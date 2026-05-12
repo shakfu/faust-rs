@@ -1849,6 +1849,65 @@ process = (y_target - nl_filter(p_learned, noise)) <: _, _;
 }
 
 #[test]
+fn bra_reverse_sweep_skips_integer_noise_tape_candidates_compile_to_cpp() {
+    std::thread::Builder::new()
+        .name("rad-runtime-integer-noise-tape-candidates-cpp".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+import("stdfaust.lib");
+clip(v) = max(-1.0, min(1.0, v - (v*v*v)/3.0));
+ladder(g1, g2, g3, g4, res, x) = loop ~ (_,_,_,_) : !,!,!,_
+with {
+    loop(s1, s2, s3, s4) = ns1, ns2, ns3, ns4
+    with {
+        fb  = clip(x - res * s4);
+        ns1 = clip(fb  * g1 + s1 * (1.0 - g1));
+        ns2 = clip(ns1 * g2 + s2 * (1.0 - g2));
+        ns3 = clip(ns2 * g3 + s3 * (1.0 - g3));
+        ns4 = clip(ns3 * g4 + s4 * (1.0 - g4));
+    };
+};
+g1 = hslider("g1", 0.1, 0, 1, 0.01);
+g2 = hslider("g2", 0.2, 0, 1, 0.01);
+g3 = hslider("g3", 0.3, 0, 1, 0.01);
+g4 = hslider("g4", 0.4, 0, 1, 0.01);
+res = hslider("res", 0.5, 0, 4, 0.01);
+noise = +(12345) ~ *(1103515245) : *(4.656612873077393e-10);
+target = noise * 0.5;
+pred = ladder(g1, g2, g3, g4, res, noise);
+loss = (target - pred) * (target - pred);
+process = rad(loss, (g1, g2, g3, g4, res));
+"#;
+            let unique_id = NEXT_TEMP_DSP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "faust-rs-rad-stress2-integer-noise-{}-{unique_id}.dsp",
+                std::process::id()
+            ));
+            fs::write(&path, source).unwrap_or_else(|e| {
+                panic!("failed to write temporary DSP {}: {e}", path.display())
+            });
+            let cpp = Compiler::new()
+                .compile_file_default_to_cpp_with_lane(
+                    &path,
+                    &codegen::backends::cpp::CppOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{}: BRA reverse sweep must skip non-real structural tape candidates: {e}",
+                        path.display()
+                    )
+                });
+            let _ = fs::remove_file(&path);
+            assert!(cpp.contains("class mydsp"));
+        })
+        .expect("spawn rad-runtime-integer-noise-tape-candidates-cpp worker")
+        .join()
+        .expect("rad-runtime-integer-noise-tape-candidates-cpp worker should finish")
+}
+
+#[test]
 fn bra_reverse_sweep_sr_constants_compile_to_cpp() {
     std::thread::Builder::new()
         .name("rad-runtime-sr-constants-cpp".to_string())

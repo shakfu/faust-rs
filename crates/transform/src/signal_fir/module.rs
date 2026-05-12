@@ -230,6 +230,13 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
 /// FloatCast`.
 ///
+/// BRA tape lowering relies on the same invariant.  It does not run a second
+/// promotion pass over synthesized `fBraTapeN` stores.  If the signal graph
+/// contains an integer/discrete subgraph that feeds a real expression through a
+/// `FloatCast` (for example an LCG noise recursion multiplied by a real scale),
+/// the cast node is the promoted real boundary.  The integer nodes upstream of
+/// that cast keep their integer semantics and are not valid real tape values.
+///
 /// # Recursion Boundary
 ///
 /// Most recursion-specific mechanics now live in `recursion.rs`:
@@ -2764,15 +2771,22 @@ impl<'a> SignalToFirLower<'a> {
                 // Seeds, constants, or external scalars: no children to propagate into.
             }
 
-            // ── Casts: identity rule ────────────────────────────────────────
+            // ── Casts: identity rule for real casts, gradient stop for int→real ─
             SigMatch::FloatCast(x) => {
-                // Gradient propagates through float-to-float casts only.
+                // `signalPromotion` inserts `FloatCast` where an Int-valued
+                // signal is used in a Real context.  Example:
                 //
-                // When `x` is integer-typed (e.g. `no.noise`'s LCG accumulator
-                // cast to float via `float`), the integer arithmetic is
-                // non-differentiable: backpropagating a Float32 adjoint into an
-                // Int32 subtree would produce invalid `BinOp(Float32, Int32)`
-                // FIR nodes in the reverse loop.  Stop gradient propagation here.
+                //   i[n]  = 1103515245*i[n-1] + 12345     // Int LCG state
+                //   x[n]  = float(i[n]) * 4.656612873e-10 // Real noise sample
+                //
+                // RAD differentiates the Real expression starting at `x[n]`;
+                // it does not reinterpret the upstream Int recurrence as Real
+                // arithmetic.  Propagating a Float32 adjoint into the Int32
+                // LCG subtree would both change the DSP semantics and produce
+                // invalid mixed-domain FIR (`BinOp(Float32, Int32)`) in the
+                // reverse sweep.  Therefore FloatCast is an identity only for
+                // float-to-float casts; for int→real casts it is a gradient
+                // boundary.
                 let x_is_int = matches!(
                     self.signal_fir_type(x),
                     Ok(FirType::Int32) | Ok(FirType::Int64)
@@ -3483,6 +3497,23 @@ impl<'a> SignalToFirLower<'a> {
     /// matters: tape stores are pushed to `immediate`, before state updates and
     /// before any later BRA sweep statements for the same carrier can consume
     /// the recorded values.
+    ///
+    /// # Interaction with `signalPromotion`
+    ///
+    /// The input signal forest has already been promoted before FIR lowering.
+    /// BRA therefore must not perform ad-hoc integer-to-real promotion by
+    /// casting values at the tape store.  The tape is a backend object, not a
+    /// Signal-IR node, so such a cast would bypass normalform's `signalPromotion`
+    /// rules and could hide a missing promotion bug.
+    ///
+    /// `collect_tape_needed_values` is intentionally conservative and
+    /// structural: it may see integer/discrete nodes that are present upstream
+    /// of a promoted `FloatCast`.  Those upstream nodes keep their original
+    /// integer semantics (for instance the LCG recurrence used to generate
+    /// pseudo-noise) and no adjoint rule crosses the int→real cast.  They are
+    /// skipped here.  The promoted real `FloatCast` result, or a real expression
+    /// derived from it, is the value that may be taped and later loaded by the
+    /// reverse sweep.
     fn ensure_bra_tape_stores(
         &mut self,
         _group: SigId,
@@ -3516,14 +3547,17 @@ impl<'a> SignalToFirLower<'a> {
             let real_ty = self.real_ty.clone();
             let v_ty = self.signal_fir_type(v)?;
             if v_ty != real_ty {
-                let sig_text = tree_to_str(self.arena, v).unwrap_or("<unprintable>");
-                return Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!(
-                        "BlockReverseAD tape-needed signal {} has FIR type {v_ty:?}, expected {real_ty:?}; integer/real promotion must be resolved before FIR lowering",
-                        sig_text
-                    ),
-                ));
+                // `collect_tape_needed_values` is structural: it walks the full
+                // body postorder and can see integer islands below a
+                // `FloatCast`, notably LCG-style noise recursions.  Those
+                // integer subgraphs are not differentiable and
+                // `propagate_bra_adj` stops at the int->float cast, so no
+                // reverse rule will ever load them from a BRA tape.  The
+                // real-valued use site must already be represented by a
+                // promoted `FloatCast` node; that node is the candidate to tape
+                // when needed.  Skip non-real candidates here rather than
+                // silently casting and hiding a missing Signal-level promotion.
+                continue;
             }
             let tape_name = format!("fBraTape{}", self.next_loop_var_id);
             self.next_loop_var_id += 1;
@@ -3533,12 +3567,17 @@ impl<'a> SignalToFirLower<'a> {
             // Lower the value in the current (forward) loop context.
             // BRA tapes are homogeneous `real_ty` arrays because the reverse
             // rules consume recorded forward values in real adjoint arithmetic.
-            // A tape-needed value that is still integer-typed here means the
-            // upstream Signal pipeline failed to insert the required
-            // `FloatCast`/promotion node before `BlockReverseAD` reached FIR
-            // lowering.  Do not silently repair that by casting at the tape
-            // store; it would hide a typing bug from normalform/signalPromotion.
             let v_fir = self.lower_signal(v)?;
+            if self.store.value_type(v_fir) != Some(real_ty.clone()) {
+                let sig_text = dump_sig_readable(self.arena, v);
+                let got = self.store.value_type(v_fir);
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "BlockReverseAD real tape-needed signal {sig_text} lowered to FIR type {got:?}, expected {real_ty:?}; integer/real promotion must be resolved before FIR lowering"
+                    ),
+                ));
+            }
             // Tape stores go in `immediate` so they capture the forward value
             // BEFORE `post_output` updates delay/state variables.  Placing them
             // in `sample_end` would re-read post-update state (e.g. the updated

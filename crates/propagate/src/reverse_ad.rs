@@ -1083,7 +1083,7 @@ fn build_block_reverse_ad(arena: &mut TreeArena, primals: &[SigId], seeds: &[Sig
 /// targeted diagnostic.
 ///
 /// The fallback boundary is intentionally semantic.  Tape layout, enforcement
-/// that tape-needed values are already `real_ty` after `signalPromotion`,
+/// that actual tape stores are already `real_ty` after `signalPromotion`,
 /// persistent `fConst*` storage for constants reused by generated sweeps, and
 /// split-vs-inline loop scheduling are all FIR-lowering responsibilities.
 pub(super) fn generate_rad_signals(
