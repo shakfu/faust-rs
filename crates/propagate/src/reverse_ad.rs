@@ -103,6 +103,48 @@
 //! the symbolic sweep raises [`PropagateError::RadUnsupportedNode`] with a
 //! tailored diagnostic, and [`generate_rad_signals`] converts the supported
 //! temporal/recursive kinds into `SigBlockReverseAD`.
+//!
+//! # `SigBlockReverseAD` is a semantic carrier, not generated FIR
+//!
+//! The propagation crate deliberately stops at a Signal-IR carrier:
+//! [`SigMatch::BlockReverseAD`].  It records only the mathematical contract:
+//! body outputs, seed signals, implicit cotangents, and a tape policy.  It does
+//! **not** allocate tape arrays, choose FIR storage types, or decide where the
+//! block sweep runs.  Those decisions happen later in
+//! `crates/transform/src/signal_fir/module.rs`, after signal preparation,
+//! type reduction, recursion lowering, and backend real-type selection.
+//!
+//! This separation is important for two reasons:
+//!
+//! - `reverse_ad.rs` still works in Signal IR, where nodes are typed by the
+//!   signal type system and can be rewritten by later normalization/preparation
+//!   passes.  Backend-local objects such as `fBraTapeN` arrays are not signal
+//!   nodes and cannot participate in `normalform.rs` / `signalPromotion`.
+//! - The correct execution schedule depends on the surrounding FIR context.
+//!   A top-level `process = rad(body, seeds)` usually exposes both primal and
+//!   gradient projections as public outputs, so FIR lowering emits a forward
+//!   loop for primals followed by a reverse loop for gradients.  In adaptive
+//!   DSPs, however, a gradient projection may be consumed inside a recursive
+//!   forward update, e.g. `p_next = p - lr * (rad(loss, p) : !, _)`.  In that
+//!   shape the outer public output is the recursive primal, and descending into
+//!   the recursion body while classifying public outputs would be wrong.  The
+//!   FIR lowerer therefore emits the BRA sweep inline in the currently lowered
+//!   forward loop; there is no separate public backward loop in the generated
+//!   `compute()`.
+//!
+//! The carrier is therefore best read as “this sub-expression needs block-local
+//! reverse-mode semantics when lowered,” not as “the final C++ must contain an
+//! explicit backward loop.”  Whether the sweep is split or interleaved is a
+//! backend scheduling decision.
+//!
+//! This scheduling rule is separate from the dormant LTI/IIR transpose helper
+//! path below.  “A gradient projection is consumed inside a forward recursive
+//! body” describes the *use site* of a `BlockReverseAD` projection and therefore
+//! where FIR statements are inserted.  It does not mean the recursive sub-graph
+//! was proven linear/time-invariant or replaced by an analytic transposed
+//! recursion.  The LTI path would change the derivative representation itself;
+//! the BRA fallback keeps the general block tape representation and only lets
+//! FIR lowering choose split versus inline placement.
 
 use ahash::{AHashMap, AHashSet};
 use signals::{BinOp, BlockRevPolicy, SigBuilder, SigId, SigMatch, match_sig};
@@ -974,6 +1016,21 @@ pub(super) fn build_lti_recursive_adjoint_projections(
 /// non-overlapping backward pass.  The implicit per-output cotangent is `1.0`,
 /// matching the symbolic sweep contract.
 ///
+/// This function does not decide the final loop schedule.  It merely produces
+/// projections from one carrier:
+///
+/// - primal projections can be lowered like normal body signals in the causal
+///   forward loop;
+/// - gradient projections force `signal_fir` to emit the block adjoint sweep
+///   at the point where the projection is lowered.
+///
+/// If the gradient projection is itself a public output, `signal_fir` classifies
+/// that output as reverse-time and emits a separate backward loop over the
+/// block.  If the gradient projection is consumed inside another forward-time
+/// expression (for example a recursive learning update), there may be no public
+/// reverse-time output at all; the sweep is emitted inline in the surrounding
+/// forward loop slice.
+///
 /// # Output layout
 ///
 /// ```text
@@ -1024,6 +1081,11 @@ fn build_block_reverse_ad(arena: &mut TreeArena, primals: &[SigId], seeds: &[Sig
 /// All other errors — arity mismatches, malformed foreign functions, writable
 /// tables, soundfile accessors — propagate unchanged so the user receives a
 /// targeted diagnostic.
+///
+/// The fallback boundary is intentionally semantic.  Tape layout, FIR-side
+/// casts at homogeneous `real_ty` tape-store/load boundaries, persistent
+/// `fConst*` storage for constants reused by generated sweeps, and
+/// split-vs-inline loop scheduling are all FIR-lowering responsibilities.
 pub(super) fn generate_rad_signals(
     arena: &mut TreeArena,
     primals: &[SigId],

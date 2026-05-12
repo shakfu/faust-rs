@@ -47,6 +47,56 @@
 //!   - bargraph zone write (from computation): `real_ty → FaustFloat`.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
+//!
+//! # BlockReverseAD / BRA scheduling model
+//!
+//! `SigBlockReverseAD` arrives from `propagate::reverse_ad` as a semantic
+//! carrier: it says that a `rad(...)` sub-expression must be evaluated with
+//! block-local reverse-mode semantics.  It does not prescribe the final C++ loop
+//! shape.  This module owns the concrete FIR schedule and storage:
+//!
+//! 1. **Primal projections** (`Proj(0..M-1, BlockReverseAD)`) lower by lowering
+//!    the corresponding body signal in causal order.  While doing so,
+//!    `ensure_bra_tape_stores` may schedule forward stores to `fBraTapeN[i0]`
+//!    for values that cannot be reconstructed during the adjoint sweep.
+//! 2. **Gradient projections** (`Proj(M+j, BlockReverseAD)`) call
+//!    `ensure_bra_backward_sweep`, which emits the local transpose program and
+//!    caches the requested seed adjoints.
+//! 3. The caller’s context decides where those statements land.  If the
+//!    gradient projection is a public output, `classify_reverse_time_outputs`
+//!    marks it reverse-time and `build_module` creates a second loop that runs
+//!    `i0 = count-1 .. 0`.  If the gradient projection is used inside another
+//!    forward expression, such as an adaptive recursive update, the same sweep
+//!    is emitted into the currently active forward sample phase.  In that
+//!    generated program there is no separate backward loop; the forward and
+//!    adjoint statements are interleaved in one causal loop.
+//!
+//! The inline schedule is intentional.  Classifying an outer `Proj(SYMREC)` as
+//! reverse-time just because its body contains an internal RAD gradient would
+//! suppress the causal recursion update and produce the wrong program shape.
+//! Therefore `classify_reverse_time_outputs` stops at `SYMREC` boundaries: the
+//! public recursive output remains forward-time, and any BRA work discovered
+//! while lowering the body is scheduled locally.
+//!
+//! Do not confuse this inline schedule with the older LTI recursive transpose
+//! fast path.  The LTI path is a propagation-time choice that rewrites an
+//! eligible linear recursive frontier into a `ReverseTimeRec` carrier.  The BRA
+//! inline case is only a lowering-time placement choice for the general
+//! block-tape fallback: the derivative is still represented by
+//! `BlockReverseAD`, but the first gradient projection is requested while the
+//! forward recursive update is being emitted.
+//!
+//! Storage follows the same boundary:
+//!
+//! - `fBraTapeN` arrays are scratch forward tapes, written for `0..count-1`
+//!   before their matching slots are read. They are not `instanceClear` state.
+//! - `fBraCarryN` / `fBraDelayCarryN` fields are adjoint carries and are reset
+//!   at `compute()` entry, because each host call is one independent TBPTT
+//!   block.
+//! - `Konst` values below a `BlockReverseAD` carrier are forced to persistent
+//!   struct storage by `placement.rs`, since the synthesized sweep can create
+//!   compute-time uses that are not visible as parent edges in the original
+//!   signal DAG.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -305,6 +355,14 @@ pub(super) fn build_module(
     let mut sample_loops = Vec::new();
 
     if has_forward_outputs {
+        // Forward loop slice.  This is not necessarily "primal only": when a
+        // BRA gradient projection is consumed inside a forward-time expression
+        // (for example `p_next = p - lr * grad_p` inside a recursion body),
+        // `lower_output_signal` can descend into that expression and call
+        // `ensure_bra_backward_sweep`.  In that case the BRA adjoint statements
+        // are appended to this same forward sample phase, and no separate
+        // public backward loop is required unless another top-level output was
+        // classified as reverse-time below.
         for (signal_index, sig) in signals.iter().enumerate() {
             if !reverse_time_outputs[signal_index] {
                 lower.lower_output_signal(signal_index, *sig, plan.num_outputs)?;
@@ -319,6 +377,11 @@ pub(super) fn build_module(
     }
 
     if has_reverse_outputs {
+        // Reverse loop slice for public reverse-time outputs.  This path is
+        // used when the public bundle contains gradient projections, such as
+        // `process = rad(loss, params)`.  Adaptive DSPs may skip this block
+        // entirely: their gradient projection can be internal to the forward
+        // update and therefore scheduled by the forward slice above.
         lower.cache.clear();
         lower.lowering_reverse_loop = true;
         for (signal_index, sig) in signals.iter().enumerate() {
@@ -732,8 +795,10 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
             return true;
         }
         // BlockReverseAD gradient projections (index ≥ primal_count) also run
-        // in the reverse sample loop so the TBPTT backward sweep executes at
-        // sample-loop indices going from BS−1 down to 0.
+        // in a reverse sample loop when they are visible as public outputs.
+        // If the same projection is internal to a forward-time expression, this
+        // classifier never sees it as a root; it will be lowered inline by the
+        // forward slice instead.
         if let SigMatch::Proj(index, group) = match_sig(arena, sig)
             && let SigMatch::BlockReverseAD {
                 primal_count,
@@ -755,7 +820,10 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
         // into the SYMREC body would discover BRA gradient projections that are
         // used *inside* the body (e.g. `p_next = clamp(p_prev - lr * grad_p)` in
         // `rad_filter1.dsp`) and incorrectly classify the outer output as
-        // reverse-time, suppressing the forward loop entirely.
+        // reverse-time, suppressing the forward loop entirely.  This is the
+        // main reason some RAD/BRA DSPs intentionally generate no standalone
+        // backward loop: their backward work is internal to the causal recursive
+        // update and is emitted while lowering that forward body.
         if let SigMatch::Proj(_, group) = match_sig(arena, sig)
             && match_sym_rec(arena, group).is_some()
         {
@@ -2450,8 +2518,14 @@ impl<'a> SignalToFirLower<'a> {
     ///   loop.
     /// - Slots `primal_count .. primal_count + seeds.len() - 1` are
     ///   **gradient** outputs: `ensure_bra_backward_sweep` is called once to
-    ///   emit the TBPTT(BS, BS) backward adjoint sweep in the reverse sample
-    ///   loop, and the per-seed adjoint `FirId` is returned from the cache.
+    ///   emit the TBPTT(BS, BS) adjoint sweep in the **current** sample-loop
+    ///   slice, and the per-seed adjoint `FirId` is returned from the cache.
+    ///
+    /// “Current” is deliberate.  For a public gradient output the current slice
+    /// is the reverse loop built by `build_module`.  For an internal gradient
+    /// used by a forward recursive update, the current slice is the forward
+    /// loop body currently being lowered.  The sweep code itself is the same;
+    /// only its placement differs.
     #[allow(clippy::too_many_arguments)]
     fn lower_block_reverse_ad_proj(
         &mut self,
@@ -2494,7 +2568,15 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Ensures the TBPTT(BS, BS) backward adjoint sweep for `group` has been
-    /// emitted into the current (reverse) sample-loop phase.
+    /// emitted into the current sample-loop phase.
+    ///
+    /// The phase may be the explicit reverse loop for public RAD gradient
+    /// outputs, or the forward loop when the gradient projection is an internal
+    /// operand of a causal expression.  This function should therefore avoid
+    /// assuming `self.lowering_reverse_loop == true`; it emits a local transpose
+    /// program against the loop variable `i0` and lets the caller's scheduling
+    /// context determine whether `i0` advances forward or backward in generated
+    /// C++.
     ///
     /// The sweep is emitted **at most once** per group per loop slice; the
     /// `bra_state_scheduled` guard prevents re-emission when multiple gradient
@@ -3393,6 +3475,14 @@ impl<'a> SignalToFirLower<'a> {
     ///    it in `sample_end` would read post-update state and produce the
     ///    wrong tape entry for signals like `Delay1`).
     ///    e. Record the mapping `v → fBraTapeN` in `bra_tape_store_var`.
+    ///
+    /// In the split public-output schedule these stores appear in the forward
+    /// loop and the matching loads appear in a later reverse loop.  In the
+    /// inline adaptive schedule both the stores and the adjoint statements can
+    /// be emitted into the same forward loop body.  The phase ordering still
+    /// matters: tape stores are pushed to `immediate`, before state updates and
+    /// before any later BRA sweep statements for the same carrier can consume
+    /// the recorded values.
     fn ensure_bra_tape_stores(
         &mut self,
         _group: SigId,
@@ -3431,6 +3521,11 @@ impl<'a> SignalToFirLower<'a> {
             self.ensure_named_struct_var(&tape_name, tape_ty, None);
             // Lower the value in the current (forward) loop context.
             let mut v_fir = self.lower_signal(v)?;
+            // BRA tapes are homogeneous `real_ty` arrays because the reverse
+            // rules consume recorded forward values in real adjoint arithmetic.
+            // In a well-promoted differentiable expression this is normally a
+            // no-op; keeping the cast here makes the FIR boundary explicit and
+            // avoids leaking a non-real FIR value into a real tape store.
             if self.store.value_type(v_fir) != Some(real_ty.clone()) {
                 v_fir = FirBuilder::new(&mut self.store).cast(real_ty, v_fir);
             }

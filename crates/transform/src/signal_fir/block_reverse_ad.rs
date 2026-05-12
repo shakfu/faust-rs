@@ -27,6 +27,29 @@
 //! 3. In the reverse loop, loads from the tape via `load_bra_fwd_value`
 //!    instead of calling `lower_signal` — which would read incorrect state.
 //!
+//! The word “reverse loop” in this helper module names the mathematical sweep
+//! direction, not necessarily a distinct generated C++ loop.  The FIR lowerer
+//! can place the sweep in two schedules:
+//!
+//! - **Split public-output schedule**: a public gradient projection
+//!   `Proj(M+j, BlockReverseAD)` is classified as reverse-time, so `compute()`
+//!   has a forward loop for primals and a separate loop from `count-1` down to
+//!   `0` for gradients.
+//! - **Inline adaptive schedule**: the gradient projection is consumed inside
+//!   a forward-time expression, often a recursive parameter update.  The public
+//!   output may then be only the outer primal recursion.  In that case
+//!   `module.rs` emits the BRA adjoint statements into the current forward
+//!   loop slice; the generated C++ may contain no separate backward loop even
+//!   though these helpers still build the same local transpose rules.
+//!   This is not the LTI/IIR `ReverseTimeRec` fast path: no linearity proof is
+//!   being used here, and the derivative remains the general block-tape BRA
+//!   program.
+//!
+//! In both schedules the generated statements are block-local.  BRA carry
+//! fields are reset at `compute()` entry; tape arrays, when present, are
+//! scratch buffers whose slots `0..count-1` are written before the matching
+//! slots are read by the sweep.
+//!
 //! **Phase B5** extends B4 with full backward rule coverage:
 //! - `Delay(c, x)`: adjoint propagated via a circular carry buffer
 //!   `fBraDelayCarryN: Array(real_ty, c)` declared as a struct field.

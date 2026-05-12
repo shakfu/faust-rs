@@ -800,6 +800,21 @@ impl<'a> SigBuilder<'a> {
     /// `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`,
     /// sections 7 and 7.1.
     ///
+    /// # Scheduling boundary
+    ///
+    /// The carrier is intentionally schedule-agnostic.  It does not say
+    /// whether the backend must materialize a distinct generated backward
+    /// loop.  FIR lowering may emit a split forward/backward schedule when a
+    /// gradient projection is a public output, or emit the same local adjoint
+    /// sweep inline when that projection is consumed by a forward-time
+    /// expression such as a recursive parameter update.
+    ///
+    /// That inline case is a code-placement consequence of the surrounding
+    /// graph, not a proof that an LTI subgraph was recognized and analytically
+    /// transposed.  LTI transposition is a separate, more specialized
+    /// derivation strategy; `BlockReverseAD` remains the general block-tape
+    /// fallback carrier.
+    ///
     /// # On-arena layout
     ///
     /// The five children, in order, are:
