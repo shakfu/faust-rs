@@ -1823,6 +1823,31 @@ fn corpus_tbptt_softclip_drive_converges_to_silence() {
     assert_tbptt_converges("rad_tbptt_softclip_drive", 2000, 100, 0.5);
 }
 
+#[test]
+fn bra_reverse_sweep_minmax_conditions_compile() {
+    let source = r#"
+p_star = 0.75;
+lr = 0.005;
+noise = +(12345) ~ *(1103515245) : *(4.656612873077393e-10);
+soft_clip(v) = max(-1.0, min(1.0, v - (v*v*v)/3.0));
+nl_filter(p, input) = input : + ~ (*(p) : soft_clip);
+y_target = nl_filter(p_star, noise);
+p_learned = loop ~ _
+with {
+    loop(p) = p_next
+    with {
+        y_pred = nl_filter(p, noise);
+        loss = (y_target - y_pred) * (y_target - y_pred);
+        grad = rad(loss, p) : !, _;
+        p_next = max(-0.99, min(0.99, p - lr * grad));
+    };
+};
+process = (y_target - nl_filter(p_learned, noise)) <: _, _;
+"#;
+    let outs = run_interp_temp_source("bra-reverse-sweep-minmax-conditions", source, 8);
+    assert_eq!(outs.len(), 2);
+}
+
 /// Debug: inspect softclip gradient values to diagnose convergence failure.
 #[test]
 fn debug_softclip_gradient_values() {

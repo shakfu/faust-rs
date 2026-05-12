@@ -3114,7 +3114,7 @@ impl<'a> SignalToFirLower<'a> {
                 let rhs_v = self.load_bra_fwd_value(rhs)?;
                 let cond = {
                     let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Le, lhs_v, rhs_v, real_ty.clone())
+                    b.binop(FirBinOp::Le, lhs_v, rhs_v, FirType::Int32)
                 };
                 let zero_r = self.float_const(0.0);
                 let lhs_adj = {
@@ -3136,7 +3136,7 @@ impl<'a> SignalToFirLower<'a> {
                 let rhs_v = self.load_bra_fwd_value(rhs)?;
                 let cond = {
                     let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Ge, lhs_v, rhs_v, real_ty.clone())
+                    b.binop(FirBinOp::Ge, lhs_v, rhs_v, FirType::Int32)
                 };
                 let zero_r = self.float_const(0.0);
                 let lhs_adj = {
