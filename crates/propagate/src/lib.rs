@@ -2909,6 +2909,7 @@ fn propagate_inner(
             Ok(vec![b.int(value)])
         }
         FlatNodeKind::ForwardAD { body, seed } => {
+            let body_arity = box_arity_typed(arena, body, ctx.cache)?;
             let seed_arity = box_arity_typed(arena, seed, ctx.cache)?;
             if seed_arity.outputs == 0 {
                 return Err(PropagateError::FadSeedArity {
@@ -2928,7 +2929,8 @@ fn propagate_inner(
                     outputs: seed_sigs.len(),
                 });
             }
-            let body_sigs = propagate_in_slot_env(arena, body, inputs, ctx)?;
+            let body_inputs: Vec<SigId> = inputs.iter().copied().take(body_arity.inputs).collect();
+            let body_sigs = propagate_in_slot_env(arena, body, &body_inputs, ctx)?;
             if ctx.suppress_fad {
                 ctx.pending_fad_seeds.extend(seed_sigs.iter().copied());
                 Ok(body_sigs)
@@ -2964,7 +2966,8 @@ fn propagate_inner(
                     outputs: seed_sigs.len(),
                 });
             }
-            let body_sigs = propagate_in_slot_env(arena, body, inputs, ctx)?;
+            let body_inputs: Vec<SigId> = inputs.iter().copied().take(body_arity.inputs).collect();
+            let body_sigs = propagate_in_slot_env(arena, body, &body_inputs, ctx)?;
             if body_sigs.len() != body_arity.outputs {
                 return Err(PropagateError::RadBodyArity {
                     node: box_tree.as_tree_id(),

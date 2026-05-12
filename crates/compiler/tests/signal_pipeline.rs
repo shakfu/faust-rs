@@ -989,6 +989,24 @@ fn inline_fad_seq_with_identity_pair_compiles() {
 }
 
 #[test]
+fn inline_fad_body_uses_body_input_slice_when_seed_bus_is_wider() {
+    let source = r#"process = fad(*, (_,_,_));"#;
+    let out = compile_inline("fad_wide_seed_bus.dsp", source);
+    assert_eq!(out.process_arity.inputs, 3);
+    assert_eq!(out.process_arity.outputs, 4);
+    assert_eq!(out.signals.len(), 4);
+}
+
+#[test]
+fn inline_rad_body_uses_body_input_slice_when_seed_bus_is_wider() {
+    let source = r#"process = rad(*, (_,_,_));"#;
+    let out = compile_inline("rad_wide_seed_bus.dsp", source);
+    assert_eq!(out.process_arity.inputs, 3);
+    assert_eq!(out.process_arity.outputs, 4);
+    assert_eq!(out.signals.len(), 4);
+}
+
+#[test]
 fn inline_partial_mul_with_trigger_argument_compiles_to_signal_mul() {
     let source = r#"
 upfront(x) = (x-x') > 0.0;
