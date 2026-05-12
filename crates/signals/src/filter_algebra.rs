@@ -174,8 +174,8 @@ pub fn iir_filter_to_state_space(
             coeff: one,
         });
     }
-    for row in 1..order {
-        a_rows[row].push(LinearTerm {
+    for (row, terms) in a_rows.iter_mut().enumerate().take(order).skip(1) {
+        terms.push(LinearTerm {
             slot: row - 1,
             coeff: one,
         });

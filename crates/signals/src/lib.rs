@@ -22,7 +22,10 @@
 //!   normal recursive group and keeps the usual body/projection contract, but
 //!   downstream lowering must evaluate the group from the end of the current
 //!   compute block back to the beginning with terminal adjoint state initialized
-//!   to zero.
+//!   to zero. RAD propagation does not currently produce this node; it remains
+//!   dormant IR-level carrier infrastructure for a future LTI fast-path revival
+//!   documented in
+//!   `porting/rad-disable-reverse-time-rec-fast-path-plan-2026-05-10-en.md`.
 //! - `BlockReverseAD { body, primal_count, seeds, cotangents, policy }` is a
 //!   Rust-only general RAD fallback carrier. It is the Signal-IR-level
 //!   counterpart of the block-local Truncated BPTT model described in
@@ -739,6 +742,10 @@ impl<'a> SigBuilder<'a> {
     /// sample order over the current compute block. The terminal state after
     /// the last frame is implicitly zero and no adjoint state is preserved
     /// across `compute()` calls.
+    ///
+    /// RAD propagation does not currently produce this node; it remains as
+    /// dormant IR-level carrier infrastructure. See
+    /// `porting/rad-disable-reverse-time-rec-fast-path-plan-2026-05-10-en.md`.
     ///
     /// Source provenance: original Rust RAD phase-E1 design in
     /// `porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md`, section

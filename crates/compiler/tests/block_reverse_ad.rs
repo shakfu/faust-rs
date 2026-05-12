@@ -1,4 +1,10 @@
 //! Reference BPTT executor for [`SigMatch::BlockReverseAD`] + finite-difference oracle.
+#![allow(
+    clippy::collapsible_if,
+    clippy::doc_overindented_list_items,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments
+)]
 //!
 //! # Purpose
 //!

@@ -179,6 +179,9 @@ pub(super) struct RecursionState {
     /// `group.as_u32()` values for groups that are `ReverseTimeRec` (LTI
     /// adjoint) wrappers.
     ///
+    /// Dormant under the 2026-05-10 RAD dispatcher change; kept compilable for
+    /// a future LTI fast-path revival.
+    ///
     /// Only these carriers must be zeroed in the `compute()` preamble (via
     /// `emit_reverse_time_rec_compute_resets`).  Normal SYMREC primal carriers
     /// — including those allocated while lowering the forward body of a
@@ -626,6 +629,9 @@ impl RecursionAllocCtx<'_> {
     /// `emit_reverse_time_rec_compute_resets` can distinguish these adjoint
     /// carriers — which must be zeroed before each backward sweep — from normal
     /// SYMREC primal carriers, which are persistent DSP state.
+    ///
+    /// Dormant under the 2026-05-10 RAD dispatcher change; kept compilable for
+    /// a future LTI fast-path revival.
     pub(super) fn allocate_group_arrays(
         &mut self,
         group: SigId,

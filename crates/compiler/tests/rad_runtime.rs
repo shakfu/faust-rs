@@ -1688,10 +1688,10 @@ fn assert_tbptt_converges(stem: &'static str, frames: usize, window: usize, fact
         outs.len()
     );
     // Both channels must carry the same signal (process = residual <: _, _).
-    for frame in 0..frames {
+    for (frame, (&left, &right)) in outs[0].iter().zip(&outs[1]).take(frames).enumerate() {
         assert_close(
-            outs[0][frame],
-            outs[1][frame],
+            left,
+            right,
             1.0e-6,
             &format!("{stem}: L/R mismatch at frame {frame}"),
         );

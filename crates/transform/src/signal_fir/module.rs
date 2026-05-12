@@ -734,18 +734,17 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
         // BlockReverseAD gradient projections (index ≥ primal_count) also run
         // in the reverse sample loop so the TBPTT backward sweep executes at
         // sample-loop indices going from BS−1 down to 0.
-        if let SigMatch::Proj(index, group) = match_sig(arena, sig) {
-            if let SigMatch::BlockReverseAD {
+        if let SigMatch::Proj(index, group) = match_sig(arena, sig)
+            && let SigMatch::BlockReverseAD {
                 primal_count,
                 policy: _,
                 ..
             } = match_sig(arena, group)
-            {
-                let pc = usize::try_from(primal_count).unwrap_or(0);
-                let idx = usize::try_from(index).unwrap_or(0);
-                if idx >= pc {
-                    return true;
-                }
+        {
+            let pc = usize::try_from(primal_count).unwrap_or(0);
+            let idx = usize::try_from(index).unwrap_or(0);
+            if idx >= pc {
+                return true;
             }
         }
         // Stop recursion at SYMREC boundaries.
@@ -757,10 +756,10 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
         // used *inside* the body (e.g. `p_next = clamp(p_prev - lr * grad_p)` in
         // `rad_filter1.dsp`) and incorrectly classify the outer output as
         // reverse-time, suppressing the forward loop entirely.
-        if let SigMatch::Proj(_, group) = match_sig(arena, sig) {
-            if match_sym_rec(arena, group).is_some() {
-                return false;
-            }
+        if let SigMatch::Proj(_, group) = match_sig(arena, sig)
+            && match_sym_rec(arena, group).is_some()
+        {
+            return false;
         }
         arena.node(sig).is_some_and(|node| {
             node.children
@@ -2335,6 +2334,9 @@ impl<'a> SignalToFirLower<'a> {
     /// Emits `compute()`-preamble resets for `ReverseTimeRec` (LTI adjoint)
     /// recursion carriers.
     ///
+    /// Dormant under the 2026-05-10 RAD dispatcher change; kept compilable for
+    /// a future LTI fast-path revival.
+    ///
     /// `ReverseTimeRec` has block-local adjoint semantics: the state one frame
     /// past `count - 1` is terminal-zero for every `compute()` call. Ordinary
     /// SYMREC primal carriers are only cleared by `instanceClear()` (they are
@@ -2504,14 +2506,14 @@ impl<'a> SignalToFirLower<'a> {
     ///    handles DAG-shared sub-expressions).
     /// 2. Lower each cotangent signal into a FIR value (constant `1.0` in the
     ///    all-ones B1 convention).
-    /// 3a. Pre-seed recursive feedback carries (Phase B6).  For each
+    ///    3a. Pre-seed recursive feedback carries (Phase B6).  For each
     ///    `Delay1(Proj(slot, SYMREF(var)))` node in the postorder, load the
     ///    corresponding carry struct field (written by the previous reverse step)
     ///    and accumulate it into `adj[body_sigs[slot]]`.  This ensures the total
     ///    TBPTT adjoint `cotangent[n] + carry_from_step_n+1` is available when
     ///    the `Proj(slot, SYMREC)` node is processed first in the reverse
     ///    postorder.
-    /// 3b. Seed the adjoint map: `adj[body_sigs[k]] += cotangent_firs[k]`.
+    ///    3b. Seed the adjoint map: `adj[body_sigs[k]] += cotangent_firs[k]`.
     /// 4. Walk the postorder in reverse, calling `propagate_bra_adj` for each
     ///    node to distribute its accumulated adjoint to its children.
     /// 5. Store per-seed gradient `FirId`s into `bra_grad_cache`.
@@ -2570,38 +2572,36 @@ impl<'a> SignalToFirLower<'a> {
         // Build: (SYMREC var TreeId, proj slot) → body_sig  from body_sigs.
         let mut var_slot_to_body_sig: HashMap<(TreeId, usize), SigId> = HashMap::new();
         for &body_sig in body_sigs {
-            if let SigMatch::Proj(bslot, bgroup) = match_sig(self.arena, body_sig) {
-                if let Some((bvar, _)) = match_sym_rec(self.arena, bgroup) {
-                    let bslot_usize = usize::try_from(bslot).unwrap_or(usize::MAX);
-                    var_slot_to_body_sig.insert((bvar, bslot_usize), body_sig);
-                }
+            if let SigMatch::Proj(bslot, bgroup) = match_sig(self.arena, body_sig)
+                && let Some((bvar, _)) = match_sym_rec(self.arena, bgroup)
+            {
+                let bslot_usize = usize::try_from(bslot).unwrap_or(usize::MAX);
+                var_slot_to_body_sig.insert((bvar, bslot_usize), body_sig);
             }
         }
 
         for &sig in &postorder {
-            if let SigMatch::Delay1(x) = match_sig(self.arena, sig) {
-                if let SigMatch::Proj(slot, inner_group) = match_sig(self.arena, x) {
-                    if let Some(ref_var) = match_sym_ref(self.arena, inner_group) {
-                        let slot_usize = usize::try_from(slot).unwrap_or(usize::MAX);
-                        // Look up the body_sig whose SYMREC var matches this SYMREF var.
-                        if let Some(&proj_symrec) = var_slot_to_body_sig.get(&(ref_var, slot_usize))
-                        {
-                            let carry_name = self.ensure_bra_delay1_carry(sig, group)?;
-                            let carry_load = {
-                                let rt = self.real_ty();
-                                let mut b = FirBuilder::new(&mut self.store);
-                                b.load_var(carry_name, AccessType::Struct, rt)
-                            };
-                            let real_ty = self.real_ty.clone();
-                            Self::add_to_adjoint(
-                                &mut self.store,
-                                &mut adj,
-                                proj_symrec,
-                                carry_load,
-                                real_ty,
-                            );
-                        }
-                    }
+            if let SigMatch::Delay1(x) = match_sig(self.arena, sig)
+                && let SigMatch::Proj(slot, inner_group) = match_sig(self.arena, x)
+                && let Some(ref_var) = match_sym_ref(self.arena, inner_group)
+            {
+                let slot_usize = usize::try_from(slot).unwrap_or(usize::MAX);
+                // Look up the body_sig whose SYMREC var matches this SYMREF var.
+                if let Some(&proj_symrec) = var_slot_to_body_sig.get(&(ref_var, slot_usize)) {
+                    let carry_name = self.ensure_bra_delay1_carry(sig, group)?;
+                    let carry_load = {
+                        let rt = self.real_ty();
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.load_var(carry_name, AccessType::Struct, rt)
+                    };
+                    let real_ty = self.real_ty.clone();
+                    Self::add_to_adjoint(
+                        &mut self.store,
+                        &mut adj,
+                        proj_symrec,
+                        carry_load,
+                        real_ty,
+                    );
                 }
             }
         }
@@ -3388,10 +3388,10 @@ impl<'a> SignalToFirLower<'a> {
     ///    b. Declare the field as `Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)`.
     ///    c. Lower `v` via `lower_signal` (runs in the forward loop context).
     ///    d. Emit `store_table(fBraTapeN, Struct, i0, v_fir)` to
-    ///       `sample_phases.immediate` so it captures the forward value
-    ///       **before** `post_output` updates delay/state variables (placing
-    ///       it in `sample_end` would read post-update state and produce the
-    ///       wrong tape entry for signals like `Delay1`).
+    ///    `sample_phases.immediate` so it captures the forward value
+    ///    **before** `post_output` updates delay/state variables (placing
+    ///    it in `sample_end` would read post-update state and produce the
+    ///    wrong tape entry for signals like `Delay1`).
     ///    e. Record the mapping `v → fBraTapeN` in `bra_tape_store_var`.
     fn ensure_bra_tape_stores(
         &mut self,
