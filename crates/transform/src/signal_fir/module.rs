@@ -3427,10 +3427,13 @@ impl<'a> SignalToFirLower<'a> {
             self.next_loop_var_id += 1;
             let real_ty = self.real_ty.clone();
             // Declare as a fixed-size array struct field.
-            let tape_ty = FirType::Array(Box::new(real_ty), MAX_BRA_TAPE_BLOCK_SIZE);
+            let tape_ty = FirType::Array(Box::new(real_ty.clone()), MAX_BRA_TAPE_BLOCK_SIZE);
             self.ensure_named_struct_var(&tape_name, tape_ty, None);
             // Lower the value in the current (forward) loop context.
-            let v_fir = self.lower_signal(v)?;
+            let mut v_fir = self.lower_signal(v)?;
+            if self.store.value_type(v_fir) != Some(real_ty.clone()) {
+                v_fir = FirBuilder::new(&mut self.store).cast(real_ty, v_fir);
+            }
             // Tape stores go in `immediate` so they capture the forward value
             // BEFORE `post_output` updates delay/state variables.  Placing them
             // in `sample_end` would re-read post-update state (e.g. the updated
