@@ -223,54 +223,61 @@ Reverse-mode AD requires the transpose, which is anti-causal:
 adj_x[n] += adj_y[n + 1]              // adjoint at frame n depends on a future frame
 ```
 
-A correct reverse pass would therefore need either
+A correct reverse pass therefore needs either
 
 - a finite block tape that buffers primal intermediates and a backward
-  scan over that block (BPTT — out of scope for phase 1), or
+  scan over that block, or
 - a causal approximation that is explicitly not exact reverse mode.
 
-Phase 1 RAD takes the strict route. Non-recursive `delay` and `prefix`
-still raise `PropagateError::RadUnsupportedNode` with a tailored
-diagnostic. Strict-LTI recursive groups are the phase-E1 exception:
-the compiler emits a block-local system transpose, evaluates the
-primal recursion forward over `compute(count)`, then evaluates the
-adjoint recursion backward over the same block with terminal-zero
-reverse state at the block end. The gradient lanes are per-sample
-contributions for the block-local objective; users can sum them over
-the block or reduce them in DSP code with a block length such as
-`ma.BS`.
+Current RAD takes the finite-block route through `SigBlockReverseAD`.
+The local symbolic sweep remains feed-forward only: when it reaches a
+delay, prefix, recursion, or IIR carrier, it raises
+`PropagateError::RadUnsupportedNode` with a kind label. The public
+`generate_rad_signals` dispatcher catches the temporal/recursive kinds
+and emits a `BlockReverseAD` carrier instead of surfacing the diagnostic.
+Hard unsupported families such as mutable tables, soundfiles, and
+unrecognized foreign functions still surface targeted diagnostics.
 
-The plan reserves `rad(expr, seeds, horizon)` and `-rad-horizon N` for
-a future BPTT mode; phase 1 must never silently emit a misleading
-gradient.
+The `BlockReverseAD` lowering evaluates the primal body forward over
+the current `compute(count)` block, records the intermediate values it
+needs in real-valued BRA tapes, then runs the backward sweep over that
+same block. The gradient lanes are per-sample contributions for the
+block-local objective; users can sum them over the block or reduce them
+in DSP code with a block length such as `ma.BS`.
+
+The plan still reserves `rad(expr, seeds, horizon)` and `-rad-horizon N`
+for a future explicit-horizon mode; current BRA semantics use the
+current compute block as the finite horizon. RAD must never silently
+emit a misleading gradient.
 
 Phase E0 added a read-only classifier in
 `crates/propagate/src/stateful_rad.rs` for `DEBRUIJNREC` groups. It
 classifies recursive bodies as `LinearLti`, `LinearTimeVarying`, or
-`Nonlinear`. Phase E1 now uses the `LinearLti` result as the acceptance
-gate for exact block-local transposition.
+`Nonlinear`. This classifier now annotates fallback mode and future
+strategy selection; it no longer selects a public `ReverseTimeRec`
+fast path.
 
 The same module also exposes `RecRadMode`, a strategy gate for the
 next phases:
 
 | Recursive class | Future RAD mode |
 |-----------------|-----------------|
-| `LinearLti` | `LinearTranspose` (phase E1, implemented for the strict public subset) |
+| `LinearLti` | `LinearTranspose` (dormant specialized phase E1 path) |
 | `LinearTimeVarying` | `BlockLinearTimeVarying` (phase E2) |
 | `Nonlinear` | `BpttRequired` (phase F) |
 
-For `LinearLti`, `reverse_ad.rs` now builds the transposed
-`ReverseTimeRec` group when the public E1 constraints are satisfied.
-For LTV and nonlinear recursion, the modes remain diagnostics: the
-error says whether the blocked path is E2 block linear-time-varying
-transposition or phase-F BPTT.
+The `ReverseTimeRec` LTI/IIR path remains in the codebase as dormant
+helper infrastructure, but public RAD propagation no longer emits it.
+Temporal and recursive public RAD outputs use `BlockReverseAD`; the
+mode labels are retained to classify what more specialized strategy
+could replace BRA later.
 
 The diagnostic kinds are:
 
 | `kind` | Family |
 |--------|--------|
 | `delay-or-prefix` | `Delay1`, `Delay`, `Prefix` |
-| `recursive-linear-transpose` | `Proj` over an LTI `DEBRUIJNREC` that did not satisfy the current E1 public path |
+| `recursive-linear-transpose` | LTI recursive class for the dormant E1 path |
 | `recursive-block-linear-time-varying` | `Proj` over LTV `DEBRUIJNREC` (future E2) |
 | `recursive-bptt-required` | `Proj` over nonlinear `DEBRUIJNREC` (future F) |
 | `recursive-projection` | recursive fallback when no specific mode was classified |
@@ -279,9 +286,11 @@ The diagnostic kinds are:
 | `soundfile` | `Soundfile`, `SoundfileLength`, `SoundfileRate`, `SoundfileBuffer` |
 | `other` | catch-all (representation casts, generators, opaque) |
 
-Each kind emits a structured `Diagnostic` with kind-specific notes
-and help text, so users get an actionable explanation pointing either
-at FAD or at the rewrite they need to do.
+Temporal/recursive kinds are normally caught by the public dispatcher
+and converted to `BlockReverseAD`. If one of those diagnostics surfaces
+directly, it indicates a fallback-dispatch regression. Hard unsupported
+kinds still emit structured diagnostics with kind-specific notes and
+help text.
 
 ## 5. Relationship to FAD
 
@@ -295,8 +304,8 @@ expressions; only the temporal extension differs.
 | Output layout | `[p, t_0, …, t_{N-1}]` interleaved per primal | `[primals…, gradient(s_0), …]` flat |
 | Cost per added seed | one extra tangent lane per primal node | one extra accumulation in the seed map |
 | Cost per added primal | one extra rebuild | one extra adjoint init + one extra postorder sweep |
-| Recursive primals | yes (via `DEBRUIJNREC` interleaving) | refused with `recursive-projection` |
-| Delays | yes (causal forward rule) | refused with `delay-or-prefix` |
+| Recursive primals | yes (via `DEBRUIJNREC` interleaving) | yes, via block-local `BlockReverseAD` fallback |
+| Delays | yes (causal forward rule) | yes, via block-local `BlockReverseAD` fallback |
 | Multi-output cotangent | implicit per-tangent | implicit all-ones (sum cotangent) |
 
 For feed-forward expressions, RAD gradients agree with the
@@ -308,29 +317,31 @@ parity tests in `crates/compiler/tests/rad_runtime.rs`.
 ## 6. Test surface
 
 - **Structural** ([crates/propagate/tests/core_api.rs](crates/propagate/tests/core_api.rs))
-  — arity contract, feed-forward success, temporal/recursive rejection,
-  diagnostic content checks.
+  — arity contract, feed-forward success, temporal/recursive
+  `BlockReverseAD` fallback, diagnostic content checks for hard
+  unsupported families and internal kind labels.
 - **Runtime parity** ([crates/compiler/tests/rad_runtime.rs](crates/compiler/tests/rad_runtime.rs))
   — RAD vs FAD parity, RAD vs central finite differences, repeated /
   absent seeds, multi-output sum cotangent, read-only table index,
-  unary FFun (tanh), and strict-LTI recursive E1 cases.
+  unary FFun (tanh), and recursive BRA cases.
 - **Backend parity** ([crates/compiler/tests/signal_fir_lane.rs](crates/compiler/tests/signal_fir_lane.rs))
-  — C, C++, and Cranelift lowering of the reverse-time loop for a coupled
-  strict-LTI recursive RAD state-space form.
+  — C, C++, interpreter, and Cranelift lowering of RAD/BRA shapes within the
+  current fast-lane subset.
 - **Corpus** ([tests/corpus/rad_*.dsp](tests/corpus)) — fixtures
   pin the source-level shape of each contract: arithmetic, trig
   composition, multi-seed, multi-output, repeated/absent seeds,
-  read-only table indexing, accepted strict-LTI recursive E1 forms,
-  plus the three error fixtures
-  (`err_rad_zero_body`, `err_rad_zero_seed`,
-  `err_rad_delay_temporal_unsupported`).
+  read-only table indexing, accepted recursive/block RAD forms,
+  plus arity error fixtures (`err_rad_zero_body`, `err_rad_zero_seed`) and
+  the temporal fallback fixture `rad_delay1_block_fallback`.
 
 ## 7. Out-of-scope and future work
 
-Per plan §3, the following remain explicitly out of scope for phase 1:
+The following remain explicitly out of scope for current RAD:
 
-- reverse-through-time / BPTT for delay, prefix, LTV recursion, and
-  nonlinear recursion,
+- specialized `ReverseTimeRec` / phase-E recursive fast paths in public RAD
+  dispatch,
+- explicit user-controlled horizons (`rad(expr, seeds, horizon)` /
+  `-rad-horizon N`),
 - adjoints over mutable tables,
 - adjoints over soundfile content,
 - custom vector-output cotangent API (`vjp(...)`),
@@ -341,8 +352,8 @@ Plan phases E and F sketch the next steps:
 
 - **Phase E0** — implemented read-only recursive-linearity classifier
   and `RecRadMode` strategy gate; no new `rad(...)` capability.
-- **Phase E1/E2** — a scoped `RecRadMode` for linear recursive subsets
-  where a transposed evaluation can be defined over a finite block.
+- **Phase E1/E2** — scoped specialized recursive strategies that can replace
+  generic BRA where profitable and proven equivalent.
 - **Phase F** — a finite-horizon BPTT mode (`rad(expr, seeds, horizon)`
   or `-rad-horizon N`) requiring a runtime tape and a backend backward
   sweep.

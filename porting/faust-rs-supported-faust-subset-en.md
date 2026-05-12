@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-05-03
+Last updated: 2026-05-12
 
 Version: 0.6.0
 
@@ -167,6 +167,17 @@ This snapshot is based on:
   - `crates/cranelift-ffi/src/factory.rs`
   - `crates/interp-ffi/src/factory.rs`
   - `porting/journal/2026-05-03.md`
+- RAD reverse-time-recursion safety and BRA tape typing fixes on
+  2026-05-10/12 reviewed against:
+  - `crates/propagate/src/reverse_ad.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/compiler/tests/rad_runtime.rs`
+  - `porting/rad-disable-reverse-time-rec-fast-path-plan-2026-05-10-en.md`
+  - `porting/journal/2026-05-12.md`
+- AD wrapper arity-slicing fix on 2026-05-12 reviewed against:
+  - `crates/propagate/src/lib.rs`
+  - `crates/compiler/tests/signal_pipeline.rs`
+  - `porting/journal/2026-05-12.md`
 
 The corresponding generated reports are:
 
@@ -333,6 +344,20 @@ prototype subset. On the tracked corpus, it includes:
   (`button`, `checkbox`) and other unmatched signal families currently
   preserve the primal and emit zero tangents rather than claiming a
   derivative model that has not been ported.
+- **reverse-mode AD**: `rad(expr, seeds)` is supported for the feed-forward
+  differentiable subset. It mirrors the explicit-seed surface of `fad` and
+  returns `[primals..., gradients...]`, with one gradient lane per seed output.
+  For multi-output bodies, the cotangent at the body boundary is the implicit
+  all-ones vector, so the gradient is taken with respect to the sum of body
+  outputs. Temporal or recursive bodies (`delay`, `prefix`, recursion /
+  projection) leave the symbolic feed-forward sweep and are routed through the
+  `BlockReverseAD` fallback rather than being differentiated by the local
+  symbolic transpose. As of 2026-05-12, `fad` and `rad` both obey the same
+  wrapper input-slicing contract: the wrapper exposes the maximum child input
+  arity externally, while each child is propagated with only the prefix of the
+  bus matching its own arity. Thus `rad(*, (_,_,_))` is legal: the wrapper has
+  3 inputs, the body `*` consumes `x0,x1`, and the third seed lane correctly
+  produces gradient zero.
 
 Stated differently:
 
@@ -521,6 +546,12 @@ The most important current exclusions are:
     surface of `fad(expr, seeds)` and produces the bundle
     `[primals…, ∂ sum(primals) / ∂ s_0, …, ∂ sum(primals) / ∂ s_{N-1}]`
     with an implicit all-ones cotangent on every primal output.
+  - Wrapper input arity follows the same rule as FAD: the public wrapper arity
+    is the maximum of `body.inputs` and `seeds.inputs`, but the body and seeds
+    are each propagated with only the input prefix required by their own arity.
+    For example, `rad(*, (_,_,_))` has three public inputs and four outputs:
+    `x0 * x1`, `d(x0*x1)/d(x0) = x1`, `d(x0*x1)/d(x1) = x0`,
+    `d(x0*x1)/d(x2) = 0`.
   - Arity contract: `body.outputs ≥ 1`, `seeds.outputs ≥ 1`,
     `outputs = body.outputs + seeds.outputs`. Violations surface
     structured `RadBodyArity` / `RadSeedArity` diagnostics
@@ -533,25 +564,37 @@ The most important current exclusions are:
     (`tanh`/`sinh`/`cosh` and inverse-hyperbolic counterparts),
     pass-through wrappers (`attach`, `enable`, `control`, `Output`),
     bargraphs (zero contribution).
-  - Out of scope (raise `RadUnsupportedNode` with kind-specific
-    diagnostics, never silently zero): `delay1`, variable `delay`,
-    `prefix`, recursion / projection over a recursion, mutable
+  - Outside the local symbolic sweep: `delay1`, variable `delay`,
+    `prefix`, recursion / projection over a recursion. These kinds raise
+    `RadUnsupportedNode` internally as a dispatch signal and are then routed
+    to the `BlockReverseAD` fallback, never silently zeroed.
+  - Still out of scope as hard unsupported families: mutable
     tables, soundfiles, non-unary or unrecognised foreign functions.
     The reverse transpose of a delay is anti-causal
     (`adj_x[n] += adj_y[n + 1]`) and would require a runtime tape; a
-    finite-horizon BPTT mode is reserved for a later phase.
+    finite-horizon block fallback is used by the current lowering while the
+    more specialized phase-E recursive strategies remain incomplete.
   - Stateful RAD phase E0 is present as an internal feasibility
     classifier (`crates/propagate/src/stateful_rad.rs`) over
     `DEBRUIJNREC` groups. It distinguishes `LinearLti`,
     `LinearTimeVarying`, and `Nonlinear` recursive bodies, but it does
-    not make recursive `rad(...)` legal yet. The paired `RecRadMode`
+    does not enable the dormant `ReverseTimeRec` fast path yet. The paired
+    `RecRadMode`
     gate maps those classes to the future E1/E2/F strategies:
     `LinearTranspose`, `BlockLinearTimeVarying`, and `BpttRequired`.
-    RAD recursive rejection diagnostics now surface that mode when it
-    can be classified.
+    RAD recursive fallback classification now carries that mode when it can be
+    classified.
+  - The experimental reverse-time recursion dispatcher fast path is disabled
+    for RAD until the phase-E recursive strategies are complete. Recursive RAD
+    bodies therefore route through the `BlockReverseAD` fallback instead of
+    attempting an incomplete `ReverseTimeRec` lowering.
+  - Block reverse AD (BRA) tape stores use real-valued tape arrays. Because
+    BRA tape store buffers are introduced later during FIR lowering, after
+    signal-level normalization/promotion, taped integer forward values are cast
+    to the tape element type at the FIR boundary before being stored.
   - Coverage:
     - structural: [crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs)
-      (arity + temporal/recursive rejection),
+      (arity + temporal/recursive BlockReverseAD fallback),
     - structural classifier unit tests:
       [crates/propagate/src/stateful_rad.rs](../crates/propagate/src/stateful_rad.rs),
     - runtime parity (RAD ↔ FAD lane-by-lane and RAD ↔ central
@@ -561,7 +604,7 @@ The most important current exclusions are:
       `rad_trig_composition`, `rad_absent_seed`, `rad_repeated_seed`,
       `rad_multi_output_sum_cotangent`, `rad_rdtbl_index_basic`, plus
       `err_rad_zero_body`, `err_rad_zero_seed`,
-      `err_rad_delay_temporal_unsupported`.
+      `rad_delay1_block_fallback`.
   - Detailed design notes: [docs/rad-note-en.md](../docs/rad-note-en.md);
     plan: [porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md](reverse-ad-rad-implementation-plan-2026-04-27-en.md).
 
@@ -656,12 +699,18 @@ Relative to the tracked corpus and the current production-oriented route:
   the fast-lane. The transform operates directly on De Bruijn recursive form,
   interleaving primal and tangent slots inside `DEBRUIJNREC` bodies before
   symbolic conversion in `signal_prepare`,
-- **reverse-mode AD** (`rad(expr, seeds)`) feed-forward subset landed 2026-04-27:
+- **reverse-mode AD** (`rad(expr, seeds)`) landed as a feed-forward symbolic
+  subset on 2026-04-27 and now includes the BRA temporal/recursive fallback:
   `rad(...)` produces `[primals…, ∂ sum(primals) / ∂ s_j…]` with an implicit
-  all-ones cotangent. The differentiable subset matches FAD outside temporal
-  families. Phase E0 recursive-linearity classifier and E1 LTI transposition
-  scaffold are in place; recursive `rad(...)` is still gated pending block/tape
-  wiring. See [docs/rad-note-en.md](../docs/rad-note-en.md),
+  all-ones cotangent. The feed-forward symbolic differentiable subset matches
+  FAD outside temporal families; temporal and recursive families leave that
+  local sweep and use `BlockReverseAD`. Phase E0 recursive-linearity
+  classification and the E1 LTI transposition scaffold remain as dormant
+  specialization infrastructure. The 2026-05-12 RAD fixes disable the
+  incomplete reverse-time-recursion dispatcher fast path, cast integer BRA
+  forward values into the real-valued tape-store boundary during FIR lowering,
+  and fix shared FAD/RAD wrapper input slicing for cases such as
+  `rad(*, (_,_,_))`. See [docs/rad-note-en.md](../docs/rad-note-en.md),
 - **SVG block-diagram output** is now wired via `-svg` (landed 2026-05-02):
   the full `crates/draw/` module renders all box/composition/schema types,
   supports hierarchical folding (`-f`, `-fc`), and matches the C++ output
@@ -681,11 +730,13 @@ Faust C++ still supports a broader end-to-end language/runtime envelope.
 
 Most importantly, the C++ compiler still has:
 
-- **reverse-mode AD through time**: the feed-forward RAD subset is implemented
-  (see [docs/rad-note-en.md](../docs/rad-note-en.md)). What remains gated is
-  reverse-through-time: any `delay` / `prefix` / recursion in the differentiated
-  body raises a structured `RadUnsupportedNode` diagnostic. Phase E1 LTI
-  transposition and phase F BPTT are reserved for future phases (plan §20).
+- **specialized reverse-mode AD through time**: the feed-forward RAD subset and
+  the generic `BlockReverseAD` fallback are implemented (see
+  [docs/rad-note-en.md](../docs/rad-note-en.md)). What remains gated is the
+  more specialized reverse-time recursion path: `delay` / `prefix` / recursion
+  in the differentiated body leave the local symbolic sweep and use BRA today,
+  while phase E1 LTI transposition and phase F BPTT specialization remain
+  future phases (plan §20).
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
 - a fuller embedded-compiler helper surface for web tooling
@@ -1615,7 +1666,7 @@ two-phase protocol prevents dangling references inside the De Bruijn group:
 | `rad_fad_quadratic` | mixed AD: outer RAD over inner FAD, sum-cotangent gradient `f' + f''` |
 | `fad_rad_trig_second_derivative` | mixed AD on `sin(x*x)`, fourth lane is the second derivative |
 | `rad_fad_multi_seed` | mixed AD with two seeds, implicit all-ones cotangent through inner FAD lanes |
-| `err_rad_zero_body`, `err_rad_zero_seed`, `err_rad_delay_temporal_unsupported`, `err_fad_rad_temporal` | structured RAD diagnostic surface (incl. RAD-in-FAD wrapping) |
+| `err_rad_zero_body`, `err_rad_zero_seed`, `rad_delay1_block_fallback`, `err_fad_rad_temporal` | RAD diagnostics and fallback surface (incl. RAD-in-FAD wrapping) |
 
 These fixtures pass through `crates/compiler/tests/signal_pipeline.rs`.
 `fad_delay` is additionally validated end-to-end through the
@@ -1823,19 +1874,24 @@ Phase 1 reverse-mode AD landed in full on 2026-04-27:
   `control`, `Output`).
 - **Phase D**: family-specific `RadUnsupportedNode` diagnostics with
   `kind`-dependent help text explaining why each temporal family (delay,
-  prefix, recursion) is rejected (anti-causal transpose / BPTT reserved).
+  prefix, recursion) cannot be handled by the local symbolic sweep alone
+  (anti-causal transpose / BPTT boundary).
 
 Output bundle: `[primals…, ∂ sum(primals) / ∂ s_0, …]` with implicit all-ones
 cotangent on every primal output. Out-of-scope families raise
-`RadUnsupportedNode`; RAD never silently emits a misleading gradient.
+`RadUnsupportedNode`; after the 2026-05-12 dispatcher change, temporal and
+recursive kinds use that error as an internal dispatch signal to
+`BlockReverseAD`, while true hard-unsupported families still surface targeted
+diagnostics. RAD never silently emits a misleading gradient.
 
 #### Phase E0: recursive-linearity classifier
 
 `crates/propagate/src/stateful_rad.rs` classifies `DEBRUIJNREC` groups as
 `LinearLti`, `LinearTimeVarying`, or `Nonlinear`. The paired `RecRadMode` maps
 these to future strategies (`LinearTranspose`, `BlockLinearTimeVarying`,
-`BpttRequired`). Recursive `rad(...)` is still rejected, but the diagnostic now
-names the future phase when one can be determined.
+`BpttRequired`). This classifier now annotates the recursive fallback class;
+the dormant `ReverseTimeRec` fast path remains disabled until the specialized
+phase-E/F strategies are complete.
 
 #### FAD de Bruijn invariants and multi-seed tests strengthened
 
@@ -1847,7 +1903,7 @@ to `fad_recursive_runtime.rs`.
 #### Corpus and documentation
 
 - 7 positive RAD fixtures + 3 error fixtures (`err_rad_zero_body`,
-  `err_rad_zero_seed`, `err_rad_delay_temporal_unsupported`).
+  `err_rad_zero_seed`, `rad_delay1_block_fallback`).
 - 4 mixed `fad(rad(...))` / `rad(fad(...))` corpus entries including
   `err_fad_rad_temporal`.
 - RAD runtime test suite: 29 tests (10 inline + 14 corpus-driven + 5
@@ -1871,8 +1927,8 @@ to `fad_recursive_runtime.rs`.
 - `RecRadMode` strategy gate wired: `recursive-linear-transpose`,
   `recursive-block-linear-time-varying`, and `recursive-bptt-required`
   diagnostic kinds now distinguish future phases in user-facing messages.
-- Tests cover E2 (`coef`-dependent linear) and F (`sin` nonlinear) rejection
-  with correct kind labels.
+- Tests cover E2 (`coef`-dependent linear) and F (`sin` nonlinear) fallback
+  classification with correct kind labels.
 
 ### 7.22 April 29, 2026: normalize simplify-cache sharing, wasm-ffi unblock, RAD demos
 
@@ -2004,6 +2060,48 @@ A complete port of `compiler/draw/` landed across 2026-05-02:
 
 5 new compiler library tests cover both functions end-to-end.
 
+### 7.26 May 10–12, 2026: RAD safety gate, BRA tape typing, AD wrapper slicing
+
+#### Reverse-time-recursive RAD fast path disabled
+
+The experimental `ReverseTimeRec` dispatcher path for RAD was disabled until
+the planned phase-E recursive strategies are complete. Recursive RAD bodies now
+route through the `BlockReverseAD` fallback instead of entering an incomplete
+reverse-time-recursive lowering path.
+
+#### BRA tape store typing
+
+BRA forward tape arrays are real-valued FIR storage introduced during
+`signal_fir` lowering. These tape buffers are not signal-IR nodes and therefore
+do not pass through the earlier `normalize` / `signalPromotion` phase. The FIR
+lowering boundary now casts taped integer forward values to the tape element
+type before storing them, preserving the real-valued tape contract used by the
+backward sweep and avoiding interpreter stack-type mismatches.
+
+#### FAD/RAD wrapper input slicing
+
+`fad(body, seed)` and `rad(body, seeds)` expose the maximum of the body and seed
+input arities as their public wrapper input arity. Internally, each child must
+still be evaluated with only the prefix of that bus matching its own arity.
+
+The RAD regression case is:
+
+```faust
+process = rad(*, (_,_,_));
+```
+
+The wrapper has inputs `x0`, `x1`, `x2`, but the body `*` consumes only `x0`
+and `x1`. The expected outputs are:
+
+1. primal: `x0 * x1`
+2. `d(body)/d(seed0)`: `d(x0*x1)/d(x0) = x1`
+3. `d(body)/d(seed1)`: `d(x0*x1)/d(x1) = x0`
+4. `d(body)/d(seed2)`: `d(x0*x1)/d(x2) = 0`
+
+The same slicing contract applies to `fad(*, (_,_,_))`; FAD obtains the lanes
+by propagating one tangent direction per seed output, while RAD accumulates
+adjoints back from the scalar body output cotangent.
+
 ## 8. Practical Reading Rule
 
 Today, the simplest accurate rule is:
@@ -2026,10 +2124,10 @@ Today, the simplest accurate rule is:
   `fad(fad(eq, phi), phi)` on recursive accumulators. End-to-end backend
   compilation succeeds whenever the underlying tangent signal content stays
   within the supported fast-lane subset (same as for primal-only programs).
-- `rad(expr, seeds)` is supported on the feed-forward subset (phase 1
-  reverse-mode AD). The temporal boundary (`delay`, `prefix`, recursion
-  inside the differentiated body) raises a structured `RadUnsupportedNode`
-  diagnostic. See [docs/rad-note-en.md](../docs/rad-note-en.md).
+- `rad(expr, seeds)` is supported on the feed-forward subset and routes
+  temporal/recursive differentiated bodies (`delay`, `prefix`, recursion) to
+  the `BlockReverseAD` fallback rather than to the local symbolic transpose.
+  See [docs/rad-note-en.md](../docs/rad-note-en.md).
 - `-svg` produces block-diagram SVG output matching the C++ compiler output
   directory convention; hierarchical folding via `-f` splits complex diagrams.
 - `rad(expr, seeds)` over `hslider` / `vslider` / `numentry` seeds and a

@@ -236,8 +236,9 @@ impl<'a> ReverseADTransform<'a> {
                 // adjoint to the wrapped signal.
                 out.push(inner);
             }
-            // Phase-B/C unsupported families: temporal, recursive,
-            // mutable table, soundfile, opaque.
+            // Families outside the local symbolic sweep. Temporal/recursive
+            // kinds are caught by `generate_rad_signals` and routed to
+            // BlockReverseAD; hard unsupported kinds surface as diagnostics.
             SigMatch::Delay1(_) | SigMatch::Delay(_, _) | SigMatch::Prefix(_, _) => {
                 return Err(PropagateError::RadUnsupportedNode {
                     node: sig,
@@ -620,10 +621,10 @@ impl<'a> ReverseADTransform<'a> {
             SigMatch::Output(_, inner) => {
                 self.add_adjoint(inner, y_bar);
             }
-            // The unsupported families were rejected in `active_children`
-            // before they reached postorder. Reaching them here means a
-            // direct primal output of an unsupported family — we still
-            // refuse rather than silently dropping the gradient.
+            // Families that need fallback or hard diagnostics are reported in
+            // `active_children` before they reach postorder. Reaching them here
+            // means a direct primal output escaped classification; report it
+            // rather than silently dropping the gradient.
             _ => {
                 return Err(PropagateError::RadUnsupportedNode {
                     node: y,

@@ -1755,7 +1755,8 @@ fn propagate_reverse_ad_delay1_falls_back_to_block_mode() {
 #[test]
 fn propagate_reverse_ad_delay_or_prefix_kind_has_temporal_diagnostic() {
     // Standalone check: the `RadUnsupportedNode { kind: "delay-or-prefix" }`
-    // diagnostic contains the notes the user needs to understand the obstacle.
+    // diagnostic now documents the internal dispatch reason. Public `rad(...)`
+    // catches this kind and routes it to BlockReverseAD.
     let arena = TreeArena::new();
     let diag = PropagateError::RadUnsupportedNode {
         node: arena.nil(),
@@ -1769,8 +1770,10 @@ fn propagate_reverse_ad_delay_or_prefix_kind_has_temporal_diagnostic() {
         "temporal RAD diagnostic must mention non-causal transpose"
     );
     assert!(
-        diag.notes.iter().any(|n| n.contains("BPTT")),
-        "temporal RAD diagnostic must mention BPTT as the future-mode escape hatch"
+        diag.notes
+            .iter()
+            .any(|n| n.contains("BlockReverseAD fallback")),
+        "temporal RAD diagnostic must mention the BlockReverseAD fallback"
     );
 }
 
@@ -1829,9 +1832,9 @@ fn propagate_reverse_ad_seed_independent_lti_recursive_body_succeeds() {
 }
 
 #[test]
-fn propagate_reverse_ad_strict_lti_feedback_coeff_falls_back_to_block_mode() {
+fn propagate_reverse_ad_lti_feedback_coeff_falls_back_to_block_mode() {
     // process = rad((2 : + ~ *(p)), p): p is a reused constant signal, so this
-    // used to exercise the strict-LTI ReverseTimeRec fast path. The
+    // used to exercise the LTI ReverseTimeRec fast path. The
     // 2026-05-10 dispatcher change routes it through BlockReverseAD instead.
     let mut arena = TreeArena::new();
     let process = {
@@ -1849,7 +1852,7 @@ fn propagate_reverse_ad_strict_lti_feedback_coeff_falls_back_to_block_mode() {
     };
     let flat = try_build_flat_box(&arena, process).unwrap();
     let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
-        .expect("strict-LTI feedback coefficient RAD should propagate");
+        .expect("LTI feedback coefficient RAD should propagate");
 
     assert_eq!(outs.len(), 2, "rad output bundle = [primal, dp]");
     assert_block_reverse_ad_projections(&arena, &outs);
@@ -1891,8 +1894,8 @@ fn propagate_reverse_ad_ltv_recursive_kind_has_block_replay_diagnostic() {
     }
     .into_diagnostic();
     assert!(
-        diag.notes.iter().any(|n| n.contains("phase E2")),
-        "LTV recursive RAD diagnostic must point at phase E2"
+        diag.notes.iter().any(|n| n.contains("BlockReverseAD")),
+        "LTV recursive RAD diagnostic must point at the BlockReverseAD fallback"
     );
 }
 
@@ -1927,8 +1930,8 @@ fn propagate_reverse_ad_nonlinear_recursive_kind_has_bptt_diagnostic() {
     }
     .into_diagnostic();
     assert!(
-        diag.notes.iter().any(|n| n.contains("phase F")),
-        "nonlinear recursive RAD diagnostic must point at phase F"
+        diag.notes.iter().any(|n| n.contains("BlockReverseAD")),
+        "nonlinear recursive RAD diagnostic must point at the BlockReverseAD fallback"
     );
 }
 

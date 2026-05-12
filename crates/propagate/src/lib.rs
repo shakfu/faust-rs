@@ -96,8 +96,12 @@
 //!
 //! ## Reverse-mode AD (`rad`)
 //!
-//! `rad(expr)` returns [`PropagateError::UnsupportedBox`] in this phase.
-//! Reverse-mode is explicitly out of scope for the current propagation pass.
+//! `rad(expr, seeds)` lowers through [`reverse_ad`]. Feed-forward bodies use a
+//! local symbolic reverse sweep and produce `[primals…, gradients…]` with an
+//! implicit all-ones cotangent over primal outputs. Temporal and recursive
+//! bodies leave that symbolic sweep and are routed to the `BlockReverseAD`
+//! finite-block fallback; hard unsupported families still surface typed
+//! diagnostics.
 
 use std::fmt::{Display, Formatter};
 
@@ -1102,10 +1106,10 @@ impl IntoDiagnostic for PropagateError {
                                 "cause: reverse-mode AD of a delay or prefix would require a non-causal transpose `adj_x[n] += adj_y[n+1]`",
                             )
                             .with_note(
-                                "rule: phase 1 RAD does not implement reverse-through-time. A future BPTT mode would need a runtime tape for primal intermediates",
+                                "rule: the local symbolic RAD sweep delegates temporal nodes to the BlockReverseAD fallback, which supplies the required finite block tape",
                             )
                             .with_help(
-                                "remove the delay/prefix from the differentiated expression, or use fad(...) which handles delays via a causal forward rule",
+                                "if this diagnostic is surfaced directly, preserve the DSP as a fallback-dispatch regression",
                             );
                     }
                     "recursive-linear-transpose" => {
@@ -1114,10 +1118,10 @@ impl IntoDiagnostic for PropagateError {
                                 "cause: RAD reached a linear time-invariant recursive feedback; exact reverse mode needs the phase-E1 linear-transpose path",
                             )
                             .with_note(
-                                "rule: phase 1 still rejects recursive projections until block/tape evaluation semantics are implemented",
+                                "rule: the ReverseTimeRec fast path is dormant; public RAD routes recursive bodies through BlockReverseAD",
                             )
                             .with_help(
-                                "use fad(...) for recursive differentiation today, or keep the differentiated rad(...) body feed-forward",
+                                "if this diagnostic is surfaced directly, preserve the DSP as a fallback-dispatch regression",
                             );
                     }
                     "recursive-block-linear-time-varying" => {
@@ -1126,10 +1130,10 @@ impl IntoDiagnostic for PropagateError {
                                 "cause: RAD reached a linear but time-varying recursive feedback; exact reverse mode needs block coefficient replay",
                             )
                             .with_note(
-                                "rule: phase E2 requires a finite block/tape convention before this can be lowered",
+                                "rule: the specialized phase-E2 replay path is not enabled; public RAD uses BlockReverseAD for this class",
                             )
                             .with_help(
-                                "use fad(...) for recursive differentiation today, or make the differentiated rad(...) body feed-forward",
+                                "if this diagnostic is surfaced directly, preserve the DSP as a fallback-dispatch regression",
                             );
                     }
                     "recursive-bptt-required" => {
@@ -1138,10 +1142,10 @@ impl IntoDiagnostic for PropagateError {
                                 "cause: RAD reached nonlinear recursive feedback; exact reverse mode requires finite-horizon BPTT",
                             )
                             .with_note(
-                                "rule: phase F must define horizon, tape allocation, and backend backward-sweep semantics before this can be lowered",
+                                "rule: the specialized phase-F path is not enabled; public RAD uses the generic BlockReverseAD finite-block fallback",
                             )
                             .with_help(
-                                "use fad(...) for recursive differentiation today, or rewrite the differentiated expression to remove nonlinear feedback",
+                                "if this diagnostic is surfaced directly, preserve the DSP as a fallback-dispatch regression",
                             );
                     }
                     "recursive-projection" => {
@@ -1150,10 +1154,10 @@ impl IntoDiagnostic for PropagateError {
                                 "cause: reverse-mode AD of a recursive feedback would require a non-causal transpose over an infinite stream",
                             )
                             .with_note(
-                                "rule: phase 1 RAD rejects recursion / projection nodes rather than producing a misleading gradient",
+                                "rule: the local symbolic RAD sweep delegates recursion / projection nodes to the BlockReverseAD fallback",
                             )
                             .with_help(
-                                "rewrite the differentiated expression as feed-forward, or use fad(...) for recursive seeds",
+                                "if this diagnostic is surfaced directly, preserve the DSP as a fallback-dispatch regression",
                             );
                     }
                     "writable-table" | "writable-table-or-waveform-direct" => {
@@ -1217,8 +1221,8 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
 ///   common case and matches the C++ `getBoxType` behavior
 ///   (`boxtype.cpp:371`). Multi-output seeds bundle several independent
 ///   differentiation variables through a single `fad` node.
-/// - `rad(expr)` stays arity-transparent (unsupported in this phase).
-/// - Reverse-mode propagation remains intentionally unsupported.
+/// - `rad(expr, seeds)` reports `outputs = body_outputs + seed_outputs`:
+///   primals first, then one gradient lane per seed output.
 pub fn box_arity_typed(
     arena: &TreeArena,
     box_tree: FlatBoxId,

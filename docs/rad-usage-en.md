@@ -1,38 +1,38 @@
 # Using `rad(expr, seeds)` for Gradient Descent
 
-This note shows how to use the phase-1 reverse-mode AD primitive
+This note shows how to use the reverse-mode AD primitive
 `rad(expr, seeds)` from a host program. It complements
 [`docs/rad-note-en.md`](rad-note-en.md), which describes the algorithm
 and rule table.
 
-## What you get from phase-1 RAD today
+## What you get from RAD today
 
-Phase-1 RAD compiles `rad(expr, seeds)` into the output bundle
+RAD compiles `rad(expr, seeds)` into the output bundle
 
 ```text
 [primals…, ∂ sum(primals) / ∂ s_0, …, ∂ sum(primals) / ∂ s_{N-1}]
 ```
 
 with an implicit all-ones cotangent on every primal output. For
-recursive LTI bodies, the gradient lanes are per-sample contribution
-signals for the current `compute(count)` block. Sum them over the
-block in the host, or inside Faust when a DSP-level reduction is
-needed and the block size is known through `ma.BS`.
+temporal or recursive bodies, the gradient lanes are per-sample
+contribution signals for the current `compute(count)` block. Sum them
+over the block in the host, or inside Faust when a DSP-level reduction
+is needed and the block size is known through `ma.BS`.
 
-The differentiable subset matches FAD for feed-forward code and now
-also accepts the strict-LTI recursive E1 subset: arithmetic, trig,
-transcendentals, `pow`, `atan2`, `min`/`max`, `select2`, casts,
-read-only tables, unary FFun, pass-through wrappers, and recursive
-state-space forms whose feedback matrix is block-invariant. Non-
-recursive delay/prefix forms, LTV recursive coefficients, nonlinear
-recursive feedback, mutable tables, soundfiles, non-unary or
-unrecognised foreign functions surface a structured
-`RadUnsupportedNode` diagnostic — never a silently wrong gradient.
+The differentiable subset matches FAD for feed-forward code and routes
+temporal/recursive bodies through the `BlockReverseAD` fallback:
+arithmetic, trig, transcendentals, `pow`, `atan2`, `min`/`max`,
+`select2`, casts, read-only tables, unary FFun, pass-through wrappers,
+delay/prefix forms, and recursive feedback. Mutable tables,
+soundfiles, non-unary or unrecognised foreign functions still surface
+a structured `RadUnsupportedNode` diagnostic — never a silently wrong
+gradient.
 
 In short: any feed-forward DSP whose parameters live in `hslider` /
 `vslider` / `numentry` controls is fittable by gradient descent today,
-and strict-LTI recursive filters are fittable when the recursive
-coefficients are constant over the `compute(count)` block.
+and temporal/recursive DSPs are fittable within the current
+block-local BRA horizon when their lowered signal families are covered
+by the BRA backward rules.
 
 ## Pattern: host-driven gradient descent
 
@@ -133,12 +133,12 @@ instance.set_real_zone(bias_offset, bias);
 The reference implementation recovers the true `gain` and `bias`
 within `~1e-6` in 400 iterations of 512-sample batches.
 
-## Pattern: block-local LTI recursion
+## Pattern: block-local recursion
 
-Phase E1 accepts recursive DSPs whose state transition is linear and
-time-invariant over the current `compute(count)` block. The runtime
-runs the primal recursion forward, then runs the transposed adjoint
-recursion backward over the same block with a terminal-zero adjoint
+Recursive DSPs route through `BlockReverseAD` today. The runtime runs
+the primal recursion forward over the current `compute(count)` block,
+records the needed primal intermediates in BRA tapes, then runs the
+adjoint sweep backward over the same block with terminal-zero adjoint
 state at the end of each `compute()` call.
 
 One-pole example:
@@ -169,16 +169,18 @@ step. If the reduction must happen in DSP code, use `ma.BS` to make
 the block length explicit and reduce the contribution lanes with a
 block-aware construction.
 
-Current E1 keeps a strict contract: recursive coefficients that depend
-on audio inputs, UI controls, mutable tables, or other time-varying
-signals remain LTV and are refused with the phase-E2 diagnostic. A
-future E2 can define block-replay semantics for those cases.
+The same block-local rule is used for LTI, LTV, and nonlinear
+recursive classes. The classifier still records whether a recursive
+body is `LinearTranspose`, `BlockLinearTimeVarying`, or `BpttRequired`,
+but public RAD dispatch currently uses BRA for all of them while the
+specialized recursive paths remain dormant.
 
-## Pattern: host-managed delay lines (FIR taps)
+## Pattern: delay lines and FIR taps
 
-Non-recursive delay and prefix nodes are still outside the exact RAD
-subset. For FIR taps, lift the delay line out of the differentiated
-body and feed the delayed taps as separate audio channels:
+Non-recursive delay and prefix nodes also use the BRA fallback. For FIR
+taps, it can still be practical to lift the delay line out of the
+differentiated body and feed the delayed taps as separate audio
+channels when the host already owns that buffer:
 
 ```faust
 c0 = hslider("c0", 0.25, -2.0, 2.0, 0.001);
@@ -231,10 +233,10 @@ Run with:
 cargo run --release -p compiler --example rad_adaptive_notch
 ```
 
-This is the recognisable adaptive-filtering use case for phase-1
-RAD: any FIR or memoryless nonlinear filter parameterised by one or
-more sliders is fittable today, with the host buffering whatever
-state the differentiated body cannot carry.
+This is the recognisable adaptive-filtering use case for RAD: any FIR
+or memoryless nonlinear filter parameterised by one or more sliders is
+fittable today, and host buffering remains useful when the application
+already owns the delay line.
 
 ## Pattern: stateless waveshapers
 
@@ -251,18 +253,18 @@ into independent inputs by Faust's wire substitution.
 
 The benchmark
 [`crates/compiler/examples/rad_vs_fad_perf.rs`](../crates/compiler/examples/rad_vs_fad_perf.rs)
-compares RAD vs FAD on representative feed-forward and recursive E1
+compares RAD vs FAD on representative feed-forward and recursive
 shapes. On the current
 pipeline (release builds, signal-prepare + CSE active) the bytecode
 size and per-frame compute time are close between the two modes on
 the feed-forward shapes, including the deep multiplicative chain that
 plan §17 flagged as the canonical adjoint-sum-growth stress case. The
-same harness now also includes strict-LTI recursive one-pole and
-coupled state-space cases.
+same harness now also includes recursive one-pole and coupled
+state-space cases.
 
 In other words: at the scales explored here, the simplification
 pipeline already absorbs the symbolic-growth cost of reverse-mode
-adjoint accumulation. The recursive E1 cases should be read as
+adjoint accumulation. The recursive cases should be read as
 implementation guardrails rather than statistically rigorous
 benchmarks.
 
@@ -274,18 +276,19 @@ cargo run --release -p compiler --example rad_vs_fad_perf
 
 ## Limits to keep in mind
 
-- **Strict temporal boundary.** Non-recursive `delay` and `prefix`
-  still raise `RadUnsupportedNode`. Strict-LTI recursive groups compile
-  through the E1 block-local transpose. LTV or nonlinear recursive
-  groups keep raising the documented E2/F diagnostics.
+- **Block-local temporal boundary.** `delay`, `prefix`, and recursive
+  bodies use the current `compute(count)` block as the reverse horizon
+  through `BlockReverseAD`. This is exact for the block-local objective,
+  not a cross-call infinite-horizon adjoint.
 - **Implicit all-ones cotangent.** Multi-output `expr` produces the
   gradient of `sum(primals)`. A future `vjp(expr, cotangent, seeds)`
   primitive will expose custom output cotangents.
 - **No automatic seed discovery.** Seeds must be listed explicitly,
   same as for FAD. UI-control annotations are not consulted.
-- **Block-local recursion horizon.** E1 uses the current `compute(count)`
-  block as its horizon and resets reverse adjoint carriers at each
-  compute call. Longer cross-block horizons remain future work.
+- **Block-local recursion horizon.** BRA uses the current
+  `compute(count)` block as its horizon and resets reverse adjoint
+  carriers at each compute call. Longer cross-block horizons remain
+  future work.
 
 ## Source pointers
 

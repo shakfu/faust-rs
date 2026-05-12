@@ -1192,7 +1192,7 @@ fn corpus_err_rad_zero_seed_surfaces_rad_seed_arity_diagnostic() {
 //      two-output FAD bundle).
 //
 // Both rely on the feed-forward subset only; nested temporal cases are
-// covered by the temporal-rejection tests further up.
+// covered by the temporal BlockReverseAD fallback tests further up.
 
 #[test]
 fn nested_fad_rad_on_quadratic_matches_second_derivative() {
@@ -1489,12 +1489,14 @@ fn rad_nonlinear_one_pole_bra_total_grad_matches_fd() {
     );
 }
 
-/// LTI vs BlockReverseAD cross-validation: both paths must agree numerically
-/// on `d(Σ_n y[n])/d(p)` for the LTI one-pole `y[n] = 2 + p * y[n-1]`.
+/// BlockReverseAD cross-validation against a seed-independent LTI carrier:
+/// the block total must agree numerically on `d(Σ_n y[n])/d(a)` where
+/// `y[n] = a * y_lti[n]` and `y_lti[n] = 2 + p * y_lti[n-1]`.
 ///
-/// The **LTI fast path** (`ReverseTimeRec`) is engaged when the feedback
-/// coefficient `p` is not the seed — the seed `a` multiplies the input only.
-/// This validates §11.5 of the plan: gradient parity between LTI and BRA.
+/// This used to cross-check the dormant `ReverseTimeRec` fast path. Public RAD
+/// now routes the recursive body through BlockReverseAD, so the test is a
+/// finite-difference guard for the BRA path when the requested seed is outside
+/// the recursive carrier itself.
 ///
 /// `rad((a * (2 : +~*(p))), a)` with `p = 0.5` (constant) — the seed `a`
 /// multiplies the primal output but the recursion itself is LTI-in-state.
