@@ -1009,6 +1009,94 @@ process = fad(ma.tanh(a*a), a);
 }
 
 #[test]
+fn rad_vs_fad_parity_on_supported_hyperbolic_ffuns() {
+    let cases = [
+        (
+            "rad-vs-fad-sinh-ffun",
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.35, -2.0, 2.0, 0.001);
+process = rad(ma.sinh(a*a), a);
+"#,
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.35, -2.0, 2.0, 0.001);
+process = fad(ma.sinh(a*a), a);
+"#,
+            5.0e-5,
+        ),
+        (
+            "rad-vs-fad-cosh-ffun",
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.35, -2.0, 2.0, 0.001);
+process = rad(ma.cosh(a*a), a);
+"#,
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.35, -2.0, 2.0, 0.001);
+process = fad(ma.cosh(a*a), a);
+"#,
+            5.0e-5,
+        ),
+        (
+            "rad-vs-fad-atanh-ffun",
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.2, -0.8, 0.8, 0.001);
+process = rad(ma.atanh(a*a), a);
+"#,
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.2, -0.8, 0.8, 0.001);
+process = fad(ma.atanh(a*a), a);
+"#,
+            5.0e-5,
+        ),
+        (
+            "rad-vs-fad-asinh-ffun",
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.45, -2.0, 2.0, 0.001);
+process = rad(ma.asinh(a*a), a);
+"#,
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 0.45, -2.0, 2.0, 0.001);
+process = fad(ma.asinh(a*a), a);
+"#,
+            5.0e-5,
+        ),
+        (
+            "rad-vs-fad-acosh-ffun",
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 1.4, 1.1, 3.0, 0.001);
+process = rad(ma.acosh(a*a), a);
+"#,
+            r#"
+import("stdfaust.lib");
+a = hslider("a", 1.4, 1.1, 3.0, 0.001);
+process = fad(ma.acosh(a*a), a);
+"#,
+            1.0e-4,
+        ),
+    ];
+
+    for (stem, rad_source, fad_source, abs_tol) in cases {
+        assert_rad_matches_fad(
+            stem,
+            1,
+            1,
+            4,
+            abs_tol,
+            || rad_source.to_string(),
+            || fad_source.to_string(),
+        );
+    }
+}
+
+#[test]
 fn rad_vs_fad_parity_on_readonly_table_index() {
     // Read-only `rdtable(waveform{...}, idx)` is differentiable through
     // the read index via the symmetric finite-difference slope.

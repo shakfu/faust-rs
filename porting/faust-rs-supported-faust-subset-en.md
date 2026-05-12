@@ -1661,6 +1661,7 @@ two-phase protocol prevents dangling references inside the De Bruijn group:
 | `rad_absent_seed` | unreachable seed must yield zero gradient |
 | `rad_repeated_seed` | repeated seed lanes must alias the same gradient |
 | `rad_multi_output_sum_cotangent` | implicit all-ones cotangent on multi-output bodies |
+| `rad_vs_fad_*_ffun` | runtime RAD/FAD parity for the supported unary FFun families (`tanh`, `sinh`, `cosh`, `atanh`, `asinh`, `acosh`) |
 | `rad_rdtbl_index_basic` | read-only table index slope contract |
 | `fad_rad_quadratic` | mixed AD: outer FAD over inner RAD, second derivative `f''(x) = 2` |
 | `rad_fad_quadratic` | mixed AD: outer RAD over inner FAD, sum-cotangent gradient `f' + f''` |

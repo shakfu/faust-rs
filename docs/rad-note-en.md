@@ -323,7 +323,8 @@ parity tests in `crates/compiler/tests/rad_runtime.rs`.
 - **Runtime parity** ([crates/compiler/tests/rad_runtime.rs](crates/compiler/tests/rad_runtime.rs))
   — RAD vs FAD parity, RAD vs central finite differences, repeated /
   absent seeds, multi-output sum cotangent, read-only table index,
-  unary FFun (tanh), and recursive BRA cases.
+  supported unary FFun families (`tanh`, `sinh`, `cosh`, `atanh`,
+  `asinh`, `acosh`), and recursive BRA cases.
 - **Backend parity** ([crates/compiler/tests/signal_fir_lane.rs](crates/compiler/tests/signal_fir_lane.rs))
   — C, C++, interpreter, and Cranelift lowering of RAD/BRA shapes within the
   current fast-lane subset.
