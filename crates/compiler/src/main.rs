@@ -30,6 +30,7 @@ use codegen::backends::interp::{
     FbcCppOptions, InterpOptions, generate_cpp_from_fbc, generate_interp_module, read_fbc,
     write_fbc,
 };
+use codegen::backends::julia::{JuliaOptions, generate_julia_module};
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
@@ -57,6 +58,8 @@ enum CliLang {
     Interp,
     #[value(alias = "clif")]
     Cranelift,
+    #[value(alias = "jl")]
+    Julia,
     Wasm,
     #[value(alias = "wat")]
     Wast,
@@ -187,10 +190,10 @@ struct CliArgs {
     /// Emit strict C++-style JSON description.
     #[arg(long = "json", action = ArgAction::SetTrue)]
     dump_json: bool,
-    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, `-lang wasm`, or `-lang wast`.
+    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, `-lang julia`, `-lang wasm`, or `-lang wast`.
     ///
     /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`
-    /// / `--dump-interp` / `--dump-cranelift` / `-lang wasm` / `-lang wast`.
+    /// / `--dump-interp` / `--dump-cranelift` / `-lang julia` / `-lang wasm` / `-lang wast`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     lang: Option<CliLang>,
     /// Print version information and exit.
@@ -798,7 +801,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
-        "  cargo run -p compiler -- -lang c|cpp|fir|wast <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- -lang c|cpp|fir|julia|wast <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!("                           [--no-fir-verify] [--fir-verify-strict]");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
@@ -926,6 +929,7 @@ fn cli_lang_name(lang: CliLang) -> &'static str {
         CliLang::Fir => "fir",
         CliLang::Interp => "interp",
         CliLang::Cranelift => "cranelift",
+        CliLang::Julia => "julia",
         CliLang::Wasm => "wasm",
         CliLang::Wast => "wast",
     }
@@ -1343,7 +1347,12 @@ fn run_main() {
         || matches!(
             cli.lang,
             Some(
-                CliLang::Fir | CliLang::Interp | CliLang::Cranelift | CliLang::Wasm | CliLang::Wast
+                CliLang::Fir
+                    | CliLang::Interp
+                    | CliLang::Cranelift
+                    | CliLang::Julia
+                    | CliLang::Wasm
+                    | CliLang::Wast
             )
         ))
         && cli.architecture.is_some()
@@ -1539,6 +1548,39 @@ fn run_main() {
                 }
                 Err(err) => {
                     eprintln!("WAST fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
+        if matches!(cli.lang, Some(CliLang::Julia)) {
+            let options = JuliaOptions {
+                class_name: selected_class_name(&cli),
+            };
+            match generate_julia_module(&store, module, &options) {
+                Ok(julia) => {
+                    emit_output(&julia, cli.output.as_ref());
+                    if cli.dump_json {
+                        let output = require_companion_output_path(&cli);
+                        let compile_options =
+                            compile_options_json_string(Some("julia"), cli.double);
+                        match compile_fixture_to_json_text(
+                            &store,
+                            module,
+                            compile_options,
+                            cli.double,
+                        ) {
+                            Ok(json) => emit_json_companion_output(&json, output),
+                            Err(err) => {
+                                eprintln!("JSON fixture generation failed: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Julia fixture codegen failed: {err}");
                     std::process::exit(1);
                 }
             }
@@ -2099,6 +2141,50 @@ fn run_main() {
         return;
     }
 
+    if matches!(cli.lang, Some(CliLang::Julia)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        let options = JuliaOptions {
+            class_name: selected_class_name(&cli),
+        };
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_julia_with_lane(
+                input_path,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_julia_with_lane(
+                input_path,
+                &cli.import_dir,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+        timer.phase("julia-codegen");
+
+        match result {
+            Ok(julia) => {
+                emit_output(&julia, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(
+                        &compiler,
+                        &cli,
+                        input_path,
+                        CliLang::Julia,
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!("Julia pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        timer.total();
+        return;
+    }
+
     if matches!(cli.lang, Some(CliLang::Wasm)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
@@ -2381,6 +2467,12 @@ mod tests {
     fn cli_parse_accepts_lang_cranelift() {
         let cli = CliArgs::parse_from(["faust-rs", "--lang", "cranelift", "foo.dsp"]);
         assert!(matches!(cli.lang, Some(CliLang::Cranelift)));
+    }
+
+    #[test]
+    fn cli_parse_accepts_lang_julia() {
+        let cli = CliArgs::parse_from(["faust-rs", "--lang", "julia", "foo.dsp"]);
+        assert!(matches!(cli.lang, Some(CliLang::Julia)));
     }
 
     #[test]

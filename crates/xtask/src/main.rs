@@ -3777,6 +3777,7 @@ fn rust_case_status(compiler: &compiler::Compiler, input: &Path) -> CaseStatus {
                 compiler::CompilerError::FirVerify { .. } => ("fir", err.to_string()),
                 compiler::CompilerError::Codegen { .. } => ("codegen", err.to_string()),
                 compiler::CompilerError::CodegenC { .. } => ("codegen", err.to_string()),
+                compiler::CompilerError::CodegenJulia { .. } => ("codegen", err.to_string()),
                 compiler::CompilerError::CodegenInterp { .. } => ("codegen", err.to_string()),
                 compiler::CompilerError::CodegenWasm { .. } => ("codegen", err.to_string()),
                 compiler::CompilerError::MissingRoot { .. } => ("parse", err.to_string()),

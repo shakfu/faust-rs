@@ -68,6 +68,25 @@ fn fastlane_c_honors_explicit_class_name_option() {
     assert!(!c_code.contains("} mydsp;"));
 }
 
+#[test]
+fn fastlane_julia_emits_faust_style_shell() {
+    let compiler = Compiler::new();
+    let path = corpus_path("rep_01_passthrough.dsp");
+    let julia = compiler
+        .compile_file_default_to_julia_with_lane(
+            &path,
+            &codegen::backends::julia::JuliaOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("fast-lane Julia compilation failed: {e}"));
+
+    assert!(julia.contains("mutable struct mydsp{T} <: dsp"));
+    assert!(julia.contains("getNumInputs(dsp::mydsp{T}) where {T} = Int32(1)"));
+    assert!(julia.contains("getNumOutputs(dsp::mydsp{T}) where {T} = Int32(1)"));
+    assert!(julia.contains("function compute!(dsp::mydsp{T}, count::Int32"));
+    assert!(julia.contains("outputs::Matrix{FAUSTFLOAT}"));
+}
+
 fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
     let compiler = Compiler::new();
     let path = corpus_path(file);

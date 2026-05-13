@@ -43,6 +43,9 @@ use codegen::backends::interp::{
     CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
     FbcReal, InterpOptions, generate_interp_module, write_fbc,
 };
+use codegen::backends::julia::{
+    CodegenError as JuliaCodegenError, JuliaOptions, generate_julia_module,
+};
 use codegen::backends::wasm::layout::WasmMemoryLayout;
 use codegen::backends::wasm::{
     WasmBackendError, WasmJsonContext, WasmModule, WasmOptions, generate_wasm_module_with_context,
@@ -691,6 +694,21 @@ impl Compiler {
         )
     }
 
+    /// Parses + evaluates + propagates one source, then emits Julia text.
+    pub fn compile_source_to_julia(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &JuliaOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_source_to_julia_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
     /// Parses + evaluates + propagates one source, then emits C text using
     /// the selected signal->FIR lowering lane.
     pub fn compile_source_to_c_with_lane(
@@ -711,6 +729,28 @@ impl Compiler {
         };
         lower_signals_to_c(source_name, &signals, options, ctx)
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
+    }
+
+    /// Parses + evaluates + propagates one source, then emits Julia text using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_source_to_julia_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &JuliaOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        let ctx = SignalLoweringContext {
+            lane,
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
+        };
+        lower_signals_to_julia(source_name, &signals, options, ctx)
+            .map_err(|e| lower_julia_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one source, then emits C++ text using
@@ -980,6 +1020,21 @@ impl Compiler {
         )
     }
 
+    /// Parses + evaluates + propagates one file, then emits Julia text.
+    pub fn compile_file_to_julia(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &JuliaOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_julia_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
     /// Parses + evaluates + propagates one file, then emits C text using
     /// the selected signal->FIR lowering lane.
     pub fn compile_file_to_c_with_lane(
@@ -1001,6 +1056,29 @@ impl Compiler {
         };
         lower_signals_to_c(&source, &signals, options, ctx)
             .map_err(|e| lower_c_error_to_compiler(&source, e))
+    }
+
+    /// Parses + evaluates + propagates one file, then emits Julia text using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_file_to_julia_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &JuliaOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        let ctx = SignalLoweringContext {
+            lane,
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
+        };
+        lower_signals_to_julia(&source, &signals, options, ctx)
+            .map_err(|e| lower_julia_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file, then emits C++ text using
@@ -1231,6 +1309,20 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits Julia text.
+    pub fn compile_file_default_to_julia(
+        &self,
+        path: &Path,
+        options: &JuliaOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_default_to_julia_with_lane(
+            path,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
     /// then emits C text using the selected signal->FIR lowering lane.
     pub fn compile_file_default_to_c_with_lane(
         &self,
@@ -1239,6 +1331,17 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         self.compile_file_to_c_with_lane(path, &[], options, lane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits Julia text using the selected signal->FIR lowering lane.
+    pub fn compile_file_default_to_julia_with_lane(
+        &self,
+        path: &Path,
+        options: &JuliaOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_julia_with_lane(path, &[], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -1821,6 +1924,11 @@ pub enum CompilerError {
         source: Box<str>,
         error: CCodegenError,
     },
+    /// Julia backend emission failed from FIR.
+    CodegenJulia {
+        source: Box<str>,
+        error: JuliaCodegenError,
+    },
     /// Interpreter backend emission failed from FIR.
     CodegenInterp {
         source: Box<str>,
@@ -1876,6 +1984,9 @@ impl std::fmt::Display for CompilerError {
             Self::CodegenC { source, error } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
+            Self::CodegenJulia { source, error } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
             Self::CodegenInterp { source, error } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
@@ -1901,6 +2012,7 @@ impl CompilerError {
             Self::FirVerify { diagnostics, .. } => Some(diagnostics),
             Self::Codegen { .. } => None,
             Self::CodegenC { .. } => None,
+            Self::CodegenJulia { .. } => None,
             Self::CodegenWasm { .. } => None,
             _ => None,
         }
@@ -2055,6 +2167,18 @@ fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerErro
         LowerError::Transform(error) => transform_error_to_compiler(source, error),
         LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerError::Codegen(error) => CompilerError::CodegenC {
+            source: source.into(),
+            error,
+        },
+    }
+}
+
+/// Maps a `LowerToJuliaError` into a `CompilerError`, attaching the source name.
+fn lower_julia_error_to_compiler(source: &str, error: LowerToJuliaError) -> CompilerError {
+    match error {
+        LowerError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
+        LowerError::Codegen(error) => CompilerError::CodegenJulia {
             source: source.into(),
             error,
         },
@@ -2245,6 +2369,8 @@ enum LowerError<E> {
 type LowerToCppError = LowerError<CodegenError>;
 /// Lower error for the C backend.
 type LowerToCError = LowerError<CCodegenError>;
+/// Lower error for the Julia backend.
+type LowerToJuliaError = LowerError<JuliaCodegenError>;
 
 #[derive(Debug)]
 enum LowerToInterpError {
@@ -2316,6 +2442,17 @@ fn lower_signals_to_c(
 ) -> Result<String, LowerToCError> {
     let _ = ctx.lane;
     lower_signals_to_c_transform_fastlane(source_name, output, options, &ctx)
+}
+
+/// Dispatches Julia lowering through the selected signal->FIR lane.
+fn lower_signals_to_julia(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &JuliaOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToJuliaError> {
+    let _ = ctx.lane;
+    lower_signals_to_julia_transform_fastlane(source_name, output, options, &ctx)
 }
 
 /// Dispatches interpreter lowering through the selected signal->FIR lane.
@@ -2504,6 +2641,35 @@ fn lower_signals_to_c_transform_fastlane(
     .map_err(LowerError::Verify)?;
     time_phase_with_sink(timing_sink, "c-codegen", || {
         generate_c_module(&lowered.store, lowered.module, options)
+    })
+    .map_err(LowerError::Codegen)
+}
+
+/// Lowers signals through the transform fast lane, verifies FIR, then emits Julia.
+fn lower_signals_to_julia_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &JuliaOptions,
+    ctx: &SignalLoweringContext,
+) -> Result<String, LowerToJuliaError> {
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
+    .map_err(LowerError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerError::Verify)?;
+    time_phase_with_sink(timing_sink, "julia-codegen", || {
+        generate_julia_module(&lowered.store, lowered.module, options)
     })
     .map_err(LowerError::Codegen)
 }

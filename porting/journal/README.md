@@ -85,4 +85,4 @@ Files are listed chronologically (oldest day first). Inside each file, entries a
 - [2026-05-10](./2026-05-10.md) (1 entry)
 - [2026-05-11](./2026-05-11.md) (1 entry)
 - [2026-05-12](./2026-05-12.md) (7 entries)
-- [2026-05-13](./2026-05-13.md) (1 entry)
+- [2026-05-13](./2026-05-13.md) (2 entries)
