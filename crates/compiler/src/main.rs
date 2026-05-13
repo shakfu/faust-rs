@@ -30,7 +30,7 @@ use codegen::backends::interp::{
     FbcCppOptions, InterpOptions, generate_cpp_from_fbc, generate_interp_module, read_fbc,
     write_fbc,
 };
-use codegen::backends::julia::{JuliaOptions, generate_julia_module};
+use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_module};
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
@@ -1037,6 +1037,14 @@ fn selected_real_type(cli: &CliArgs) -> RealType {
     }
 }
 
+fn selected_julia_real_type(cli: &CliArgs) -> JuliaRealType {
+    if cli.double {
+        JuliaRealType::Float64
+    } else {
+        JuliaRealType::Float32
+    }
+}
+
 /// Builds one configured [`Compiler`] instance from parsed CLI arguments.
 fn compiler_from_cli(
     cli: &CliArgs,
@@ -1580,6 +1588,7 @@ fn run_main() {
         if matches!(cli.lang, Some(CliLang::Julia)) {
             let options = JuliaOptions {
                 class_name: selected_class_name(&cli),
+                real_type: selected_julia_real_type(&cli),
             };
             match generate_julia_module(&store, module, &options) {
                 Ok(julia) => {
@@ -2170,6 +2179,7 @@ fn run_main() {
         let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let options = JuliaOptions {
             class_name: selected_class_name(&cli),
+            real_type: selected_julia_real_type(&cli),
         };
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_julia_with_lane(

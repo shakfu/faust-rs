@@ -53,12 +53,34 @@ pub const BACKEND_NAME: &str = "julia";
 pub struct JuliaOptions {
     /// Optional Julia DSP struct name override for the FIR module name.
     pub class_name: Option<String>,
+    /// Julia real scalar type used by the generated `REAL` alias.
+    pub real_type: JuliaRealType,
 }
 
 impl Default for JuliaOptions {
     fn default() -> Self {
         Self {
             class_name: Some("mydsp".to_owned()),
+            real_type: JuliaRealType::Float32,
+        }
+    }
+}
+
+/// Scalar precision selected for the Julia backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JuliaRealType {
+    /// Single precision, matching Faust default code generation.
+    #[default]
+    Float32,
+    /// Double precision, matching Faust `-double`.
+    Float64,
+}
+
+impl JuliaRealType {
+    fn julia_name(self) -> &'static str {
+        match self {
+            Self::Float32 => "Float32",
+            Self::Float64 => "Float64",
         }
     }
 }
@@ -230,7 +252,7 @@ pub fn generate_julia_module(
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
 
     let mut out = String::new();
-    emit_julia_header(&mut out);
+    emit_julia_header(&mut out, options.real_type);
     emit_static_tables(store, &mut out, module.static_decls)?;
     emit_struct_definition(
         store,
@@ -259,7 +281,7 @@ pub fn generate_julia_module(
 /// The helper aliases are deliberately close to the C++ Faust Julia backend
 /// output so downstream structural tests and user expectations see the same
 /// runtime vocabulary.
-fn emit_julia_header(out: &mut String) {
+fn emit_julia_header(out: &mut String, real_type: JuliaRealType) {
     let _ = writeln!(out, "#=");
     let _ = writeln!(out, "Code generated with faust-rs");
     let _ = writeln!(out, "Compilation options: -lang julia");
@@ -267,7 +289,7 @@ fn emit_julia_header(out: &mut String) {
     let _ = writeln!(out);
     let _ = writeln!(out, "using StaticArrays");
     let _ = writeln!(out);
-    let _ = writeln!(out, "const REAL = Float32");
+    let _ = writeln!(out, "const REAL = {}", real_type.julia_name());
     let _ = writeln!(out, "pow(x, y) = x ^ y");
     let _ = writeln!(out, "rint(x) = round(x, Base.Rounding.RoundNearest)");
     let _ = writeln!(
@@ -1002,7 +1024,7 @@ fn emit_stmt(
             };
             let _ = writeln!(
                 out,
-                "{tab}{api}(ui_interface, {}, dsp.{var})",
+                "{tab}{api}(ui_interface, {}, :{var})",
                 julia_string_literal(&label)
             );
             Ok(())
@@ -1023,7 +1045,7 @@ fn emit_stmt(
             };
             let _ = writeln!(
                 out,
-                "{tab}{api}(ui_interface, {}, dsp.{var}, FAUSTFLOAT({}), FAUSTFLOAT({}), FAUSTFLOAT({}), FAUSTFLOAT({}))",
+                "{tab}{api}(ui_interface, {}, :{var}, FAUSTFLOAT({}), FAUSTFLOAT({}), FAUSTFLOAT({}), FAUSTFLOAT({}))",
                 julia_string_literal(&label),
                 trim_float(init),
                 trim_float(lo),
@@ -1045,7 +1067,7 @@ fn emit_stmt(
             };
             let _ = writeln!(
                 out,
-                "{tab}{api}(ui_interface, {}, dsp.{var}, FAUSTFLOAT({}), FAUSTFLOAT({}))",
+                "{tab}{api}(ui_interface, {}, :{var}, FAUSTFLOAT({}), FAUSTFLOAT({}))",
                 julia_string_literal(&label),
                 trim_float(lo),
                 trim_float(hi)
@@ -1053,13 +1075,13 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddMetaDeclare { var, key, value } => {
-            let zone = if var == "0" {
-                "0".to_owned()
-            } else {
-                format!("dsp.{var}")
-            };
             match mode {
                 EmitMode::Ui => {
+                    let zone = if var == "0" {
+                        ":dummy".to_owned()
+                    } else {
+                        format!(":{var}")
+                    };
                     let _ = writeln!(
                         out,
                         "{tab}declare!(ui_interface, {zone}, {}, {})",
@@ -1070,7 +1092,7 @@ fn emit_stmt(
                 EmitMode::Default | EmitMode::Metadata => {
                     let _ = writeln!(
                         out,
-                        "{tab}declare!(m, {zone}, {}, {})",
+                        "{tab}declare!(m, {}, {})",
                         julia_string_literal(&key),
                         julia_string_literal(&value)
                     );
@@ -1081,7 +1103,7 @@ fn emit_stmt(
         FirMatch::AddSoundfile { label, url, var } => {
             let _ = writeln!(
                 out,
-                "{tab}addSoundfile!(ui_interface, {}, {}, dsp.{var})",
+                "{tab}addSoundfile!(ui_interface, {}, {}, :{var})",
                 julia_string_literal(&label),
                 julia_string_literal(&url)
             );
@@ -1642,7 +1664,7 @@ fn julia_string_literal(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodegenErrorCode, JuliaOptions, generate_julia_module};
+    use super::{CodegenErrorCode, JuliaOptions, JuliaRealType, generate_julia_module};
     use crate::fixtures::build_sine_phasor_test_module;
     use fir::{FirBuilder, FirStore};
 
@@ -1658,7 +1680,7 @@ mod tests {
         assert!(
             out.contains("function buildUserInterface!(dsp::mydsp{T}, ui_interface::UI) where {T}")
         );
-        assert!(out.contains("addHorizontalSlider!(ui_interface, \"freq\", dsp.fFreq"));
+        assert!(out.contains("addHorizontalSlider!(ui_interface, \"freq\", :fFreq"));
         assert!(out.contains("function compute!(dsp::mydsp{T}, count::Int32, inputs::Matrix{FAUSTFLOAT}, outputs::Matrix{FAUSTFLOAT}) where {T}"));
         assert!(out.contains("for i0 in 0:((count) - 1)"));
         assert!(out.contains("output0[(i0) + 1] = "));
@@ -1666,6 +1688,19 @@ mod tests {
         assert!(out.contains("instanceConstants!(dsp, sample_rate)"));
         assert!(out.contains("instanceResetUserInterface!(dsp)"));
         assert!(out.contains("instanceClear!(dsp)"));
+    }
+
+    #[test]
+    fn emits_float64_real_alias_when_requested() {
+        let (store, module) = build_sine_phasor_test_module();
+        let options = JuliaOptions {
+            real_type: JuliaRealType::Float64,
+            ..JuliaOptions::default()
+        };
+        let out = generate_julia_module(&store, module, &options)
+            .expect("julia module generation should succeed");
+
+        assert!(out.contains("const REAL = Float64"));
     }
 
     #[test]

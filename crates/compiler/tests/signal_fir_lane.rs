@@ -87,6 +87,21 @@ fn fastlane_julia_emits_faust_style_shell() {
     assert!(julia.contains("outputs::Matrix{FAUSTFLOAT}"));
 }
 
+#[test]
+fn fastlane_julia_honors_double_precision_real_alias() {
+    let compiler = Compiler::new().with_real_type(RealType::Float64);
+    let path = corpus_path("rep_01_passthrough.dsp");
+    let julia = compiler
+        .compile_file_default_to_julia_with_lane(
+            &path,
+            &codegen::backends::julia::JuliaOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("fast-lane Julia double compilation failed: {e}"));
+
+    assert!(julia.contains("const REAL = Float64"));
+}
+
 fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
     let compiler = Compiler::new();
     let path = corpus_path(file);

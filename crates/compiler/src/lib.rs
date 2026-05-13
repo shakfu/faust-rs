@@ -44,7 +44,7 @@ use codegen::backends::interp::{
     FbcReal, InterpOptions, generate_interp_module, write_fbc,
 };
 use codegen::backends::julia::{
-    CodegenError as JuliaCodegenError, JuliaOptions, generate_julia_module,
+    CodegenError as JuliaCodegenError, JuliaOptions, JuliaRealType, generate_julia_module,
 };
 use codegen::backends::wasm::layout::WasmMemoryLayout;
 use codegen::backends::wasm::{
@@ -2668,8 +2668,13 @@ fn lower_signals_to_julia_transform_fastlane(
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
     .map_err(LowerError::Verify)?;
+    let mut codegen_options = options.clone();
+    codegen_options.real_type = match ctx.real_type {
+        RealType::Float32 => JuliaRealType::Float32,
+        RealType::Float64 => JuliaRealType::Float64,
+    };
     time_phase_with_sink(timing_sink, "julia-codegen", || {
-        generate_julia_module(&lowered.store, lowered.module, options)
+        generate_julia_module(&lowered.store, lowered.module, &codegen_options)
     })
     .map_err(LowerError::Codegen)
 }
