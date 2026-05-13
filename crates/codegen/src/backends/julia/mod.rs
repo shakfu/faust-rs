@@ -292,6 +292,12 @@ fn emit_julia_header(out: &mut String, real_type: JuliaRealType) {
     let _ = writeln!(out, "const REAL = {}", real_type.julia_name());
     let _ = writeln!(out, "pow(x, y) = x ^ y");
     let _ = writeln!(out, "rint(x) = round(x, Base.Rounding.RoundNearest)");
+    let _ = writeln!(out, "fmod(x, y) = rem(x, y)");
+    let _ = writeln!(out, "atan2(y, x) = atan(y, x)");
+    let _ = writeln!(
+        out,
+        "faust_wrap_int32(x) = reinterpret(Int32, UInt32(mod(trunc(Int64, x), 0x100000000)))"
+    );
     let _ = writeln!(
         out,
         "remainder(x, y) = rem(x, y, Base.Rounding.RoundNearest)"
@@ -1315,7 +1321,22 @@ fn emit_cast(typ: &FirType, value: &str) -> String {
         // into a scalar conversion instead of preserving the array view.
         FirType::Ptr(_) => value.to_owned(),
         FirType::Void => value.to_owned(),
+        FirType::Int32 => format!("faust_wrap_int32({value})"),
+        FirType::Int64 => format!("trunc(Int64, {value})"),
+        FirType::Float32 | FirType::Float64 => format!("T({value})"),
         _ => format!("{}({value})", emit_type(typ)),
+    }
+}
+
+/// Emits a Julia cast outside the `mydsp{T}` method scope.
+///
+/// Top-level static declarations cannot refer to `T`, so real-valued static
+/// table constants keep concrete Julia constructors.
+fn emit_top_level_cast(typ: &FirType, value: &str) -> String {
+    match typ {
+        FirType::Float32 => format!("Float32({value})"),
+        FirType::Float64 => format!("Float64({value})"),
+        _ => emit_cast(typ, value),
     }
 }
 
@@ -1397,7 +1418,7 @@ fn emit_static_tables(
             let mut rendered = Vec::with_capacity(values.len());
             for value in values {
                 let value = emit_value(store, value)?;
-                rendered.push(emit_cast(&elem_type, &value));
+                rendered.push(emit_top_level_cast(&elem_type, &value));
             }
             let _ = writeln!(out, "const {name} = @SVector [{}]", rendered.join(", "));
         }
@@ -1616,11 +1637,12 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     )
 }
 
-/// Formats a floating literal in compact Julia syntax.
+/// Formats a floating literal in Julia syntax.
 ///
-/// The formatter trims trailing zeros for deterministic output while preserving
-/// explicit `.0` for integral-looking floats. Special values use Julia spellings
-/// (`NaN`, `Inf`, `-Inf`).
+/// Rust's `Debug` formatting emits the shortest round-trippable decimal for
+/// finite `f64` values and preserves `.0` for integral-looking floats. That is
+/// important for small constants such as Faust's noise LCG scale, where fixed
+/// decimal truncation is enough to move impulse samples.
 fn trim_float(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
@@ -1632,13 +1654,7 @@ fn trim_float(value: f64) -> String {
             "Inf".to_owned()
         };
     }
-    let mut s = format!("{value:.15}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
-    }
-    if s.ends_with('.') {
-        s.push('0');
-    }
+    let s = format!("{value:?}");
     if s == "-0.0" { "0.0".to_owned() } else { s }
 }
 
@@ -1664,7 +1680,7 @@ fn julia_string_literal(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodegenErrorCode, JuliaOptions, JuliaRealType, generate_julia_module};
+    use super::{CodegenErrorCode, JuliaOptions, JuliaRealType, emit_cast, generate_julia_module};
     use crate::fixtures::build_sine_phasor_test_module;
     use fir::{FirBuilder, FirStore};
 
@@ -1675,6 +1691,9 @@ mod tests {
             .expect("julia module generation should succeed");
 
         assert!(out.contains("using StaticArrays"));
+        assert!(out.contains("fmod(x, y) = rem(x, y)"));
+        assert!(out.contains("atan2(y, x) = atan(y, x)"));
+        assert!(out.contains("faust_wrap_int32(x) = reinterpret(Int32"));
         assert!(out.contains("mutable struct mydsp{T} <: dsp"));
         assert!(out.contains("fFreq::FAUSTFLOAT"));
         assert!(
@@ -1701,6 +1720,30 @@ mod tests {
             .expect("julia module generation should succeed");
 
         assert!(out.contains("const REAL = Float64"));
+    }
+
+    #[test]
+    fn integer_casts_truncate_float_values_like_faust() {
+        assert_eq!(
+            emit_cast(&fir::FirType::Int32, "0.6000000000000001"),
+            "faust_wrap_int32(0.6000000000000001)"
+        );
+        assert_eq!(
+            emit_cast(&fir::FirType::Int64, "-2.9"),
+            "trunc(Int64, -2.9)"
+        );
+    }
+
+    #[test]
+    fn real_casts_use_internal_type_parameter() {
+        assert_eq!(
+            emit_cast(&fir::FirType::Float32, "dsp.fVslider0"),
+            "T(dsp.fVslider0)"
+        );
+        assert_eq!(
+            emit_cast(&fir::FirType::Float64, "dsp.fVslider0"),
+            "T(dsp.fVslider0)"
+        );
     }
 
     #[test]
