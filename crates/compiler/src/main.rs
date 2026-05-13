@@ -942,6 +942,34 @@ fn require_companion_output_path(cli: &CliArgs) -> &PathBuf {
     })
 }
 
+fn wrap_backend_with_architecture(generated: &str, cli: &CliArgs) -> String {
+    let Some(architecture_file) = cli.architecture.as_ref() else {
+        return generated.to_owned();
+    };
+
+    let mut options = EnrobageOptions::new(architecture_file.clone());
+    options.architecture_dirs = cli.architecture_dir.clone();
+    options.inline_arch_files = cli.inline_architecture_files;
+    if let Some(class_name) = selected_class_name(cli) {
+        options.class_name = class_name;
+    }
+    if let Some(super_class_name) = selected_super_class_name(cli) {
+        options.super_class_name = super_class_name;
+    }
+    let wrapped = match wrap_cpp_with_architecture(generated, &options) {
+        Ok(wrapped) => wrapped,
+        Err(err) => {
+            eprintln!("Architecture wrapping failed: {err}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(err) = wrapped.recoverable_error.as_deref() {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    wrapped.code
+}
+
 /// Renders a short Cranelift backend status report for the CLI.
 fn render_cranelift_report(
     compiled: &codegen::backends::cranelift::JitDspModule,
@@ -1347,17 +1375,12 @@ fn run_main() {
         || matches!(
             cli.lang,
             Some(
-                CliLang::Fir
-                    | CliLang::Interp
-                    | CliLang::Cranelift
-                    | CliLang::Julia
-                    | CliLang::Wasm
-                    | CliLang::Wast
+                CliLang::Fir | CliLang::Interp | CliLang::Cranelift | CliLang::Wasm | CliLang::Wast
             )
         ))
         && cli.architecture.is_some()
     {
-        eprintln!("--architecture is currently supported only for C/C++ output");
+        eprintln!("--architecture is currently supported only for C/C++/Julia output");
         std::process::exit(2);
     }
     if cli.no_fir_verify && cli.dump_fir_verify {
@@ -1560,7 +1583,8 @@ fn run_main() {
             };
             match generate_julia_module(&store, module, &options) {
                 Ok(julia) => {
-                    emit_output(&julia, cli.output.as_ref());
+                    let rendered = wrap_backend_with_architecture(&julia, &cli);
+                    emit_output(&rendered, cli.output.as_ref());
                     if cli.dump_json {
                         let output = require_companion_output_path(&cli);
                         let compile_options =
@@ -2165,7 +2189,8 @@ fn run_main() {
 
         match result {
             Ok(julia) => {
-                emit_output(&julia, cli.output.as_ref());
+                let rendered = wrap_backend_with_architecture(&julia, &cli);
+                emit_output(&rendered, cli.output.as_ref());
                 if cli.dump_json {
                     emit_cli_json_companion_for_backend(
                         &compiler,
