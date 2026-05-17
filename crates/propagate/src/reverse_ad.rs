@@ -147,7 +147,14 @@
 //! FIR lowering choose split versus inline placement.
 
 use ahash::{AHashMap, AHashSet};
-use signals::{BinOp, BlockRevPolicy, SigBuilder, SigId, SigMatch, match_sig};
+use signals::{
+    BinOp, BlockRevPolicy, SigBuilder, SigId, SigMatch,
+    ad_rules::{
+        RadBinaryMathRule, RadUnaryMathRule, rad_binary_contributions, rad_binary_math_rule,
+        rad_binop_contributions, rad_binop_rule, rad_unary_contribution, rad_unary_math_rule,
+    },
+    match_sig,
+};
 use smallvec::SmallVec;
 use tlib::{
     NodeKind, TreeArena, check_de_bruijn_coherence, is_de_bruijn_closed, list_to_vec,
@@ -194,7 +201,17 @@ impl<'a> ReverseADTransform<'a> {
     /// drives the adjoint emission below.
     fn active_children(&self, sig: SigId) -> Result<SmallVec<[SigId; 4]>, PropagateError> {
         let mut out: SmallVec<[SigId; 4]> = SmallVec::new();
-        match match_sig(self.arena, sig) {
+        let decoded = match_sig(self.arena, sig);
+        if let Some((_rule, x)) = rad_unary_math_rule(&decoded) {
+            out.push(x);
+            return Ok(out);
+        }
+        if let Some((_rule, x, y)) = rad_binary_math_rule(&decoded) {
+            out.push(x);
+            out.push(y);
+            return Ok(out);
+        }
+        match decoded {
             // Leaves — no descent.
             SigMatch::Int(_)
             | SigMatch::Real(_)
@@ -205,29 +222,11 @@ impl<'a> ReverseADTransform<'a> {
             | SigMatch::Button(_)
             | SigMatch::Checkbox(_) => {}
             // Arithmetic / math.
-            SigMatch::BinOp(_, x, y)
-            | SigMatch::Pow(x, y)
-            | SigMatch::Min(x, y)
-            | SigMatch::Max(x, y)
-            | SigMatch::Atan2(x, y)
-            | SigMatch::Fmod(x, y)
-            | SigMatch::Remainder(x, y) => {
+            SigMatch::BinOp(_, x, y) => {
                 out.push(x);
                 out.push(y);
             }
-            SigMatch::Sin(x)
-            | SigMatch::Cos(x)
-            | SigMatch::Tan(x)
-            | SigMatch::Exp(x)
-            | SigMatch::Log(x)
-            | SigMatch::Log10(x)
-            | SigMatch::Sqrt(x)
-            | SigMatch::Abs(x)
-            | SigMatch::Acos(x)
-            | SigMatch::Asin(x)
-            | SigMatch::Atan(x)
-            | SigMatch::IntCast(x)
-            | SigMatch::FloatCast(x) => {
+            SigMatch::IntCast(x) | SigMatch::FloatCast(x) => {
                 out.push(x);
             }
             SigMatch::Select2(cond, x, y) => {
@@ -374,7 +373,16 @@ impl<'a> ReverseADTransform<'a> {
     fn propagate_adjoint(&mut self, y: SigId, y_bar: SigId) -> Result<(), PropagateError> {
         // Re-decode `y` for each call — the matcher is a cheap lookup and
         // keeps the rule arms fully local.
-        match match_sig(self.arena, y) {
+        let decoded = match_sig(self.arena, y);
+        if let Some((rule, x)) = rad_unary_math_rule(&decoded) {
+            self.propagate_unary_math(rule, x, y_bar);
+            return Ok(());
+        }
+        if let Some((rule, x, z)) = rad_binary_math_rule(&decoded) {
+            self.propagate_binary_math(rule, x, z, y_bar);
+            return Ok(());
+        }
+        match decoded {
             SigMatch::Int(_)
             | SigMatch::Real(_)
             | SigMatch::Input(_)
@@ -386,168 +394,6 @@ impl<'a> ReverseADTransform<'a> {
                 // Leaves; nothing downstream.
             }
             SigMatch::BinOp(op, x, z) => self.propagate_binop(op, x, z, y_bar),
-            SigMatch::Pow(x, z) => {
-                // d/dx x^z = x^z * z / x ; d/dz x^z = x^z * log(x)
-                let mut b = SigBuilder::new(self.arena);
-                let scaled_y_bar_over_x = b.div(y_bar, x);
-                let dx_factor = b.mul(scaled_y_bar_over_x, z);
-                let pow = b.pow(x, z);
-                let x_contrib = b.mul(dx_factor, pow);
-                let log_x = b.log(x);
-                let pow2 = b.pow(x, z);
-                let z_contrib_inner = b.mul(y_bar, log_x);
-                let z_contrib = b.mul(z_contrib_inner, pow2);
-                self.add_adjoint(x, x_contrib);
-                self.add_adjoint(z, z_contrib);
-            }
-            SigMatch::Min(x, z) => {
-                let mut b = SigBuilder::new(self.arena);
-                let cond = b.lt(x, z);
-                let zero = b.real(0.0);
-                let x_contrib = b.select2(cond, zero, y_bar);
-                let z_contrib = b.select2(cond, y_bar, zero);
-                self.add_adjoint(x, x_contrib);
-                self.add_adjoint(z, z_contrib);
-            }
-            SigMatch::Max(x, z) => {
-                let mut b = SigBuilder::new(self.arena);
-                let cond = b.gt(x, z);
-                let zero = b.real(0.0);
-                let x_contrib = b.select2(cond, zero, y_bar);
-                let z_contrib = b.select2(cond, y_bar, zero);
-                self.add_adjoint(x, x_contrib);
-                self.add_adjoint(z, z_contrib);
-            }
-            SigMatch::Atan2(num, den) => {
-                // d/d num atan2(num,den) = den / (num² + den²)
-                // d/d den atan2(num,den) = -num / (num² + den²)
-                let mut b = SigBuilder::new(self.arena);
-                let num_sq = b.mul(num, num);
-                let den_sq = b.mul(den, den);
-                let denom = b.add(num_sq, den_sq);
-                let num_factor = b.div(den, denom);
-                let zero = b.real(0.0);
-                let neg_num = b.sub(zero, num);
-                let den_factor = b.div(neg_num, denom);
-                let num_contrib = b.mul(y_bar, num_factor);
-                let den_contrib = b.mul(y_bar, den_factor);
-                self.add_adjoint(num, num_contrib);
-                self.add_adjoint(den, den_contrib);
-            }
-            SigMatch::Fmod(x, z) => {
-                // d/dx fmod(x,z) = 1 ; d/dz fmod(x,z) = -floor(x/z)
-                let mut b = SigBuilder::new(self.arena);
-                let q = b.div(x, z);
-                let floor_q = b.floor(q);
-                let zero = b.real(0.0);
-                let neg_floor = b.sub(zero, floor_q);
-                let z_contrib = b.mul(y_bar, neg_floor);
-                self.add_adjoint(x, y_bar);
-                self.add_adjoint(z, z_contrib);
-            }
-            SigMatch::Remainder(x, z) => {
-                let mut b = SigBuilder::new(self.arena);
-                let q = b.div(x, z);
-                let round_q = b.round(q);
-                let zero = b.real(0.0);
-                let neg_round = b.sub(zero, round_q);
-                let z_contrib = b.mul(y_bar, neg_round);
-                self.add_adjoint(x, y_bar);
-                self.add_adjoint(z, z_contrib);
-            }
-            SigMatch::Sin(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let cos_x = b.cos(x);
-                let contrib = b.mul(y_bar, cos_x);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Cos(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let sin_x = b.sin(x);
-                let zero = b.real(0.0);
-                let neg_sin = b.sub(zero, sin_x);
-                let contrib = b.mul(y_bar, neg_sin);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Tan(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let cos_x = b.cos(x);
-                let cos_sq = b.mul(cos_x, cos_x);
-                let one = b.real(1.0);
-                let inv = b.div(one, cos_sq);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Exp(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let exp_x = b.exp(x);
-                let contrib = b.mul(y_bar, exp_x);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Log(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let one = b.real(1.0);
-                let inv = b.div(one, x);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Log10(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let ten = b.real(10.0);
-                let log_ten = b.log(ten);
-                let denom = b.mul(x, log_ten);
-                let one = b.real(1.0);
-                let inv = b.div(one, denom);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Sqrt(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let two = b.real(2.0);
-                let root = b.sqrt(x);
-                let denom = b.mul(two, root);
-                let one = b.real(1.0);
-                let inv = b.div(one, denom);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Abs(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let denom = b.abs(x);
-                let sign = b.div(x, denom);
-                let contrib = b.mul(y_bar, sign);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Acos(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let one = b.real(1.0);
-                let x_sq = b.mul(x, x);
-                let inside = b.sub(one, x_sq);
-                let root = b.sqrt(inside);
-                let minus_one = b.real(-1.0);
-                let inv = b.div(minus_one, root);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Asin(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let one = b.real(1.0);
-                let x_sq = b.mul(x, x);
-                let inside = b.sub(one, x_sq);
-                let root = b.sqrt(inside);
-                let inv = b.div(one, root);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
-            SigMatch::Atan(x) => {
-                let mut b = SigBuilder::new(self.arena);
-                let one = b.real(1.0);
-                let x_sq = b.mul(x, x);
-                let denom = b.add(one, x_sq);
-                let inv = b.div(one, denom);
-                let contrib = b.mul(y_bar, inv);
-                self.add_adjoint(x, contrib);
-            }
             SigMatch::FloatCast(x) => {
                 let mut b = SigBuilder::new(self.arena);
                 let contrib = b.float_cast(y_bar);
@@ -677,57 +523,53 @@ impl<'a> ReverseADTransform<'a> {
         Ok(())
     }
 
+    /// Propagates the local cotangent of a unary math node in pure Signal IR.
+    ///
+    /// This path runs after `rad_unary_math_rule` has classified the operator
+    /// as a supported pointwise transpose. It owns only the local algebra:
+    /// rebuilding any needed forward output as a Signal expression, asking the
+    /// shared `ad_rules` helper for the contribution, then accumulating that
+    /// contribution on the single operand. It intentionally has no tape or FIR
+    /// state access; temporal/recursive eligibility is decided before this
+    /// postorder step.
+    fn propagate_unary_math(&mut self, rule: RadUnaryMathRule, x: SigId, y_bar: SigId) {
+        let mut b = SigBuilder::new(self.arena);
+        let primal = match rule {
+            RadUnaryMathRule::Exp => b.exp(x),
+            RadUnaryMathRule::Sqrt => b.sqrt(x),
+            RadUnaryMathRule::Abs => b.abs(x),
+            _ => x,
+        };
+        let contrib = rad_unary_contribution(&mut b, rule, x, primal, y_bar);
+        self.add_adjoint(x, contrib);
+    }
+
+    /// Propagates the local cotangents of a binary math node in pure Signal IR.
+    ///
+    /// The two operands are still Signal values, so this symbolic RAD pass may
+    /// rebuild the forward result when a formula needs it. Today that is only
+    /// required by `pow`, whose exponent derivative uses the original output.
+    /// The backend-neutral `ad_rules` helper returns both operand
+    /// contributions; this method is responsible for adding them to the
+    /// reverse accumulation map.
+    fn propagate_binary_math(&mut self, rule: RadBinaryMathRule, x: SigId, z: SigId, y_bar: SigId) {
+        let mut b = SigBuilder::new(self.arena);
+        let primal = match rule {
+            RadBinaryMathRule::Pow => b.pow(x, z),
+            _ => x,
+        };
+        let (x_contrib, z_contrib) = rad_binary_contributions(&mut b, rule, x, z, primal, y_bar);
+        self.add_adjoint(x, x_contrib);
+        self.add_adjoint(z, z_contrib);
+    }
+
     fn propagate_binop(&mut self, op: BinOp, x: SigId, z: SigId, y_bar: SigId) {
         let mut b = SigBuilder::new(self.arena);
-        match op {
-            BinOp::Add => {
-                self.add_adjoint(x, y_bar);
-                self.add_adjoint(z, y_bar);
-            }
-            BinOp::Sub => {
-                let zero = b.real(0.0);
-                let neg = b.sub(zero, y_bar);
-                self.add_adjoint(x, y_bar);
-                self.add_adjoint(z, neg);
-            }
-            BinOp::Mul => {
-                let xc = b.mul(y_bar, z);
-                let zc = b.mul(y_bar, x);
-                self.add_adjoint(x, xc);
-                self.add_adjoint(z, zc);
-            }
-            BinOp::Div => {
-                let xc = b.div(y_bar, z);
-                let zsq = b.mul(z, z);
-                let zero = b.real(0.0);
-                let neg_x = b.sub(zero, x);
-                let scaled = b.div(neg_x, zsq);
-                let zc = b.mul(y_bar, scaled);
-                self.add_adjoint(x, xc);
-                self.add_adjoint(z, zc);
-            }
-            BinOp::Rem => {
-                let q = b.div(x, z);
-                let floor_q = b.floor(q);
-                let zero = b.real(0.0);
-                let neg_floor = b.sub(zero, floor_q);
-                let zc = b.mul(y_bar, neg_floor);
-                self.add_adjoint(x, y_bar);
-                self.add_adjoint(z, zc);
-            }
-            // Discrete: comparisons, shifts, bitwise → zero contribution.
-            BinOp::Lsh
-            | BinOp::ARsh
-            | BinOp::LRsh
-            | BinOp::Gt
-            | BinOp::Lt
-            | BinOp::Ge
-            | BinOp::Le
-            | BinOp::Eq
-            | BinOp::Ne
-            | BinOp::And
-            | BinOp::Or
-            | BinOp::Xor => {}
+        if let Some((x_contrib, z_contrib)) =
+            rad_binop_contributions(&mut b, rad_binop_rule(op), x, z, y_bar)
+        {
+            self.add_adjoint(x, x_contrib);
+            self.add_adjoint(z, z_contrib);
         }
     }
 

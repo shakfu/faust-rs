@@ -104,7 +104,15 @@ use fir::{
     AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMathOp, FirStore,
     FirType, NamedType, SliderRange, SliderType, UiBoxType,
 };
-use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
+use signals::{
+    BinOp, SigId, SigMatch,
+    ad_rules::{
+        RadBinOpRule, RadBinaryMathRule, RadFormulaBuilder, RadUnaryMathRule,
+        rad_binary_contributions, rad_binary_math_rule, rad_binop_contributions, rad_binop_rule,
+        rad_unary_contribution, rad_unary_math_rule,
+    },
+    dump_sig_readable, match_sig,
+};
 use tlib::{
     NodeKind, TreeArena, TreeId, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int,
     tree_to_str,
@@ -1160,6 +1168,77 @@ impl<'a> SignalToFirLower<'a> {
         for (carried, delay) in max_delays {
             self.ensure_delay_line_decl(carried, delay)?;
         }
+        Ok(())
+    }
+
+    /// Emits the BRA reverse update for a supported unary math node.
+    ///
+    /// Unlike the pure Signal RAD path, BRA cannot freely rebuild every
+    /// operand expression during the reverse sweep: operands may be temporal,
+    /// recursive, or otherwise already materialized in forward storage. This
+    /// method therefore performs the tape-aware loads first, then delegates
+    /// only the pointwise algebra to `ad_rules`. For formulas that can reuse the
+    /// forward node output (`exp`, `sqrt`, `abs`), `sig` is loaded as `primal`
+    /// so the local transpose uses the recorded forward value rather than a
+    /// second computation.
+    fn propagate_bra_unary_math_adj(
+        &mut self,
+        rule: RadUnaryMathRule,
+        sig: SigId,
+        x: SigId,
+        y_bar: FirId,
+        adj: &mut std::collections::HashMap<SigId, FirId>,
+    ) -> Result<(), SignalFirError> {
+        let real_ty = self.real_ty.clone();
+        let x_fir = self.load_bra_fwd_value(x)?;
+        // The shared formula only sees values. For rules whose derivative can
+        // reuse the forward output, pass the tape-loaded current node value so
+        // the reverse sweep does not recompute non-trivial temporal operands.
+        let primal = match rule {
+            RadUnaryMathRule::Exp | RadUnaryMathRule::Sqrt | RadUnaryMathRule::Abs => {
+                self.load_bra_fwd_value(sig)?
+            }
+            _ => x_fir,
+        };
+        let mut b = FirRadFormulaBuilder::new(self, real_ty.clone());
+        let x_adj = rad_unary_contribution(&mut b, rule, x_fir, primal, y_bar);
+        Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
+        Ok(())
+    }
+
+    /// Emits the BRA reverse updates for a supported binary math node.
+    ///
+    /// This method is the FIR/BRA counterpart of `propagate_binary_math`: it
+    /// loads both forward operand values from BRA storage, lets the shared
+    /// `ad_rules` formula build the two local cotangents in FIR, then
+    /// accumulates them into the reverse adjoint map. `pow` additionally needs
+    /// the stored forward result of `sig` for its exponent contribution; other
+    /// binary math rules depend only on the loaded operands and ignore the
+    /// `primal` placeholder.
+    fn propagate_bra_binary_math_adj(
+        &mut self,
+        rule: RadBinaryMathRule,
+        lhs: SigId,
+        rhs: SigId,
+        sig: SigId,
+        y_bar: FirId,
+        adj: &mut std::collections::HashMap<SigId, FirId>,
+    ) -> Result<(), SignalFirError> {
+        let real_ty = self.real_ty.clone();
+        let lhs_fir = self.load_bra_fwd_value(lhs)?;
+        let rhs_fir = self.load_bra_fwd_value(rhs)?;
+        // `pow` needs its forward output for the exponent derivative. Other
+        // binary rules compute their local transpose from operand values only,
+        // so the placeholder is intentionally ignored by the shared helper.
+        let primal = match rule {
+            RadBinaryMathRule::Pow => self.load_bra_fwd_value(sig)?,
+            _ => lhs_fir,
+        };
+        let mut b = FirRadFormulaBuilder::new(self, real_ty.clone());
+        let (lhs_adj, rhs_adj) =
+            rad_binary_contributions(&mut b, rule, lhs_fir, rhs_fir, primal, y_bar);
+        Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
+        Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
         Ok(())
     }
 
@@ -2753,7 +2832,14 @@ impl<'a> SignalToFirLower<'a> {
         group: SigId,
     ) -> Result<(), SignalFirError> {
         let real_ty = self.real_ty.clone();
-        match match_sig(self.arena, sig) {
+        let decoded = match_sig(self.arena, sig);
+        if let Some((rule, x)) = rad_unary_math_rule(&decoded) {
+            return self.propagate_bra_unary_math_adj(rule, sig, x, y_bar, adj);
+        }
+        if let Some((rule, lhs, rhs)) = rad_binary_math_rule(&decoded) {
+            return self.propagate_bra_binary_math_adj(rule, lhs, rhs, sig, y_bar, adj);
+        }
+        match decoded {
             // ── Leaves ─────────────────────────────────────────────────────
             SigMatch::Real(_)
             | SigMatch::Int(_)
@@ -2800,156 +2886,36 @@ impl<'a> SignalToFirLower<'a> {
             }
 
             // ── BinOp ───────────────────────────────────────────────────────
-            SigMatch::BinOp(op, lhs, rhs) => match op {
-                BinOp::Add => {
-                    // adj[lhs] += y_bar; adj[rhs] += y_bar
-                    Self::add_to_adjoint(&mut self.store, adj, lhs, y_bar, real_ty.clone());
-                    Self::add_to_adjoint(&mut self.store, adj, rhs, y_bar, real_ty);
+            SigMatch::BinOp(op, lhs, rhs) => {
+                let rule = rad_binop_rule(op);
+                if !matches!(rule, RadBinOpRule::Rem | RadBinOpRule::Zero) {
+                    // `Mul` and `Div` need tape-aware forward operand values.
+                    // `Add`/`Sub` do not use operands, so `y_bar` is a harmless
+                    // placeholder that avoids needless tape traffic.
+                    let lhs_val = if matches!(rule, RadBinOpRule::Mul | RadBinOpRule::Div) {
+                        self.load_bra_fwd_value(lhs)?
+                    } else {
+                        y_bar
+                    };
+                    let rhs_val = if matches!(rule, RadBinOpRule::Mul | RadBinOpRule::Div) {
+                        self.load_bra_fwd_value(rhs)?
+                    } else {
+                        y_bar
+                    };
+                    let mut b = FirRadFormulaBuilder::new(self, real_ty.clone());
+                    if let Some((lhs_adj, rhs_adj)) =
+                        rad_binop_contributions(&mut b, rule, lhs_val, rhs_val, y_bar)
+                    {
+                        Self::add_to_adjoint(
+                            &mut self.store,
+                            adj,
+                            lhs,
+                            lhs_adj,
+                            real_ty.clone(),
+                        );
+                        Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
+                    }
                 }
-                BinOp::Sub => {
-                    // adj[lhs] += y_bar; adj[rhs] += -y_bar
-                    Self::add_to_adjoint(&mut self.store, adj, lhs, y_bar, real_ty.clone());
-                    let zero = self.float_const(0.0);
-                    let neg_y_bar = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
-                    };
-                    Self::add_to_adjoint(&mut self.store, adj, rhs, neg_y_bar, real_ty);
-                }
-                BinOp::Mul => {
-                    // adj[lhs] += y_bar * val[rhs]; adj[rhs] += y_bar * val[lhs]
-                    // Use load_bra_fwd_value so non-trivial operands (e.g.
-                    // Delay1(x)) are read from the forward tape rather than
-                    // re-evaluated in the reverse loop (Phase B4).
-                    let rhs_val = self.load_bra_fwd_value(rhs)?;
-                    let lhs_val = self.load_bra_fwd_value(lhs)?;
-                    let lhs_adj = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Mul, y_bar, rhs_val, real_ty.clone())
-                    };
-                    let rhs_adj = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Mul, y_bar, lhs_val, real_ty.clone())
-                    };
-                    Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
-                    Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
-                }
-                BinOp::Div => {
-                    // adj[lhs] += y_bar / val[rhs]
-                    // adj[rhs] += -y_bar * val[lhs] / (val[rhs]^2)
-                    let rhs_val = self.load_bra_fwd_value(rhs)?;
-                    let lhs_val = self.load_bra_fwd_value(lhs)?;
-                    let lhs_adj = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Div, y_bar, rhs_val, real_ty.clone())
-                    };
-                    Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
-                    let rhs_sq = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Mul, rhs_val, rhs_val, real_ty.clone())
-                    };
-                    let zero = self.float_const(0.0);
-                    let neg_num = {
-                        let neg_y_bar = {
-                            let mut b = FirBuilder::new(&mut self.store);
-                            b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
-                        };
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Mul, neg_y_bar, lhs_val, real_ty.clone())
-                    };
-                    let rhs_adj = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Div, neg_num, rhs_sq, real_ty.clone())
-                    };
-                    Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
-                }
-                // Discrete / integer ops: gradient is zero for both operands.
-                BinOp::Lt
-                | BinOp::Le
-                | BinOp::Gt
-                | BinOp::Ge
-                | BinOp::Eq
-                | BinOp::Ne
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::Xor
-                | BinOp::Lsh
-                | BinOp::ARsh
-                | BinOp::LRsh
-                | BinOp::Rem => {}
-            },
-
-            // ── Unary math ──────────────────────────────────────────────────
-            SigMatch::Sin(x) => {
-                // adj[x] += y_bar * cos(x)
-                let x_fir = self.load_bra_fwd_value(x)?;
-                self.used_math_ops.insert(FirMathOp::Cos);
-                let rt = self.real_ty();
-                let cos_x = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.math_call(FirMathOp::Cos, &[x_fir], rt)
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, y_bar, cos_x, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Cos(x) => {
-                // adj[x] += -y_bar * sin(x)
-                let x_fir = self.load_bra_fwd_value(x)?;
-                self.used_math_ops.insert(FirMathOp::Sin);
-                let rt = self.real_ty();
-                let sin_x = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.math_call(FirMathOp::Sin, &[x_fir], rt)
-                };
-                let zero = self.float_const(0.0);
-                let neg_y_bar = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, neg_y_bar, sin_x, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Exp(x) => {
-                // adj[x] += y_bar * exp(x)  [= y_bar * val[sig]]
-                // Tape-needed: val[sig] = exp(x); loaded from tape when x is
-                // not trivially re-evaluable (Phase B4).
-                let exp_val = self.load_bra_fwd_value(sig)?;
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, y_bar, exp_val, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Log(x) => {
-                // adj[x] += y_bar / x
-                let x_fir = self.load_bra_fwd_value(x)?;
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, y_bar, x_fir, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Sqrt(x) => {
-                // adj[x] += y_bar / (2 * sqrt(x))  [= y_bar / (2 * val[sig])]
-                // Tape-needed: val[sig] = sqrt(x); loaded from tape when x is
-                // not trivially re-evaluable (Phase B4).
-                let sqrt_val = self.load_bra_fwd_value(sig)?;
-                let two = self.float_const(2.0);
-                let denom = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, two, sqrt_val, real_ty.clone())
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, y_bar, denom, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
             }
 
             // ── Delay1: anti-causal carry ───────────────────────────────────
@@ -2993,259 +2959,9 @@ impl<'a> SignalToFirLower<'a> {
                 }
             }
 
-            // ── Tan, Asin, Acos, Atan, Log10 ───────────────────────────────
-            SigMatch::Tan(x) => {
-                // adj[x] += y_bar / cos(x)^2  = y_bar * (1 + tan(x)^2)
-                let x_fir = self.load_bra_fwd_value(x)?;
-                self.used_math_ops.insert(FirMathOp::Cos);
-                let rt = self.real_ty();
-                let cos_x = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.math_call(FirMathOp::Cos, &[x_fir], rt)
-                };
-                let cos2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, cos_x, cos_x, real_ty.clone())
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, y_bar, cos2, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Asin(x) => {
-                // adj[x] += y_bar / sqrt(1 - x^2)
-                let x_fir = self.load_bra_fwd_value(x)?;
-                self.used_math_ops.insert(FirMathOp::Sqrt);
-                let one = self.float_const(1.0);
-                let x2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, x_fir, x_fir, real_ty.clone())
-                };
-                let denom_sq = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Sub, one, x2, real_ty.clone())
-                };
-                let rt = self.real_ty();
-                let denom = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.math_call(FirMathOp::Sqrt, &[denom_sq], rt)
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, y_bar, denom, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Acos(x) => {
-                // adj[x] += -y_bar / sqrt(1 - x^2)
-                let x_fir = self.load_bra_fwd_value(x)?;
-                self.used_math_ops.insert(FirMathOp::Sqrt);
-                let one = self.float_const(1.0);
-                let x2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, x_fir, x_fir, real_ty.clone())
-                };
-                let denom_sq = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Sub, one, x2, real_ty.clone())
-                };
-                let rt = self.real_ty();
-                let denom = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.math_call(FirMathOp::Sqrt, &[denom_sq], rt)
-                };
-                let zero = self.float_const(0.0);
-                let neg_y_bar = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, neg_y_bar, denom, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Atan(x) => {
-                // adj[x] += y_bar / (1 + x^2)
-                let x_fir = self.load_bra_fwd_value(x)?;
-                let one = self.float_const(1.0);
-                let x2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, x_fir, x_fir, real_ty.clone())
-                };
-                let denom = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Add, one, x2, real_ty.clone())
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, y_bar, denom, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-            SigMatch::Log10(x) => {
-                // adj[x] += y_bar / (x * ln(10))
-                let x_fir = self.load_bra_fwd_value(x)?;
-                let ln10 = self.float_const(std::f64::consts::LN_10);
-                let denom = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, x_fir, ln10, real_ty.clone())
-                };
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Div, y_bar, denom, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-
-            // ── Abs: subgradient (sign function) ────────────────────────────
-            SigMatch::Abs(x) => {
-                // adj[x] += y_bar * sign(x)  [subgradient; 0 at x=0]
-                // sign(x) = val[sig] / |val[sig]| when x != 0; we use
-                // the fwd value of sig divided by the abs value.
-                let abs_val = self.load_bra_fwd_value(sig)?;
-                let x_fir = self.load_bra_fwd_value(x)?;
-                let x_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    // y_bar * x / abs(x)  — matches sign(x)
-                    let num = b.binop(FirBinOp::Mul, y_bar, x_fir, real_ty.clone());
-                    b.binop(FirBinOp::Div, num, abs_val, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
-            }
-
             // ── Floor / Ceil / Rint / Round: zero gradient ──────────────────
             SigMatch::Floor(x) | SigMatch::Ceil(x) | SigMatch::Rint(x) | SigMatch::Round(x) => {
                 let _ = (x, y_bar); // Rounding ops: gradient is 0 almost everywhere.
-            }
-
-            // ── Pow(x, y): power rule ───────────────────────────────────────
-            SigMatch::Pow(lhs, rhs) => {
-                // d/dx x^y = y * x^(y-1);  d/dy x^y = x^y * ln(x)
-                // adj[x] += y_bar * y * x^(y-1)         [uses pow(x, y-1)]
-                // adj[y] += y_bar * val[sig] * ln(x)
-                //
-                // NOTE: do NOT use the equivalent form `y * x^y / x` — that
-                // divides by x and produces NaN when x = 0 (e.g. when the
-                // loss of a learning system reaches zero at convergence).
-                // `pow(x, y-1)` is numerically safe: pow(0, 1) = 0 for y=2.
-                self.used_math_ops.insert(FirMathOp::Pow);
-                self.used_math_ops.insert(FirMathOp::Log);
-                let pow_val = self.load_bra_fwd_value(sig)?;
-                let x_fir = self.load_bra_fwd_value(lhs)?;
-                let y_fir = self.load_bra_fwd_value(rhs)?;
-                let lhs_adj = {
-                    // y_bar * y * pow(x, y - 1)
-                    let one = self.float_const(1.0);
-                    let y_minus_1 = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Sub, y_fir, one, real_ty.clone())
-                    };
-                    let rt = self.real_ty();
-                    let pow_x_ym1 = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.math_call(FirMathOp::Pow, &[x_fir, y_minus_1], rt)
-                    };
-                    let mut b = FirBuilder::new(&mut self.store);
-                    let t = b.binop(FirBinOp::Mul, y_bar, y_fir, real_ty.clone());
-                    b.binop(FirBinOp::Mul, t, pow_x_ym1, real_ty.clone())
-                };
-                let rt = self.real_ty();
-                let ln_x = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.math_call(FirMathOp::Log, &[x_fir], rt)
-                };
-                let rhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    let t = b.binop(FirBinOp::Mul, y_bar, pow_val, real_ty.clone());
-                    b.binop(FirBinOp::Mul, t, ln_x, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
-                Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
-            }
-
-            // ── Atan2(y, x): angle of (x, y) vector ─────────────────────────
-            SigMatch::Atan2(lhs, rhs) => {
-                // lhs = y, rhs = x in atan2(y, x).
-                // d/dy = x / (x^2 + y^2);  d/dx = -y / (x^2 + y^2)
-                let y_fir = self.load_bra_fwd_value(lhs)?;
-                let x_fir = self.load_bra_fwd_value(rhs)?;
-                let x2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, x_fir, x_fir, real_ty.clone())
-                };
-                let y2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Mul, y_fir, y_fir, real_ty.clone())
-                };
-                let denom = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Add, x2, y2, real_ty.clone())
-                };
-                let lhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    let num = b.binop(FirBinOp::Mul, y_bar, x_fir, real_ty.clone());
-                    b.binop(FirBinOp::Div, num, denom, real_ty.clone())
-                };
-                let zero = self.float_const(0.0);
-                let neg_y_bar = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
-                };
-                let rhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    let num = b.binop(FirBinOp::Mul, neg_y_bar, y_fir, real_ty.clone());
-                    b.binop(FirBinOp::Div, num, denom, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
-                Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
-            }
-
-            // ── Min / Max: subgradient ──────────────────────────────────────
-            SigMatch::Min(lhs, rhs) => {
-                // adj[lhs] += y_bar if lhs <= rhs, else 0
-                // adj[rhs] += y_bar if rhs < lhs, else 0
-                let lhs_v = self.load_bra_fwd_value(lhs)?;
-                let rhs_v = self.load_bra_fwd_value(rhs)?;
-                let cond = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Le, lhs_v, rhs_v, FirType::Int32)
-                };
-                let zero_r = self.float_const(0.0);
-                let lhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.select2(cond, y_bar, zero_r, real_ty.clone())
-                };
-                let zero_r2 = self.float_const(0.0);
-                let rhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.select2(cond, zero_r2, y_bar, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
-                Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
-            }
-            SigMatch::Max(lhs, rhs) => {
-                // adj[lhs] += y_bar if lhs >= rhs, else 0
-                // adj[rhs] += y_bar if rhs > lhs, else 0
-                let lhs_v = self.load_bra_fwd_value(lhs)?;
-                let rhs_v = self.load_bra_fwd_value(rhs)?;
-                let cond = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.binop(FirBinOp::Ge, lhs_v, rhs_v, FirType::Int32)
-                };
-                let zero_r = self.float_const(0.0);
-                let lhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.select2(cond, y_bar, zero_r, real_ty.clone())
-                };
-                let zero_r2 = self.float_const(0.0);
-                let rhs_adj = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.select2(cond, zero_r2, y_bar, real_ty.clone())
-                };
-                Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
-                Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
             }
 
             // ── Delay(c, x): anti-causal carry with circular buffer ──────────
@@ -5142,6 +4858,129 @@ impl<'a> SignalToFirLower<'a> {
             info.typ, out_ty
         );
         Ok(out)
+    }
+}
+
+/// FIR adapter for backend-neutral local RAD formulas.
+///
+/// This wrapper is deliberately small: it maps arithmetic and math calls into
+/// FIR, registers required math helpers through `used_math_ops`, and preserves
+/// the active internal real type. It does not know which Signal node is being
+/// differentiated and must not load BRA tapes; callers pass already prepared
+/// `FirId` values into the shared formula helpers.
+struct FirRadFormulaBuilder<'lower, 'arena> {
+    lower: &'lower mut SignalToFirLower<'arena>,
+    real_ty: FirType,
+}
+
+impl<'lower, 'arena> FirRadFormulaBuilder<'lower, 'arena> {
+    fn new(lower: &'lower mut SignalToFirLower<'arena>, real_ty: FirType) -> Self {
+        Self { lower, real_ty }
+    }
+
+    fn binop(&mut self, op: FirBinOp, x: FirId, y: FirId, typ: FirType) -> FirId {
+        FirBuilder::new(&mut self.lower.store).binop(op, x, y, typ)
+    }
+
+    fn math_call(&mut self, op: FirMathOp, args: &[FirId]) -> FirId {
+        self.lower.used_math_ops.insert(op);
+        FirBuilder::new(&mut self.lower.store).math_call(op, args, self.real_ty.clone())
+    }
+}
+
+impl RadFormulaBuilder for FirRadFormulaBuilder<'_, '_> {
+    type Value = FirId;
+
+    fn zero(&mut self) -> Self::Value {
+        self.lower.float_const(0.0)
+    }
+
+    fn one(&mut self) -> Self::Value {
+        self.lower.float_const(1.0)
+    }
+
+    fn ln_10(&mut self) -> Self::Value {
+        self.lower.float_const(std::f64::consts::LN_10)
+    }
+
+    fn add(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Add, x, y, self.real_ty.clone())
+    }
+
+    fn sub(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Sub, x, y, self.real_ty.clone())
+    }
+
+    fn mul(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Mul, x, y, self.real_ty.clone())
+    }
+
+    fn div(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Div, x, y, self.real_ty.clone())
+    }
+
+    fn pow(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Pow, &[x, y])
+    }
+
+    fn log(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Log, &[x])
+    }
+
+    fn cos(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Cos, &[x])
+    }
+
+    fn sin(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Sin, &[x])
+    }
+
+    fn sqrt(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Sqrt, &[x])
+    }
+
+    fn abs(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Abs, &[x])
+    }
+
+    fn floor(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Floor, &[x])
+    }
+
+    fn round(&mut self, x: Self::Value) -> Self::Value {
+        self.math_call(FirMathOp::Round, &[x])
+    }
+
+    fn lt(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Lt, x, y, FirType::Int32)
+    }
+
+    fn le(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Le, x, y, FirType::Int32)
+    }
+
+    fn gt(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Gt, x, y, FirType::Int32)
+    }
+
+    fn ge(&mut self, x: Self::Value, y: Self::Value) -> Self::Value {
+        self.binop(FirBinOp::Ge, x, y, FirType::Int32)
+    }
+
+    fn select_nonzero(
+        &mut self,
+        cond: Self::Value,
+        when_true: Self::Value,
+        when_false: Self::Value,
+    ) -> Self::Value {
+        // FIR `select2` already uses the natural order
+        // `(cond, when_true, when_false)`, unlike Signal `select2`.
+        FirBuilder::new(&mut self.lower.store).select2(
+            cond,
+            when_true,
+            when_false,
+            self.real_ty.clone(),
+        )
     }
 }
 

@@ -53,6 +53,8 @@ use ui::ControlId;
 
 mod filter_algebra;
 
+pub mod ad_rules;
+
 pub use filter_algebra::{
     FilterStateSpaceError, FirFilter, IirFilter, LinearTerm, StateSpace, add_sig_fir, add_sig_iir,
     concerned_iir, convert_fir_to_sig, delay_sig_fir, delay_sig_iir, div_sig_iir, embedded_iir,
