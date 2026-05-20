@@ -54,8 +54,20 @@ faust-rs -lang interp foo.dsp
 # alias: -lang interp-fbc
 # shorthand flag: --dump-interp
 
+# Generate WebAssembly plus companion JSON
+faust-rs -lang wasm foo.dsp -o foo.wasm
+
+# Generate textual WAT/WAST from the same WASM backend
+faust-rs -lang wast foo.dsp -o foo.wat
+
+# Generate Julia source
+faust-rs -lang julia foo.dsp -o foo.jl
+
 # Dump FIR text IR
 faust-rs -lang fir foo.dsp
+
+# Generate block-diagram SVG files
+faust-rs -svg foo.dsp
 
 # Write output to a file
 faust-rs -lang cpp foo.dsp -o foo.cpp
@@ -76,6 +88,8 @@ faust-rs --fir-fixture control_flow -lang c
 faust-rs --fir-fixture gain_bias_ui_meta -lang cpp
 faust-rs --fir-fixture sine_phasor -lang interp
 faust-rs --fir-fixture sine_phasor -lang cranelift
+faust-rs --fir-fixture sine_phasor -lang julia
+faust-rs --fir-fixture sine_phasor -lang wasm
 ```
 
 Notes:
@@ -93,6 +107,9 @@ faust -lang c foo.dsp
 faust -lang cpp foo.dsp
 faust -lang interp foo.dsp
 faust -lang fir foo.dsp
+faust -lang wasm foo.dsp
+faust -lang wast foo.dsp
+faust -lang julia foo.dsp
 ```
 
 Without installation (equivalent):
@@ -102,6 +119,9 @@ cargo run -p compiler -- -lang c foo.dsp
 cargo run -p compiler -- -lang cpp foo.dsp
 cargo run -p compiler -- -lang interp foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
+cargo run -p compiler -- -lang wasm foo.dsp
+cargo run -p compiler -- -lang wast foo.dsp
+cargo run -p compiler -- -lang julia foo.dsp
 ```
 
 ## Environment variables
@@ -115,6 +135,7 @@ Use the following variables to increase the evaluation depth stack:
 
 - User CLI reference: `docs/user-cli-guide-en.md`
 - User diagnostics guide: `docs/user-diagnostics-guide-en.md`
+- Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
 - Technical/developer workflows: `docs/developer-workflows-en.md`
 - Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
 
@@ -129,17 +150,17 @@ Use the following variables to increase the evaluation depth stack:
 | `graph` | Shared graph algorithms scaffold |
 | `boxes` | Faust box IR builders and matchers |
 | `parser` | Faust source parser and import handling |
-| `signals` | Faust signal IR builders, matchers, and extended math nodes |
+| `signals` | Faust signal IR builders, matchers, extended math nodes, and shared local RAD rule helpers |
 | `ui` | Grouped UI IR |
 | `eval` | Box-level evaluator and pattern matcher |
-| `propagate` | Box-to-signal propagation |
+| `propagate` | Box-to-signal propagation, including FAD/RAD expansion |
 | `normalize` | Signal normalization and preparation helpers |
 | `sigtype` | Signal type lattice and inference |
 | `transform` | Signal preparation and signal-to-FIR lowering |
 | `fir` | Faust Intermediate Representation |
 | `foreign-call` | Raw C ABI foreign-function invocation bridge |
-| `codegen` | C, C++, interpreter, Cranelift, and WASM backend generation |
-| `draw` | Diagram rendering scaffold |
+| `codegen` | C, C++, interpreter, Cranelift, WASM, and Julia backend generation |
+| `draw` | SVG block-diagram rendering |
 | `doc` | Documentation/reporting scaffold |
 | `utils` | Shared FFI utilities |
 | `compiler` | Top-level compiler facade and CLI |

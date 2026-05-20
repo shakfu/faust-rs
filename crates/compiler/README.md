@@ -30,6 +30,9 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_source_to_interp[_with_lane]` | `.fbc` bytecode string |
 | `compile_file_to_interp[_with_lane]` | `.fbc` bytecode string |
 | `compile_file_default_to_interp[_with_lane]` | `.fbc` bytecode string |
+| `compile_source_to_julia[_with_lane]` | Julia source string |
+| `compile_file_to_julia[_with_lane]` | Julia source string |
+| `compile_file_default_to_julia[_with_lane]` | Julia source string |
 | `compile_source_to_wasm[_with_lane]` | `WasmModule` (`.wasm` + companion JSON) |
 | `compile_file_to_wasm[_with_lane]` | `WasmModule` (`.wasm` + companion JSON) |
 | `compile_file_default_to_wasm[_with_lane]` | `WasmModule` (`.wasm` + companion JSON) |
@@ -45,6 +48,7 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 
 - C / C++ file/source helpers now default to `SignalFirLane::TransformFastLane`.
 - WASM / strict JSON source helpers default to `SignalFirLane::TransformFastLane`.
+- Julia helpers default to `SignalFirLane::TransformFastLane`.
 - Interpreter helpers now default to `SignalFirLane::TransformFastLane`.
 - `WasmArtifactRequest::new(...)` defaults to `SignalFirLane::TransformFastLane`.
 - `compile_file_default_to_wasm_artifact(...)` also defaults to
@@ -53,7 +57,7 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 ## Pipeline
 
 ```
-parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / .fbc / WASM / JSON)
+parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / .fbc / WASM / Julia / JSON)
 ```
 
 The public signal->FIR route is:
@@ -67,4 +71,6 @@ The public signal->FIR route is:
 - Provide one orchestrator type (`Compiler`) for file-based compilation.
 - Aggregate typed stage errors into one top-level `CompilerError`.
 - Provide test/golden-oriented helper outputs (box dump, signal dump, FIR dump).
-- Route backend generation to C, C++, interpreter bytecode, WASM/JSON artifacts, and strict JSON emitters with consistent options.
+- Route backend generation to C, C++, Julia, interpreter bytecode, WASM/JSON
+  artifacts, and strict JSON emitters with consistent options.
+- Apply architecture wrapping for C, C++, and Julia output when `-a` is used.

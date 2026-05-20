@@ -19,6 +19,12 @@ recursively applying the Faust composition algebra.
 - **Composition algebra** — `seq`, `par`, `split`, `merge` with explicit bus routing.
 - **Recursive forms** — De Bruijn-style placeholders (`sigRec` / `sigProj` shape).
 - **Grouped UI** — builds a canonical `UiProgram` as an explicit propagation product.
+- **Forward-mode AD** — expands `fad(expr, seed)` directly in Signal IR with
+  one tangent lane per seed output.
+- **Reverse-mode AD** — expands `rad(expr, seeds)` to
+  `[primals..., gradients...]`; feed-forward local algebra is symbolic, while
+  temporal/recursive bodies route through the `BlockReverseAD` carrier for FIR
+  block replay.
 
 ## Public API
 
@@ -58,6 +64,19 @@ Preferred for callers that already hold a validated `FlatBoxId`.
 | `PropagateUiOptions` | Grouped-UI construction policy (synthesized root label) |
 | `PropagateError` | Typed error covering arity mismatches and unsupported nodes |
 | `ArityCache` | Memoization cache (`AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>`) |
+
+### AD internals
+
+| Module | Description |
+|---|---|
+| `forward_ad` | FAD transform over Signal IR, including multi-seed and recursive layouts |
+| `reverse_ad` | RAD symbolic sweep plus `BlockReverseAD` fallback construction |
+| `stateful_rad` | Recursive-body classifier for future specialized RAD strategies |
+| `transpose_ad` | Dormant LTI transpose scaffold; not user-visible RAD lowering yet |
+
+RAD local math rule classification and formulas are shared with FIR/BRA
+lowering through `signals::ad_rules`; this crate still owns the symbolic
+Signal-IR traversal and adjoint accumulation.
 
 ### Utilities
 

@@ -1,8 +1,8 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-05-12
+Last updated: 2026-05-20
 
-Version: 0.6.0
+Version: 0.5.0
 
 Status: living document
 
@@ -178,6 +178,24 @@ This snapshot is based on:
   - `crates/propagate/src/lib.rs`
   - `crates/compiler/tests/signal_pipeline.rs`
   - `porting/journal/2026-05-12.md`
+- initial Julia backend, Julia architecture wrapping, UI-zone parity, double
+  precision aliasing, numeric cast parity, and Julia math aliases landed on
+  2026-05-13/14 and reviewed against:
+  - `crates/codegen/src/backends/julia/mod.rs`
+  - `crates/compiler/src/main.rs`
+  - `crates/compiler/src/enrobage.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `crates/compiler/tests/enrobage_integration.rs`
+  - `porting/julia-backend-plan-2026-05-13-en.md`
+  - `porting/journal/2026-05-13.md`
+  - `porting/journal/2026-05-14.md`
+- RAD local-rule factorization and shared Signal/FIR formula helpers landed on
+  2026-05-17 and reviewed against:
+  - `crates/signals/src/ad_rules.rs`
+  - `crates/propagate/src/reverse_ad.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `porting/rad-local-rule-factorization-plan-2026-05-17-en.md`
+  - `porting/journal/2026-05-17.md`
 
 The corresponding generated reports are:
 
@@ -188,49 +206,58 @@ The corresponding generated reports are:
 
 ### 4.1 Source-language status
 
-At the front-end level, the checked-in corpus-status report currently shows
-**full status parity** with the C++ compiler:
+At the front-end level, the checked-in corpus-status report now separates two
+classes:
 
-- total corpus cases in the latest checked-in report: `104`
-- valid cases accepted by both Rust and C++: `88`
-- invalid cases rejected by both Rust and C++: `16`
+- Faust C++ parity cases, where both compilers accept or both reject the same
+  source,
+- Rust-extension cases, mostly `fad(...)` / `rad(...)` fixtures, where Rust
+  accepts programs that the pinned C++ reference rejects because those symbols
+  do not exist there.
+
+- total corpus cases in the latest checked-in report: `190`
+- `OK/OK` cases accepted by both Rust and C++: `94`
+- `ERR/ERR` cases rejected by both Rust and C++: `18`
 - `OK/ERR` mismatches: `0`
-- `ERR/OK` mismatches: `0`
+- `ERR/OK` Rust-extension cases: `78`
 
 Important note:
 
-- the repository now contains `107` files under `tests/corpus/`
-- the checked-in backend full-corpus report is older (`98` cases)
-- so the front-end counts above are the latest auditable numbers in-repo,
-  while the end-to-end backend counts below remain the latest checked-in
-  backend snapshot, not a claim that all `107` corpus entries have already
-  been re-benchmarked end-to-end
+- the regenerated reports cover `190` files under `tests/corpus/`
+- many `ERR/OK` entries are intentional Rust language extensions used to test
+  FAD/RAD, not regressions against the portable Faust C++ subset
+- the "portable C++ subset" still has no `OK/ERR` front-end mismatch in this
+  snapshot
 
 In other words:
 
-- on the current tracked corpus, `faust-rs` now accepts the same valid source
-  programs as Faust C++ up to the `signals` boundary,
-- and it rejects the same invalid corpus programs.
+- on the current tracked corpus, `faust-rs` accepts every source that the
+  pinned C++ reference accepts up to the `signals` boundary,
+- it rejects the same invalid portable corpus programs,
+- and it additionally accepts the Rust-only AD fixtures.
 
 ### 4.2 End-to-end backend status
 
 At the current backend route (`TransformFastLane`), the supported subset is
 still narrower. The latest checked-in full backend report says:
 
-- total corpus cases: `98`
-- end-to-end C backend parity: `OK=82`, `DIFF=0`, `UNSUPPORTED=16`
-- end-to-end C++ backend parity: `OK=82`, `DIFF=0`, `UNSUPPORTED=16`
+- total corpus cases: `190`
+- end-to-end C backend parity: `OK=93`, `DIFF=0`, `UNSUPPORTED=97`
+- end-to-end C++ backend parity: `OK=93`, `DIFF=0`, `UNSUPPORTED=97`
 
-The `16` unsupported cases are:
+The `97` unsupported entries combine several different situations:
 
-- `15` corpus entries that are intentionally invalid Faust programs,
-- `1` remaining valid corpus case:
+- intentionally invalid Faust programs,
+- Rust-only AD fixtures that compile in Rust but have no C++ reference backend
+  because the pinned C++ compiler rejects `fad`/`rad` as undefined symbols,
+- and `1` remaining C++-accepted valid corpus case:
   - `rep_18_stream_wrappers.dsp`
 
-So for **valid** corpus programs, the current backend route compiles:
+So for **C++-accepted portable** corpus programs, the current backend route
+compiles:
 
-- `82 / 83` valid corpus cases,
-- and misses `1 / 83`, currently in the non-trivial stream-wrapper family.
+- `93 / 94` portable backend cases,
+- and misses `1 / 94`, currently in the non-trivial stream-wrapper family.
 
 ### 4.3 WASM / JSON backend status
 
@@ -289,6 +316,58 @@ What is not yet true:
     `printBox`); `generateAuxFiles` compiles source and writes one or more
     output files for `-cpp`, `-c`, `-wasm`, `-json`, and `-svg` flags; both
     are wired into the C/C++ FFI headers for Cranelift and interpreter backends
+
+### 4.4 Julia backend status
+
+The Rust compiler now has an initial Julia source backend selected with
+`-lang julia`.
+
+What is now true:
+
+- `faust-rs -lang julia foo.dsp -o foo.jl` emits a Faust-style Julia DSP shell
+  from FIR:
+  - `mutable struct mydsp{T} <: dsp`
+  - lifecycle/API methods
+  - `compute!(dsp::mydsp{T}, count::Int32, inputs::Matrix{FAUSTFLOAT},
+    outputs::Matrix{FAUSTFLOAT})`
+  - one-based Julia table indexing at the final table access boundary, while
+    zero-based FIR loop and offset arithmetic are preserved internally
+- `-double` now propagates into the generated Julia `REAL` alias
+  (`const REAL = Float64`), matching the Julia impulse architecture's
+  `FAUSTFLOAT = Float64` path.
+- `-a/--architecture` wrapping is supported for Julia in the same CLI enrobage
+  pipeline as C/C++ backends. The architecture marker replacement, class-name
+  rewrite, Julia `include(...)` scanning, and recoverable injected include
+  handling are covered by tests.
+- UI callbacks now pass Faust Julia runtime zone identifiers as symbols
+  (`:fHslider0`, `:fButton0`, etc.), matching the C++ Julia backend and the
+  installed Julia runtime signatures.
+- Numeric casts are aligned with the C++ Julia backend:
+  - real casts inside `mydsp{T}` emit `T(...)`
+  - `Int64` casts use `trunc(Int64, ...)`
+  - `Int32` casts use the generated `faust_wrap_int32(...)` helper so
+    out-of-range values wrap instead of raising Julia `InexactError`
+- The Julia prologue now defines Faust math aliases needed by the impulse
+  corpus:
+  - `fmod(x, y) = rem(x, y)`
+  - `atan2(y, x) = atan(y, x)`
+- Float literal emission now uses Rust's shortest round-trippable formatting,
+  preserving small constants such as noise LCG scales.
+
+What is not yet true:
+
+- the Julia backend should be treated as a functional first slice, not as full
+  semantic parity with Faust C++ `-lang julia`;
+- it consumes the existing FIR fast-lane subset, so any upstream
+  `signal_prepare`/`signal_fir` exclusion remains a Julia exclusion too;
+- it assumes the host provides the Faust Julia runtime names (`dsp`, `UI`,
+  `FMeta`, `FAUSTFLOAT`, UI callback methods). The backend emits source; it
+  does not package the Julia runtime;
+- full `/Users/letz/Developpements/faust/tests/impulse-tests` `make julia`
+  coverage was not completed in the 2026-05-13 validation session, although
+  targeted generated Julia impulse checks were run for representative cases
+  including `grain3.dsp`, `noise.dsp`, `noiseabs.dsp`, `pow.dsp`,
+  `priority1.dsp`, and `math.dsp`.
 
 ## 5. Synthetic Characterization of the Supported Subset
 
@@ -401,6 +480,13 @@ boundary before FIR emission:
 For the Rust WASM route, the same FIR preparation pipeline is reused, but the
 backend lowering itself is currently a separate, narrower bring-up slice with
 its own documented subset in `crates/codegen/src/backends/wasm/`.
+
+For the Rust Julia route, the same FIR preparation pipeline is reused and the
+backend emits Julia source from the resulting FIR `Module`. Its source-language
+coverage is therefore bounded first by the shared fast-lane subset, then by the
+Julia emitter's current FIR-node coverage. The Julia backend is now useful for
+representative impulse-test DSPs, but should still be described as an initial
+backend slice rather than a complete replacement for Faust C++ `-lang julia`.
 
 That slice currently includes, in broad terms:
 
@@ -530,6 +616,16 @@ The most important current exclusions are:
     but the full `ondemand(_)`, `upsampling(_)`, `downsampling(_)` family is
     not yet fully lowered end-to-end.
 
+- **Julia backend maturity**
+  - `-lang julia` is now wired and usable, including `-double` and
+    architecture wrapping, but it is still an initial FIR emitter slice.
+  - Programs outside the shared fast-lane subset are outside Julia too.
+  - The emitted source assumes a Faust Julia runtime provided by the host; Rust
+    does not package or vendor that runtime in the generated file.
+  - Full Faust impulse-test parity is not yet claimed. Current validation is a
+    mix of codegen/unit tests, CLI/enrobage tests, and selected generated Julia
+    impulse runs.
+
 - **Complex table generators in `SIGGEN`**
   - the fast-lane now handles a broad class of computed `SIGGEN` generators
     via the compile-time `GeneratorInterpreter` (oscillator sine tables,
@@ -592,9 +688,20 @@ The most important current exclusions are:
     BRA tape store buffers are introduced later during FIR lowering, after
     signal-level normalization/promotion, taped integer forward values are cast
     to the tape element type at the FIR boundary before being stored.
+  - As of 2026-05-17, local RAD math rules are factored through
+    `signals::ad_rules`. The pure Signal symbolic path and the FIR/BRA lowering
+    now share backend-neutral rule classification and formula construction for
+    unary math, binary math, and differentiable arithmetic `SIGBINOP`s. Tape
+    allocation, forward-value loading, reverse-sweep scheduling, FIR helper
+    registration, and backend typing remain owned by `transform::signal_fir`.
+    The shared `pow` rule uses the stable base derivative form
+    `y_bar * exponent * pow(base, exponent - 1)` instead of `base^exponent /
+    base`.
   - Coverage:
     - structural: [crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs)
       (arity + temporal/recursive BlockReverseAD fallback),
+    - local-rule unit tests:
+      [crates/signals/src/ad_rules.rs](../crates/signals/src/ad_rules.rs),
     - structural classifier unit tests:
       [crates/propagate/src/stateful_rad.rs](../crates/propagate/src/stateful_rad.rs),
     - runtime parity (RAD ↔ FAD lane-by-lane and RAD ↔ central
@@ -646,6 +753,11 @@ Relative to the tracked corpus and the current production-oriented route:
   - `-lang wast` for textual WAT output,
   - `crates/wasm-ffi` for a raw embedded-compiler module consumed by
     `faustwasm`,
+- the Rust CLI now supports `-lang julia` as a real backend mode. The generated
+  source follows the Faust Julia shell shape, supports architecture wrapping,
+  propagates `-double` to `const REAL = Float64`, emits Julia UI zones as
+  symbols, and includes the cast/math helpers needed by representative impulse
+  DSPs (`faust_wrap_int32`, `fmod`, `atan2`),
 - many language families that were earlier missing are no longer front-end
   blockers:
   - `case` and recursive pattern-matching with computed numeric arguments,
@@ -710,7 +822,11 @@ Relative to the tracked corpus and the current production-oriented route:
   incomplete reverse-time-recursion dispatcher fast path, cast integer BRA
   forward values into the real-valued tape-store boundary during FIR lowering,
   and fix shared FAD/RAD wrapper input slicing for cases such as
-  `rad(*, (_,_,_))`. See [docs/rad-note-en.md](../docs/rad-note-en.md),
+  `rad(*, (_,_,_))`. The 2026-05-17 local-rule factorization also makes the
+  Signal symbolic RAD path and FIR/BRA path share one backend-neutral
+  classification/formula table in `signals::ad_rules`, while preserving
+  backend-local tape loading and reverse-loop scheduling. See
+  [docs/rad-note-en.md](../docs/rad-note-en.md),
 - **SVG block-diagram output** is now wired via `-svg` (landed 2026-05-02):
   the full `crates/draw/` module renders all box/composition/schema types,
   supports hierarchical folding (`-f`, `-fc`), and matches the C++ output
@@ -739,6 +855,8 @@ Most importantly, the C++ compiler still has:
   future phases (plan §20).
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
+- a mature Julia backend with broader impulse-test coverage and runtime
+  packaging assumptions already exercised by the upstream Faust test suite,
 - a fuller embedded-compiler helper surface for web tooling
   (`expandDSP` and `generateAuxFiles` are now real in Rust, but `getInfos`
   is only partially implemented and packaged FS semantics differ),
@@ -2103,6 +2221,47 @@ The same slicing contract applies to `fad(*, (_,_,_))`; FAD obtains the lanes
 by propagating one tangent direction per seed output, while RAD accumulates
 adjoints back from the scalar body output cotangent.
 
+### 7.27 May 13–17, 2026: Julia backend and shared RAD local rules
+
+#### Julia backend first slice
+
+An initial FIR-to-Julia backend landed across 2026-05-13/14:
+
+- `-lang julia` is accepted by the CLI and emits a Faust-style Julia DSP shell.
+- `JuliaOptions` and `JuliaRealType` expose backend configuration, with
+  `-double` selecting `const REAL = Float64`.
+- `-a/--architecture` wrapping is accepted for Julia, using the existing
+  enrobage marker replacement pipeline extended to understand Julia
+  `include(...)` forms.
+- UI widget and bargraph zone arguments are emitted as Julia `Symbol`s, as
+  expected by the Faust Julia runtime.
+- real casts inside parametric DSP methods use `T(...)`; integer casts use
+  Julia truncation/wrapping helpers, including `faust_wrap_int32(...)` for
+  C++-style 32-bit wraparound.
+- the prologue defines `fmod` and `atan2` aliases needed by the impulse corpus,
+  and float literals use shortest round-trippable formatting.
+
+The backend is still a first slice over the existing FIR fast-lane, not a full
+claim of C++ Julia backend parity.
+
+#### Shared RAD local-rule table
+
+The local reverse-AD operator rules were factored into
+`crates/signals/src/ad_rules.rs`.
+
+The pure Signal RAD pass in `crates/propagate/src/reverse_ad.rs` and the
+FIR/BRA reverse sweep in `crates/transform/src/signal_fir/module.rs` now share:
+
+- classification of supported unary math rules,
+- classification of supported binary math rules,
+- classification of differentiable arithmetic versus discrete zero-gradient
+  `SIGBINOP`s,
+- backend-neutral formula construction through `RadFormulaBuilder`.
+
+This deliberately shares only local algebra. Signal-IR construction, BRA tape
+loads, real tape storage, reverse-loop scheduling, FIR helper registration, and
+backend typing remain owned by their respective crates.
+
 ## 8. Practical Reading Rule
 
 Today, the simplest accurate rule is:
@@ -2131,6 +2290,11 @@ Today, the simplest accurate rule is:
   See [docs/rad-note-en.md](../docs/rad-note-en.md).
 - `-svg` produces block-diagram SVG output matching the C++ compiler output
   directory convention; hierarchical folding via `-f` splits complex diagrams.
+- `-lang julia` now emits Julia source for programs in the current FIR
+  fast-lane subset. Treat it as an initial backend slice: it supports the
+  Faust-style Julia shell, `-double`, architecture wrapping, UI symbol zones,
+  and C++-aligned numeric casts, but full upstream Julia impulse-suite parity
+  is not yet claimed.
 - `rad(expr, seeds)` over `hslider` / `vslider` / `numentry` seeds and a
   feed-forward body drives host-side training loops and adaptive filters
   (see `crates/compiler/examples/rad_gradient_descent.rs` and

@@ -56,6 +56,14 @@ structured FIR module.
   - explicitly verify the resulting staging contract before FIR lowering.
 - `signal_fir` is implemented for the active fast-lane slice and covered by
   integration tests and golden checks.
+- `signal_fir` owns concrete `BlockReverseAD` execution for `rad(...)`
+  temporal/recursive fallback:
+  - forward tape allocation and stores,
+  - reverse sweep scheduling,
+  - adjoint carry reset/storage,
+  - FIR type selection for tape values and local math helpers.
+  Local pointwise RAD formulas are shared with `propagate` through
+  `signals::ad_rules`; tape loading and loop placement remain local here.
 - The current fast-lane covers the executable bootstrap path plus the active
   delay/recursion/table lowering slices. Delay lowering is controlled by:
   - `max_copy_delay` for shift/copy vs circular buffering,
