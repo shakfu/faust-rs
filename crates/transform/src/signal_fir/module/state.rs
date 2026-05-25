@@ -1,0 +1,348 @@
+use super::*;
+
+impl<'a> SignalToFirLower<'a> {
+    /// Returns the resolved recursion-delay reference for `value`.
+    ///
+    /// Examples:
+    ///
+    /// - `Proj(i, group)` → delay chain `0`
+    /// - `Delay1(Proj(i, group))` → delay chain `1`
+    /// - `Delay1(Delay1(Proj(i, group)))` → delay chain `2`
+    ///
+    /// Pure state-based resolution lives in `recursion.rs`; this wrapper only
+    /// falls back to `lower_proj(...)` when a top-level `SYMREC` group still
+    /// needs to be materialized in the current lowering pass.
+    pub(super) fn resolve_recursion_delay_ref(
+        &mut self,
+        value: SigId,
+    ) -> Result<Option<RecursionDelayRef>, SignalFirError> {
+        if let Some(delay_ref) = self.recursion.resolve_delay_ref(self.arena, value)? {
+            return Ok(Some(delay_ref));
+        }
+        let Some(key) = match_recursion_delay_key(self.arena, value) else {
+            return Ok(None);
+        };
+        let Some(rec_info) =
+            self.resolve_recursion_carrier(key.proj_node, key.proj_index, key.group)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(RecursionDelayRef {
+            carrier: rec_info,
+            implicit_delay: key.implicit_delay,
+        }))
+    }
+
+    /// Returns the canonical recursion carrier for `Proj(index, group)` whether
+    /// the projection points to the active feedback reference (`SYMREF`) or to
+    /// the materialized top-level recursion group (`SYMREC`).
+    ///
+    /// Pure active/materialized lookup lives in `recursion.rs`; this wrapper
+    /// only performs top-level materialization when needed.
+    pub(super) fn resolve_recursion_carrier(
+        &mut self,
+        proj_node: SigId,
+        index: i32,
+        group: SigId,
+    ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
+        let index_usize = usize::try_from(index).map_err(|_| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("negative SIGPROJ index {index} in recursion carrier lookup"),
+            )
+        })?;
+        if let Some(info) = self
+            .recursion
+            .resolve_carrier(self.arena, group, index_usize)?
+        {
+            return Ok(Some(info));
+        }
+        if match_sym_rec(self.arena, group).is_none() {
+            return Ok(None);
+        }
+
+        // Ensure the group's recursion arrays and body stores are scheduled,
+        // then read back the canonical carrier metadata allocated by `lower_proj`.
+        let _ = self.lower_proj(proj_node, index, group)?;
+        self.recursion
+            .resolve_carrier(self.arena, group, index_usize)
+    }
+
+    /// Declares a stack-local current-sample binding for one scalar recursion
+    /// carrier and records it under the canonical `(group, index)` key.
+    pub(super) fn bind_scalar_recursion_current_value(
+        &mut self,
+        group: SigId,
+        index: usize,
+        info: &RecArrayInfo,
+        value: FirId,
+    ) -> String {
+        let prefix = if info.typ == FirType::Int32 {
+            "iRecCur"
+        } else {
+            "fRecCur"
+        };
+        let name = if index == 0 {
+            format!("{prefix}{}", group.as_u32())
+        } else {
+            format!("{prefix}{}_{}", group.as_u32(), index)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.sample_phases.immediate.push(b.declare_var(
+            name.clone(),
+            info.typ.clone(),
+            AccessType::Stack,
+            Some(value),
+        ));
+        self.recursion.set_current_value_binding(
+            group,
+            index,
+            RecursionCurrentValueBinding {
+                name: name.clone(),
+                typ: info.typ.clone(),
+            },
+        );
+        name
+    }
+
+    /// Loads the current-sample value of a scalar recursion carrier through its
+    /// stack-local binding.
+    pub(super) fn load_scalar_recursion_current_value(
+        &mut self,
+        group: SigId,
+        index: usize,
+    ) -> Result<Option<FirId>, SignalFirError> {
+        let Some(binding) = self
+            .recursion
+            .current_value_binding(self.arena, group, index)
+        else {
+            return Ok(None);
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(Some(b.load_var(
+            binding.name,
+            AccessType::Stack,
+            binding.typ.clone(),
+        )))
+    }
+
+    /// Ensures a 2-element circular buffer state slot exists for `node`,
+    /// idempotent.  On first call, declares `[typ; 2]` in the struct
+    /// (prefixed `iRec` for `Int32`, `fRec` otherwise) and registers an
+    /// `instanceClear` zeroing loop.  Returns the generated variable name.
+    ///
+    /// Keyed by `node` SigId in `state_name_by_node` — separate from
+    /// `rec_array_by_group_index` to avoid aliasing (see `build_module` doc).
+    pub(super) fn ensure_state_slot(&mut self, node: SigId, typ: FirType, init: FirId) -> String {
+        if let Some(name) = self.state_name_by_node.get(&node) {
+            return name.clone();
+        }
+        let prefix = if typ == FirType::Int32 {
+            "iRec"
+        } else {
+            "fRec"
+        };
+        let name = format!("{prefix}{}", node.as_u32());
+        // Allocate a 2-element circular buffer (matching C++ signalFIRCompiler DelayLine).
+        let array_ty = FirType::Array(Box::new(typ), 2);
+        let mut b = FirBuilder::new(&mut self.store);
+        let dec = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
+        self.struct_declarations.push(dec);
+        self.register_clear_recursion_array(name.clone(), init, 2);
+        self.state_name_by_node.insert(node, name.clone());
+        name
+    }
+
+    /// Declares the struct array for one circular delay line, idempotent.
+    ///
+    /// Thin delegate to [`DelayManager::ensure_delay_line`]; constructs a
+    /// [`DelayFirCtx`] from disjoint fields via split-borrow struct literal so
+    /// that `self.delay` can be borrowed simultaneously.
+    pub(super) fn ensure_delay_line_decl(
+        &mut self,
+        carried: SigId,
+        delay: i32,
+    ) -> Result<DelayLineInfo, SignalFirError> {
+        // Explicit field-level split borrows: `self.delay` is NOT included here,
+        // so it can be mutably borrowed below without conflict.
+        let mut ctx = DelayFirCtx {
+            store: &mut self.store,
+            real_ty: self.real_ty.clone(),
+            types: self.types,
+            struct_declarations: &mut self.struct_declarations,
+            clear_statements: &mut self.clear_statements,
+            clear_init_seen: &mut self.clear_init_seen,
+            next_loop_var_id: &mut self.next_loop_var_id,
+            uses_iota: &mut self.uses_iota,
+        };
+        self.delay.ensure_delay_line(carried, delay, &mut ctx)
+    }
+
+    /// Returns the canonical pre-allocated delay line for `carried`.
+    ///
+    /// Delay-line strategy and geometry are chosen during
+    /// [`Self::prepare_delay_lines`]. Lowering paths should only query that
+    /// decision, not allocate new delay lines opportunistically.
+    pub(super) fn delay_line_info(&self, carried: SigId) -> Result<DelayLineInfo, SignalFirError> {
+        self.delay.get_delay_line(carried).cloned().ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "internal fast-lane missing pre-allocated delay line for signal {}",
+                    carried.as_u32()
+                ),
+            )
+        })
+    }
+
+    /// Declares the shared global circular cursor state (`fIOTA`), idempotent.
+    pub(super) fn ensure_global_circular_cursor(&mut self) {
+        let mut ctx = DelayFirCtx {
+            store: &mut self.store,
+            real_ty: self.real_ty.clone(),
+            types: self.types,
+            struct_declarations: &mut self.struct_declarations,
+            clear_statements: &mut self.clear_statements,
+            clear_init_seen: &mut self.clear_init_seen,
+            next_loop_var_id: &mut self.next_loop_var_id,
+            uses_iota: &mut self.uses_iota,
+        };
+        GlobalCircularCursor.ensure_state(&mut ctx);
+    }
+
+    /// Returns the masked current write index for the shared global cursor.
+    pub(super) fn global_circular_current_index(&mut self, size: usize) -> FirId {
+        self.ensure_global_circular_cursor();
+        GlobalCircularCursor.current_index(&mut self.store, size)
+    }
+
+    /// Returns the masked delayed read index for the shared global cursor.
+    pub(super) fn global_circular_delayed_index(&mut self, amount: FirId, size: usize) -> FirId {
+        self.ensure_global_circular_cursor();
+        GlobalCircularCursor.delayed_index(&mut self.store, amount, size)
+    }
+
+    /// Runs `f` with one recursion group pushed onto the active recursion stack.
+    ///
+    /// This centralizes the push/pop discipline for the active recursion-group
+    /// stack, which must stay perfectly balanced even when lowering
+    /// fails partway through a recursive body.
+    pub(super) fn with_active_recursion_group<R>(
+        &mut self,
+        var: SigId,
+        arrays: Vec<RecArrayInfo>,
+        f: impl FnOnce(&mut Self, &[RecArrayInfo]) -> Result<R, SignalFirError>,
+    ) -> Result<R, SignalFirError> {
+        self.recursion.push_active_group(var, arrays.clone());
+        let result = f(self, &arrays);
+        self.recursion.pop_active_group();
+        result
+    }
+
+    /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.
+    ///
+    /// Idempotent: subsequent calls for the same `name` are silently ignored.
+    pub(super) fn register_clear_recursion_array(
+        &mut self,
+        name: String,
+        init: FirId,
+        size: usize,
+    ) {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return;
+        }
+        let loop_var = self.fresh_loop_var("lRec");
+        let upper = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(size).unwrap_or(i32::MAX))
+        };
+        let body = {
+            let index = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name, AccessType::Struct, index, init)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.block(&[store])
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.clear_statements
+            .push(b.simple_for_loop(loop_var, upper, body, false));
+    }
+
+    /// Generates a unique loop variable name using a monotonic counter.
+    pub(super) fn fresh_loop_var(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", self.next_loop_var_id);
+        self.next_loop_var_id += 1;
+        name
+    }
+
+    /// Declares one named struct variable once.
+    pub(super) fn ensure_named_struct_var(
+        &mut self,
+        name: &str,
+        typ: FirType,
+        init: Option<FirId>,
+    ) {
+        if self.named_struct_vars.contains(name) {
+            return;
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        let dec = b.declare_var(name.to_owned(), typ, AccessType::Struct, None);
+        self.struct_declarations.push(dec);
+        self.named_struct_vars.insert(name.to_owned());
+        if let Some(init) = init {
+            self.register_reset_init(name.to_owned(), init);
+        }
+    }
+
+    /// Registers one reset-time assignment for UI controls (`instanceResetUserInterface`).
+    pub(super) fn register_reset_init(&mut self, name: String, init: FirId) {
+        if !self.reset_init_seen.insert(name.clone()) {
+            return;
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        self.reset_statements
+            .push(b.store_var(name, AccessType::Struct, init));
+    }
+
+    /// Registers one clear-time assignment for runtime state (`instanceClear`).
+    pub(super) fn register_clear_init(&mut self, name: String, init: FirId) {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return;
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        self.clear_statements
+            .push(b.store_var(name, AccessType::Struct, init));
+    }
+
+    /// Registers one per-instance table initialization block for
+    /// `instanceConstants`.
+    pub(super) fn register_constant_table_init(
+        &mut self,
+        name: String,
+        access: AccessType,
+        values: &[FirId],
+    ) {
+        if values.is_empty() {
+            return;
+        }
+        let mut stores = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let idx = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
+            };
+            let store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name.clone(), access, idx, *value)
+            };
+            stores.push(store);
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        self.constants_statements.push(b.block(&stores));
+    }
+}
