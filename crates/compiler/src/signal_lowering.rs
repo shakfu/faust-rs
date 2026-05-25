@@ -1,0 +1,348 @@
+use super::*;
+
+// ─── Signal-to-FIR lower errors ───────────────────────────────────────────────
+
+/// Generic lower-to-backend error for backends that follow the
+/// Transform → Verify → Codegen pattern.
+///
+/// `E` is the backend-specific codegen error type.
+/// Specialised as [`LowerToCppError`] and [`LowerToCError`].
+#[derive(Debug)]
+pub(crate) enum LowerError<E> {
+    /// Fast-lane signal-to-FIR lowering failed.
+    Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
+    Verify(FirVerifyReport),
+    /// Backend emission failed after successful FIR lowering.
+    Codegen(E),
+}
+
+/// Lower error for the C++ backend.
+pub(crate) type LowerToCppError = LowerError<CodegenError>;
+/// Lower error for the C backend.
+pub(crate) type LowerToCError = LowerError<CCodegenError>;
+/// Lower error for the Julia backend.
+pub(crate) type LowerToJuliaError = LowerError<JuliaCodegenError>;
+
+#[derive(Debug)]
+pub(crate) enum LowerToInterpError {
+    /// Fast-lane signal-to-FIR lowering failed.
+    Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
+    Verify(FirVerifyReport),
+    /// Interpreter backend emission failed after successful lowering.
+    Codegen(InterpCodegenError),
+    /// Serialization of the factory to `.fbc` text failed.
+    Serialize(String),
+}
+
+#[derive(Debug)]
+pub(crate) enum LowerToFirError {
+    /// Fast-lane signal-to-FIR lowering failed.
+    Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
+    Verify(FirVerifyReport),
+}
+
+pub(crate) fn time_phase_with_sink<T>(
+    timing_sink: Option<&TimingSink>,
+    name: &'static str,
+    f: impl FnOnce() -> T,
+) -> T {
+    if let Some(sink) = timing_sink {
+        let start = Instant::now();
+        let result = f();
+        sink(name, start.elapsed());
+        result
+    } else {
+        f()
+    }
+}
+
+// ─── Signal-to-FIR lower functions ───────────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct SignalLoweringContext {
+    pub(crate) lane: SignalFirLane,
+    pub(crate) fir_verify: FirVerifyOptions,
+    pub(crate) real_type: RealType,
+    pub(crate) max_copy_delay: u32,
+    pub(crate) delay_line_threshold: u32,
+    pub(crate) timing_sink: Option<TimingSink>,
+}
+
+/// Dispatches C++ lowering through the selected signal->FIR lane.
+///
+/// The backend itself always consumes FIR; the lane choice controls only how
+/// the intermediate FIR module is produced from the propagated signal list.
+pub(crate) fn lower_signals_to_cpp(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CppOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToCppError> {
+    let _ = ctx.lane;
+    lower_signals_to_cpp_transform_fastlane(source_name, output, options, &ctx)
+}
+
+/// Dispatches C lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_c(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &COptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToCError> {
+    let _ = ctx.lane;
+    lower_signals_to_c_transform_fastlane(source_name, output, options, &ctx)
+}
+
+/// Dispatches Julia lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_julia(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &JuliaOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToJuliaError> {
+    let _ = ctx.lane;
+    lower_signals_to_julia_transform_fastlane(source_name, output, options, &ctx)
+}
+
+/// Dispatches interpreter lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_interp(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &InterpOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToInterpError> {
+    let _ = ctx.lane;
+    lower_signals_to_interp_transform_fastlane(source_name, output, options, &ctx)
+}
+
+/// Lowers signals through the transform fast lane then serializes an interpreter `.fbc`.
+///
+/// This function reuses `lower_signals_to_fir_transform_fastlane` so that the
+/// C, C++, and interp transform paths share one FIR lowering implementation.
+pub(crate) fn lower_signals_to_interp_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &InterpOptions,
+    ctx: &SignalLoweringContext,
+) -> Result<String, LowerToInterpError> {
+    let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
+    .map_err(LowerToInterpError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerToInterpError::Verify)?;
+    match ctx.real_type {
+        RealType::Float32 => {
+            let factory: FbcDspFactory<f32> =
+                time_phase_with_sink(timing_sink, "interp-codegen", || {
+                    generate_interp_module(&lowered.store, lowered.module, options)
+                })
+                .map_err(LowerToInterpError::Codegen)?;
+            time_phase_with_sink(timing_sink, "interp-serialize", || {
+                serialize_factory(&factory)
+            })
+            .map_err(LowerToInterpError::Serialize)
+        }
+        RealType::Float64 => {
+            let factory: FbcDspFactory<f64> =
+                time_phase_with_sink(timing_sink, "interp-codegen", || {
+                    generate_interp_module(&lowered.store, lowered.module, options)
+                })
+                .map_err(LowerToInterpError::Codegen)?;
+            time_phase_with_sink(timing_sink, "interp-serialize", || {
+                serialize_factory(&factory)
+            })
+            .map_err(LowerToInterpError::Serialize)
+        }
+    }
+}
+
+/// Serializes a [`FbcDspFactory`] to `.fbc` text format.
+pub(crate) fn serialize_factory<R: FbcReal>(factory: &FbcDspFactory<R>) -> Result<String, String> {
+    let mut buf = Vec::new();
+    write_fbc(factory, &mut buf, false).map_err(|e| e.to_string())?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
+/// Lowers propagated signals to FIR without invoking a backend emitter.
+///
+/// This is the shared implementation behind FIR dump/verification flows and is
+/// also used as the backend-independent boundary for lane comparisons.
+pub(crate) fn lower_signals_to_fir(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    _lane: SignalFirLane,
+    fir_verify: FirVerifyOptions,
+    real_type: RealType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
+) -> Result<FirCompileOutput, LowerToFirError> {
+    let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
+    let lowered = lower_signals_to_fir_transform_fastlane(
+        output,
+        module_name,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+    )
+    .map_err(LowerToFirError::Transform)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
+    Ok(lowered)
+}
+
+/// Resolves a module name from explicit class_name option or from the source name.
+pub(crate) fn resolve_module_name(class_name: Option<&str>, _source_name: &str) -> String {
+    class_name
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "mydsp".to_owned())
+}
+
+/// Transform fast-lane FIR lowering used by native backends and FIR dumps.
+pub(crate) fn lower_signals_to_fir_transform_fastlane(
+    output: &SignalCompileOutput,
+    module_name: String,
+    real_type: RealType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
+) -> Result<FirCompileOutput, SignalFirError> {
+    let signal_fir_options = SignalFirOptions {
+        module_name,
+        strict_mode: true,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+    };
+    let lowered = compile_signals_to_fir_fastlane_with_ui(
+        &output.parse.state.arena,
+        &output.signals,
+        output.process_arity.inputs,
+        output.propagated_output_count(),
+        &output.ui,
+        &signal_fir_options,
+    )?;
+    Ok(FirCompileOutput {
+        store: lowered.store,
+        module: lowered.module,
+    })
+}
+
+/// Lowers signals through the transform fast lane, verifies FIR, then emits C++.
+pub(crate) fn lower_signals_to_cpp_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CppOptions,
+    ctx: &SignalLoweringContext,
+) -> Result<String, LowerToCppError> {
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
+    .map_err(LowerError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerError::Verify)?;
+    time_phase_with_sink(timing_sink, "cpp-codegen", || {
+        generate_cpp_module(&lowered.store, lowered.module, options)
+    })
+    .map_err(LowerError::Codegen)
+}
+
+/// Lowers signals through the transform fast lane, verifies FIR, then emits C.
+pub(crate) fn lower_signals_to_c_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &COptions,
+    ctx: &SignalLoweringContext,
+) -> Result<String, LowerToCError> {
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
+    .map_err(LowerError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerError::Verify)?;
+    time_phase_with_sink(timing_sink, "c-codegen", || {
+        generate_c_module(&lowered.store, lowered.module, options)
+    })
+    .map_err(LowerError::Codegen)
+}
+
+/// Lowers signals through the transform fast lane, verifies FIR, then emits Julia.
+pub(crate) fn lower_signals_to_julia_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &JuliaOptions,
+    ctx: &SignalLoweringContext,
+) -> Result<String, LowerToJuliaError> {
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
+    .map_err(LowerError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerError::Verify)?;
+    let mut codegen_options = options.clone();
+    codegen_options.real_type = match ctx.real_type {
+        RealType::Float32 => JuliaRealType::Float32,
+        RealType::Float64 => JuliaRealType::Float64,
+    };
+    time_phase_with_sink(timing_sink, "julia-codegen", || {
+        generate_julia_module(&lowered.store, lowered.module, &codegen_options)
+    })
+    .map_err(LowerError::Codegen)
+}
+
+/// Runs optional FIR verification according to the compiler facade policy.
+///
+/// In strict mode, warnings are promoted to fatal errors to support CI and
+/// parity-audit workflows that want a clean FIR module before backend lowering.
+pub(crate) fn maybe_verify_fir_module(
+    lowered: &FirCompileOutput,
+    options: FirVerifyOptions,
+) -> Result<(), FirVerifyReport> {
+    if !options.enabled {
+        return Ok(());
+    }
+    let report = verify_fir_module(&lowered.store, lowered.module);
+    let fatal = report.has_errors() || (options.strict && report.warnings().next().is_some());
+    if fatal { Err(report) } else { Ok(()) }
+}
