@@ -1,3 +1,20 @@
+//! JSON description construction, name utilities, and diagnostic bundle helpers.
+//!
+//! Covers the JSON-facing surface of the compiler:
+//! - `source_name_to_class` / `source_name_to_filename` — derive the class and
+//!   file name strings used in generated code and JSON from a source path;
+//! - `faustwasm_info_help_text` — help text for the faustwasm info query;
+//! - [`StrictJsonContext`] / `build_strict_json_description` — assemble the
+//!   full [`JsonDescription`] from a lowered FIR module (used by WASM backend);
+//! - `compile_options_json_string` — formats the `-lang`/`-single`/`-double`
+//!   string stored in JSON metadata;
+//! - `wasm_json_context_for_*` / `json_meta_entries_from_snapshot` — build the
+//!   [`WasmJsonContext`] for memory-backed and file-backed compilation sessions;
+//! - `parse_search_paths_from_argv` / `sanitize_cpp_ident` / `resolve_ui_root_label` —
+//!   miscellaneous name/path helpers;
+//! - `bundle_from_diagnostic` / `eval_error_node` / `propagate_error_node` —
+//!   diagnostic packaging and error-node extraction helpers.
+
 use super::*;
 
 // ─── Diagnostic helpers ───────────────────────────────────────────────────────
@@ -58,6 +75,7 @@ pub(crate) fn source_name_to_class(source_name: &str) -> String {
         .to_owned()
 }
 
+/// Extracts the file-name component (with extension) from a source path string.
 pub(crate) fn source_name_to_filename(source_name: &str) -> String {
     Path::new(source_name)
         .file_name()
@@ -67,6 +85,10 @@ pub(crate) fn source_name_to_filename(source_name: &str) -> String {
         .to_owned()
 }
 
+/// Returns the help text emitted for `faustwasm --info` queries.
+///
+/// Lists supported and currently-stubbed query keys so tooling can report
+/// capability without attempting unsupported operations.
 pub(crate) fn faustwasm_info_help_text() -> String {
     let mut out = String::new();
     out.push_str("faust-rs faustwasm helper info\n");
@@ -82,15 +104,32 @@ pub(crate) fn faustwasm_info_help_text() -> String {
     out
 }
 
+/// Input bundle for [`build_strict_json_description`].
+///
+/// Separates the contextual metadata (filename, paths, options) from the FIR
+/// store so callers can build the context independently of the lowering step.
 pub(crate) struct StrictJsonContext {
+    /// Source filename reported in the JSON `filename` field.
     pub(crate) filename: String,
+    /// Import search paths included in the JSON `include_pathnames` array.
     pub(crate) include_pathnames: Vec<String>,
+    /// Library files used during compilation, for the JSON `library_list` array.
     pub(crate) library_list: Vec<String>,
+    /// Top-level `declare` metadata entries from the source.
     pub(crate) top_level_meta: Vec<JsonMetaEntry>,
+    /// Formatted compile-options string (e.g. `"-lang wasm -single"`).
     pub(crate) compile_options: String,
+    /// Whether the session targets double-precision output.
     pub(crate) double_precision: bool,
 }
 
+/// Builds the strict (Faust-compatible) JSON description of a compiled module.
+///
+/// Validates that `module` is a FIR `Module` whose functions section is a
+/// `Block`, derives the WASM memory layout to obtain the struct size, then
+/// assembles the [`JsonDescription`] from the FIR functions plus the contextual
+/// metadata in `context`. Returns a [`WasmBackendError`] if the FIR root has an
+/// unexpected shape.
 pub(crate) fn build_strict_json_description(
     store: &FirStore,
     module: FirId,
@@ -170,6 +209,7 @@ pub fn compile_options_json_string(lang: Option<&str>, double_precision: bool) -
     }
 }
 
+/// Builds a [`WasmJsonContext`] for an in-memory (string) compilation session.
 pub(crate) fn wasm_json_context_for_memory_source(
     source_name: &str,
     signals: &SignalCompileOutput,
@@ -185,6 +225,11 @@ pub(crate) fn wasm_json_context_for_memory_source(
     }
 }
 
+/// Builds a [`WasmJsonContext`] for a file-backed compilation session.
+///
+/// Collects the library list from `signals.parse.used_files` (skipping the
+/// primary source) and `signals.loaded_files`, deduplicating entries.
+/// Include pathnames are derived by merging `path`'s parent with `search_paths`.
 pub(crate) fn wasm_json_context_for_file(
     path: &Path,
     search_paths: &[PathBuf],
@@ -222,6 +267,11 @@ pub(crate) fn wasm_json_context_for_file(
     }
 }
 
+/// Converts a compilation metadata snapshot into a flat list of JSON meta entries.
+///
+/// Each `(key, [v1, v2, ...])` pair in the snapshot becomes one `JsonMetaEntry`
+/// per value.  Global keys (without a path prefix) and path-scoped keys are
+/// both included.
 pub(crate) fn json_meta_entries_from_snapshot(
     snapshot: &CompilationMetadataSnapshot,
 ) -> Vec<JsonMetaEntry> {

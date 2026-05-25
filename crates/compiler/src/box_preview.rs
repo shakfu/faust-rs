@@ -1,3 +1,13 @@
+//! Compact box expression previews for diagnostics notes.
+//!
+//! Provides bounded single-line summaries of box subtrees for use in
+//! diagnostic `note` fields where a full tree dump would be too verbose:
+//! - `compact_box_preview` — raw dump capped at 180 characters;
+//! - `compact_human_box_preview` — human-oriented infix rendering capped at 180 characters;
+//! - `render_human_box_expr` — recursive Faust-like expression renderer;
+//! - `prim_infix_symbol` / `prim_readable_name` — symbol and name helpers for
+//!   primitive box families.
+
 use super::*;
 
 // ─── Box preview helpers ──────────────────────────────────────────────────────

@@ -1,3 +1,15 @@
+//! UI control lowering, metadata emission, and `buildUserInterface` assembly.
+//!
+//! Manages the UI side of the Faust lifecycle:
+//! - zone variable declaration for buttons, checkboxes, sliders, bargraphs,
+//!   and soundfile controls;
+//! - `addMetaDeclare` emission for per-control metadata key/value pairs;
+//! - `emit_ui_program` — the recursive walk that emits the full
+//!   `buildUserInterface(ui)` body from the [`UiProgram`] tree.
+//!
+//! All methods operate on the shared [`SignalToFirLower`] state and write
+//! directly into `self.ui_statements` for final assembly by `build_module`.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {
@@ -222,6 +234,7 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Looks up one metadata value by key for the given control, if present.
     pub(super) fn control_metadata_value(
         &self,
         control: ControlId,

@@ -21,6 +21,10 @@ pub(crate) enum EvalValue {
 }
 
 impl EvalValue {
+    /// Returns the tree node used to display or lower this value back to a box.
+    ///
+    /// For a `Box` this is the node itself; for closures and pattern matchers it
+    /// is the underlying expression / case-expression node.
     pub(crate) fn display_tree(&self) -> TreeId {
         match self {
             Self::Box(id) => *id,
@@ -229,16 +233,29 @@ impl Environment {
         self.current
     }
 
+    /// Returns `true` if both handles refer to the same layer in the same arena.
+    ///
+    /// Compares the current layer id together with the identity of the shared
+    /// store and source context (pointer equality), so two clones of the same
+    /// environment compare equal while structurally identical but distinct
+    /// environments do not.
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
         self.current == other.current
             && Rc::ptr_eq(&self.store, &other.store)
             && Arc::ptr_eq(&self.source_context, &other.source_context)
     }
 
+    /// Returns a globally unique key identifying this environment's current layer.
+    ///
+    /// Used as a memoization/loop-detection key (see [`crate::loop_detector`]).
     pub(crate) fn frame_key(&self) -> EnvFrameKey {
         self.frame_key_for(self.current)
     }
 
+    /// Builds an [`EnvFrameKey`] for an arbitrary layer of this environment's store.
+    ///
+    /// Combines the store and source-context pointers with `env_id` so keys are
+    /// unique across distinct arenas as well as across layers.
     pub(crate) fn frame_key_for(&self, env_id: EnvId) -> EnvFrameKey {
         EnvFrameKey {
             store_ptr: Rc::as_ptr(&self.store) as usize,
@@ -272,6 +289,11 @@ impl Environment {
         self.bind_value(sym, EvalValue::Box(value));
     }
 
+    /// Binds a symbol to an arbitrary [`EvalValue`] in the current scope.
+    ///
+    /// The general form behind [`bind`](Self::bind): it accepts closures and
+    /// pattern matchers in addition to plain boxes. Like `bind`, it is unchecked
+    /// — duplicate bindings shadow rather than error.
     pub(crate) fn bind_value(&mut self, sym: SymId, value: EvalValue) {
         self.with_store_mut(|store| {
             let layer = &mut store.layers[self.current];
@@ -310,6 +332,11 @@ impl Environment {
         })
     }
 
+    /// Value-returning core of [`lookup`](Self::lookup).
+    ///
+    /// Walks the full scope chain and returns the innermost binding as an
+    /// [`EvalValue`] together with the [`EnvId`] of the layer that owns it, so
+    /// callers that care about closures/matchers (not just boxes) can use them.
     pub(crate) fn lookup_value(&self, sym: SymId) -> Option<(EnvId, EvalValue)> {
         self.with_store(|store| {
             let mut env_id = Some(self.current);
@@ -345,6 +372,10 @@ impl Environment {
             })
     }
 
+    /// Value-returning core of [`lookup_until_barrier`](Self::lookup_until_barrier).
+    ///
+    /// Like [`lookup_value`](Self::lookup_value) but stops at the first barrier
+    /// layer, returning the raw [`EvalValue`] instead of only boxes.
     pub(crate) fn lookup_until_barrier_value(&self, sym: SymId) -> Option<EvalValue> {
         self.with_store(|store| {
             let mut env_id = Some(self.current);
@@ -390,6 +421,10 @@ impl Environment {
         })
     }
 
+    /// Value-returning core of [`lookup_local`](Self::lookup_local).
+    ///
+    /// Consults only the current layer (no parent traversal) and returns the raw
+    /// [`EvalValue`] rather than only boxes.
     pub(crate) fn lookup_local_value(&self, sym: SymId) -> Option<EvalValue> {
         self.with_store(|store| {
             let layer = &store.layers[self.current];
@@ -433,10 +468,19 @@ impl Environment {
         self.push_child(true)
     }
 
+    /// Shared core of [`push_scope`](Self::push_scope) and
+    /// [`push_barrier_scope`](Self::push_barrier_scope): spawns a child whose
+    /// parent is the current layer, with the given barrier flag.
     fn push_child(&self, barrier: bool) -> Self {
         self.spawn_child_with_parent(Some(self.current), barrier)
     }
 
+    /// Allocates a fresh layer in the shared store and returns a handle to it.
+    ///
+    /// The low-level primitive behind [`push_scope`](Self::push_scope) and
+    /// [`push_barrier_scope`](Self::push_barrier_scope): `parent` sets the lookup
+    /// chain (`None` for a root layer) and `barrier` marks it as a pattern-matching
+    /// barrier. The new handle shares the same store and source context.
     pub(crate) fn spawn_child_with_parent(&self, parent: Option<EnvId>, barrier: bool) -> Self {
         let current = self.with_store_mut(|store| {
             let next_id = store.layers.len();
@@ -455,6 +499,9 @@ impl Environment {
         }
     }
 
+    /// Clones the current layer's contents for inspection or replay.
+    ///
+    /// Returns the layer's parent, its barrier flag, and a copy of its bindings.
     pub(crate) fn layer_snapshot(&self) -> (Option<EnvId>, bool, Vec<(SymId, EvalValue)>) {
         self.with_store(|store| {
             let layer = &store.layers[self.current];
@@ -531,11 +578,18 @@ impl Environment {
         out
     }
 
+    /// Runs `f` with shared (read-only) access to the underlying [`EnvStore`].
+    ///
+    /// Centralizes the `RefCell` borrow so call sites never hold a borrow guard
+    /// across other operations on the same environment.
     pub(crate) fn with_store<R>(&self, f: impl FnOnce(&EnvStore) -> R) -> R {
         let guard = self.store.borrow();
         f(&guard)
     }
 
+    /// Runs `f` with exclusive (mutable) access to the underlying [`EnvStore`].
+    ///
+    /// The mutable counterpart of [`with_store`](Self::with_store).
     pub(crate) fn with_store_mut<R>(&self, f: impl FnOnce(&mut EnvStore) -> R) -> R {
         let mut guard = self.store.borrow_mut();
         f(&mut guard)

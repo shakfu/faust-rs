@@ -1,3 +1,13 @@
+//! Iterative `ipar` / `iseq` / `isum` / `iprod` lowering.
+//!
+//! Expands the four iteration forms of Faust box IR into their equivalent
+//! parallel/sequential compositions by substituting the loop variable with
+//! successive integer literals and composing the results:
+//! - `iterate_par` / `iterate_seq` — expand to `par(A, B)` / `seq(A, B)` trees;
+//! - `iterate_sum` / `iterate_prod` — expand to `add` / `mul` chains;
+//! - `iteration_var_name` / `eval_non_negative_count` — parse and validate the
+//!   loop header.
+
 use super::*;
 
 /// Returns the identifier name used as iterative binder in `ipar/iseq/isum/iprod`.

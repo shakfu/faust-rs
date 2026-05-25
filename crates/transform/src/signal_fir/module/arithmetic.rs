@@ -1,3 +1,17 @@
+//! Binary operator, math function, cast, select, and projection lowering.
+//!
+//! Covers the arithmetic spine of the signal-to-FIR lowering:
+//! - `lower_binop` — maps Faust `BinOp` nodes to typed FIR binop instructions;
+//! - `lower_math1` / `lower_math2` — unary and binary math intrinsics;
+//! - `lower_minmax` — min/max with integer-vs-real type handling;
+//! - `lower_abs` — absolute value with domain-appropriate FIR form;
+//! - `lower_cast` / `lower_bitcast` — integer↔real type coercions;
+//! - `lower_select2` — conditional selection;
+//! - `lower_proj` — recursion projection decoding.
+//!
+//! Relies on the promoter invariant that all operands already carry explicit
+//! cast wrappers; no implicit coercion is performed here.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {

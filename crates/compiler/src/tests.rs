@@ -12,6 +12,8 @@ use codegen::backends::wasm::WasmOptions;
 use parser::VirtualSourceMap;
 use serde_json::Value;
 
+/// Creates a unique temporary directory for one test, keyed by `test_name`,
+/// process id and a nanosecond timestamp to avoid collisions across runs.
 fn temp_root(test_name: &str) -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -26,6 +28,7 @@ fn temp_root(test_name: &str) -> PathBuf {
     root
 }
 
+/// Extracts the `include_pathnames` array from a DSP JSON string as paths.
 fn json_include_pathnames(dsp_json: &str) -> Vec<PathBuf> {
     let parsed: Value = serde_json::from_str(dsp_json).expect("valid DSP JSON");
     parsed["include_pathnames"]
@@ -42,6 +45,7 @@ fn json_include_pathnames(dsp_json: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Extracts the `library_list` array from a DSP JSON string as paths.
 fn json_library_list(dsp_json: &str) -> Vec<PathBuf> {
     let parsed: Value = serde_json::from_str(dsp_json).expect("valid DSP JSON");
     parsed["library_list"]
@@ -58,6 +62,7 @@ fn json_library_list(dsp_json: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Returns the `filename` field of a DSP JSON string, if present.
 fn json_filename(dsp_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(dsp_json).expect("valid DSP JSON");
     parsed["filename"].as_str().map(str::to_owned)

@@ -1,3 +1,13 @@
+//! Case and pattern rule evaluation.
+//!
+//! Handles the `case` expression form in Faust box IR:
+//! - `rule_parts` — splits a rule node into its pattern list and body;
+//! - `case_expected_arity` — derives the expected argument count from the first rule;
+//! - `eval_rule_list` / `eval_pattern_list` / `eval_pattern` — evaluate and
+//!   match rule sets against supplied argument lists;
+//! - `pattern_simplification` — reduces pattern expressions to normal form
+//!   before matching.
+
 use super::*;
 
 /// Decodes a case rule node into `(lhs_patterns, rhs_expr)`.

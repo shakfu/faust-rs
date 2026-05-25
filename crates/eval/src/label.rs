@@ -1,3 +1,18 @@
+//! UI and modulation label evaluation.
+//!
+//! Ports the C++ `evalLabel(...)` mini-parser used to resolve dynamic label
+//! strings in widget and modulation expressions:
+//! - `eval_label_node` — evaluates a label tree node to a `String`;
+//! - `eval_label` — the state-machine parser that substitutes `%` and `%i`
+//!   placeholders by evaluating identifiers from the current environment;
+//! - `is_eval_label_ident_char` / `write_label_ident_value` — character
+//!   classification and substitution helpers;
+//! - `strip_label_*` / `label_node_text` / `is_subsequence` — utility helpers
+//!   for label text extraction and suffix matching.
+//!
+//! Source provenance (C++): `compiler/evaluate/eval.cpp` — `evalLabel(...)`,
+//! `writeIdentValue(...)`.
+
 use super::*;
 
 /// Evaluates one UI/modulation label node using the C++ `evalLabel(...)`

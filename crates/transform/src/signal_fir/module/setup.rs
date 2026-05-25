@@ -1,3 +1,10 @@
+//! Constructor and shared lowering utilities for [`SignalToFirLower`].
+//!
+//! Contains `SignalToFirLower::new` together with the helper methods that are
+//! used across multiple lowering concerns: sample-rate variable creation,
+//! delay-line preparation, type resolution, signal variability analysis,
+//! bucket materialization, and FIR-type mapping.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {

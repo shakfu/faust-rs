@@ -1,3 +1,14 @@
+//! Golden regression snapshot generation and comparison helpers.
+//!
+//! Golden tests in this crate record a compact fingerprint of generated code
+//! rather than storing the full source text.  The fingerprint encodes byte
+//! count, line count, and an FNV-1a 64-bit hash of the newline-normalised
+//! output, making it platform-independent and diff-friendly.
+//!
+//! - `golden_snapshot` — builds the fingerprint string from in-memory source;
+//! - `golden_snapshot_from_file` — builds the fingerprint by reading a file;
+//! - `fnv1a64` / `normalize_newlines` — hash and normalisation primitives.
+
 use super::*;
 
 // ─── Golden snapshot helpers ──────────────────────────────────────────────────

@@ -1,3 +1,11 @@
+//! Delay and recursion state helpers, and register-init logic.
+//!
+//! Provides the methods that manage persistent DSP state across the Faust
+//! lifecycle: recursion-carrier resolution and allocation, delay-state slot
+//! lowering (shift strategy and ring-buffer strategy), and the helpers that
+//! register state variables in `instanceClear` and `instanceConstants`
+//! through the named-struct / register-init mechanism.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {

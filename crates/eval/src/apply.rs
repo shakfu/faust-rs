@@ -1,3 +1,13 @@
+//! Box application, arity inference, and list/par conversion.
+//!
+//! Implements the core function-application machinery of the Faust evaluator:
+//! - `rev_eval_list` / `apply_value_list*` — evaluate and apply argument lists;
+//! - `apply_list` — recursive application that peels one argument per step;
+//! - `larg2par` — converts an n-tuple `par` abstraction into a multi-argument form;
+//! - `concat_lists` / `nwires` — list and wire-count utilities;
+//! - `infer_box_arity` / `infer_box_arity_for_apply` — box input/output arity
+//!   inference used during application and route construction.
+
 use super::*;
 
 /// Evaluates argument list nodes and returns the reversed evaluated list.
@@ -417,6 +427,11 @@ pub(crate) fn list_outputs_for_apply(
     Some(total)
 }
 
+/// Infers box arity after `a2sb` lowering, with fallback to pre-lowering arity.
+///
+/// Unlike [`infer_box_arity`], this variant runs `a2sb` first so that residual
+/// symbolic boxes (e.g. partially-applied `selectbus`) report the correct arity
+/// before application attempts to match them against argument lists.
 pub(crate) fn infer_box_arity_for_apply(
     arena: &mut TreeArena,
     id: TreeId,

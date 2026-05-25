@@ -245,6 +245,10 @@ impl EvalSourceContext {
         )
     }
 
+    /// Returns the list of files loaded so far via `import` / `library` / `component`.
+    ///
+    /// Order reflects first-load order; each path appears at most once. Used to
+    /// report source dependencies of a compilation.
     #[must_use]
     pub fn loaded_files(&self) -> Vec<PathBuf> {
         self.loaded_files
@@ -253,6 +257,11 @@ impl EvalSourceContext {
             .clone()
     }
 
+    /// Probes the loaded-source cache for the first of `paths` already present.
+    ///
+    /// Invokes `f` with the cached entry and its path on the first hit, or with
+    /// `(None, "")` if none of the candidate paths are cached. Runs `f` while
+    /// holding the cache lock, so callers must avoid re-entering the cache.
     pub(crate) fn cached_loaded_source_hits<R>(
         &self,
         paths: &[PathBuf],
@@ -267,6 +276,10 @@ impl EvalSourceContext {
         f(None, Path::new(""))
     }
 
+    /// Caches a parsed source under `path` and records it in `loaded_files`.
+    ///
+    /// Idempotent with respect to the loaded-files list (a path is recorded only
+    /// once) while the cache entry is overwritten on repeat calls.
     pub(crate) fn insert_loaded_source(&self, path: PathBuf, source: CachedLoadedSource) {
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(path.clone(), source);

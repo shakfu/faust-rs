@@ -1,3 +1,13 @@
+//! Central `lower_signal` dispatcher and leaf signal lowering.
+//!
+//! The [`SignalToFirLower::lower_signal`] method defined here is the single
+//! recursive entry point for the signal-to-FIR traversal.  It dispatches on
+//! the signal-tree shape via `match_sig` and delegates each case to a
+//! specialised helper: constants, inputs, delay chains, casts, BinOps, math
+//! functions, FFI calls, and recursion projections.
+//!
+//! Results are memoized in [`SignalToFirLower::cache`] for DAG sharing.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {

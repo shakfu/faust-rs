@@ -219,6 +219,12 @@ impl LoopDetector {
         Self::with_parts(max_depth, Arc::new(AtomicBool::new(false)))
     }
 
+    /// Shared constructor behind [`new`](Self::new), [`with_cancel`](Self::with_cancel)
+    /// and [`with_max_depth`](Self::with_max_depth).
+    ///
+    /// Reads the structural hard-limit from the environment, then initializes all
+    /// empty stacks, caches and side-tables from the given `max_depth` and
+    /// `cancel` flag.
     fn with_parts(max_depth: usize, cancel: Arc<AtomicBool>) -> Self {
         let structural_max_depth =
             depth_limit_from_env(STRUCTURAL_HARD_MAX_DEPTH_ENV, STRUCTURAL_HARD_MAX_DEPTH);
@@ -281,10 +287,20 @@ impl LoopDetector {
         self.closure_store.get(key as usize).cloned()
     }
 
+    /// Pushes a frame keyed by `(tree, environment)` and checks for a cycle.
+    ///
+    /// Used when re-evaluating a tree node in a given environment; returns
+    /// [`EvalError::LoopDetected`] if the same pair is already on the stack and
+    /// [`EvalError::RecursionDepthExceeded`] past `max_depth`. Pair with
+    /// [`leave`](Self::leave).
     pub(crate) fn enter_tree(&mut self, id: TreeId, env_key: EnvFrameKey) -> Result<(), EvalError> {
         self.enter(LoopFrame::TreeEnv { id, env_key }, id)
     }
 
+    /// Pushes a frame keyed by `(symbol, environment)` and checks for a cycle.
+    ///
+    /// Used when resolving a definition; `node` is the tree blamed in a
+    /// [`EvalError::LoopDetected`]. Pair with [`leave`](Self::leave).
     pub(crate) fn enter_symbol_env(
         &mut self,
         sym: SymId,
@@ -294,6 +310,12 @@ impl LoopDetector {
         self.enter(LoopFrame::SymbolEnv { sym, env_key }, node)
     }
 
+    /// Pushes `frame` after the cycle and depth checks shared by both `enter_*`
+    /// methods.
+    ///
+    /// Returns [`EvalError::LoopDetected`] (blaming `node`) if `frame` is already
+    /// on the stack, or [`EvalError::RecursionDepthExceeded`] once `max_depth` is
+    /// reached.
     fn enter(&mut self, frame: LoopFrame, node: TreeId) -> Result<(), EvalError> {
         if self.call_stack.contains(&frame) {
             return Err(EvalError::LoopDetected { node });
@@ -307,6 +329,7 @@ impl LoopDetector {
         Ok(())
     }
 
+    /// Pops the most recently entered frame, balancing an `enter_*` call.
     pub(crate) fn leave(&mut self) {
         let _ = self.call_stack.pop();
     }
@@ -327,19 +350,29 @@ impl LoopDetector {
         Ok(())
     }
 
+    /// Decrements the structural-lowering counter, balancing an
+    /// [`enter_structural`](Self::enter_structural) call.
     pub(crate) fn leave_structural(&mut self) {
         self.structural_depth = self.structural_depth.saturating_sub(1);
     }
 }
 
+/// Reads a recursion-depth limit from the environment variable `var_name`,
+/// falling back to `fallback` when it is unset or invalid.
 fn depth_limit_from_env(var_name: &str, fallback: usize) -> usize {
     depth_limit_from_env_value(std::env::var_os(var_name).as_deref(), fallback)
 }
 
+/// Pure core of [`depth_limit_from_env`], taking the raw value directly so it
+/// can be unit-tested without touching process environment.
 fn depth_limit_from_env_value(raw: Option<&OsStr>, fallback: usize) -> usize {
     raw.and_then(parse_depth_limit).unwrap_or(fallback)
 }
 
+/// Parses a depth limit, accepting only strictly positive integers.
+///
+/// Returns `None` for non-UTF-8, non-numeric, or zero values so the caller can
+/// apply its fallback.
 fn parse_depth_limit(raw: &OsStr) -> Option<usize> {
     let parsed = raw.to_str()?.trim().parse::<usize>().ok()?;
     (parsed > 0).then_some(parsed)

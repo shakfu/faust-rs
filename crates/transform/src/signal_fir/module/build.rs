@@ -1,3 +1,15 @@
+//! FIR module assembly — `build_module` entry point.
+//!
+//! Owns the single crate-visible function [`build_module`] that accepts
+//! pre-validated planning data and a prepared signal forest and assembles a
+//! self-contained [`SignalFirOutput`] with all Faust lifecycle sections in
+//! deterministic order: `metadata`, `instanceConstants`,
+//! `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
+//! and `compute`.
+//!
+//! All other submodules in `module/` provide `impl SignalToFirLower` methods
+//! that are invoked from the orchestration logic here.
+
 use super::*;
 
 /// Lowers a prepared signal forest into a complete FIR module.

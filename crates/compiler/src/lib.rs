@@ -309,6 +309,8 @@ pub enum FaustwasmServiceErrorCode {
 }
 
 impl FaustwasmServiceError {
+    /// Builds an error tagged [`FaustwasmServiceErrorCode::Unsupported`] for a
+    /// query that is recognized but not yet implemented in the Rust service.
     fn unsupported(message: impl Into<String>) -> Self {
         Self {
             code: FaustwasmServiceErrorCode::Unsupported,
@@ -316,6 +318,8 @@ impl FaustwasmServiceError {
         }
     }
 
+    /// Builds an error tagged [`FaustwasmServiceErrorCode::InvalidArgument`] for
+    /// an unknown query key.
     fn invalid_argument(message: impl Into<String>) -> Self {
         Self {
             code: FaustwasmServiceErrorCode::InvalidArgument,
@@ -390,6 +394,8 @@ pub enum SignalFirLane {
 }
 
 impl WasmArtifactBundle {
+    /// Repackages a compiled [`WasmModule`] into the public artifact bundle,
+    /// pairing its binary and JSON with the formatted `compile_options` string.
     fn from_wasm_module(module: WasmModule, compile_options: String) -> Self {
         Self {
             wasm_bytes: module.wasm_binary,
@@ -485,6 +491,9 @@ impl Compiler {
         self
     }
 
+    /// Runs `f`, reporting its wall-clock duration as phase `name` to the
+    /// configured timing sink (a no-op when [`with_timing_sink`](Self::with_timing_sink)
+    /// was never called). Returns `f`'s result unchanged.
     fn time_phase<T>(&self, name: &'static str, f: impl FnOnce() -> T) -> T {
         time_phase_with_sink(self.timing_sink.as_ref(), name, f)
     }
@@ -570,6 +579,12 @@ impl Compiler {
         )
     }
 
+    /// Shared core of the `compile_*_to_signals*` family.
+    ///
+    /// Parses `source` (with import resolution when `search_paths` or
+    /// `virtual_sources` are non-empty), evaluates the `process` entry point, and
+    /// propagates the resulting boxes to output signals. `virtual_sources` lets
+    /// callers supply in-memory library files instead of on-disk ones.
     fn compile_source_to_signals_with_import_context(
         &self,
         source_name: &str,

@@ -394,6 +394,14 @@ pub fn eval_entrypoint_with_source_context_and_cancel(
     eval_entrypoint_full(arena, definitions, entrypoint, source_context, Some(cancel))
 }
 
+/// Shared implementation behind every `eval_entrypoint_*` entry point.
+///
+/// Binds the top-level definitions into a fresh root environment, checks that
+/// `entrypoint` (typically `"process"`) is actually defined, evaluates it, then
+/// lowers the result back to box IR via [`a2sb_value`]. `cancel`, when present,
+/// wires cooperative cancellation into the [`LoopDetector`]. Returns the lowered
+/// box together with [`EvalStats`]; the def-name table is remapped through
+/// `a2sb`'s rebuild cache so SVG folding stays reachable.
 fn eval_entrypoint_full(
     arena: &mut TreeArena,
     definitions: TreeId,
@@ -441,6 +449,13 @@ fn eval_entrypoint_full(
     Ok((result, stats))
 }
 
+/// Lowers an [`EvalValue`] to box IR, guarded by the structural-depth budget.
+///
+/// Thin wrapper that brackets [`a2sb_value_inner`] with
+/// [`enter_structural`](LoopDetector::enter_structural) /
+/// [`leave_structural`](LoopDetector::leave_structural), so deep closure chains
+/// fail with [`EvalError::RecursionDepthExceeded`] rather than overflowing the
+/// native stack.
 fn a2sb_value(
     arena: &mut TreeArena,
     value: EvalValue,
@@ -452,6 +467,13 @@ fn a2sb_value(
     result
 }
 
+/// Dispatches lowering of an [`EvalValue`] by variant.
+///
+/// Boxes go straight to [`a2sb`]; abstraction closures are lowered to
+/// `symbolic(...)` via [`lower_abstraction_to_symbolic_value`]; environment
+/// closures pass through unchanged; any other closure is forced by re-evaluating
+/// its body and re-lowering; pattern matchers go through
+/// [`lower_pattern_matcher_to_symbolic`].
 fn a2sb_value_inner(
     arena: &mut TreeArena,
     value: EvalValue,
@@ -511,6 +533,13 @@ fn a2sb(
     Ok(result)
 }
 
+/// Lowers a single box node by shape — the recursive core of [`a2sb`].
+///
+/// Abstractions and `case` nodes are re-wrapped as evaluator values and lowered
+/// via [`a2sb_value`]; `boxPatternMatcher` / `boxClosure` keys are resolved from
+/// the side-tables in [`LoopDetector`]; waveforms are returned verbatim (their
+/// child is sample payload, not a subtree); all other nodes are rebuilt only if
+/// a child actually changed, preserving structural sharing.
 fn a2sb_match(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -600,6 +629,11 @@ fn a2sb_match(
     }
 }
 
+/// Lowers a one-argument abstraction closure into a `symbolic(slot, body)` box.
+///
+/// Applies the closure to one [`fresh_slot`], lowers the resulting body with
+/// [`a2sb`], and wraps it so later passes see a first-order symbolic box instead
+/// of an unapplied abstraction.
 fn lower_abstraction_to_symbolic_value(
     arena: &mut TreeArena,
     abstraction: ClosureValue,
@@ -620,6 +654,13 @@ fn lower_abstraction_to_symbolic_value(
     Ok(b.symbolic(slot, lowered_body))
 }
 
+/// Lowers a partially-applied `case` automaton into symbolic boxes.
+///
+/// If the matcher is already in a final state, evaluates the winning rule's RHS
+/// and lowers it. Otherwise it fills the still-missing arguments with
+/// [`fresh_slot`]s, applies the matcher to them, lowers the result, and wraps it
+/// in one `symbolic(slot, ...)` per slot (innermost slot first) so the lowered
+/// box exposes the expected arity.
 fn lower_pattern_matcher_to_symbolic(
     arena: &mut TreeArena,
     mut pm: PatternMatcherValue,
@@ -727,6 +768,11 @@ fn eval_value(
     Ok(result)
 }
 
+/// Decides whether an evaluation result may be memoized in the eval cache.
+///
+/// Boxes and closures are cacheable; pattern matchers are not, because their
+/// automaton state is mutated in place during application and a cached copy
+/// would be replayed from a stale position.
 #[inline]
 fn should_cache_eval_value(value: &EvalValue) -> bool {
     match value {

@@ -1,3 +1,13 @@
+//! Import search path construction and merge helpers.
+//!
+//! Mirrors the C++ `global::initDocumentNames()` / `initDirectories()` model:
+//! - `default_import_search_paths` — builds the ordered path list for a
+//!   file-backed session (current dir, `FAUST_LIB_PATH`, exe-relative, system);
+//! - `merge_import_search_paths` / `build_import_search_paths` — utilities for
+//!   combining caller-supplied paths with the defaults;
+//! - `ensure_parse_success` — converts a parse result into a `CompilerError`
+//!   with consistent source attribution.
+
 use super::*;
 
 // ─── Helpers: path resolution ─────────────────────────────────────────────────

@@ -1,3 +1,19 @@
+//! Box and signal algebraic simplification, and compile-time constant extraction.
+//!
+//! Implements the evaluator-level simplification layer:
+//! - `propagate_box_and_simplify` — propagates a 0→1 box and simplifies the
+//!   resulting signal; building block for all constant folding in the evaluator;
+//! - `eval_box_to_*` — try to extract an `i32` or `f64` literal from a box;
+//! - `simplify_pattern` — reduces a pattern box to normal form before matching;
+//! - `flatten_route_spec` / `normalize_route_spec` — route wire-list helpers;
+//! - `box_simplification` / `numeric_box_simplification` — structural
+//!   simplifications applied after evaluation;
+//! - `is_numerical_tuple_box` — predicate for compile-time numeric tuples;
+//! - `try_fold_seq_numeric` — folds `seq(numeric_tuple, f)` at compile time.
+//!
+//! Source provenance (C++): `compiler/evaluate/eval.cpp` — `isBoxNumeric`,
+//! `eval2double`, `eval2int`, `numericBoxSimplification`.
+
 use super::*;
 
 /// Propagates a 0→1 box with no inputs, then algebraically simplifies the
@@ -244,6 +260,10 @@ pub(crate) fn all_inputs_are_int(arena: &TreeArena, box_id: TreeId) -> bool {
     }
 }
 
+/// Returns `true` if `box_id` is a tree of numeric literals connected only by `par`.
+///
+/// Used by [`try_fold_seq_numeric`] to decide whether the left-hand side of a
+/// `seq` expression can be treated as a static input tuple for compile-time folding.
 pub(crate) fn is_numerical_tuple_box(arena: &TreeArena, box_id: TreeId) -> bool {
     match match_box(arena, box_id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => true,

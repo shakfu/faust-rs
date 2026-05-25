@@ -1,3 +1,11 @@
+//! FIR adapter for backend-neutral local RAD formula emission.
+//!
+//! [`FirRadFormulaBuilder`] bridges the backend-agnostic `RadFormulaBuilder`
+//! trait (used by shared differentiation-rule helpers) and the FIR store owned
+//! by [`SignalToFirLower`].  It maps arithmetic operations and math calls to
+//! typed FIR instructions while registering required math helpers through
+//! `used_math_ops`, and preserves the active internal real type.
+
 use super::*;
 
 /// FIR adapter for backend-neutral local RAD formulas.
@@ -13,14 +21,18 @@ pub(super) struct FirRadFormulaBuilder<'lower, 'arena> {
 }
 
 impl<'lower, 'arena> FirRadFormulaBuilder<'lower, 'arena> {
+    /// Wraps a mutable borrow of the active lowering state with the given real type.
     pub(super) fn new(lower: &'lower mut SignalToFirLower<'arena>, real_ty: FirType) -> Self {
         Self { lower, real_ty }
     }
 
+    /// Emits a typed FIR binary operation into the lowering store.
     fn binop(&mut self, op: FirBinOp, x: FirId, y: FirId, typ: FirType) -> FirId {
         FirBuilder::new(&mut self.lower.store).binop(op, x, y, typ)
     }
 
+    /// Emits a FIR math call, registering `op` in `used_math_ops` so the backend
+    /// knows to provide the corresponding math helper.
     fn math_call(&mut self, op: FirMathOp, args: &[FirId]) -> FirId {
         self.lower.used_math_ops.insert(op);
         FirBuilder::new(&mut self.lower.store).math_call(op, args, self.real_ty.clone())

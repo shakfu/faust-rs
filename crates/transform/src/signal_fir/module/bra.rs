@@ -1,3 +1,15 @@
+//! Block Reverse AD (BRA) lowering — backward sweep, adjoint accumulation, tapes.
+//!
+//! Implements the `impl SignalToFirLower` methods that lower `ReverseTimeRec`
+//! recursion groups and their associated BRA tape stores, backward-sweep
+//! loops, adjoint variables, and carry propagation.  The BRA pattern is the
+//! Faust-specific realisation of reverse-mode automatic differentiation in a
+//! block-processing DSP context.
+//!
+//! Note: as of 2026-05-10 the primary RAD dispatcher uses the forward-mode
+//! algebraic RAD path; the BRA lowering here is preserved for the LTI
+//! adjoint fast-path revival.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {

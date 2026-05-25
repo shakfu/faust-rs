@@ -1,3 +1,18 @@
+//! Signal-to-FIR lowering context, error types, and per-backend dispatch.
+//!
+//! Centralises everything between the evaluator/propagate output
+//! ([`SignalCompileOutput`]) and the backend emitter:
+//!
+//! - [`LowerError<E>`] / [`LowerToInterpError`] / [`LowerToFirError`] —
+//!   three-stage error envelopes (Transform → Verify → Codegen);
+//! - [`SignalLoweringContext`] — lane selection, FIR verify options, real type,
+//!   delay parameters, and optional timing sink bundled as one value;
+//! - `lower_signals_to_*` — public dispatch entry points (C++, C, Julia, interp, FIR);
+//! - `lower_signals_to_*_transform_fastlane` — the actual lowering implementations
+//!   shared by all backends;
+//! - `maybe_verify_fir_module` / `serialize_factory` / `resolve_module_name` —
+//!   shared helpers used across multiple entry points.
+
 use super::*;
 
 // ─── Signal-to-FIR lower errors ───────────────────────────────────────────────
@@ -44,6 +59,12 @@ pub(crate) enum LowerToFirError {
     Verify(FirVerifyReport),
 }
 
+/// Runs `f`, optionally recording its wall-clock duration in `timing_sink`.
+///
+/// When `timing_sink` is `None`, the closure is called directly with zero
+/// overhead.  When present, the elapsed time is passed to the sink under
+/// `name` so callers can collect per-phase timing without conditional logic
+/// at each call site.
 pub(crate) fn time_phase_with_sink<T>(
     timing_sink: Option<&TimingSink>,
     name: &'static str,
@@ -61,13 +82,24 @@ pub(crate) fn time_phase_with_sink<T>(
 
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
 
+/// Shared configuration for all `lower_signals_to_*` entry points.
+///
+/// Bundles the parameters that are common across every backend so callers
+/// construct one value and pass it to the chosen dispatch function.
 #[derive(Clone)]
 pub(crate) struct SignalLoweringContext {
+    /// Which signal→FIR lowering lane to use (currently only transform fast-lane).
     pub(crate) lane: SignalFirLane,
+    /// Whether and how strictly to run FIR verification after lowering.
     pub(crate) fir_verify: FirVerifyOptions,
+    /// Floating-point precision for the generated DSP core.
     pub(crate) real_type: RealType,
+    /// Maximum number of samples a delay may be copy-unrolled before falling
+    /// back to a ring-buffer state slot.
     pub(crate) max_copy_delay: u32,
+    /// Delay-line count threshold above which the lowerer switches strategy.
     pub(crate) delay_line_threshold: u32,
+    /// Optional per-phase timing callback; `None` disables timing.
     pub(crate) timing_sink: Option<TimingSink>,
 }
 

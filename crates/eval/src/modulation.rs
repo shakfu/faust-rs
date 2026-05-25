@@ -1,3 +1,17 @@
+//! Modulation circuit evaluation and widget rewriting.
+//!
+//! Implements the Faust `modulate(target, circuit, body)` form:
+//! - `eval_modulation` — evaluates target label and optional modulation circuit,
+//!   then implants the circuit around matching widgets in the fully-evaluated body;
+//! - `eval_modulation_label` — evaluates the label argument of a modulation node;
+//! - `eval_modulation_circuit` — evaluates and arity-checks the circuit argument;
+//! - `implant_modulation` / `implant_widget_if_match` — tree-walking rewriters
+//!   that splice the circuit around every widget whose path matches the target;
+//! - `widget_matches` / `modulation_target_path` — path-matching predicates.
+//!
+//! Source provenance (C++): `compiler/evaluate/eval.cpp` modulation branch +
+//! `compiler/transform/boxModulationImplanter.cpp`.
+
 use super::*;
 
 /// Evaluates one modulation form and rewrites matching widgets in the body.

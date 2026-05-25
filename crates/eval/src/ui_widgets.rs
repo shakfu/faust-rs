@@ -1,3 +1,14 @@
+//! UI widget evaluation — sliders, buttons, groups, bargraphs, soundfile.
+//!
+//! Each public function evaluates the label and parameters of one Faust widget
+//! constructor node and rebuilds it with the evaluated values, mirroring the
+//! C++ `evalBoxWidget(...)` / `evalBoxGroup(...)` family in
+//! `compiler/evaluate/eval.cpp`.
+//!
+//! Slider-like widgets (`vslider`, `hslider`, `numentry`) share a common
+//! `eval_slider_like` helper that validates the four numeric parameters
+//! (init, min, max, step) and calls `simplify_slider_param` on each.
+
 use super::*;
 
 /// Evaluates one label node and re-interns the resulting string literal in the arena.
@@ -37,6 +48,7 @@ pub(crate) fn eval_checkbox(
     Ok(BoxBuilder::new(arena).checkbox(label))
 }
 
+/// Evaluates one `vslider` widget node, simplifying label and numeric params.
 pub(crate) fn eval_vslider(
     arena: &mut TreeArena,
     label: TreeId,
@@ -54,6 +66,7 @@ pub(crate) fn eval_vslider(
     )
 }
 
+/// Evaluates one `hslider` widget node, simplifying label and numeric params.
 pub(crate) fn eval_hslider(
     arena: &mut TreeArena,
     label: TreeId,
@@ -71,6 +84,7 @@ pub(crate) fn eval_hslider(
     )
 }
 
+/// Evaluates one `nentry` (numeric entry) widget node, simplifying label and numeric params.
 pub(crate) fn eval_num_entry(
     arena: &mut TreeArena,
     label: TreeId,
@@ -94,6 +108,13 @@ enum SliderKind {
     NumEntry,
 }
 
+/// Builds a slider-family UI box (`vslider` / `hslider` / `nentry`).
+///
+/// Shared by the three public evaluators: it evaluates the `label` node and
+/// reduces each of the four numeric parameters (current, min, max, step) to a
+/// constant via [`simplify_slider_param`], then constructs the box for the
+/// requested [`SliderKind`]. Mirrors the per-kind `eval2double` reduction in C++
+/// `eval.cpp`.
 fn eval_slider_like(
     arena: &mut TreeArena,
     kind: SliderKind,

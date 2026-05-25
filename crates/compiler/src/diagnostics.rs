@@ -1,3 +1,18 @@
+//! Diagnostic enrichment — source spans, definition ownership, and paired context.
+//!
+//! Provides the helpers that attach detailed context to compiler diagnostics:
+//! - `add_paired_propagate_context` — adds A/B expression notes to composed-box
+//!   arity-mismatch errors;
+//! - `maybe_add_source_label` / `eval_source_labels` — attaches source-file span
+//!   notes derived from tree node metadata;
+//! - `source_span_*` — extract span start/end/file from a node or definition;
+//! - `find_definition_*` / `owner_definition_name_for_node` — locate the
+//!   enclosing definition for a given node in the box tree;
+//! - `definition_reference_edges` / `collect_definition_refs` — build the
+//!   definition cross-reference graph used in alias binding traces;
+//! - `alias_binding_trace_for_node` — produces an ordered chain of definition
+//!   names showing how a node was reached through symbol aliases.
+
 use super::*;
 
 // ─── Propagate diagnostic enrichment ─────────────────────────────────────────

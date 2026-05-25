@@ -169,6 +169,9 @@ struct SamplePhases {
 }
 
 impl SamplePhases {
+    /// Concatenates the three lifecycle phases into a single statement list,
+    /// preserving execution order: `immediate`, then `post_output`, then
+    /// `sample_end`.
     fn flattened(&self) -> Vec<FirId> {
         let mut all = Vec::with_capacity(
             self.immediate.len() + self.post_output.len() + self.sample_end.len(),
@@ -221,7 +224,16 @@ const MATH_PROTO_ORDER: &[FirMathOp] = &[
 /// Deterministic prototype emission order for polymorphic integer helper calls.
 const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 
+/// Flags, per output signal, whether it must be computed in the reverse sample loop.
+///
+/// Returns a mask parallel to `signals`: an entry is `true` when the output is a
+/// gradient projection of a `ReverseTimeRec` or a public `BlockReverseAD` group
+/// (index ≥ `primal_count`), which run in reverse time. Outputs whose backward
+/// work is internal to a causal `loop ~ _` recursion stay forward-time.
 fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bool> {
+    /// Recursively tests whether `sig`'s subtree contains a reverse-time gradient
+    /// projection, stopping at SYMREC boundaries and using `visited` for cycle
+    /// safety.
     fn contains_reverse_time_projection(
         arena: &TreeArena,
         sig: SigId,

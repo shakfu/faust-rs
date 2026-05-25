@@ -1,3 +1,14 @@
+//! Waveform table, read-table, and write-table lowering.
+//!
+//! Handles the three table signal families:
+//! - `SIGWAVEFORM` — constant ROM tables defined inline in the DSP source;
+//! - `SIGRDTBL` — indexed read access into a table;
+//! - `SIGWRTBL` / `SIGGEN` — write-driven tables (e.g. delay lines with an
+//!   external write index).
+//!
+//! Also owns table sizing helpers (`table_size_for_signal`) and the index
+//! expression normalisation that enforces integer-domain access.
+
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {

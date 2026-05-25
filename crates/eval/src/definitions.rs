@@ -1,3 +1,15 @@
+//! Definition lookup, environment binding, and abstraction construction.
+//!
+//! Manages the name-resolution and closure layer of the Faust evaluator:
+//! - `bind_definitions` — extends an environment with a set of recursive bindings;
+//! - `rewrite_captured_env` / `copy_env_replace_defs` — closure capture helpers;
+//! - `decode_definition` — unwraps a parser definition node into name + body;
+//! - `top_level_definition_names` — enumerates names in a top-level definition block;
+//! - `map_children` — structural fallback that evaluates children and rebuilds;
+//! - `ident_name` — validates that a node is an `Ident` and extracts its name;
+//! - `build_abstr_from_parser_args` — constructs a lambda chain from a reversed
+//!   parser argument list.
+
 use super::*;
 
 /// Structural fallback: evaluate all children, then rebuild the node unchanged in kind.
@@ -271,6 +283,11 @@ pub(crate) fn ident_name(arena: &TreeArena, id: TreeId) -> Result<String, EvalEr
     }
 }
 
+/// Builds a curried lambda chain from a reversed parser argument list.
+///
+/// The C++ `buildBoxAbstr` iterates over a reversed parameter list and wraps
+/// each head around the current body.  The Rust port mirrors this exactly:
+/// for `[p2, p1]` (reversed) and body `B`, the result is `λp1.(λp2.B)`.
 pub(crate) fn build_abstr_from_parser_args(
     arena: &mut TreeArena,
     mut args: TreeId,

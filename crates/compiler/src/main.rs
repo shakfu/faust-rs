@@ -905,6 +905,9 @@ fn emit_wasm_output(wasm_binary: &[u8], dsp_json: &str, output: Option<&PathBuf>
     }
 }
 
+/// Disassembles a WASM binary into its textual WAST form for `-lang wast`.
+///
+/// Exits the process with status 1 if the binary cannot be printed.
 fn render_wast_output(wasm_binary: &[u8]) -> String {
     match wasmprinter::print_bytes(wasm_binary) {
         Ok(wast) => wast,
@@ -922,6 +925,7 @@ fn emit_json_companion_output(json_text: &str, output: &Path) {
     emit_output(json_text, Some(&json_path));
 }
 
+/// Maps a [`CliLang`] back to its canonical `-lang` token for diagnostics.
 fn cli_lang_name(lang: CliLang) -> &'static str {
     match lang {
         CliLang::C => "c",
@@ -935,6 +939,10 @@ fn cli_lang_name(lang: CliLang) -> &'static str {
     }
 }
 
+/// Returns the `-o` output path, required when `--json` accompanies `-lang` so
+/// the companion JSON has a destination.
+///
+/// Exits with status 2 if no output path was given.
 fn require_companion_output_path(cli: &CliArgs) -> &PathBuf {
     cli.output.as_ref().unwrap_or_else(|| {
         eprintln!("--json used with -lang requires -o <file> so the companion JSON has a path");
@@ -942,6 +950,12 @@ fn require_companion_output_path(cli: &CliArgs) -> &PathBuf {
     })
 }
 
+/// Wraps generated backend code in a user-supplied architecture file.
+///
+/// Returns `generated` unchanged when no `-a <file>` was given. Otherwise builds
+/// [`EnrobageOptions`] from the CLI (architecture dirs, inline flag, class /
+/// super-class names) and applies the wrapper, exiting with status 1 on a
+/// wrapping failure or recoverable error.
 fn wrap_backend_with_architecture(generated: &str, cli: &CliArgs) -> String {
     let Some(architecture_file) = cli.architecture.as_ref() else {
         return generated.to_owned();
@@ -1037,6 +1051,8 @@ fn selected_real_type(cli: &CliArgs) -> RealType {
     }
 }
 
+/// Maps CLI precision switches to the Julia backend's real type, mirroring
+/// [`selected_real_type`] for the Julia code generator.
 fn selected_julia_real_type(cli: &CliArgs) -> JuliaRealType {
     if cli.double {
         JuliaRealType::Float64
@@ -1168,6 +1184,12 @@ fn compile_fixture_to_json_text(
     Ok(json.render())
 }
 
+/// Compiles `input_path` to a JSON description and writes it as a companion file
+/// alongside a textual backend's output (when `--json` is combined with `-lang`).
+///
+/// Tags the JSON `compile_options` with `backend_lang`, picks the import-aware or
+/// default pipeline depending on `-I` flags, and exits with status 1 (after
+/// printing structured diagnostics) on failure.
 fn emit_cli_json_companion_for_backend(
     compiler: &Compiler,
     cli: &CliArgs,
@@ -1240,6 +1262,11 @@ fn main() {
         .expect("compiler thread panicked");
 }
 
+/// Real CLI entry point, run on the deep-stack worker thread spawned by `main`.
+///
+/// Normalizes legacy argument spellings, parses [`CliArgs`], handles early-exit
+/// flags (`--version`, error-format help), then sets up cooperative cancellation
+/// plus the watchdog timeout and drives the requested compilation backend.
 fn run_main() {
     let args = normalize_legacy_args(std::env::args());
     let cli = CliArgs::parse_from(args);
@@ -2933,6 +2960,7 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
         assert!(rendered.contains("expr=x"));
     }
 
+    /// Resolves `file` against the workspace `tests/corpus` directory for snapshot tests.
     fn corpus_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -2942,6 +2970,8 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
             .join(file)
     }
 
+    /// Returns the index of the first note starting with `prefix`, panicking with
+    /// a descriptive message if none matches.
     fn note_index<'a>(notes: &'a [&'a str], prefix: &str) -> usize {
         notes
             .iter()
