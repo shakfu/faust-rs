@@ -88,6 +88,14 @@ pub fn maybe_print_error_format_help(enabled: bool) {
     }
 }
 
+/// Renders the `-v` / `--version` output.
+pub fn render_version_text() -> String {
+    format!(
+        "faust-rs {}\nCopyright (C) 2002-2026, GRAME - Centre National de Creation Musicale. All rights reserved.",
+        Compiler::version()
+    )
+}
+
 /// Writes generated output either to stdout or to the requested file.
 pub fn emit_output(content: &str, output: Option<&PathBuf>) {
     if let Some(path) = output {
@@ -497,7 +505,7 @@ pub fn run_main() {
     let args = normalize_legacy_args(std::env::args());
     let cli = CliArgs::parse_from(args);
     if cli.version {
-        println!("faust-rs {}", Compiler::version());
+        println!("{}", render_version_text());
         return;
     }
     maybe_print_error_format_help(cli.help_error_format);

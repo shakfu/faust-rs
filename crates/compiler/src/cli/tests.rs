@@ -19,7 +19,7 @@ use super::diagnostics::{
     format_diagnostics_human, format_diagnostics_human_with_verbosity, format_diagnostics_json,
     format_diagnostics_json_with_verbosity,
 };
-use super::runner::{emit_wasm_output, render_wast_output};
+use super::runner::{emit_wasm_output, render_version_text, render_wast_output};
 
 #[test]
 fn normalize_legacy_args_maps_dash_fir_to_lang_fir() {
@@ -262,6 +262,15 @@ fn help_mentions_faust_naming_aliases() {
     assert!(rendered.contains("-cn <name>"));
     assert!(rendered.contains("-scn <name>"));
     assert!(rendered.contains("-pn <name>"));
+}
+
+#[test]
+fn version_mentions_faust_copyright() {
+    let rendered = render_version_text();
+    assert!(rendered.starts_with("faust-rs "));
+    assert!(rendered.contains(
+        "Copyright (C) 2002-2026, GRAME - Centre National de Creation Musicale. All rights reserved."
+    ));
 }
 
 #[test]
