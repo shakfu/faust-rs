@@ -140,7 +140,7 @@ Import precedence:
 | `getInfos("help")` | implemented |
 | `getInfos("libdir"\\|"includedir"\\|"archdir"\\|"dspdir"\\|"pathslist")` | explicit `unsupported` |
 | `expandDSP(...)` | API present, currently returns the Rust service result when implemented for the requested shape, otherwise `unsupported` |
-| `generateAuxFiles(...)` | API present, currently returns success only when the Rust service supports the requested generation, otherwise failure |
+| `generateAuxFiles(...)` | API present for `-cpp`, `-c`, `-wasm`, `-json`, and `-svg`; SVG artifacts are generated in memory through `draw::draw_schema_to_memory` |
 
 That `.wasm` file is the compiler-module artifact that the `faustwasm`
 embedded-compiler path is expected to load.

@@ -23,6 +23,20 @@ cargo build -p compiler --release
 cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
+## Validate
+
+Recommended local checks before committing:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo run -p xtask -- golden-check
+```
+
+Use `cargo run -p xtask -- golden-check-cpp` for the long-run C++ parity target
+when `tests/golden/cpp/` is expected to match the current Rust output.
+
 ## Install
 
 ```bash
