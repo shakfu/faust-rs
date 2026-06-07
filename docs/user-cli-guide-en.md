@@ -129,7 +129,7 @@ cargo run -p compiler -- --json tests/corpus/rep_01_passthrough.dsp
 This can also be combined with `--lang <backend>` to emit a backend artifact
 plus a companion `.json` file next to `-o <file>`.
 
-### `--lang c|cpp|fir|interp|cranelift|wasm|wast`
+### `--lang c|cpp|fir|interp|cranelift|julia|wasm|wast`
 
 Faust-style backend language selector.
 
@@ -139,13 +139,14 @@ cargo run -p compiler -- --lang cpp tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang fir tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang interp tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang cranelift tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- --lang julia tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang wasm tests/corpus/rep_01_passthrough.dsp -o /tmp/out.wasm
 cargo run -p compiler -- --lang wast tests/corpus/rep_01_passthrough.dsp
 ```
 
 Legacy compatibility:
 
-- `-lang c`, `-lang cpp`, `-lang fir`, `-lang interp`, `-lang wasm`, and `-lang wast` are accepted.
+- `-lang c`, `-lang cpp`, `-lang fir`, `-lang interp`, `-lang cranelift`, `-lang julia`, `-lang wasm`, and `-lang wast` are accepted.
 - `-lang -c` maps to `--lang c`.
 - `-lang -cpp` maps to `--lang cpp`.
 - `-lang -fir` maps to `--lang fir`.
@@ -158,6 +159,8 @@ faust-rs -lang c foo.dsp
 faust-rs -lang cpp foo.dsp
 faust-rs -lang fir foo.dsp
 faust-rs -lang interp foo.dsp
+faust-rs -lang cranelift foo.dsp
+faust-rs -lang julia foo.dsp
 faust-rs -lang wasm foo.dsp -o foo.wasm
 faust-rs -lang wast foo.dsp
 ```
@@ -253,7 +256,7 @@ Valid with:
 - `--dump-fir-verify`
 - `--dump-cranelift`
 - `--json`
-- `--lang c|cpp|fir|interp|cranelift|wasm|wast`
+- `--lang c|cpp|fir|interp|cranelift|julia|wasm|wast`
 
 Invalid with:
 

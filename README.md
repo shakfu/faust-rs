@@ -28,6 +28,7 @@ cargo run -p xtask -- build-faustwasm-compiler-module
 Recommended local checks before committing:
 
 ```bash
+cargo check --workspace --all-targets
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
@@ -77,8 +78,20 @@ faust-rs -lang wast foo.dsp -o foo.wat
 # Generate Julia source
 faust-rs -lang julia foo.dsp -o foo.jl
 
+# Generate experimental Cranelift backend report
+faust-rs -lang cranelift foo.dsp
+
 # Dump FIR text IR
 faust-rs -lang fir foo.dsp
+
+# Emit strict Faust JSON description
+faust-rs --json foo.dsp
+
+# Emit a backend artifact plus companion JSON next to the output path
+faust-rs -lang cpp --json foo.dsp -o foo.cpp
+
+# Convert interpreter bytecode (.fbc) to self-contained native C++
+faust-rs --dump-cpp-from-fbc foo.fbc --cpp-class-name MyInterpDsp
 
 # Generate block-diagram SVG files
 faust-rs -svg foo.dsp
@@ -120,6 +133,7 @@ the same model applies:
 faust -lang c foo.dsp
 faust -lang cpp foo.dsp
 faust -lang interp foo.dsp
+faust -lang cranelift foo.dsp
 faust -lang fir foo.dsp
 faust -lang wasm foo.dsp
 faust -lang wast foo.dsp
@@ -132,6 +146,7 @@ Without installation (equivalent):
 cargo run -p compiler -- -lang c foo.dsp
 cargo run -p compiler -- -lang cpp foo.dsp
 cargo run -p compiler -- -lang interp foo.dsp
+cargo run -p compiler -- -lang cranelift foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
 cargo run -p compiler -- -lang wasm foo.dsp
 cargo run -p compiler -- -lang wast foo.dsp
