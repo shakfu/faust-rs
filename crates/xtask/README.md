@@ -2,14 +2,39 @@
 
 Developer and CI automation for the `faust-rs` workspace.
 
-`xtask` is not part of the compiler runtime.  It hosts workflows that compare
-Rust output against the C++ reference compiler, regenerate golden snapshots, and
-produce parity/diff reports.
+`xtask` is not part of the compiler runtime. It hosts repository maintenance
+workflows: golden snapshot generation/checks, runtime trace validation,
+backend-alignment smoke runs, differential reports, code-graph generation, and
+the `faustwasm` compiler-module build helper.
 
 ## Usage
 
+Run from the workspace root:
+
+```bash
+cargo run -p xtask -- <command> [options]
 ```
-cargo run -p xtask -- <command>
+
+Show the command summary:
+
+```bash
+cargo run -p xtask
+```
+
+## Prerequisites
+
+- Rust toolchain with the workspace default target installed.
+- `FAUST_CPP_BIN` when running C++ reference workflows.
+- Graphviz `dot` when running `code-graphs`, because SVG rendering is produced
+  from DOT files.
+- `wasm32-unknown-unknown` target when running
+  `build-faustwasm-compiler-module`.
+
+Useful setup commands:
+
+```bash
+rustup target add wasm32-unknown-unknown
+dot -V
 ```
 
 ## Commands
@@ -19,17 +44,17 @@ cargo run -p xtask -- <command>
 | `golden-check` | Verify Rust golden snapshots are up to date |
 | `golden-check-cpp` | Verify Rust output matches C++ reference goldens |
 | `golden-gen-rust` | Regenerate Rust golden snapshots from current output |
-| `golden-gen-cpp` | Regenerate C++ reference goldens (requires `FAUST_CPP_BIN`) |
-| `interp-trace-dump` | Phase 1 runtime trace harness: execute one DSP through `interp` and dump JSON trace |
-| `interp-trace-dump-cppfbc` | Generate C++ Faust `.fbc` (`-lang interp`), then execute it with the Rust `interp` runtime and dump JSON trace |
-| `interp-trace-gen-cppfbc` | Batch-generate persisted runtime traces from C++ Faust `.fbc` files and execute them with the Rust `interp` runtime |
-| `interp-trace-gen` | Phase 2 scaffold: generate runtime trace snapshots for `tests/runtime_corpus/` |
-| `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots (tolerant float compare) |
-| `fir-dump-scan` | Structural scan of `dump_fir` output for loop-body expansion regressions |
+| `golden-gen-cpp` | Regenerate C++ reference goldens using `FAUST_CPP_BIN` |
+| `interp-trace-dump` | Execute one DSP through the Rust interpreter backend and print a JSON trace |
+| `interp-trace-dump-cppfbc` | Generate C++ Faust `.fbc`, execute it with the Rust interpreter runtime, and print a JSON trace |
+| `interp-trace-gen-cppfbc` | Batch-generate persisted runtime traces from C++ Faust `.fbc` files |
+| `interp-trace-gen` | Generate Rust runtime trace snapshots for `tests/runtime_corpus/` |
+| `interp-trace-check` | Compare Rust runtime traces against persisted snapshots |
+| `fir-dump-scan` | Scan `dump_fir` output for loop-body expansion regressions |
 | `build-faustwasm-compiler-module` | Build `wasm-ffi` for `wasm32-unknown-unknown` and verify the raw export ABI |
-| `backend-align-smoke` | CI-friendly orchestration of golden/runtime/lane/FIR smoke alignment checks |
-| `backend-align-nightly` | Broader nightly alignment orchestration |
-| `code-graphs` | Generate Mermaid/DOT crate graphs, IR overview graphs, and a public API source-scan index |
+| `backend-align-smoke` | CI-friendly alignment orchestration |
+| `backend-align-nightly` | Broader alignment orchestration intended for longer jobs |
+| `code-graphs` | Generate Mermaid/DOT/SVG crate graphs, IR overview graphs, and a public API source-scan index |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
@@ -37,22 +62,295 @@ cargo run -p xtask -- <command>
 | `backend-full-corpus-diff-report` | Write full corpus diff for all backends |
 | `table-fastlane-diff-report` | Write table fast-lane diff report |
 
-## Environment variables
+## Environment Variables
 
 | Variable | Used by | Description |
 |---|---|---|
-| `FAUST_CPP_BIN` | `golden-gen-cpp`, `interp-trace-dump-cppfbc`, `interp-trace-gen-cppfbc` | Path to reference C++ `faust` binary |
+| `FAUST_CPP_BIN` | `golden-gen-cpp`, `interp-trace-dump-cppfbc`, `interp-trace-gen-cppfbc` | Path to the reference C++ `faust` binary |
 | `GOLDEN_REF` | `golden-check` | `rust` (default) or `cpp` |
 
-## Design invariants
+## Design Invariants
 
-- Deterministic corpus file ordering (sorted).
-- Normalized output text before snapshot comparison (CRLF → LF).
-- Fail-fast: first diverging case aborts the run to keep CI signal clean.
+- Deterministic corpus ordering: files are sorted before processing.
+- Normalized snapshot text: CRLF is normalized to LF before comparison.
+- Fail-fast golden checks: the first diverging case aborts the run.
+- Repository-relative paths are preferred in generated documentation.
+- Runtime trace comparison uses exact metadata/shape checks and tolerant float
+  sample comparison.
 
-## `code-graphs`
+## Golden Snapshots
 
-Generates developer navigation artifacts under `docs/code-graphs/` by default.
+Golden snapshots validate stable compiler text output on `tests/corpus/`.
+
+### `golden-check`
+
+Checks Rust reference snapshots under `tests/golden/rust/`.
+
+```bash
+cargo run -p xtask -- golden-check
+```
+
+Equivalent explicit reference selection:
+
+```bash
+GOLDEN_REF=rust cargo run -p xtask -- golden-check
+```
+
+### `golden-check-cpp`
+
+Checks current Rust output against C++ reference snapshots under
+`tests/golden/cpp/`.
+
+```bash
+cargo run -p xtask -- golden-check-cpp
+```
+
+This is the long-run parity gate. It is only expected to pass when the checked
+corpus and `tests/golden/cpp/` are intentionally aligned.
+
+### `golden-gen-rust`
+
+Regenerates Rust reference snapshots from current Rust output.
+
+```bash
+cargo run -p xtask -- golden-gen-rust
+```
+
+Use this only when intentionally refreshing Rust snapshots. Document the refresh
+in the journal and PR notes.
+
+### `golden-gen-cpp`
+
+Regenerates C++ reference snapshots by invoking the reference Faust compiler.
+
+```bash
+FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp
+```
+
+Extra arguments can be passed to the C++ compiler after `--`:
+
+```bash
+FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp -- -vec
+```
+
+## Runtime Traces
+
+Runtime trace workflows validate interpreter execution behavior on deterministic
+input scenarios.
+
+Supported scenarios:
+
+- `zeros`
+- `impulse`
+- `ramp`
+- `sine`
+
+Supported Rust lowering lane:
+
+- `fast`
+
+### `interp-trace-dump`
+
+Compiles one DSP through Rust, builds an interpreter factory, executes a
+scenario, and prints JSON.
+
+```bash
+cargo run -p xtask -- interp-trace-dump \
+  --case tests/corpus/rep_31_extended_primitives.dsp \
+  --scenario impulse \
+  --lane fast
+```
+
+Optional strict FIR type guard:
+
+```bash
+cargo run -p xtask -- interp-trace-dump \
+  --case tests/corpus/rep_31_extended_primitives.dsp \
+  --scenario impulse \
+  --strict-fir-types
+```
+
+`--strict-fir-types` rejects traces when FIR verification emits type-related
+diagnostics such as `FIR-B03`.
+
+### `interp-trace-dump-cppfbc`
+
+Generates `.fbc` bytecode with the C++ Faust compiler, loads the bytecode with
+the Rust interpreter runtime, executes a scenario, and prints JSON.
+
+```bash
+FAUST_CPP_BIN=/path/to/faust \
+cargo run -p xtask -- interp-trace-dump-cppfbc \
+  --case tests/corpus/rep_31_extended_primitives.dsp \
+  --scenario impulse
+```
+
+Use `--faust-bin` to override `FAUST_CPP_BIN` for one run:
+
+```bash
+cargo run -p xtask -- interp-trace-dump-cppfbc \
+  --case tests/corpus/rep_31_extended_primitives.dsp \
+  --scenario impulse \
+  --faust-bin /path/to/faust
+```
+
+This validates the Rust interpreter runtime independently from Rust FIR
+lowering.
+
+### `interp-trace-gen-cppfbc`
+
+Batch-generates persisted traces from C++ `.fbc` files. Defaults:
+
+- corpus: `tests/corpus/rep_*.dsp`
+- output directory: `tests/runtime_traces/cppfbc`
+- one scenario per invocation
+
+Examples:
+
+```bash
+cargo run -p xtask -- interp-trace-gen-cppfbc \
+  --case tests/corpus/rep_01_passthrough.dsp \
+  --scenario impulse \
+  --out-dir /tmp/runtime_traces_cppfbc
+```
+
+```bash
+FAUST_CPP_BIN=/path/to/faust \
+cargo run -p xtask -- interp-trace-gen-cppfbc \
+  --scenario impulse
+```
+
+### `interp-trace-gen`
+
+Generates Rust runtime trace snapshots under `tests/runtime_traces/rust/`.
+
+```bash
+cargo run -p xtask -- interp-trace-gen
+```
+
+With an explicit runtime corpus case:
+
+```bash
+cargo run -p xtask -- interp-trace-gen \
+  --case tests/runtime_corpus/<case>.dsp \
+  --lane fast \
+  --strict-fir-types
+```
+
+### `interp-trace-check`
+
+Regenerates Rust runtime traces and compares them with persisted snapshots.
+
+```bash
+cargo run -p xtask -- interp-trace-check
+```
+
+With an explicit runtime corpus case:
+
+```bash
+cargo run -p xtask -- interp-trace-check \
+  --case tests/runtime_corpus/<case>.dsp \
+  --lane fast \
+  --strict-fir-types
+```
+
+Comparison rules:
+
+- metadata and shape must match exactly;
+- sample values use tolerant float comparison;
+- `opt_level=0` vs `opt_level=max` drift checks are used by alignment workflows
+  on the covered subset.
+
+## FIR Dump Scan
+
+`fir-dump-scan` scans `dump_fir` output on selected corpus cases to catch
+structural regressions in loop-body emission and textual FIR shape.
+
+```bash
+cargo run -p xtask -- fir-dump-scan \
+  --case tests/corpus/rep_01_passthrough.dsp \
+  --lane fast
+```
+
+Multiple `--case` arguments are accepted. When no case is provided, the command
+uses its built-in scan set.
+
+## Backend Alignment
+
+### `backend-align-smoke`
+
+Runs the CI-friendly alignment subset.
+
+```bash
+cargo run -p xtask -- backend-align-smoke
+```
+
+Useful options:
+
+```bash
+cargo run -p xtask -- backend-align-smoke \
+  --case tests/runtime_corpus/<case>.dsp \
+  --strict-fir-types \
+  --skip-golden \
+  --skip-fir-dump-scan
+```
+
+The smoke workflow can combine:
+
+- golden checks;
+- FIR dump scans;
+- Rust interpreter runtime trace checks;
+- interpreter `opt_level=0` vs `opt_level=max` drift checks;
+- Cranelift subset/runtime smoke checks where applicable.
+
+### `backend-align-nightly`
+
+Runs a broader alignment orchestration intended for longer jobs.
+
+```bash
+cargo run -p xtask -- backend-align-nightly
+```
+
+Useful options:
+
+```bash
+cargo run -p xtask -- backend-align-nightly \
+  --strict-fir-types \
+  --skip-golden \
+  --skip-fir-dump-scan
+```
+
+## Faustwasm Compiler Module
+
+`build-faustwasm-compiler-module` builds the raw Rust compiler module consumed
+by the `faustwasm` embedded-compiler path and verifies its exported ABI.
+
+```bash
+cargo run -p xtask -- build-faustwasm-compiler-module
+```
+
+What it does:
+
+- runs `cargo build -p wasm-ffi --target wasm32-unknown-unknown --release`;
+- verifies the raw exports expected by the `faustwasm` Rust adapter;
+- prints the resulting module path.
+
+Debug profile:
+
+```bash
+cargo run -p xtask -- build-faustwasm-compiler-module --debug
+```
+
+Expected release artifact:
+
+```text
+target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm
+```
+
+## Code Graphs
+
+`code-graphs` generates developer navigation artifacts under
+`docs/code-graphs/` by default.
 
 ```bash
 cargo run -p xtask -- code-graphs
@@ -66,168 +364,68 @@ cargo run -p xtask -- code-graphs --out-dir /tmp/faust-rs-code-graphs
 
 Generated files:
 
-- `workspace-crates.mmd` / `workspace-crates.dot`: workspace crate nodes from
-  `cargo metadata`;
-- `internal-crate-deps.mmd` / `internal-crate-deps.dot`: internal crate
-  dependency edges from `cargo metadata`;
-- `ir-overview.mmd` / `ir-overview.dot`: curated overview of the main
-  `boxes`, `signals`, `fir`, and `ui` IR relationships;
-- `public-api-index.md`: lightweight source-scan index of public items.
+| File | Description |
+|---|---|
+| `workspace-crates.mmd` | Mermaid workspace crate nodes from `cargo metadata` |
+| `workspace-crates.dot` | DOT workspace crate nodes from `cargo metadata` |
+| `workspace-crates.svg` | Rendered SVG workspace crate graph |
+| `internal-crate-deps.mmd` | Mermaid internal crate dependency graph |
+| `internal-crate-deps.dot` | DOT internal crate dependency graph |
+| `internal-crate-deps.svg` | Rendered SVG internal crate dependency graph |
+| `ir-overview.mmd` | Mermaid curated IR overview |
+| `ir-overview.dot` | DOT curated IR overview |
+| `ir-overview.svg` | Rendered SVG curated IR overview |
+| `public-api-index.md` | Lightweight source-scan index of public items |
+| `README.md` | Generated entry point with embedded SVG references |
 
-The public API index is intended as a quick map, not a replacement for
-`cargo doc --workspace --no-deps`.
-
-## `build-faustwasm-compiler-module`
-
-Builds the raw Rust compiler module intended for the `faustwasm`
-embedded-compiler mode:
-
-```bash
-cargo run -p xtask -- build-faustwasm-compiler-module
-```
-
-What it does:
-- runs `cargo build -p wasm-ffi --target wasm32-unknown-unknown --release`
-- verifies the exported raw ABI expected by the `faustwasm` Rust adapter
-- prints the resulting module path
-
-Debug profile:
+The public API index is a quick map, not a replacement for:
 
 ```bash
-cargo run -p xtask -- build-faustwasm-compiler-module --debug
+cargo doc --workspace --no-deps
 ```
 
-Expected default output:
-- `target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm`
+## Differential Reports
 
-## `interp-trace-dump` (Phase 1)
+Report commands write Markdown reports under `porting/phases/`.
 
-Minimal runtime trace harness prototype for continuous validation planning.
-
-Example:
-
-```bash
-cargo run -p xtask -- interp-trace-dump \
-  --case tests/corpus/rep_31_extended_primitives.dsp \
-  --scenario impulse \
-  --lane fast
-```
-
-Current scope (Phase 1):
-- compiles one DSP through the Rust compiler pipeline to FIR
-- builds an `interp` factory via Rust APIs (no CLI output parsing)
-- runs deterministic inputs (`zeros`, `impulse`, `ramp`, `sine`)
-- prints a JSON trace (stdout or `--out <path>`)
-
-Optional guardrail:
-- `--strict-fir-types` re-runs the FIR verifier and rejects traces when
-  type-related FIR diagnostics are present (including warnings such as
-  `FIR-B03`), preventing misleading runtime results on under-typed FIR.
-
-## `interp-trace-dump-cppfbc` (C++ `.fbc` -> Rust interp runtime)
-
-Runs the Rust interpreter runtime on bytecode generated by the reference C++
-Faust compiler (`faust -lang interp`).
-
-Example:
-
-```bash
-FAUST_CPP_BIN=/usr/local/bin/faust \
-cargo run -p xtask -- interp-trace-dump-cppfbc \
-  --case tests/corpus/rep_31_extended_primitives.dsp \
-  --scenario impulse \
-  --num-blocks 1
-```
-
-What it does:
-- invokes C++ Faust to generate a temporary `.fbc` file (`-lang interp`)
-- loads the `.fbc` using Rust `read_fbc(...)`
-- instantiates and executes it using the Rust `interp` backend runtime
-- emits the same JSON trace format as `interp-trace-dump`
-
-Notes:
-- this validates the Rust interpreter runtime/executor independently from the
-  Rust FIR lowering pipeline
-- `--lane` and `--strict-fir-types` do not apply to this command (source is the
-  C++-generated `.fbc`, not Rust-generated FIR)
-
-## `interp-trace-gen-cppfbc` (persisted C++ `.fbc` traces)
-
-Batch-generates and persists JSON execution traces by:
-- compiling DSPs with C++ Faust (`-lang interp`)
-- loading the generated `.fbc` in Rust
-- executing with the Rust `interp` runtime
-- writing traces to disk for later inspection/comparison
+| Command | Output |
+|---|---|
+| `parser-parity-report` | `porting/phases/phase-3-parser-parity-report-en.md` |
+| `corpus-status-report` | `porting/phases/phase-4-corpus-status-diff-report-en.md` |
+| `cpp-backend-diff-report` | `porting/phases/phase-6-cpp-backend-diff-report-en.md` |
+| `c-fastlane-diff-report` | `porting/phases/phase-6-c-fastlane-diff-report-en.md` |
+| `backend-full-corpus-diff-report` | `porting/phases/phase-6-backend-full-corpus-diff-report-en.md` |
+| `table-fastlane-diff-report` | `porting/phases/phase-6-table-fastlane-diff-report-en.md` |
 
 Examples:
 
 ```bash
-cargo run -p xtask -- interp-trace-gen-cppfbc \
-  --case tests/corpus/rep_01_passthrough.dsp \
-  --scenario impulse \
-  --out-dir /tmp/runtime_traces_cppfbc
+cargo run -p xtask -- parser-parity-report
+cargo run -p xtask -- corpus-status-report
+cargo run -p xtask -- cpp-backend-diff-report
+cargo run -p xtask -- c-fastlane-diff-report
+cargo run -p xtask -- backend-full-corpus-diff-report
+cargo run -p xtask -- table-fastlane-diff-report
 ```
+
+Some report commands use the local C++ reference source tree configured in
+`crates/xtask/src/main.rs` and/or a C++ Faust binary when available. Keep the
+generated report paths repository-relative.
+
+## Validation Before Commit
+
+For changes to this crate, run at least:
 
 ```bash
-FAUST_CPP_BIN=/usr/local/bin/faust \
-cargo run -p xtask -- interp-trace-gen-cppfbc \
-  --scenario impulse
+cargo fmt --all
+cargo check -p xtask
+cargo clippy -p xtask --all-targets -- -D warnings
 ```
 
-Current behavior:
-- default corpus = `tests/corpus/rep_*.dsp`
-- default output directory = `tests/runtime_traces/cppfbc`
-- one scenario per invocation (`--scenario`)
-- writes traces under `<out-dir>/<case>/<scenario>.json`
-
-Notes:
-- this command is intended to preserve traces (unlike ad hoc one-off dumps)
-- it complements `interp-trace-dump-cppfbc` and enables future C++ differential
-  runtime workflows
-
-## `interp-trace-gen` / `interp-trace-check` (Phase 2 scaffold)
-
-Phase 2 has started with a simple snapshot workflow built on top of
-`interp-trace-dump`.
-
-Examples:
+For workflow-specific changes, run the affected command as well. Examples:
 
 ```bash
-cargo run -p xtask -- interp-trace-gen
-cargo run -p xtask -- interp-trace-check
+cargo run -p xtask -- code-graphs
+cargo run -p xtask -- fir-dump-scan
+cargo run -p xtask -- backend-align-smoke --skip-golden
 ```
-
-Current Phase 2 scaffold behavior:
-- iterates `tests/runtime_corpus/*.dsp`
-- uses a built-in scenario mapping (documented in `tests/runtime_corpus/README.md`)
-- writes snapshots under `tests/runtime_traces/rust/<case>/<scenario>.json`
-- checks by regenerating traces and comparing parsed traces with tolerance-based
-  float comparison (metadata/shape must still match exactly)
-- supports `--strict-fir-types` to enforce a clean FIR typing subset during
-  generation/check runs
-
-## `fir-dump-scan`
-
-Scans `dump_fir` output on selected corpus cases to catch structural regressions
-in loop-body emission and FIR textual shape.
-
-Example:
-
-```bash
-cargo run -p xtask -- fir-dump-scan --case tests/corpus/rep_01_passthrough.dsp --lane fast
-```
-
-## `backend-align-smoke` / `backend-align-nightly`
-
-Higher-level orchestration commands that bundle several already-documented
-checks into one alignment workflow.
-
-- `backend-align-smoke` is the CI-friendly subset.
-- `backend-align-nightly` runs a broader version intended for longer jobs.
-
-These commands can combine:
-
-- golden checks,
-- FIR dump scans,
-- interpreter alignment checks, including `opt_level=0` vs `opt_level=max`
-  drift detection on the covered subset.

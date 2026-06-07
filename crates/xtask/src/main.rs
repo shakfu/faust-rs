@@ -13,10 +13,15 @@
 //!   - `interp-trace-gen`, `interp-trace-check` (Phase 2 snapshot scaffold)
 //!   - `interp-trace-dump-cppfbc` (C++ Faust `.fbc` -> Rust interp runtime)
 //!   - `interp-trace-gen-cppfbc` (batch-generate persisted traces from C++ `.fbc`)
+//!   - `fir-dump-scan` (structural scan of `dump_fir` loop body expansion)
+//! - Backend alignment:
 //!   - `backend-align-smoke` (CI-friendly smoke alignment orchestration,
 //!     including `opt_level=0` vs `opt_level=max` interpreter drift checks)
 //!   - `backend-align-nightly` (broader alignment orchestration)
-//!   - `fir-dump-scan` (structural scan of `dump_fir` loop body expansion)
+//! - Developer navigation:
+//!   - `code-graphs` (Mermaid/DOT/SVG crate graphs, curated IR overview, and a
+//!     public API source-scan index)
+//! - Wasm integration:
 //!   - `build-faustwasm-compiler-module` (`wasm-ffi` -> verified `.wasm`)
 //! - Differential reports:
 //!   - parser parity report
@@ -27,6 +32,10 @@
 //! - Deterministic corpus file ordering.
 //! - Normalized output text before snapshot comparison.
 //! - Fail-fast behavior when one case diverges to preserve CI signal quality.
+//! - Generated documentation uses repository-relative paths where practical.
+//! - The command surface stays intentionally simple: argument parsing is local to
+//!   each workflow instead of adding a runtime CLI dependency to this helper
+//!   crate.
 
 use fir::dump_fir;
 use serde::{Deserialize, Serialize};
@@ -40,6 +49,12 @@ use std::process::Command;
 use std::process::Stdio;
 use wasmparser::{ExternalKind, Parser, Payload};
 
+/// Human-readable command summary printed when no command or an unknown command
+/// is provided.
+///
+/// The project intentionally keeps `xtask` argument parsing lightweight. This
+/// string is the canonical short-form help for the dispatcher below; the longer
+/// workflow documentation lives in `crates/xtask/README.md`.
 const USAGE: &str = "\
 Usage:
   cargo run -p xtask -- golden-check
@@ -68,15 +83,32 @@ Usage:
   GOLDEN_REF      rust (default) or cpp
 ";
 
+/// Local checkout of the reference C++ Faust source tree used by static parser
+/// report generation.
+///
+/// Runtime workflows that need a C++ Faust executable use `FAUST_CPP_BIN` or an
+/// explicit `--faust-bin` instead.
 const CPP_SOURCE_ROOT: &str = "/Users/letz/Developpements/RUST/faust";
+
+/// Parser parity report output path, relative to the workspace root.
 const PARITY_REPORT_REL_PATH: &str = "porting/phases/phase-3-parser-parity-report-en.md";
+
+/// Corpus accept/reject diff report output path, relative to the workspace root.
 const CORPUS_STATUS_REPORT_REL_PATH: &str =
     "porting/phases/phase-4-corpus-status-diff-report-en.md";
+
+/// C++ backend differential report output path, relative to the workspace root.
 const CPP_BACKEND_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-cpp-backend-diff-report-en.md";
+
+/// C fast-lane differential report output path, relative to the workspace root.
 const C_FASTLANE_DIFF_REPORT_REL_PATH: &str = "porting/phases/phase-6-c-fastlane-diff-report-en.md";
+
+/// Full backend corpus diff report output path, relative to the workspace root.
 const BACKEND_FULL_CORPUS_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-backend-full-corpus-diff-report-en.md";
+
+/// Table lowering fast-lane report output path, relative to the workspace root.
 const TABLE_FASTLANE_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-table-fastlane-diff-report-en.md";
 
@@ -136,6 +168,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Shared workspace/path helpers
+// ---------------------------------------------------------------------------
+
 /// Returns the canonical workspace root path.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -162,35 +198,68 @@ fn workspace_relative_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+// ---------------------------------------------------------------------------
+// `code-graphs` support
+// ---------------------------------------------------------------------------
+
+/// Minimal subset of `cargo metadata --format-version 1` used by the
+/// `code-graphs` workflow.
+///
+/// Keeping this structure narrow makes the generator resilient to unrelated
+/// metadata additions while still allowing typed access to workspace members and
+/// package-level dependency data.
 #[derive(Debug, Deserialize)]
 struct CargoMetadata {
+    /// All packages reported by Cargo for the current workspace query.
     packages: Vec<CargoPackage>,
+    /// Package IDs that belong to the active workspace.
     workspace_members: Vec<String>,
 }
 
+/// Package metadata needed to render crate nodes, dependency edges, and the
+/// public API source-scan index.
 #[derive(Debug, Deserialize)]
 struct CargoPackage {
+    /// Cargo package name, used as the graph label and public API section title.
     name: String,
+    /// Stable package ID from Cargo metadata.
     id: String,
+    /// Declared dependencies. Path dependencies are used to identify internal
+    /// workspace edges.
     dependencies: Vec<CargoDependency>,
+    /// Package manifest path; its parent directory is used to map path
+    /// dependencies back to package names.
     manifest_path: PathBuf,
+    /// Build targets. Library-like targets provide source roots for the public
+    /// item index.
     targets: Vec<CargoTarget>,
 }
 
+/// Dependency metadata needed to decide whether an edge is internal to the
+/// workspace.
 #[derive(Debug, Deserialize)]
 struct CargoDependency {
+    /// Dependency package name as written in Cargo metadata.
     name: String,
+    /// Local path for path dependencies. Registry dependencies have no path and
+    /// are intentionally omitted from internal crate graphs.
     path: Option<PathBuf>,
 }
 
+/// Target metadata used to discover crate source roots.
 #[derive(Debug, Deserialize)]
 struct CargoTarget {
+    /// Cargo target kinds, for example `lib`, `rlib`, `cdylib`, or `bin`.
     kind: Vec<String>,
+    /// Main source file for the target.
     src_path: PathBuf,
 }
 
+/// Parsed options for `cargo run -p xtask -- code-graphs`.
 #[derive(Debug)]
 struct CodeGraphOptions {
+    /// Destination directory for generated Mermaid, DOT, SVG, README, and public
+    /// API index files.
     out_dir: PathBuf,
 }
 
@@ -202,11 +271,21 @@ impl Default for CodeGraphOptions {
     }
 }
 
+/// One public source item found by the lightweight public API scanner.
+///
+/// This is deliberately a source index, not a semantic model. Rustdoc remains
+/// the authoritative API representation; this index is optimized for quick
+/// navigation across the workspace.
 #[derive(Debug)]
 struct PublicItem {
+    /// Item category such as `struct`, `enum`, `trait`, `fn`, or `use`.
     kind: String,
+    /// Parsed item name. For re-exports, this is the first path-like token after
+    /// `pub use`.
     name: String,
+    /// Source file containing the public item.
     path: PathBuf,
+    /// One-based source line number.
     line: usize,
 }
 
@@ -239,6 +318,10 @@ fn parse_code_graph_options(
 
 /// Generates workspace/dependency graphs, IR overview graphs, and a public API
 /// index for developer navigation.
+///
+/// Output is deterministic for stable `cargo metadata` and stable source file
+/// ordering. SVG generation requires Graphviz `dot`; failing to render one SVG
+/// fails the workflow so checked-in visualizations do not silently go stale.
 fn code_graphs(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_code_graph_options(args)?;
     fs::create_dir_all(&options.out_dir)?;
@@ -299,6 +382,11 @@ fn code_graphs(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// Loads typed workspace metadata by invoking Cargo rather than parsing
+/// manifests by hand.
+///
+/// This keeps feature resolution, package IDs, target metadata, and path
+/// dependencies aligned with Cargo's own view of the workspace.
 fn load_cargo_metadata() -> Result<CargoMetadata, Box<dyn std::error::Error>> {
     let output = Command::new("cargo")
         .current_dir(workspace_root())
@@ -317,6 +405,10 @@ fn load_cargo_metadata() -> Result<CargoMetadata, Box<dyn std::error::Error>> {
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
+/// Returns workspace packages sorted by package name.
+///
+/// Sorting makes generated graph files stable across platforms and independent
+/// of the ordering returned by Cargo.
 fn workspace_packages(metadata: &CargoMetadata) -> Vec<&CargoPackage> {
     let members: BTreeSet<&str> = metadata
         .workspace_members
@@ -332,6 +424,11 @@ fn workspace_packages(metadata: &CargoMetadata) -> Vec<&CargoPackage> {
     packages
 }
 
+/// Builds deterministic dependency edges between workspace packages.
+///
+/// Registry dependencies are ignored. Path dependencies are matched through
+/// manifest parent directories so package renames in `Cargo.toml` still resolve
+/// to the actual workspace package name.
 fn internal_dependency_edges(packages: &[&CargoPackage]) -> Vec<(String, String)> {
     let manifest_parent_to_name: BTreeMap<PathBuf, String> = packages
         .iter()
@@ -364,6 +461,7 @@ fn internal_dependency_edges(packages: &[&CargoPackage]) -> Vec<(String, String)
     edges.into_iter().collect()
 }
 
+/// Renders a Mermaid graph containing one node per workspace crate.
 fn render_workspace_mermaid(packages: &[&CargoPackage]) -> String {
     let mut out = String::from("flowchart LR\n");
     for package in packages {
@@ -374,6 +472,7 @@ fn render_workspace_mermaid(packages: &[&CargoPackage]) -> String {
     out
 }
 
+/// Renders a DOT graph containing one node per workspace crate.
 fn render_workspace_dot(packages: &[&CargoPackage]) -> String {
     let mut out = String::from("digraph workspace_crates {\n");
     out.push_str("    rankdir=LR;\n");
@@ -385,6 +484,7 @@ fn render_workspace_dot(packages: &[&CargoPackage]) -> String {
     out
 }
 
+/// Renders a Mermaid graph of internal workspace crate dependencies.
 fn render_internal_deps_mermaid(packages: &[&CargoPackage], edges: &[(String, String)]) -> String {
     let mut out = render_workspace_mermaid(packages);
     for (from, to) in edges {
@@ -393,6 +493,7 @@ fn render_internal_deps_mermaid(packages: &[&CargoPackage], edges: &[(String, St
     out
 }
 
+/// Renders a DOT graph of internal workspace crate dependencies.
 fn render_internal_deps_dot(packages: &[&CargoPackage], edges: &[(String, String)]) -> String {
     let mut out = render_workspace_dot(packages);
     out.truncate(out.trim_end_matches("}\n").len());
@@ -408,6 +509,11 @@ fn render_internal_deps_dot(packages: &[&CargoPackage], edges: &[(String, String
     out
 }
 
+/// Renders a curated Mermaid overview of the main Faust IR layers.
+///
+/// This graph is intentionally hand-authored: it documents architectural
+/// relationships that cannot be inferred reliably from Cargo dependencies
+/// alone.
 fn render_ir_overview_mermaid() -> String {
     String::from(
         "flowchart LR\n\
@@ -450,6 +556,7 @@ fn render_ir_overview_mermaid() -> String {
     )
 }
 
+/// Renders the same curated IR overview as DOT for Graphviz/SVG output.
 fn render_ir_overview_dot() -> String {
     String::from(
         "digraph ir_overview {\n\
@@ -469,6 +576,11 @@ fn render_ir_overview_dot() -> String {
     )
 }
 
+/// Renders a Markdown index of public source items for every workspace package.
+///
+/// The scan is intentionally syntactic and conservative. It is useful for
+/// navigation and broad API inventory, but it does not expand macros, resolve
+/// visibility through modules, or replace rustdoc.
 fn render_public_api_index(
     packages: &[&CargoPackage],
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -500,6 +612,11 @@ fn render_public_api_index(
     Ok(out)
 }
 
+/// Collects public source items for a single package by scanning library-like
+/// targets.
+///
+/// FFI crates in this workspace use target kinds such as `rlib`, `staticlib`,
+/// and `cdylib`, so all library-like target kinds are included.
 fn public_items_for_package(
     package: &CargoPackage,
 ) -> Result<Vec<PublicItem>, Box<dyn std::error::Error>> {
@@ -544,6 +661,7 @@ fn public_items_for_package(
     Ok(items)
 }
 
+/// Recursively collects Rust source files below `dir`.
 fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), io::Error> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -557,6 +675,11 @@ fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), io::Erro
     Ok(())
 }
 
+/// Parses one source line as a top-level public item declaration.
+///
+/// The parser deliberately ignores `pub(crate)`, `pub(super)`, and `pub(self)`
+/// items because the generated index is meant to approximate externally visible
+/// API surfaces. Multi-line signatures are represented by the first line only.
 fn parse_public_item_line(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || !trimmed.starts_with("pub ") {
@@ -595,6 +718,7 @@ fn parse_public_item_line(line: &str) -> Option<(String, String)> {
     None
 }
 
+/// Extracts the first identifier/path-like token after a recognized item kind.
 fn parse_item_name(input: &str) -> String {
     let name: String = input
         .trim_start()
@@ -608,6 +732,7 @@ fn parse_item_name(input: &str) -> String {
     }
 }
 
+/// Renders the generated `docs/code-graphs/README.md` entry point.
 fn render_code_graphs_readme() -> String {
     String::from(
         "# Code Graphs\n\n\
@@ -631,10 +756,15 @@ fn render_code_graphs_readme() -> String {
     )
 }
 
+/// Writes a UTF-8 text artifact.
 fn write_text(path: &Path, text: &str) -> Result<(), io::Error> {
     fs::write(path, text)
 }
 
+/// Converts one DOT file to SVG with Graphviz `dot`.
+///
+/// The generated SVG is checked in so users can inspect graphs without local
+/// Mermaid or Graphviz tooling. Regeneration still requires `dot`.
 fn render_svg_with_dot(dot_path: &Path, svg_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("dot")
         .arg("-Tsvg")
@@ -653,6 +783,7 @@ fn render_svg_with_dot(dot_path: &Path, svg_path: &Path) -> Result<(), Box<dyn s
     }
 }
 
+/// Converts a crate name into a Mermaid-safe node identifier.
 fn graph_id(name: &str) -> String {
     let mut out = String::from("crate_");
     for ch in name.chars() {
@@ -665,10 +796,12 @@ fn graph_id(name: &str) -> String {
     out
 }
 
+/// Escapes a label for Mermaid quoted-node syntax.
 fn mermaid_label(label: &str) -> String {
     label.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Escapes a label for DOT quoted strings.
 fn dot_escape(label: &str) -> String {
     label.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -715,8 +848,14 @@ fn runtime_trace_snapshot_root() -> PathBuf {
     workspace_root().join("tests/runtime_traces").join("rust")
 }
 
+// ---------------------------------------------------------------------------
+// `build-faustwasm-compiler-module`
+// ---------------------------------------------------------------------------
+
+/// Parsed options for the `build-faustwasm-compiler-module` workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FaustwasmCompilerModuleOptions {
+    /// `true` builds the release artifact; `false` builds the debug artifact.
     release: bool,
 }
 
@@ -789,8 +928,11 @@ fn build_faustwasm_compiler_module(
     Ok(())
 }
 
-/// Lists the minimum export surface that the raw `wasm-ffi` compiler-module
-/// ABI exposes to the `faustwasm` TypeScript adapter.
+/// Lists the minimum raw export surface expected by the `faustwasm`
+/// embedded-compiler adapter.
+///
+/// The verifier checks a freshly built `.wasm` module against this list so ABI
+/// regressions are caught in the same workflow that produces the artifact.
 fn required_wasm_ffi_exports() -> &'static [&'static str] {
     &[
         "memory",
@@ -820,8 +962,7 @@ fn required_wasm_ffi_exports() -> &'static [&'static str] {
     ]
 }
 
-/// Verifies that a compiled `wasm-ffi` module exports the raw ABI expected by
-/// the `faustwasm` Rust adapter.
+/// Verifies that a compiled `wasm-ffi` module exports the documented raw ABI.
 fn verify_wasm_ffi_exports(bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     let mut exported_functions = BTreeSet::new();
     let mut has_memory_export = false;
@@ -868,11 +1009,18 @@ fn verify_wasm_ffi_exports(bytes: &[u8]) -> Result<(), Box<dyn std::error::Error
     }
 }
 
+// ---------------------------------------------------------------------------
+// Backend alignment orchestration
+// ---------------------------------------------------------------------------
+
+/// Default runtime cases for the CI-friendly backend alignment smoke workflow.
 const BACKEND_ALIGN_SMOKE_DEFAULT_CASES: &[&str] = &[
     "tests/runtime_corpus/trace_01_passthrough.dsp",
     "tests/runtime_corpus/trace_07_nonlinear_clip.dsp",
     "tests/runtime_corpus/trace_38_sine_phasor.dsp",
 ];
+
+/// Default FIR dump cases for the CI-friendly backend alignment smoke workflow.
 const BACKEND_ALIGN_SMOKE_FIR_CASES: &[&str] = &[
     "tests/corpus/rep_01_passthrough.dsp",
     "tests/corpus/rep_07_nonlinear_clip.dsp",
@@ -890,9 +1038,13 @@ fn case_name(path: &Path) -> Result<String, io::Error> {
 #[derive(Debug, Default)]
 /// Parsed options for the CI-friendly backend alignment smoke workflow.
 struct BackendAlignSmokeOptions {
+    /// Explicit runtime corpus cases selected with repeated `--case`.
     cases: Vec<PathBuf>,
+    /// Whether FIR type diagnostics should make runtime traces fail early.
     strict_fir_types: bool,
+    /// Skip the golden snapshot check phase.
     skip_golden: bool,
+    /// Skip the structural FIR dump scan phase.
     skip_fir_dump_scan: bool,
 }
 
@@ -1091,11 +1243,14 @@ fn run_cranelift_ffi_runtime_diff_smoke() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-#[derive(Debug, Default)]
 /// Parsed options for the broader nightly backend-alignment workflow.
+#[derive(Debug, Default)]
 struct BackendAlignNightlyOptions {
+    /// Whether FIR type diagnostics should make runtime traces fail early.
     strict_fir_types: bool,
+    /// Skip the golden snapshot check phase.
     skip_golden: bool,
+    /// Skip the structural FIR dump scan phase.
     skip_fir_dump_scan: bool,
 }
 
@@ -1159,10 +1314,16 @@ fn parse_backend_align_nightly_options(
     Ok(options)
 }
 
-#[derive(Debug)]
+// ---------------------------------------------------------------------------
+// `fir-dump-scan`
+// ---------------------------------------------------------------------------
+
 /// Parsed options for `fir-dump-scan`.
+#[derive(Debug)]
 struct FirDumpScanOptions {
+    /// Explicit compile corpus cases selected with repeated `--case`.
     cases: Vec<PathBuf>,
+    /// Signal-to-FIR lane used before rendering `dump_fir`.
     lane: TraceLane,
 }
 
@@ -1330,6 +1491,10 @@ fn parse_loop_line_body_ids(line: &str) -> Option<(&'static str, u32, u32)> {
     Some((loop_kind, loop_id, body_id))
 }
 
+// ---------------------------------------------------------------------------
+// Golden snapshot workflows
+// ---------------------------------------------------------------------------
+
 /// Enumerates the corpus/golden pairs checked by `golden-check`.
 ///
 /// Rust references enumerate directly from `tests/corpus`, while C++ references
@@ -1375,10 +1540,12 @@ fn golden_cases_for_check(golden_ref: GoldenRef) -> Result<Vec<(String, PathBuf)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Golden reference family used by snapshot workflows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GoldenRef {
+    /// Rust-generated reference snapshots under `tests/golden/rust`.
     Rust,
+    /// C++ reference snapshots under `tests/golden/cpp`.
     Cpp,
 }
 
@@ -1418,12 +1585,20 @@ fn normalize(text: &str) -> String {
     normalized
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// ---------------------------------------------------------------------------
+// Runtime trace workflows
+// ---------------------------------------------------------------------------
+
 /// Input scenario used by runtime-trace generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TraceScenario {
+    /// All input channels receive zero.
     Zeros,
+    /// The first sample of each input channel is one, followed by zeroes.
     Impulse,
+    /// Input channels receive a deterministic increasing ramp.
     Ramp,
+    /// Input channels receive a deterministic sine wave.
     Sine,
 }
 
@@ -1452,9 +1627,10 @@ impl TraceScenario {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Interpreter lane used by runtime-trace workflows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TraceLane {
+    /// Active transform fast lane.
     Fast,
 }
 
@@ -1482,35 +1658,53 @@ impl TraceLane {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 /// Parsed options for `interp-trace-dump`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InterpTraceDumpOptions {
+    /// DSP source file to compile and execute.
     case: PathBuf,
+    /// Deterministic input pattern.
     scenario: TraceScenario,
+    /// Lowering lane used before interpreter bytecode generation.
     lane: TraceLane,
+    /// Runtime sample rate.
     sample_rate: usize,
+    /// Number of frames per compute block.
     block_size: usize,
+    /// Number of compute blocks to execute.
     num_blocks: usize,
+    /// Whether FIR type diagnostics should reject the trace.
     strict_fir_types: bool,
+    /// Optional JSON output path. When absent, JSON is printed to stdout.
     out: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 /// Parsed options for `interp-trace-dump-cppfbc`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InterpTraceCppFbcDumpOptions {
+    /// Shared trace execution options.
     trace: InterpTraceDumpOptions,
+    /// Optional C++ Faust executable override.
     faust_bin: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 /// Parsed options for batch generation from C++ `.fbc` files.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InterpTraceCppFbcBatchOptions {
+    /// Optional single compile corpus case; absent means all default corpus
+    /// cases.
     case: Option<PathBuf>,
+    /// Deterministic input pattern.
     scenario: TraceScenario,
+    /// Runtime sample rate.
     sample_rate: usize,
+    /// Number of frames per compute block.
     block_size: usize,
+    /// Number of compute blocks to execute.
     num_blocks: usize,
+    /// Output root for persisted JSON traces.
     out_dir: PathBuf,
+    /// Optional C++ Faust executable override.
     faust_bin: Option<PathBuf>,
 }
 
@@ -1545,24 +1739,35 @@ impl Default for InterpTraceDumpOptions {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 /// Persisted runtime trace payload used by snapshot workflows.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct RuntimeTrace {
+    /// Repository-relative DSP source path.
     dsp_path: String,
+    /// Signal-to-FIR lane label.
     lane: String,
+    /// Input scenario label.
     scenario: String,
+    /// Runtime sample rate.
     sample_rate: usize,
+    /// Number of frames per compute block.
     block_size: usize,
+    /// Number of compute blocks executed.
     num_blocks: usize,
+    /// Number of DSP input channels.
     num_inputs: usize,
+    /// Number of DSP output channels.
     num_outputs: usize,
+    /// Output samples by channel.
     outputs: Vec<Vec<f32>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
 /// Numeric tolerances used when comparing runtime traces.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TraceCompareTolerances {
+    /// Absolute tolerance.
     abs_tol: f32,
+    /// Relative tolerance.
     rel_tol: f32,
 }
 
@@ -1576,24 +1781,36 @@ impl Default for TraceCompareTolerances {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
 /// One concrete runtime-trace mismatch entry.
+#[derive(Clone, Debug, PartialEq)]
 struct TraceMismatch {
+    /// Field or payload area that mismatched.
     field: String,
+    /// Optional output channel index for sample mismatches.
     channel: Option<usize>,
+    /// Optional sample index for sample mismatches.
     sample: Option<usize>,
+    /// Expected float value for sample mismatches.
     expected: Option<f32>,
+    /// Actual float value for sample mismatches.
     actual: Option<f32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 /// Shared batch options for runtime-trace generation/checking flows.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InterpTraceBatchOptions {
+    /// Optional single runtime corpus case; absent means all runtime corpus
+    /// cases.
     case: Option<PathBuf>,
+    /// Lowering lane used before interpreter bytecode generation.
     lane: TraceLane,
+    /// Runtime sample rate.
     sample_rate: usize,
+    /// Number of frames per compute block.
     block_size: usize,
+    /// Number of compute blocks to execute.
     num_blocks: usize,
+    /// Whether FIR type diagnostics should reject traces.
     strict_fir_types: bool,
 }
 
@@ -2904,6 +3121,10 @@ fn print_first_diff(expected: &str, actual: &str) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Differential report generation
+// ---------------------------------------------------------------------------
 
 /// Regenerates the parser/lexer parity coverage report under `porting/`.
 fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
