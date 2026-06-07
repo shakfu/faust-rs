@@ -29,6 +29,7 @@ cargo run -p xtask -- <command>
 | `build-faustwasm-compiler-module` | Build `wasm-ffi` for `wasm32-unknown-unknown` and verify the raw export ABI |
 | `backend-align-smoke` | CI-friendly orchestration of golden/runtime/lane/FIR smoke alignment checks |
 | `backend-align-nightly` | Broader nightly alignment orchestration |
+| `code-graphs` | Generate Mermaid/DOT crate graphs, IR overview graphs, and a public API source-scan index |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
@@ -48,6 +49,33 @@ cargo run -p xtask -- <command>
 - Deterministic corpus file ordering (sorted).
 - Normalized output text before snapshot comparison (CRLF → LF).
 - Fail-fast: first diverging case aborts the run to keep CI signal clean.
+
+## `code-graphs`
+
+Generates developer navigation artifacts under `docs/code-graphs/` by default.
+
+```bash
+cargo run -p xtask -- code-graphs
+```
+
+Optional output directory:
+
+```bash
+cargo run -p xtask -- code-graphs --out-dir /tmp/faust-rs-code-graphs
+```
+
+Generated files:
+
+- `workspace-crates.mmd` / `workspace-crates.dot`: workspace crate nodes from
+  `cargo metadata`;
+- `internal-crate-deps.mmd` / `internal-crate-deps.dot`: internal crate
+  dependency edges from `cargo metadata`;
+- `ir-overview.mmd` / `ir-overview.dot`: curated overview of the main
+  `boxes`, `signals`, `fir`, and `ui` IR relationships;
+- `public-api-index.md`: lightweight source-scan index of public items.
+
+The public API index is intended as a quick map, not a replacement for
+`cargo doc --workspace --no-deps`.
 
 ## `build-faustwasm-compiler-module`
 

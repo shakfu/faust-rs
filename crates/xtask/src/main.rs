@@ -30,7 +30,7 @@
 
 use fir::dump_fir;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -55,6 +55,7 @@ Usage:
   cargo run -p xtask -- build-faustwasm-compiler-module [--debug]
   cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]
   cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]
+  cargo run -p xtask -- code-graphs [--out-dir <dir>]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -120,6 +121,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "build-faustwasm-compiler-module" => build_faustwasm_compiler_module(args)?,
         "backend-align-smoke" => backend_align_smoke(args)?,
         "backend-align-nightly" => backend_align_nightly(args)?,
+        "code-graphs" => code_graphs(args)?,
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
@@ -158,6 +160,517 @@ fn workspace_relative_path(path: &Path) -> String {
         return relative.display().to_string();
     }
     path.display().to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+    workspace_members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackage {
+    name: String,
+    id: String,
+    dependencies: Vec<CargoDependency>,
+    manifest_path: PathBuf,
+    targets: Vec<CargoTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoDependency {
+    name: String,
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoTarget {
+    kind: Vec<String>,
+    src_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct CodeGraphOptions {
+    out_dir: PathBuf,
+}
+
+impl Default for CodeGraphOptions {
+    fn default() -> Self {
+        Self {
+            out_dir: workspace_root().join("docs/code-graphs"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PublicItem {
+    kind: String,
+    name: String,
+    path: PathBuf,
+    line: usize,
+}
+
+/// Parses flags for the `code-graphs` documentation generator.
+fn parse_code_graph_options(
+    mut args: impl Iterator<Item = String>,
+) -> Result<CodeGraphOptions, Box<dyn std::error::Error>> {
+    let mut options = CodeGraphOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out-dir" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --out-dir".into());
+                };
+                options.out_dir = PathBuf::from(value);
+            }
+            other => {
+                return Err(format!(
+                    "usage: cargo run -p xtask -- code-graphs [--out-dir <dir>]\nunknown option: {other}"
+                )
+                .into());
+            }
+        }
+    }
+    if options.out_dir.is_relative() {
+        options.out_dir = workspace_root().join(&options.out_dir);
+    }
+    Ok(options)
+}
+
+/// Generates workspace/dependency graphs, IR overview graphs, and a public API
+/// index for developer navigation.
+fn code_graphs(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_code_graph_options(args)?;
+    fs::create_dir_all(&options.out_dir)?;
+
+    let metadata = load_cargo_metadata()?;
+    let workspace = workspace_packages(&metadata);
+    let edges = internal_dependency_edges(&workspace);
+
+    write_text(
+        &options.out_dir.join("workspace-crates.mmd"),
+        &render_workspace_mermaid(&workspace),
+    )?;
+    write_text(
+        &options.out_dir.join("workspace-crates.dot"),
+        &render_workspace_dot(&workspace),
+    )?;
+    write_text(
+        &options.out_dir.join("internal-crate-deps.mmd"),
+        &render_internal_deps_mermaid(&workspace, &edges),
+    )?;
+    write_text(
+        &options.out_dir.join("internal-crate-deps.dot"),
+        &render_internal_deps_dot(&workspace, &edges),
+    )?;
+    write_text(
+        &options.out_dir.join("ir-overview.mmd"),
+        &render_ir_overview_mermaid(),
+    )?;
+    write_text(
+        &options.out_dir.join("ir-overview.dot"),
+        &render_ir_overview_dot(),
+    )?;
+    render_svg_with_dot(
+        &options.out_dir.join("workspace-crates.dot"),
+        &options.out_dir.join("workspace-crates.svg"),
+    )?;
+    render_svg_with_dot(
+        &options.out_dir.join("internal-crate-deps.dot"),
+        &options.out_dir.join("internal-crate-deps.svg"),
+    )?;
+    render_svg_with_dot(
+        &options.out_dir.join("ir-overview.dot"),
+        &options.out_dir.join("ir-overview.svg"),
+    )?;
+    write_text(
+        &options.out_dir.join("public-api-index.md"),
+        &render_public_api_index(&workspace)?,
+    )?;
+    write_text(
+        &options.out_dir.join("README.md"),
+        &render_code_graphs_readme(),
+    )?;
+
+    println!(
+        "wrote code graph documentation to {}",
+        workspace_relative_path(&options.out_dir)
+    );
+    Ok(())
+}
+
+fn load_cargo_metadata() -> Result<CargoMetadata, Box<dyn std::error::Error>> {
+    let output = Command::new("cargo")
+        .current_dir(workspace_root())
+        .arg("metadata")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn workspace_packages(metadata: &CargoMetadata) -> Vec<&CargoPackage> {
+    let members: BTreeSet<&str> = metadata
+        .workspace_members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut packages: Vec<&CargoPackage> = metadata
+        .packages
+        .iter()
+        .filter(|package| members.contains(package.id.as_str()))
+        .collect();
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+    packages
+}
+
+fn internal_dependency_edges(packages: &[&CargoPackage]) -> Vec<(String, String)> {
+    let manifest_parent_to_name: BTreeMap<PathBuf, String> = packages
+        .iter()
+        .filter_map(|package| {
+            package
+                .manifest_path
+                .parent()
+                .map(|parent| (parent.to_path_buf(), package.name.clone()))
+        })
+        .collect();
+    let names: BTreeSet<&str> = packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect();
+    let mut edges = BTreeSet::new();
+
+    for package in packages {
+        for dep in &package.dependencies {
+            let dep_name = dep
+                .path
+                .as_ref()
+                .and_then(|path| manifest_parent_to_name.get(path))
+                .map_or(dep.name.as_str(), String::as_str);
+            if names.contains(dep_name) {
+                edges.insert((package.name.clone(), dep_name.to_owned()));
+            }
+        }
+    }
+
+    edges.into_iter().collect()
+}
+
+fn render_workspace_mermaid(packages: &[&CargoPackage]) -> String {
+    let mut out = String::from("flowchart LR\n");
+    for package in packages {
+        let id = graph_id(&package.name);
+        let label = mermaid_label(&package.name);
+        let _ = writeln!(out, "    {id}[\"{label}\"]");
+    }
+    out
+}
+
+fn render_workspace_dot(packages: &[&CargoPackage]) -> String {
+    let mut out = String::from("digraph workspace_crates {\n");
+    out.push_str("    rankdir=LR;\n");
+    out.push_str("    node [shape=box, style=\"rounded\"];\n");
+    for package in packages {
+        let _ = writeln!(out, "    \"{}\";", dot_escape(&package.name));
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn render_internal_deps_mermaid(packages: &[&CargoPackage], edges: &[(String, String)]) -> String {
+    let mut out = render_workspace_mermaid(packages);
+    for (from, to) in edges {
+        let _ = writeln!(out, "    {} --> {}", graph_id(from), graph_id(to));
+    }
+    out
+}
+
+fn render_internal_deps_dot(packages: &[&CargoPackage], edges: &[(String, String)]) -> String {
+    let mut out = render_workspace_dot(packages);
+    out.truncate(out.trim_end_matches("}\n").len());
+    for (from, to) in edges {
+        let _ = writeln!(
+            out,
+            "    \"{}\" -> \"{}\";",
+            dot_escape(from),
+            dot_escape(to)
+        );
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn render_ir_overview_mermaid() -> String {
+    String::from(
+        "flowchart LR\n\
+         \n\
+             subgraph Boxes[\"boxes IR\"]\n\
+                 BoxBuilder[\"BoxBuilder\"]\n\
+                 BoxTree[\"BoxId / TreeArena\"]\n\
+                 BoxMatch[\"match_box / BoxMatch\"]\n\
+                 BoxBuilder --> BoxTree --> BoxMatch\n\
+             end\n\
+         \n\
+             subgraph UI[\"ui IR\"]\n\
+                 UiProgram[\"UiProgram\"]\n\
+                 UiItems[\"groups / controls / metadata\"]\n\
+                 UiProgram --> UiItems\n\
+             end\n\
+         \n\
+             subgraph Signals[\"signals IR\"]\n\
+                 SigBuilder[\"SigBuilder\"]\n\
+                 SigTree[\"SigId / TreeArena\"]\n\
+                 SigMatch[\"match_sig / SigMatch\"]\n\
+                 AdRules[\"ad_rules\"]\n\
+                 SigBuilder --> SigTree --> SigMatch\n\
+                 AdRules --> SigBuilder\n\
+             end\n\
+         \n\
+             subgraph FIR[\"fir IR\"]\n\
+                 FirStore[\"FirStore\"]\n\
+                 FirModule[\"FirModule\"]\n\
+                 FirVerifier[\"checker\"]\n\
+                 FirInliner[\"inliner\"]\n\
+                 FirStore --> FirModule --> FirVerifier\n\
+                 FirModule --> FirInliner\n\
+             end\n\
+         \n\
+             boxes[\"boxes crate\"] --> eval[\"eval crate\"] --> propagate[\"propagate crate\"]\n\
+             propagate --> Signals\n\
+             propagate --> UI\n\
+             Signals --> transform[\"transform crate\"] --> FIR --> codegen[\"codegen crate\"]\n",
+    )
+}
+
+fn render_ir_overview_dot() -> String {
+    String::from(
+        "digraph ir_overview {\n\
+             rankdir=LR;\n\
+             node [shape=box, style=\"rounded\"];\n\
+             \"boxes::BoxBuilder\" -> \"BoxId / TreeArena\" -> \"match_box\";\n\
+             \"ui::UiProgram\" -> \"UI groups/controls/metadata\";\n\
+             \"signals::SigBuilder\" -> \"SigId / TreeArena\" -> \"match_sig\";\n\
+             \"signals::ad_rules\" -> \"signals::SigBuilder\";\n\
+             \"fir::FirStore\" -> \"FirModule\" -> \"fir::checker\";\n\
+             \"FirModule\" -> \"fir::inliner\";\n\
+             \"boxes\" -> \"eval\" -> \"propagate\";\n\
+             \"propagate\" -> \"signals\";\n\
+             \"propagate\" -> \"ui\";\n\
+             \"signals\" -> \"transform\" -> \"fir\" -> \"codegen\";\n\
+         }\n",
+    )
+}
+
+fn render_public_api_index(
+    packages: &[&CargoPackage],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut out = String::from(
+        "# Public API Index\n\n\
+         Generated by `cargo run -p xtask -- code-graphs`.\n\n\
+         This is a lightweight source scan for public items. Use `cargo doc \
+         --workspace --no-deps` for authoritative Rust API documentation.\n",
+    );
+
+    for package in packages {
+        let items = public_items_for_package(package)?;
+        let _ = writeln!(out, "\n## `{}`\n", package.name);
+        if items.is_empty() {
+            out.push_str("_No direct public items found by the source scan._\n");
+            continue;
+        }
+        out.push_str("| Kind | Name | Location |\n|---|---|---|\n");
+        for item in items {
+            let rel = workspace_relative_path(&item.path);
+            let _ = writeln!(
+                out,
+                "| `{}` | `{}` | `{rel}:{}` |",
+                item.kind, item.name, item.line
+            );
+        }
+    }
+
+    Ok(out)
+}
+
+fn public_items_for_package(
+    package: &CargoPackage,
+) -> Result<Vec<PublicItem>, Box<dyn std::error::Error>> {
+    let mut files = Vec::new();
+    for target in &package.targets {
+        if target.kind.iter().any(|kind| {
+            matches!(
+                kind.as_str(),
+                "lib" | "rlib" | "dylib" | "staticlib" | "cdylib"
+            )
+        }) {
+            collect_rs_files(
+                target
+                    .src_path
+                    .parent()
+                    .ok_or("library target has no source parent")?,
+                &mut files,
+            )?;
+        }
+    }
+    files.sort();
+
+    let mut items = Vec::new();
+    for file in files {
+        let text = fs::read_to_string(&file)?;
+        for (idx, line) in text.lines().enumerate() {
+            if let Some((kind, name)) = parse_public_item_line(line) {
+                items.push(PublicItem {
+                    kind,
+                    name,
+                    path: file.clone(),
+                    line: idx + 1,
+                });
+            }
+        }
+    }
+    items.sort_by(|left, right| {
+        workspace_relative_path(&left.path)
+            .cmp(&workspace_relative_path(&right.path))
+            .then(left.line.cmp(&right.line))
+    });
+    Ok(items)
+}
+
+fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), io::Error> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, files)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn parse_public_item_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || !trimmed.starts_with("pub ") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("pub ")?.trim_start();
+    if rest.starts_with("crate")
+        || rest.starts_with("(crate)")
+        || rest.starts_with("(super)")
+        || rest.starts_with("(self)")
+        || rest.starts_with("super")
+        || rest.starts_with("self")
+    {
+        return None;
+    }
+
+    let rest = rest
+        .strip_prefix("unsafe ")
+        .unwrap_or(rest)
+        .strip_prefix("extern ")
+        .unwrap_or(rest)
+        .strip_prefix("async ")
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix("\"C\" ").unwrap_or(rest);
+
+    for kind in [
+        "struct", "enum", "trait", "fn", "type", "const", "static", "mod", "use",
+    ] {
+        if let Some(after_kind) = rest
+            .strip_prefix(kind)
+            .and_then(|tail| tail.strip_prefix(' '))
+        {
+            return Some((kind.to_owned(), parse_item_name(after_kind)));
+        }
+    }
+    None
+}
+
+fn parse_item_name(input: &str) -> String {
+    let name: String = input
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == ':')
+        .collect();
+    if name.is_empty() {
+        "_".to_owned()
+    } else {
+        name.trim_end_matches(':').to_owned()
+    }
+}
+
+fn render_code_graphs_readme() -> String {
+    String::from(
+        "# Code Graphs\n\n\
+         Generated by:\n\n\
+         ```bash\n\
+         cargo run -p xtask -- code-graphs\n\
+         ```\n\n\
+         Files:\n\n\
+         - `workspace-crates.mmd` / `workspace-crates.dot` / `workspace-crates.svg`: workspace crate nodes from `cargo metadata`.\n\
+         - `internal-crate-deps.mmd` / `internal-crate-deps.dot` / `internal-crate-deps.svg`: internal crate dependency edges from `cargo metadata`.\n\
+         - `ir-overview.mmd` / `ir-overview.dot` / `ir-overview.svg`: curated overview of the main `boxes`, `signals`, `fir`, and `ui` IR relationships.\n\
+         - `public-api-index.md`: lightweight source-scan index of public items. Use Rustdoc as the authoritative API reference.\n\
+         \n\
+         ## Rendered SVG\n\n\
+         ### Workspace Crates\n\n\
+         ![Workspace crates](workspace-crates.svg)\n\n\
+         ### Internal Crate Dependencies\n\n\
+         ![Internal crate dependencies](internal-crate-deps.svg)\n\n\
+         ### IR Overview\n\n\
+         ![IR overview](ir-overview.svg)\n",
+    )
+}
+
+fn write_text(path: &Path, text: &str) -> Result<(), io::Error> {
+    fs::write(path, text)
+}
+
+fn render_svg_with_dot(dot_path: &Path, svg_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("dot")
+        .arg("-Tsvg")
+        .arg(dot_path)
+        .arg("-o")
+        .arg(svg_path)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to render {} with Graphviz `dot`",
+            workspace_relative_path(dot_path)
+        )
+        .into())
+    }
+}
+
+fn graph_id(name: &str) -> String {
+    let mut out = String::from("crate_");
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn mermaid_label(label: &str) -> String {
+    label.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn dot_escape(label: &str) -> String {
+    label.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Enumerates all compile corpus `.dsp` files in deterministic order.

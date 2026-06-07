@@ -1,0 +1,37 @@
+flowchart LR
+
+subgraph Boxes["boxes IR"]
+BoxBuilder["BoxBuilder"]
+BoxTree["BoxId / TreeArena"]
+BoxMatch["match_box / BoxMatch"]
+BoxBuilder --> BoxTree --> BoxMatch
+end
+
+subgraph UI["ui IR"]
+UiProgram["UiProgram"]
+UiItems["groups / controls / metadata"]
+UiProgram --> UiItems
+end
+
+subgraph Signals["signals IR"]
+SigBuilder["SigBuilder"]
+SigTree["SigId / TreeArena"]
+SigMatch["match_sig / SigMatch"]
+AdRules["ad_rules"]
+SigBuilder --> SigTree --> SigMatch
+AdRules --> SigBuilder
+end
+
+subgraph FIR["fir IR"]
+FirStore["FirStore"]
+FirModule["FirModule"]
+FirVerifier["checker"]
+FirInliner["inliner"]
+FirStore --> FirModule --> FirVerifier
+FirModule --> FirInliner
+end
+
+boxes["boxes crate"] --> eval["eval crate"] --> propagate["propagate crate"]
+propagate --> Signals
+propagate --> UI
+Signals --> transform["transform crate"] --> FIR --> codegen["codegen crate"]

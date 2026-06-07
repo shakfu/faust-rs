@@ -1,0 +1,14 @@
+digraph ir_overview {
+rankdir=LR;
+node [shape=box, style="rounded"];
+"boxes::BoxBuilder" -> "BoxId / TreeArena" -> "match_box";
+"ui::UiProgram" -> "UI groups/controls/metadata";
+"signals::SigBuilder" -> "SigId / TreeArena" -> "match_sig";
+"signals::ad_rules" -> "signals::SigBuilder";
+"fir::FirStore" -> "FirModule" -> "fir::checker";
+"FirModule" -> "fir::inliner";
+"boxes" -> "eval" -> "propagate";
+"propagate" -> "signals";
+"propagate" -> "ui";
+"signals" -> "transform" -> "fir" -> "codegen";
+}

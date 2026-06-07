@@ -1,0 +1,31 @@
+digraph workspace_crates {
+    rankdir=LR;
+    node [shape=box, style="rounded"];
+    "algebra";
+    "box-ffi";
+    "boxes";
+    "codegen";
+    "compiler";
+    "cranelift-ffi";
+    "doc";
+    "draw";
+    "errors";
+    "eval";
+    "faust-ffi";
+    "fir";
+    "foreign-call";
+    "graph";
+    "interp-ffi";
+    "interval";
+    "normalize";
+    "parser";
+    "propagate";
+    "signals";
+    "sigtype";
+    "tlib";
+    "transform";
+    "ui";
+    "utils";
+    "wasm-ffi";
+    "xtask";
+}

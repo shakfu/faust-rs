@@ -166,6 +166,7 @@ Use the following variables to increase the evaluation depth stack:
 - User diagnostics guide: `docs/user-diagnostics-guide-en.md`
 - Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
 - Technical/developer workflows: `docs/developer-workflows-en.md`
+- Code graphs and public API index: `docs/code-graphs/`
 - Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
 
 ## Workspace crates
