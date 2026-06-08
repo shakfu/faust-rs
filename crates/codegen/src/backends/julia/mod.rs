@@ -31,7 +31,7 @@
 //! reference while producing valid Julia array accesses.
 //!
 //! FIR pointer loads for `inputs`/`outputs` lower to Julia `@view` slices, not
-//! raw addresses. Consequently [`emit_cast`] deliberately preserves
+//! raw addresses. Consequently `emit_cast` deliberately preserves
 //! `FirType::Ptr(_)` values rather than wrapping views in scalar constructors.
 //!
 //! Unsupported FIR nodes fail with `FRS-CGEN-JULIA-0003`.
