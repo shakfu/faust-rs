@@ -413,6 +413,15 @@ Use the existing `normalize`/`transform`/`codegen` path where possible. The
 first acceptable version can support C/C++ source generation only, then expand
 to other backends.
 
+Status 2026-06-09: implemented. `CsimplifyToNormalForm` and
+`CsimplifyToNormalForm2` call the current Rust normal-form preparation subset
+(`normalize::normalform`) with a synthesized Signal-only `UiProgram` recovered
+from the shared FFI context. `CcreateSourceFromSignals` reuses the `box-ffi`
+Signal-array FIR export path and the shared backend renderer, so Signal source
+generation now supports the same `c`, `cpp`, `fir`, and `interp` language set
+as `CcreateSourceFromBoxes`. The regenerated Signal matrix now reports 123
+exact implementation candidates and no missing symbols.
+
 ## 8. Header And Packaging Work Items
 
 ### H1. C headers

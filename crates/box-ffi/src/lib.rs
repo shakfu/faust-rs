@@ -147,7 +147,13 @@ fn control_kind(kind: FfiSignalControlKind) -> ControlKind {
     }
 }
 
-fn signal_only_root_ui(ctx: &BoxContext, module_name: &str) -> UiProgram {
+/// Builds a synthesized UI program for Signal-only FFI entry points.
+///
+/// Signal constructors store UI/soundfile metadata in the shared
+/// [`tree_ffi::FfiTreeContext`]. This helper turns that registry back into a
+/// minimal [`UiProgram`] so normal-form preparation and source generation can
+/// type/lower Signal handles without going through a Box program.
+pub fn signal_only_root_ui(ctx: &BoxContext, module_name: &str) -> UiProgram {
     let mut arena = TreeArena::new();
     if ctx.signal_controls().is_empty() {
         let root = UiBuilder::new(&mut arena).vgroup(module_name, &[]);
@@ -327,6 +333,77 @@ pub unsafe fn export_fir_from_signal_array_handle(
         let roots = decode_signal_handle_array(ctx, signals)?;
         lower_signal_roots_to_fir(ctx, &roots, module_name)
     })
+}
+
+/// Render a lowered FFI FIR module into one supported textual backend.
+pub fn render_fir_module_source(
+    fir: &BoxFfiFirModule,
+    lang: &str,
+    module_name: &str,
+) -> Result<String, String> {
+    match lang {
+        "c" => generate_c_module(
+            &fir.store,
+            fir.module,
+            &COptions {
+                class_name: Some(module_name.to_owned()),
+                ..COptions::default()
+            },
+        )
+        .map_err(|e| e.to_string()),
+        "cpp" => generate_cpp_module(
+            &fir.store,
+            fir.module,
+            &CppOptions {
+                class_name: Some(module_name.to_owned()),
+                ..CppOptions::default()
+            },
+        )
+        .map_err(|e| e.to_string()),
+        "fir" => Ok(fir::dump_fir(&fir.store, fir.module)),
+        "interp" => {
+            let factory = generate_interp_module::<f32>(
+                &fir.store,
+                fir.module,
+                &InterpOptions {
+                    module_name: Some(module_name.to_owned()),
+                    ..InterpOptions::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            let mut buf = Vec::new();
+            write_fbc(&factory, &mut buf, false).map_err(|e| e.to_string())?;
+            String::from_utf8(buf).map_err(|e| e.to_string())
+        }
+        _ => Err(format!(
+            "unsupported lang '{lang}' (expected c, cpp, fir, or interp)"
+        )),
+    }
+}
+
+/// Compile one null-terminated Signal handle array to target source code.
+///
+/// This is the Rust-side bridge used by `signal-ffi`'s
+/// `CcreateSourceFromSignals` and mirrors `CcreateSourceFromBoxes` after Box
+/// propagation.
+///
+/// # Safety
+/// `signals` must point to a valid null-terminated `*mut c_void` array whose
+/// entries are handles from the shared FFI context.
+pub unsafe fn export_source_from_signal_array_handle(
+    name_app: &str,
+    signals: *mut c_void,
+    lang: &str,
+    argv: &[String],
+) -> Result<String, String> {
+    let parsed = utils::parse_ffi_compile_args(argv)?;
+    let module_name = parsed
+        .module_name
+        .clone()
+        .unwrap_or_else(|| name_app.to_owned());
+    // SAFETY: caller upholds the signal-array contract for this helper.
+    let fir = unsafe { export_fir_from_signal_array_handle(&module_name, signals)? };
+    render_fir_module_source(&fir, lang, &module_name)
 }
 
 /// Builds `x : op` helper shape used by unary `...Aux` APIs.
@@ -2569,51 +2646,7 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             }
         };
 
-        let rendered = match lang.as_str() {
-            "c" => generate_c_module(
-                &fir.store,
-                fir.module,
-                &COptions {
-                    class_name: Some(module_name.clone()),
-                    ..COptions::default()
-                },
-            )
-            .map_err(|e| e.to_string()),
-            "cpp" => generate_cpp_module(
-                &fir.store,
-                fir.module,
-                &CppOptions {
-                    class_name: Some(module_name.clone()),
-                    ..CppOptions::default()
-                },
-            )
-            .map_err(|e| e.to_string()),
-            "fir" => Ok(fir::dump_fir(&fir.store, fir.module)),
-            "interp" => {
-                let factory = generate_interp_module::<f32>(
-                    &fir.store,
-                    fir.module,
-                    &InterpOptions {
-                        module_name: Some(module_name.clone()),
-                        ..InterpOptions::default()
-                    },
-                )
-                .map_err(|e| e.to_string());
-                match factory {
-                    Ok(factory) => {
-                        let mut buf = Vec::new();
-                        match write_fbc(&factory, &mut buf, false) {
-                            Ok(()) => String::from_utf8(buf).map_err(|e| e.to_string()),
-                            Err(e) => Err(e.to_string()),
-                        }
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            _ => Err(format!(
-                "unsupported lang '{lang}' (expected c, cpp, fir, or interp)"
-            )),
-        };
+        let rendered = render_fir_module_source(&fir, &lang, &module_name);
 
         match rendered {
             Ok(text) => utils::alloc_c_string(&text),

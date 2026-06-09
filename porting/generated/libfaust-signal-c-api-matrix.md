@@ -5,7 +5,7 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 
 | C symbol | Rust implementation | Status | Notes |
 | --- | --- | --- | --- |
-| `CcreateSourceFromSignals` | - | `missing` | - |
+| `CcreateSourceFromSignals` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CgetUserData` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisNil` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisProj` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
@@ -123,8 +123,8 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CsigWaveform` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigWriteReadTable` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigXOR` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CsimplifyToNormalForm` | - | `missing` | - |
-| `CsimplifyToNormalForm2` | - | `missing` | - |
+| `CsimplifyToNormalForm` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
+| `CsimplifyToNormalForm2` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `Ctree2str` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `createLibContext` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `destroyLibContext` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |

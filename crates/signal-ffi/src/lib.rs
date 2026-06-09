@@ -766,6 +766,108 @@ pub unsafe extern "C" fn CsigFVar(
 }
 
 #[unsafe(no_mangle)]
+/// Simplifies one Signal to Rust's current normal-form preparation subset.
+pub extern "C" fn CsimplifyToNormalForm(s: *mut c_void) -> *mut c_void {
+    with_ctx(|ctx| {
+        let Some(signal) = decode_signal(ctx, s) else {
+            return null_signal();
+        };
+        let ui = faust_box::signal_only_root_ui(ctx, "FaustDSP");
+        let opts = normalize::normalform::NormalFormOpts::default();
+        match normalize::normalform::prepare_signals(&mut ctx.arena, &ui, signal, &opts) {
+            Ok((normal, _types)) => encode_signal(ctx, normal),
+            Err(_e) => null_signal(),
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Simplifies a null-terminated Signal array to Rust's current normal-form
+/// preparation subset.
+///
+/// # Safety
+/// `siglist` must point to a valid null-terminated Signal handle array.
+pub unsafe extern "C" fn CsimplifyToNormalForm2(siglist: *mut *mut c_void) -> *mut *mut c_void {
+    with_ctx(|ctx| {
+        // SAFETY: exported C API receives a null-terminated signal array.
+        let Some(signals) = (unsafe { decode_signal_array(ctx, siglist) }) else {
+            return std::ptr::null_mut();
+        };
+        if signals.is_empty() {
+            return ctx.alloc_handle_ptr_array(Vec::new());
+        }
+        let ui = faust_box::signal_only_root_ui(ctx, "FaustDSP");
+        let opts = normalize::normalform::NormalFormOpts::default();
+        match normalize::normalform::prepare_signals_multi(&mut ctx.arena, &ui, &signals, &opts) {
+            Ok((normal, _types)) => {
+                let raw = normal
+                    .into_iter()
+                    .map(|signal| ctx.encode(signal))
+                    .collect();
+                ctx.alloc_handle_ptr_array(raw)
+            }
+            Err(_e) => std::ptr::null_mut(),
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Compile a null-terminated Signal array to target source code.
+///
+/// # Safety
+/// - `name_app` must be null or a valid NUL-terminated C string.
+/// - `osigs` must point to a valid null-terminated Signal handle array.
+/// - `lang` must be a valid NUL-terminated C string.
+/// - `argv` must be null or point to `argc` valid C string pointers.
+/// - `error_msg` must be null or point to a writable 4096-byte buffer.
+pub unsafe extern "C" fn CcreateSourceFromSignals(
+    name_app: *const c_char,
+    osigs: *mut *mut c_void,
+    lang: *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
+    error_msg: *mut c_char,
+) -> *mut c_char {
+    let name_app = match unsafe { utils::optional_c_str_arg(name_app, "name_app") } {
+        Ok(Some(s)) if !s.is_empty() => s.to_owned(),
+        Ok(_) => "FaustDSP".to_owned(),
+        Err(e) => {
+            unsafe { utils::write_error_4096(error_msg, &e) };
+            return std::ptr::null_mut();
+        }
+    };
+    let lang = match unsafe { utils::required_c_str_arg(lang, "lang") } {
+        Ok(s) => s.to_ascii_lowercase(),
+        Err(e) => {
+            unsafe { utils::write_error_4096(error_msg, &e) };
+            return std::ptr::null_mut();
+        }
+    };
+    let argv = match unsafe { utils::decode_c_argv(argc, argv) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { utils::write_error_4096(error_msg, &e) };
+            return std::ptr::null_mut();
+        }
+    };
+    // SAFETY: caller upholds the null-terminated Signal array contract.
+    match unsafe {
+        faust_box::export_source_from_signal_array_handle(
+            &name_app,
+            osigs.cast::<c_void>(),
+            &lang,
+            &argv,
+        )
+    } {
+        Ok(source) => utils::alloc_c_string(&source),
+        Err(e) => {
+            unsafe { utils::write_error_4096(error_msg, &e) };
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 /// Builds one button Signal.
 ///
 /// # Safety
@@ -1807,6 +1909,81 @@ mod tests {
         assert!(CisSigFFun(ffun, &mut ff_out, &mut args_out));
         assert!(!ff_out.is_null());
         assert!(!args_out.is_null());
+    }
+
+    #[test]
+    fn simplifies_signal_handles_and_arrays() {
+        let _guard = lock_context();
+        reset_global_context();
+
+        let mixed = CsigAdd(CsigInt(1), CsigReal(0.5));
+        let normal = CsimplifyToNormalForm(mixed);
+        assert!(!normal.is_null());
+        assert!(unsafe { print_signal(normal) }.contains("SIG"));
+
+        let mut signals = [mixed, CsigInput(0), ptr::null_mut()];
+        let outputs = unsafe { CsimplifyToNormalForm2(signals.as_mut_ptr()) };
+        assert!(!outputs.is_null());
+        // SAFETY: `CsimplifyToNormalForm2` returns a context-owned null-terminated array.
+        let first = unsafe { *outputs };
+        // SAFETY: second element exists because the input array had two elements.
+        let second = unsafe { *outputs.add(1) };
+        // SAFETY: third element is the terminating null pointer.
+        let terminator = unsafe { *outputs.add(2) };
+        assert!(!first.is_null());
+        assert!(!second.is_null());
+        assert!(terminator.is_null());
+        unsafe { faust_box::freeCMemory(outputs.cast()) };
+    }
+
+    #[test]
+    fn creates_source_from_signal_arrays() {
+        let _guard = lock_context();
+        reset_global_context();
+
+        let gain = CString::new("gain").expect("valid label");
+        let slider = CsigHSlider(
+            gain.as_ptr(),
+            CsigReal(0.5),
+            CsigReal(0.0),
+            CsigReal(1.0),
+            CsigReal(0.01),
+        );
+        let output = CsigMul(CsigInput(0), slider);
+        let mut signals = [output, ptr::null_mut()];
+        let name = CString::new("SignalDSP").expect("valid name");
+        let lang = CString::new("c").expect("valid lang");
+        let mut error = [0_i8; 4096];
+        let source = unsafe {
+            CcreateSourceFromSignals(
+                name.as_ptr(),
+                signals.as_mut_ptr(),
+                lang.as_ptr(),
+                0,
+                ptr::null(),
+                error.as_mut_ptr(),
+            )
+        };
+        assert!(!source.is_null());
+        let source_text = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+        assert!(source_text.contains("SignalDSP"));
+        assert!(source_text.contains("compute"));
+        unsafe { faust_box::freeCMemory(source.cast()) };
+
+        let bad_lang = CString::new("rust").expect("valid lang");
+        let failed = unsafe {
+            CcreateSourceFromSignals(
+                name.as_ptr(),
+                signals.as_mut_ptr(),
+                bad_lang.as_ptr(),
+                0,
+                ptr::null(),
+                error.as_mut_ptr(),
+            )
+        };
+        assert!(failed.is_null());
+        let error_text = unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
+        assert!(error_text.contains("unsupported lang"));
     }
 
     #[test]
