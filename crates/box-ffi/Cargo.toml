@@ -25,6 +25,7 @@ standalone-capi-globals = []
 boxes = { path = "../boxes" }
 tlib = { path = "../tlib" }
 utils = { path = "../utils" }
+tree-ffi = { path = "../tree-ffi" }
 compiler = { path = "../compiler" }
 propagate = { path = "../propagate" }
 codegen = { path = "../codegen" }

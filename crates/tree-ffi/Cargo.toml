@@ -1,0 +1,18 @@
+[package]
+name = "tree-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+tlib = { path = "../tlib" }
+utils = { path = "../utils" }

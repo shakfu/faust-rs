@@ -134,6 +134,11 @@ added. If extracting a crate is too much churn initially, factor the current
 context into a private module inside `box-ffi` first, then split it once tests
 stabilize.
 
+Status 2026-06-09: extracted as `crates/tree-ffi`. The clean architecture choice
+is a shared crate-level context support layer rather than a new top-level
+`faust-ffi` owner. `box-ffi` keeps the Box API symbols and uses the shared
+handle/string/array helpers; `signal-ffi` should use the same crate when added.
+
 ### 5.2 Keep `box-ffi` as the Box API owner
 
 `box-ffi` should continue to export:

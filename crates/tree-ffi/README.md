@@ -1,0 +1,21 @@
+# tree-ffi
+
+Shared support layer for Faust-style C ABI crates.
+
+## Scope
+
+- Owns the shared `TreeArena` handle model used by Box and Signal FFI APIs.
+- Provides stable opaque handle encoding/decoding for C callers.
+- Tracks context-owned null-terminated handle arrays.
+- Owns context-pinned C strings used by matcher out-parameters.
+- Provides shared `SType` and `SOperator` enum definitions.
+- Provides null-safe helper functions for C out-pointers.
+
+## Non-goals
+
+- Does not export public libfaust C symbols.
+- Does not construct Box or Signal nodes directly.
+- Does not own backend lowering or source generation.
+
+API crates such as `box-ffi` and `signal-ffi` remain responsible for their
+public `Cbox*`, `Csig*`, matcher, conversion, and source-generation symbols.

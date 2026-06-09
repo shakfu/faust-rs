@@ -29,7 +29,7 @@
 #![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
 
 use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
@@ -46,139 +46,12 @@ use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_str,
 };
 use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
+use tree_ffi::{
+    FfiTreeContext as BoxContext, SOperator, SType, read_c_string as unsafe_read_label,
+    write_out_handle as unsafe_write_out_box, write_out_int as unsafe_write_out_int,
+    write_out_real as unsafe_write_out_real,
+};
 use ui::{UiBuilder, UiProgram, UiRootOrigin};
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-/// Scalar type tags used by foreign constant/function constructors.
-pub enum SType {
-    kSInt = 0,
-    kSReal = 1,
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-/// Binary operator tags accepted by [`CboxBinOp`] / [`CboxBinOpAux`].
-pub enum SOperator {
-    kAdd = 0,
-    kSub = 1,
-    kMul = 2,
-    kDiv = 3,
-    kRem = 4,
-    kLsh = 5,
-    kARsh = 6,
-    kLRsh = 7,
-    kGT = 8,
-    kLT = 9,
-    kGE = 10,
-    kLE = 11,
-    kEQ = 12,
-    kNE = 13,
-    kAND = 14,
-    kOR = 15,
-    kXOR = 16,
-}
-
-/// Global mutable context used by the C FFI bridge for box compilation.
-struct BoxContext {
-    arena: TreeArena,
-    by_handle: HashMap<usize, TreeId>,
-    by_tree: HashMap<u32, usize>,
-    string_pool: Vec<CString>,
-    signal_array_allocs: HashMap<usize, usize>,
-    next_handle: usize,
-}
-
-impl BoxContext {
-    /// Creates a fresh FFI box context with the canonical `nil` handle reserved.
-    fn new() -> Self {
-        let mut ctx = Self {
-            arena: TreeArena::new(),
-            by_handle: HashMap::new(),
-            by_tree: HashMap::new(),
-            string_pool: Vec::new(),
-            signal_array_allocs: HashMap::new(),
-            next_handle: 1,
-        };
-        let nil = ctx.arena.nil();
-        let _ = ctx.encode(nil);
-        ctx
-    }
-
-    /// Encodes one arena tree id as a stable opaque FFI handle.
-    ///
-    /// Handles are memoized so repeated exports of the same interned tree reuse
-    /// the same opaque pointer value for the lifetime of the process-global
-    /// context.
-    fn encode(&mut self, id: TreeId) -> *mut c_void {
-        if let Some(handle) = self.by_tree.get(&id.as_u32()).copied() {
-            return handle as *mut c_void;
-        }
-        let handle = self.next_handle;
-        self.next_handle = self.next_handle.saturating_add(1);
-        self.by_handle.insert(handle, id);
-        self.by_tree.insert(id.as_u32(), handle);
-        handle as *mut c_void
-    }
-
-    /// Decodes one opaque FFI handle back into the corresponding arena tree id.
-    fn decode(&self, ptr: *mut c_void) -> Option<TreeId> {
-        if ptr.is_null() {
-            return None;
-        }
-        let handle = ptr as usize;
-        self.by_handle.get(&handle).copied()
-    }
-
-    /// Interns a label C string as an arena symbol node for box builders.
-    fn label_box(&mut self, label: *const c_char) -> Option<TreeId> {
-        if label.is_null() {
-            return None;
-        }
-        let txt = unsafe { CStr::from_ptr(label) }.to_str().ok()?;
-        Some(self.arena.symbol(txt))
-    }
-
-    /// Interns a Rust string in the context-owned C string pool and returns its pointer.
-    fn intern_c_str_ptr(&mut self, s: &str) -> *const c_char {
-        let safe = s.replace('\0', "\\0");
-        match CString::new(safe) {
-            Ok(cstr) => {
-                self.string_pool.push(cstr);
-                self.string_pool
-                    .last()
-                    .map_or(std::ptr::null(), |v| v.as_ptr())
-            }
-            Err(_) => std::ptr::null(),
-        }
-    }
-
-    /// Allocates a null-terminated array of opaque signal pointers owned by the context.
-    fn alloc_signal_ptr_array(&mut self, mut values: Vec<*mut c_void>) -> *mut *mut c_void {
-        values.push(std::ptr::null_mut());
-        let len = values.len();
-        let mut vec = values;
-        let raw = vec.as_mut_ptr();
-        std::mem::forget(vec);
-        self.signal_array_allocs.insert(raw as usize, len);
-        raw
-    }
-
-    /// Frees a pointer previously returned by [`Self::alloc_signal_ptr_array`].
-    ///
-    /// Returns `false` when the pointer does not belong to the tracked array
-    /// allocation set.
-    fn free_if_signal_ptr_array(&mut self, ptr: *mut c_void) -> bool {
-        let key = ptr as usize;
-        let Some(len) = self.signal_array_allocs.remove(&key) else {
-            return false;
-        };
-        unsafe {
-            drop(Vec::from_raw_parts(ptr as *mut *mut c_void, len, len));
-        }
-        true
-    }
-}
 
 static BOX_CONTEXT: OnceLock<Mutex<BoxContext>> = OnceLock::new();
 
@@ -414,42 +287,29 @@ fn quaternary_aux(
     b.seq(par, op)
 }
 
+/// Interns one optional C label in the shared FFI context.
+fn label_tree(ctx: &mut BoxContext, label: *const c_char) -> Option<TreeId> {
+    unsafe { ctx.label_tree(label) }
+}
+
 /// Reads one optional C string and converts it to owned UTF-8.
 fn read_label(label: *const c_char) -> Option<String> {
-    if label.is_null() {
-        return None;
-    }
-    unsafe { CStr::from_ptr(label) }
-        .to_str()
-        .ok()
-        .map(ToOwned::to_owned)
+    unsafe { unsafe_read_label(label) }
 }
 
 /// Writes one box handle result to an optional out-pointer.
 fn write_out_box(ctx: &mut BoxContext, out: *mut *mut c_void, value: TreeId) {
-    if !out.is_null() {
-        unsafe {
-            *out = ctx.encode(value);
-        }
-    }
+    unsafe { unsafe_write_out_box(ctx, out, value) }
 }
 
 /// Writes one integer result to an optional out-pointer.
 fn write_out_int(out: *mut c_int, value: i32) {
-    if !out.is_null() {
-        unsafe {
-            *out = value;
-        }
-    }
+    unsafe { unsafe_write_out_int(out, value) }
 }
 
 /// Writes one floating-point result to an optional out-pointer.
 fn write_out_real(out: *mut f64, value: f64) {
-    if !out.is_null() {
-        unsafe {
-            *out = value;
-        }
-    }
+    unsafe { unsafe_write_out_real(out, value) }
 }
 
 /// Maps [`SOperator`] values to primitive box constructor nodes.
@@ -530,7 +390,7 @@ pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    let freed_array = with_ctx(|ctx| ctx.free_if_signal_ptr_array(ptr));
+    let freed_array = with_ctx(|ctx| ctx.free_if_handle_ptr_array(ptr));
     if !freed_array {
         unsafe { utils::free_c_memory_c_string_only(ptr) }
     }
@@ -1092,7 +952,7 @@ pub extern "C" fn CboxSoundfile(label: *const c_char, chan: *mut c_void) -> *mut
         let Some(chan) = ctx.decode(chan) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1110,7 +970,7 @@ pub extern "C" fn CboxSoundfile(label: *const c_char, chan: *mut c_void) -> *mut
 /// `label` must be a valid C string.
 pub extern "C" fn CboxButton(label: *const c_char) -> *mut c_void {
     with_ctx(|ctx| {
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1128,7 +988,7 @@ pub extern "C" fn CboxButton(label: *const c_char) -> *mut c_void {
 /// `label` must be a valid C string.
 pub extern "C" fn CboxCheckbox(label: *const c_char) -> *mut c_void {
     with_ctx(|ctx| {
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1160,7 +1020,7 @@ pub extern "C" fn CboxVSlider(
         ) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1192,7 +1052,7 @@ pub extern "C" fn CboxHSlider(
         ) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1224,7 +1084,7 @@ pub extern "C" fn CboxNumEntry(
         ) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1249,7 +1109,7 @@ pub extern "C" fn CboxVBargraph(
         let (Some(min), Some(max)) = (ctx.decode(min), ctx.decode(max)) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1276,7 +1136,7 @@ pub extern "C" fn CboxVBargraphAux(
         else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let bar = {
@@ -1302,7 +1162,7 @@ pub extern "C" fn CboxHBargraph(
         let (Some(min), Some(max)) = (ctx.decode(min), ctx.decode(max)) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1329,7 +1189,7 @@ pub extern "C" fn CboxHBargraphAux(
         else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let bar = {
@@ -1351,7 +1211,7 @@ pub extern "C" fn CboxVGroup(label: *const c_char, group: *mut c_void) -> *mut c
         let Some(group) = ctx.decode(group) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1372,7 +1232,7 @@ pub extern "C" fn CboxHGroup(label: *const c_char, group: *mut c_void) -> *mut c
         let Some(group) = ctx.decode(group) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -1393,7 +1253,7 @@ pub extern "C" fn CboxTGroup(label: *const c_char, group: *mut c_void) -> *mut c
         let Some(group) = ctx.decode(group) else {
             return std::ptr::null_mut();
         };
-        let Some(lbl) = ctx.label_box(label) else {
+        let Some(lbl) = label_tree(ctx, label) else {
             return std::ptr::null_mut();
         };
         let id = {
@@ -2511,7 +2371,7 @@ pub unsafe extern "C" fn CboxesToSignals(
             }
         };
         let raw: Vec<*mut c_void> = outputs.into_iter().map(|s| ctx.encode(s)).collect();
-        ctx.alloc_signal_ptr_array(raw)
+        ctx.alloc_handle_ptr_array(raw)
     })
 }
 
@@ -2563,7 +2423,7 @@ pub unsafe extern "C" fn CboxesToSignals2(
             }
         }
         let raw: Vec<*mut c_void> = symbolic.into_iter().map(|s| ctx.encode(s)).collect();
-        ctx.alloc_signal_ptr_array(raw)
+        ctx.alloc_handle_ptr_array(raw)
     })
 }
 

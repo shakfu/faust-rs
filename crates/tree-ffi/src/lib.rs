@@ -1,0 +1,239 @@
+//! Shared Faust tree-handle support for C ABI crates.
+//!
+//! This crate owns the representation-level FFI mechanics that are common to
+//! Box and Signal APIs: a `TreeArena`, stable opaque handles, context-owned C
+//! strings, null-terminated handle arrays, and null-safe out-pointer helpers.
+//! It intentionally does not export libfaust symbols; API crates remain
+//! responsible for their public `Cbox*`, `Csig*`, and backend entry points.
+
+#![allow(unsafe_code)]
+
+use std::collections::HashMap;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+
+use tlib::{TreeArena, TreeId};
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+/// Scalar type tags shared by libfaust Box and Signal foreign APIs.
+pub enum SType {
+    kSInt = 0,
+    kSReal = 1,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+/// Binary operator tags shared by libfaust Box and Signal APIs.
+pub enum SOperator {
+    kAdd = 0,
+    kSub = 1,
+    kMul = 2,
+    kDiv = 3,
+    kRem = 4,
+    kLsh = 5,
+    kARsh = 6,
+    kLRsh = 7,
+    kGT = 8,
+    kLT = 9,
+    kGE = 10,
+    kLE = 11,
+    kEQ = 12,
+    kNE = 13,
+    kAND = 14,
+    kOR = 15,
+    kXOR = 16,
+}
+
+/// Process-global arena and ownership state used behind opaque C tree handles.
+pub struct FfiTreeContext {
+    /// Hash-consed Box/Signal tree arena.
+    pub arena: TreeArena,
+    by_handle: HashMap<usize, TreeId>,
+    by_tree: HashMap<u32, usize>,
+    string_pool: Vec<CString>,
+    handle_array_allocs: HashMap<usize, usize>,
+    next_handle: usize,
+}
+
+impl FfiTreeContext {
+    /// Creates a fresh context with the canonical `nil` handle reserved.
+    pub fn new() -> Self {
+        let mut ctx = Self {
+            arena: TreeArena::new(),
+            by_handle: HashMap::new(),
+            by_tree: HashMap::new(),
+            string_pool: Vec::new(),
+            handle_array_allocs: HashMap::new(),
+            next_handle: 1,
+        };
+        let nil = ctx.arena.nil();
+        let _ = ctx.encode(nil);
+        ctx
+    }
+
+    /// Encodes one arena tree id as a stable opaque FFI handle.
+    pub fn encode(&mut self, id: TreeId) -> *mut c_void {
+        if let Some(handle) = self.by_tree.get(&id.as_u32()).copied() {
+            return handle as *mut c_void;
+        }
+        let handle = self.next_handle;
+        self.next_handle = self.next_handle.saturating_add(1);
+        self.by_handle.insert(handle, id);
+        self.by_tree.insert(id.as_u32(), handle);
+        handle as *mut c_void
+    }
+
+    /// Decodes one opaque FFI handle back into the corresponding arena tree id.
+    pub fn decode(&self, ptr: *mut c_void) -> Option<TreeId> {
+        if ptr.is_null() {
+            return None;
+        }
+        let handle = ptr as usize;
+        self.by_handle.get(&handle).copied()
+    }
+
+    /// Interns a C string as an arena symbol node.
+    ///
+    /// # Safety
+    /// `label` must be null or point to a valid NUL-terminated C string.
+    pub unsafe fn label_tree(&mut self, label: *const c_char) -> Option<TreeId> {
+        if label.is_null() {
+            return None;
+        }
+        let txt = unsafe { CStr::from_ptr(label) }.to_str().ok()?;
+        Some(self.arena.symbol(txt))
+    }
+
+    /// Interns a Rust string in the context-owned C string pool.
+    pub fn intern_c_str_ptr(&mut self, s: &str) -> *const c_char {
+        let safe = s.replace('\0', "\\0");
+        match CString::new(safe) {
+            Ok(cstr) => {
+                self.string_pool.push(cstr);
+                self.string_pool
+                    .last()
+                    .map_or(std::ptr::null(), |v| v.as_ptr())
+            }
+            Err(_) => std::ptr::null(),
+        }
+    }
+
+    /// Allocates a null-terminated array of opaque handles owned by the context.
+    pub fn alloc_handle_ptr_array(&mut self, mut values: Vec<*mut c_void>) -> *mut *mut c_void {
+        values.push(std::ptr::null_mut());
+        let len = values.len();
+        let mut vec = values;
+        let raw = vec.as_mut_ptr();
+        std::mem::forget(vec);
+        self.handle_array_allocs.insert(raw as usize, len);
+        raw
+    }
+
+    /// Frees a pointer previously returned by [`Self::alloc_handle_ptr_array`].
+    pub fn free_if_handle_ptr_array(&mut self, ptr: *mut c_void) -> bool {
+        let key = ptr as usize;
+        let Some(len) = self.handle_array_allocs.remove(&key) else {
+            return false;
+        };
+        unsafe {
+            drop(Vec::from_raw_parts(ptr as *mut *mut c_void, len, len));
+        }
+        true
+    }
+}
+
+impl Default for FfiTreeContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Reads one optional C string and converts it to owned UTF-8.
+///
+/// # Safety
+/// `label` must be null or point to a valid NUL-terminated C string.
+pub unsafe fn read_c_string(label: *const c_char) -> Option<String> {
+    if label.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(label) }
+        .to_str()
+        .ok()
+        .map(ToOwned::to_owned)
+}
+
+/// Writes one tree handle result to an optional out-pointer.
+///
+/// # Safety
+/// `out` must be null or point to writable memory for one handle.
+pub unsafe fn write_out_handle(ctx: &mut FfiTreeContext, out: *mut *mut c_void, value: TreeId) {
+    if !out.is_null() {
+        unsafe {
+            *out = ctx.encode(value);
+        }
+    }
+}
+
+/// Writes one integer result to an optional out-pointer.
+///
+/// # Safety
+/// `out` must be null or point to writable memory for one integer.
+pub unsafe fn write_out_int(out: *mut c_int, value: i32) {
+    if !out.is_null() {
+        unsafe {
+            *out = value;
+        }
+    }
+}
+
+/// Writes one floating-point result to an optional out-pointer.
+///
+/// # Safety
+/// `out` must be null or point to writable memory for one `f64`.
+pub unsafe fn write_out_real(out: *mut f64, value: f64) {
+    if !out.is_null() {
+        unsafe {
+            *out = value;
+        }
+    }
+}
+
+/// Frees context-owned handle arrays before falling back to C-string frees.
+///
+/// # Safety
+/// `ptr` must be null or a pointer previously returned by this library for a
+/// handle array or C string result.
+pub unsafe fn free_context_or_c_string(ctx: &mut FfiTreeContext, ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    if !ctx.free_if_handle_ptr_array(ptr) {
+        unsafe { utils::free_c_memory_c_string_only(ptr) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_tree_handles_stably() {
+        let mut ctx = FfiTreeContext::new();
+        let a = ctx.arena.int(1);
+        let first = ctx.encode(a);
+        let second = ctx.encode(a);
+
+        assert_eq!(first, second);
+        assert_eq!(ctx.decode(first), Some(a));
+    }
+
+    #[test]
+    fn tracks_null_terminated_handle_arrays() {
+        let mut ctx = FfiTreeContext::new();
+        let raw = ctx.alloc_handle_ptr_array(vec![std::ptr::dangling_mut::<c_void>()]);
+
+        assert!(!raw.is_null());
+        assert!(ctx.free_if_handle_ptr_array(raw.cast()));
+        assert!(!ctx.free_if_handle_ptr_array(raw.cast()));
+    }
+}
