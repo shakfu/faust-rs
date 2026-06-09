@@ -2608,6 +2608,33 @@ mod tests {
         assert_eq!(before_free, after_free);
     }
 
+    unsafe fn create_source(root: *mut c_void, lang: &str) -> Result<String, String> {
+        let name = CString::new("SourceSmoke").unwrap();
+        let lang = CString::new(lang).unwrap();
+        let mut err = vec![0_i8; 4096];
+        let source = unsafe {
+            CcreateSourceFromBoxes(
+                name.as_ptr(),
+                root,
+                lang.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+            )
+        };
+        if source.is_null() {
+            return Err(unsafe { CStr::from_ptr(err.as_ptr()) }
+                .to_string_lossy()
+                .into_owned());
+        }
+        let text = unsafe { CStr::from_ptr(source) }
+            .to_str()
+            .expect("source must be UTF-8")
+            .to_owned();
+        unsafe { freeCMemory(source.cast()) };
+        Ok(text)
+    }
+
     #[test]
     fn logical_and_arithmetic_right_shift_use_distinct_box_tags() {
         let _guard = fresh_test_context();
@@ -2684,6 +2711,32 @@ mod tests {
         let _guard = fresh_test_context();
 
         unsafe { assert_signal_array_contract(CboxesToSignals2) };
+
+        destroyLibContext();
+    }
+
+    #[test]
+    fn create_source_from_boxes_supports_expected_backend_languages() {
+        let _guard = fresh_test_context();
+
+        for lang in ["c", "cpp", "fir", "interp"] {
+            let source = unsafe { create_source(CboxWire(), lang) }
+                .unwrap_or_else(|err| panic!("{lang} source generation failed: {err}"));
+            assert!(!source.is_empty(), "{lang} source must not be empty");
+        }
+
+        destroyLibContext();
+    }
+
+    #[test]
+    fn create_source_from_boxes_reports_unsupported_language() {
+        let _guard = fresh_test_context();
+
+        let err = unsafe { create_source(CboxWire(), "rust") }.expect_err("rust must be rejected");
+        assert!(
+            err.contains("unsupported lang 'rust' (expected c, cpp, fir, or interp)"),
+            "{err}"
+        );
 
         destroyLibContext();
     }

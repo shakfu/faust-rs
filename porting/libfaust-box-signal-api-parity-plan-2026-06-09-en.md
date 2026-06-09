@@ -286,6 +286,11 @@ the shared `tree-ffi` handle model.
 Start with Rust-supported backends (`c`, `cpp`, `interp`, possibly `fir`) and
 return null plus a clear diagnostic for unsupported languages.
 
+Status 2026-06-09: `CcreateSourceFromBoxes` has direct FFI tests covering the
+currently supported `c`, `cpp`, `fir`, and `interp` language strings, returned
+string ownership through `freeCMemory`, and the unsupported-language diagnostic
+shape.
+
 ## 7. Signal API Work Items
 
 ### S1. Generate a Signal symbol matrix
