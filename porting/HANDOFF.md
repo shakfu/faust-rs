@@ -1,93 +1,98 @@
 # Session Handoff
 
-Date: 2026-03-30
+Date: 2026-06-09
 
 ## Repo State
 
-- Branch: `main-dev`
-- HEAD: `6cafd60b16d9f3689850b1eb2735af308a52ef65`
+- Branch: `autodiff2`
+- HEAD: `6aa549cd472660a9189ce1d0acc4e0da2db24f9f`
 
 Recent commits (most recent first):
 
-- `6cafd60` Document unary symbolic-recursion canonicalization placement
-- `a42fc73` Prepare recursive groups as symbolic forests before FIR typing
-- `726485e` Normalize unary symbolic recursion projections before FIR typing
-- `fcdef45` Explain de Bruijn recursion lowering and degenerate unary projections
-- `637ed15` Propagate recursive slot environments with lifted de Bruijn references
+- `6aa549cd` Add libfaust export verification
+- `4367a107` Add Signal C++ API header
+- `736c567c` Add Signal C API header
+- `4f258950` Add Signal normal form and source helpers
+- `c9d3b3ca` Add Signal foreign constructors
+- `c59ee151` Add Signal structural predicates
+- `8b407464` Add Signal recursion constructors
+- `ba381fd0` Add Signal table soundfile and UI constructors
 
 ## Working Tree
 
 - Tracked changes:
-  - recursion/de-Bruijn code and docs are modified
-  - journal/index updates for the 2026-03-30 entry are pending commit
-- Untracked local files/directories (user scratch/local tooling):
-  - `.claude/settings.local.json`
-  - local patch snapshots (`0001-*.patch`)
-  - local notes/docs (`CODEGUIDELINES.md`, `PROMPTS.md`, planning notes)
-  - various local `*.dsp`, `*.c`, `*.cpp`, `*.json`, `*.wat`, `*.wasm`
-  - corpus/support assets under `tests/corpus/`
+  - none after the latest committed step
+- Untracked local files/directories:
+  - many pre-existing local scratch files remain untracked at the repository
+    root; they were left untouched
 
 ## Current Goal(s)
 
-- keep the recursion/signal lowering notes aligned with the Rust code
-- preserve the current aperture-memoization cleanup in `tlib`/`propagate`
-- keep the current workbench assets available for signal/FIR follow-up
+- Execute `porting/libfaust-box-signal-api-parity-plan-2026-06-09-en.md`.
+- Keep documentation, journal entries, and commits split per completed step.
 
 ## What Changed This Session
 
-- `tlib` now exposes `de_bruijn_aperture_with_memo(...)`, and `propagate`
-  reuses the shared aperture cache instead of duplicating the helper locally
-- recursion-lowering docs were expanded in both English and French, including:
-  - explicit `aperture` explanation
-  - de Bruijn to symbolic conversion rules
-  - nested-scope examples
-- additional local workbench assets, scratch examples, and planning notes were
-  collected in the repo working tree
+- Planned and committed the libfaust Box/Signal parity roadmap.
+- Generated Box and Signal API matrices under `porting/generated/`.
+- Extracted shared tree FFI context support into `tree-ffi`.
+- Completed Box API parity fixes for right shift, `exp10`, soundfile wrappers,
+  Box-to-Signal arrays, and Box source generation contracts.
+- Added the maintained Signal FFI surface, including constructors, recursion,
+  predicates, foreign nodes, normal-form helpers, source generation, and C/C++
+  headers.
+- Added `cargo run -p xtask -- libfaust-export-check` to build `faust-ffi`,
+  compare exported symbols against maintained headers, and syntax-check C/C++
+  clients.
 
 ## Decisions / Constraints (important for resume)
 
-- `JOURNAL.md` must remain an index/redirect, not a large monolithic body
-- `porting/journal/YYYY-MM-DD.md` preserves semantic day buckets
-- Entries inside each day file are sorted by Git commit recency (newest first)
-- keep `.claude/settings.local.json` out of commits unless the user explicitly
-  wants local Claude permission presets versioned
-- the new aperture helper is meant to preserve memo sharing across one
-  traversal, not to change the de Bruijn semantics
+- `tree-ffi` owns shared C tree handle encoding and the process-global
+  `TreeFfiContext`.
+- Signal recursion uses Rust's canonical external `SIGREC(body)` shape; `CisRec`
+  reports a deterministic adapted mapping.
+- Signal doc-table predicate wrappers currently return deterministic false until
+  Rust has explicit doc-table IR nodes.
+- Header wrappers stay thin over the C ABI; no separate C++ object model was
+  introduced.
+- `JOURNAL.md` remains an index; detailed entries stay in
+  `porting/journal/YYYY-MM-DD.md` with newest commit first inside the day file.
 
 ## Validation Run
 
-- `cargo fmt --all` -> ✅
-- `cargo test -p tlib --test recursive_trees` -> ✅
-- `cargo test -p propagate` -> ✅
+- `cargo run -p xtask -- libfaust-export-check` -> passed; 269 header symbols
+  exported by `target/debug/libfaust.dylib`
+- `cargo fmt --all` -> passed
+- `cargo clippy --workspace --all-targets -- -D warnings` -> passed
+- `cargo test --workspace --all-targets` -> passed
 
 ## Open Issues / Blockers
 
-- many root-level workbench files are still ad hoc and not yet organized under a
-  dedicated scratch/ or docs/ hierarchy
-- `docs/recursion-debruijn-lowering-*` and `docs/flatnode-rec-to-signals-*`
-  now overlap intentionally; if both continue to grow, they may need clearer
-  role separation
+- None for the planned Box/Signal API parity work items in this session.
+- Longer-term parity work still needs differential tests against the C++ libfaust
+  behavior for representative Box/Signal construction and source-generation
+  cases.
 
 ## Next Steps (ordered)
 
-1. Commit the current recursion/doc/workbench snapshot on `main-dev`
-2. If desired, separate repo-local scratch assets from durable corpus/docs files
-3. Continue the signal/FIR recursion work from the now-expanded documentation set
+1. Consider wiring `cargo run -p xtask -- libfaust-export-check` into CI next to
+   existing golden/API guardrails.
+2. Add C++ differential tests for selected Box and Signal wrapper cases once the
+   reference fixture strategy is settled.
+3. Continue toward runtime/source-generation parity beyond the maintained
+   libfaust Box/Signal API surface.
 
 ## Useful Commands to Resume
 
+- `cargo run -p xtask -- libfaust-export-check`
+- `cargo run -p xtask -- libfaust-api-matrix --cpp-root /Users/letz/Developpements/RUST/faust --out porting/generated`
 - `cargo fmt --all`
-- `cargo test -p tlib --test recursive_trees`
-- `cargo test -p propagate`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --all-targets`
 - `git status --short`
-- `git diff --stat`
 
 ## Notes
 
-- If updating the journaling indexes again, keep `JOURNAL.md` as the top-level
-  index and `porting/journal/README.md` as the per-day list.
-- If revisiting recursion lowering, start in:
-  - `crates/tlib/src/recursion.rs`
-  - `crates/propagate/src/lib.rs`
-  - `docs/flatnode-rec-to-signals-en.md`
-  - `docs/recursion-debruijn-lowering-en.md`
+- The plan file is
+  `porting/libfaust-box-signal-api-parity-plan-2026-06-09-en.md`.
+- The day journal is `porting/journal/2026-06-09.md`.
