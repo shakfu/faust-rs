@@ -72,9 +72,9 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CsigEQ` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigExp` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigExp10` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CsigFConst` | - | `missing` | - |
-| `CsigFFun` | - | `missing` | - |
-| `CsigFVar` | - | `missing` | - |
+| `CsigFConst` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
+| `CsigFFun` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
+| `CsigFVar` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigFloatCast` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigFloor` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CsigFmod` | crates/signal-ffi/src/lib.rs | `implemented-exact-candidate` | - |

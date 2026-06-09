@@ -352,6 +352,16 @@ lowering Signal handles to FIR/source. The S3 implementation also added
 `SigBuilder` constructors. The regenerated Signal matrix now reports 77 exact
 implementation candidates and 46 missing symbols.
 
+Status 2026-06-09: completed the remaining constructor subset by adding
+`CsigFConst`, `CsigFVar`, and `CsigFFun`. The foreign-function constructor now
+builds the C++-shaped `ffunction(signature, incfile, libfile)` descriptor in the
+shared arena, preserves the full null-terminated `names` and `largs` arrays, and
+uses the C++ zero-terminated `SType*` convention for argument types. `SType` and
+`SOperator` are now plain copyable C tags in `tree-ffi`, matching their ABI use.
+The regenerated Signal matrix now reports 120 exact implementation candidates
+and 3 missing symbols: `CsimplifyToNormalForm`, `CsimplifyToNormalForm2`, and
+`CcreateSourceFromSignals`.
+
 ### S4. Add recursion API parity
 
 Implement:

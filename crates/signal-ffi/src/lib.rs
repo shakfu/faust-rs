@@ -11,12 +11,12 @@
 #![allow(unsafe_code)]
 #![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeId, de_bruijn_aperture, de_bruijn_ref, vec_to_list};
 use tree_ffi::{
-    FfiSignalControlKind, FfiTreeContext, SOperator, with_global_context as with_ctx,
+    FfiSignalControlKind, FfiTreeContext, SOperator, SType, with_global_context as with_ctx,
     write_out_handle as unsafe_write_out_signal, write_out_int as unsafe_write_out_int,
     write_out_real as unsafe_write_out_real,
 };
@@ -58,6 +58,102 @@ unsafe fn decode_signal_array(
 unsafe fn decode_label(ctx: &mut FfiTreeContext, label: *const c_char) -> Option<TreeId> {
     // SAFETY: caller provides a null or valid NUL-terminated label pointer.
     unsafe { ctx.label_tree(label) }
+}
+
+unsafe fn read_c_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller provides a valid NUL-terminated C string.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(ToOwned::to_owned)
+}
+
+unsafe fn read_c_string_array(ptrs: *const *const c_char) -> Option<Vec<String>> {
+    if ptrs.is_null() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut cur = ptrs;
+    loop {
+        // SAFETY: caller provides a valid null-terminated C string pointer array.
+        let ptr = unsafe { *cur };
+        if ptr.is_null() {
+            break;
+        }
+        // SAFETY: each non-null array element must be a valid NUL-terminated C string.
+        out.push(unsafe { read_c_string(ptr) }?);
+        // SAFETY: same null-terminated array contract as the dereference above.
+        cur = unsafe { cur.add(1) };
+    }
+    Some(out)
+}
+
+unsafe fn read_stype_array(types: *const SType) -> Option<Vec<SType>> {
+    if types.is_null() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut cur = types;
+    loop {
+        // SAFETY: caller provides a valid kSInt/kSReal array terminated by kSInt
+        // (the C++ API uses the zero enum value as terminator).
+        let value = unsafe { std::ptr::read(cur) };
+        if matches!(value, SType::kSInt) {
+            break;
+        }
+        out.push(value);
+        // SAFETY: same zero-terminated array contract as the read above.
+        cur = unsafe { cur.add(1) };
+    }
+    Some(out)
+}
+
+fn stype_tree(ctx: &mut FfiTreeContext, ty: SType) -> TreeId {
+    match ty {
+        SType::kSInt => ctx.arena.int(0),
+        SType::kSReal => ctx.arena.int(1),
+    }
+}
+
+fn string_list(ctx: &mut FfiTreeContext, values: &[String]) -> TreeId {
+    let mut list = ctx.arena.nil();
+    for value in values.iter().rev() {
+        let item = ctx.arena.symbol(value);
+        list = ctx.arena.cons(item, list);
+    }
+    list
+}
+
+fn stype_list(ctx: &mut FfiTreeContext, values: &[SType]) -> TreeId {
+    let mut list = ctx.arena.nil();
+    for value in values.iter().rev() {
+        let item = stype_tree(ctx, *value);
+        list = ctx.arena.cons(item, list);
+    }
+    list
+}
+
+fn ffunction_descriptor(
+    ctx: &mut FfiTreeContext,
+    rtype: SType,
+    names: &[String],
+    atypes: &[SType],
+    incfile: &str,
+    libfile: &str,
+) -> TreeId {
+    let ret_type = stype_tree(ctx, rtype);
+    let names = string_list(ctx, names);
+    let atypes = stype_list(ctx, atypes);
+    let payload = ctx.arena.cons(names, atypes);
+    let signature = ctx.arena.cons(ret_type, payload);
+    let incfile = ctx.arena.symbol(incfile);
+    let libfile = ctx.arena.symbol(libfile);
+    let tag = ctx.arena.intern_tag("FFUN");
+    ctx.arena
+        .intern(NodeKind::Tag(tag), &[signature, incfile, libfile])
 }
 
 fn write_out_signal(ctx: &mut FfiTreeContext, out: *mut *mut c_void, value: TreeId) {
@@ -566,6 +662,106 @@ pub extern "C" fn CsigSelect3(
 ) -> *mut c_void {
     quaternary_signal(selector, s1, s2, s3, |b, selector, s1, s2, s3| {
         b.select3(selector, s1, s2, s3)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Builds one foreign-function Signal.
+///
+/// The `atypes` array follows the C++ API contract and is terminated by
+/// `kSInt` (`0`), while `names` and `largs` are null-terminated arrays.
+///
+/// # Safety
+/// `names`, `atypes`, `incfile`, `libfile`, and `largs` must be valid according
+/// to their null/zero-terminated C API contracts.
+pub unsafe extern "C" fn CsigFFun(
+    rtype: SType,
+    names: *const *const c_char,
+    atypes: *const SType,
+    incfile: *const c_char,
+    libfile: *const c_char,
+    largs: *mut *mut c_void,
+) -> *mut c_void {
+    with_ctx(|ctx| {
+        // SAFETY: exported C API receives null/zero-terminated arrays.
+        let Some(names) = (unsafe { read_c_string_array(names) }) else {
+            return null_signal();
+        };
+        // SAFETY: exported C API receives a zero-terminated SType array.
+        let Some(atypes) = (unsafe { read_stype_array(atypes) }) else {
+            return null_signal();
+        };
+        // SAFETY: exported C API receives valid NUL-terminated strings.
+        let Some(incfile) = (unsafe { read_c_string(incfile) }) else {
+            return null_signal();
+        };
+        // SAFETY: exported C API receives valid NUL-terminated strings.
+        let Some(libfile) = (unsafe { read_c_string(libfile) }) else {
+            return null_signal();
+        };
+        // SAFETY: exported C API receives a null-terminated signal array.
+        let Some(largs) = (unsafe { decode_signal_array(ctx, largs) }) else {
+            return null_signal();
+        };
+
+        let ff = ffunction_descriptor(ctx, rtype, &names, &atypes, &incfile, &libfile);
+        let args = vec_to_list(&mut ctx.arena, &largs);
+        let output = SigBuilder::new(&mut ctx.arena).ffun(ff, args);
+        encode_signal(ctx, output)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Builds one foreign-constant Signal.
+///
+/// # Safety
+/// `name` and `file` must be valid NUL-terminated C strings.
+pub unsafe extern "C" fn CsigFConst(
+    ty: SType,
+    name: *const c_char,
+    file: *const c_char,
+) -> *mut c_void {
+    with_ctx(|ctx| {
+        // SAFETY: exported C API receives valid NUL-terminated strings.
+        let Some(name) = (unsafe { read_c_string(name) }) else {
+            return null_signal();
+        };
+        // SAFETY: exported C API receives valid NUL-terminated strings.
+        let Some(file) = (unsafe { read_c_string(file) }) else {
+            return null_signal();
+        };
+        let ty = stype_tree(ctx, ty);
+        let name = ctx.arena.symbol(name);
+        let file = ctx.arena.symbol(file);
+        let output = SigBuilder::new(&mut ctx.arena).fconst(ty, name, file);
+        encode_signal(ctx, output)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Builds one foreign-variable Signal.
+///
+/// # Safety
+/// `name` and `file` must be valid NUL-terminated C strings.
+pub unsafe extern "C" fn CsigFVar(
+    ty: SType,
+    name: *const c_char,
+    file: *const c_char,
+) -> *mut c_void {
+    with_ctx(|ctx| {
+        // SAFETY: exported C API receives valid NUL-terminated strings.
+        let Some(name) = (unsafe { read_c_string(name) }) else {
+            return null_signal();
+        };
+        // SAFETY: exported C API receives valid NUL-terminated strings.
+        let Some(file) = (unsafe { read_c_string(file) }) else {
+            return null_signal();
+        };
+        let ty = stype_tree(ctx, ty);
+        let name = ctx.arena.symbol(name);
+        let file = ctx.arena.symbol(file);
+        let output = SigBuilder::new(&mut ctx.arena).fvar(ty, name, file);
+        encode_signal(ctx, output)
     })
 }
 
@@ -1559,6 +1755,58 @@ mod tests {
         assert_eq!(real_out, 3.0);
         assert!(terminator.is_null());
         unsafe { faust_box::freeCMemory(outputs.cast()) };
+    }
+
+    #[test]
+    fn builds_and_matches_foreign_signal_nodes() {
+        let _guard = lock_context();
+        reset_global_context();
+
+        let name = CString::new("fSamplingFreq").expect("valid name");
+        let file = CString::new("faust/dsp/dsp.h").expect("valid file");
+        let fconst = unsafe { CsigFConst(SType::kSReal, name.as_ptr(), file.as_ptr()) };
+        assert!(!fconst.is_null());
+        let mut ty_out = ptr::null_mut();
+        let mut name_out = ptr::null_mut();
+        let mut file_out = ptr::null_mut();
+        assert!(CisSigFConst(
+            fconst,
+            &mut ty_out,
+            &mut name_out,
+            &mut file_out
+        ));
+        assert!(!ty_out.is_null());
+        assert!(!name_out.is_null());
+        assert!(!file_out.is_null());
+
+        let var_name = CString::new("count").expect("valid name");
+        let fvar = unsafe { CsigFVar(SType::kSInt, var_name.as_ptr(), file.as_ptr()) };
+        assert!(!fvar.is_null());
+        assert!(CisSigFVar(fvar, &mut ty_out, &mut name_out, &mut file_out));
+
+        let fun_name = CString::new("tanh").expect("valid function name");
+        let incfile = CString::new("math.h").expect("valid include");
+        let libfile = CString::new("").expect("valid library");
+        let names = [fun_name.as_ptr(), ptr::null()];
+        let atypes = [SType::kSReal, SType::kSInt];
+        let arg = CsigInput(0);
+        let mut args = [arg, ptr::null_mut()];
+        let ffun = unsafe {
+            CsigFFun(
+                SType::kSReal,
+                names.as_ptr(),
+                atypes.as_ptr(),
+                incfile.as_ptr(),
+                libfile.as_ptr(),
+                args.as_mut_ptr(),
+            )
+        };
+        assert!(!ffun.is_null());
+        let mut ff_out = ptr::null_mut();
+        let mut args_out = ptr::null_mut();
+        assert!(CisSigFFun(ffun, &mut ff_out, &mut args_out));
+        assert!(!ff_out.is_null());
+        assert!(!args_out.is_null());
     }
 
     #[test]

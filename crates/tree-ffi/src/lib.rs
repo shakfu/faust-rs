@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use tlib::{TreeArena, TreeId};
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 /// Scalar type tags shared by libfaust Box and Signal foreign APIs.
 pub enum SType {
@@ -23,6 +24,7 @@ pub enum SType {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 /// Binary operator tags shared by libfaust Box and Signal APIs.
 pub enum SOperator {
