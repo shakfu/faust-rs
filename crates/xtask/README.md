@@ -55,6 +55,7 @@ dot -V
 | `backend-align-smoke` | CI-friendly alignment orchestration |
 | `backend-align-nightly` | Broader alignment orchestration intended for longer jobs |
 | `code-graphs` | Generate Mermaid/DOT/SVG crate graphs, IR overview graphs, and a public API source-scan index |
+| `libfaust-api-matrix` | Generate Box and Signal C API parity matrices from libfaust reference headers |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
@@ -383,6 +384,29 @@ The public API index is a quick map, not a replacement for:
 ```bash
 cargo doc --workspace --no-deps
 ```
+
+## libfaust API Matrices
+
+`libfaust-api-matrix` compares `LIBFAUST_API` C symbols declared by the
+reference Faust headers with Rust C exports currently present in the `*-ffi`
+crates.
+
+```bash
+cargo run -p xtask -- libfaust-api-matrix \
+  --cpp-root /Users/letz/Developpements/RUST/faust \
+  --out porting/generated
+```
+
+Generated files:
+
+| File | Description |
+|---|---|
+| `porting/generated/libfaust-box-c-api-matrix.md` | Box C API symbol coverage and known adapted mappings |
+| `porting/generated/libfaust-signal-c-api-matrix.md` | Signal C API symbol coverage and missing first-slice targets |
+
+The scanner is deliberately conservative: it classifies symbol presence, not
+semantic parity. Rows marked `implemented-exact-candidate` still need focused
+API tests before being treated as final parity.
 
 ## Differential Reports
 

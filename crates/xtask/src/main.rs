@@ -77,6 +77,7 @@ Usage:
   cargo run -p xtask -- c-fastlane-diff-report
   cargo run -p xtask -- backend-full-corpus-diff-report
   cargo run -p xtask -- table-fastlane-diff-report
+  cargo run -p xtask -- libfaust-api-matrix [--cpp-root /path/to/faust] [--out porting/generated]
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -160,6 +161,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "c-fastlane-diff-report" => c_fastlane_diff_report()?,
         "backend-full-corpus-diff-report" => backend_full_corpus_diff_report()?,
         "table-fastlane-diff-report" => table_fastlane_diff_report()?,
+        "libfaust-api-matrix" => libfaust_api_matrix(args)?,
         _ => {
             print!("{USAGE}");
         }
@@ -172,6 +174,7 @@ mod backend_align;
 mod code_graphs;
 mod fir_dump;
 mod golden;
+mod libfaust_api_matrix;
 mod reports;
 mod runtime_trace;
 mod shared;
@@ -181,6 +184,7 @@ pub(crate) use backend_align::*;
 pub(crate) use code_graphs::*;
 pub(crate) use fir_dump::*;
 pub(crate) use golden::*;
+pub(crate) use libfaust_api_matrix::*;
 pub(crate) use reports::*;
 pub(crate) use runtime_trace::*;
 pub(crate) use shared::*;
