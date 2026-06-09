@@ -382,6 +382,15 @@ Where Rust lacks a C++ node family:
 - record the gap in the matrix;
 - add a focused parity test so the behavior is intentional.
 
+Status 2026-06-09: implemented for all `Cis*` rows. Predicates backed by
+`SigMatch` now decode their children through shared handle out-pointers; UI and
+soundfile predicates recover labels/ranges from the `tree-ffi` Signal control
+registry. The C++ doc-table predicate families return `false` deterministically
+because faust-rs has no public doc-table Signal node family. `CisRec` is mapped
+adaptively to Rust's `SIGREC(body)` shape by returning `nil` for the C++ symbolic
+`var` slot and the Rust recursion body in `body`. The regenerated Signal matrix
+now reports 117 exact implementation candidates and 6 missing symbols.
+
 ### S6. Add normal-form/source helpers
 
 Implement:

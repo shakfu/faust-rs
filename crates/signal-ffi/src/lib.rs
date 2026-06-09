@@ -14,7 +14,7 @@
 use std::ffi::{c_char, c_int, c_void};
 
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
-use tlib::{TreeId, de_bruijn_aperture, de_bruijn_ref, vec_to_list};
+use tlib::{NodeKind, TreeId, de_bruijn_aperture, de_bruijn_ref, vec_to_list};
 use tree_ffi::{
     FfiSignalControlKind, FfiTreeContext, SOperator, with_global_context as with_ctx,
     write_out_handle as unsafe_write_out_signal, write_out_int as unsafe_write_out_int,
@@ -73,6 +73,38 @@ fn write_out_int(out: *mut c_int, value: i32) {
 fn write_out_real(out: *mut f64, value: f64) {
     // SAFETY: exported predicate functions receive optional out-pointers from C.
     unsafe { unsafe_write_out_real(out, value) }
+}
+
+fn write_out_i64(out: *mut i64, value: i64) {
+    if !out.is_null() {
+        // SAFETY: exported predicate functions receive optional out-pointers from C.
+        unsafe {
+            *out = value;
+        }
+    }
+}
+
+fn control_label(ctx: &FfiTreeContext, control: u32) -> Option<TreeId> {
+    ctx.signal_control(control).map(|control| control.label)
+}
+
+fn control_slider_fields(
+    ctx: &FfiTreeContext,
+    control: u32,
+) -> Option<(TreeId, TreeId, TreeId, TreeId, TreeId)> {
+    let control = ctx.signal_control(control)?;
+    Some((
+        control.label,
+        control.init?,
+        control.min?,
+        control.max?,
+        control.step?,
+    ))
+}
+
+fn control_bargraph_fields(ctx: &FfiTreeContext, control: u32) -> Option<(TreeId, TreeId, TreeId)> {
+    let control = ctx.signal_control(control)?;
+    Some((control.label, control.min?, control.max?))
 }
 
 fn soperator_to_binop(op: SOperator) -> BinOp {
@@ -791,6 +823,531 @@ pub extern "C" fn CisSigBinOp(
     })
 }
 
+#[unsafe(no_mangle)]
+/// Matches a 64-bit integer Signal constant.
+pub extern "C" fn CisSigInt64(t: *mut c_void, i: *mut i64) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        match ctx.arena.kind(t) {
+            Some(NodeKind::Int(value)) => {
+                write_out_i64(i, *value);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches an output Signal.
+pub extern "C" fn CisSigOutput(t: *mut c_void, i: *mut c_int, t0: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, t) {
+            SigMatch::Output(index, signal) => {
+                write_out_int(i, index);
+                write_out_signal(ctx, t0, signal);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a prefix Signal.
+pub extern "C" fn CisSigPrefix(t: *mut c_void, t0: *mut *mut c_void, t1: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, t) {
+            SigMatch::Prefix(left, right) => {
+                write_out_signal(ctx, t0, left);
+                write_out_signal(ctx, t1, right);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a read-table Signal.
+pub extern "C" fn CisSigRDTbl(s: *mut c_void, t: *mut *mut c_void, i: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::RdTbl(table, index) => {
+                write_out_signal(ctx, t, table);
+                write_out_signal(ctx, i, index);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a write-table Signal.
+pub extern "C" fn CisSigWRTbl(
+    u: *mut c_void,
+    id: *mut *mut c_void,
+    t: *mut *mut c_void,
+    i: *mut *mut c_void,
+    s: *mut *mut c_void,
+) -> bool {
+    with_ctx(|ctx| {
+        let Some(u) = decode_signal(ctx, u) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, u) {
+            SigMatch::WrTbl(size, generator, index, signal) => {
+                write_out_signal(ctx, id, size);
+                write_out_signal(ctx, t, generator);
+                write_out_signal(ctx, i, index);
+                write_out_signal(ctx, s, signal);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a generator Signal.
+pub extern "C" fn CisSigGen(t: *mut c_void, x: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, t) {
+            SigMatch::Gen(value) => {
+                write_out_signal(ctx, x, value);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a generator Signal without returning its child.
+pub extern "C" fn CisSigGen1(t: *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        matches!(match_sig(&ctx.arena, t), SigMatch::Gen(_))
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a two-way selector Signal.
+pub extern "C" fn CisSigSelect2(
+    t: *mut c_void,
+    selector: *mut *mut c_void,
+    s1: *mut *mut c_void,
+    s2: *mut *mut c_void,
+) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, t) {
+            SigMatch::Select2(sel, left, right) => {
+                write_out_signal(ctx, selector, sel);
+                write_out_signal(ctx, s1, left);
+                write_out_signal(ctx, s2, right);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches an assert-bounds Signal.
+pub extern "C" fn CisSigAssertBounds(
+    t: *mut c_void,
+    s1: *mut *mut c_void,
+    s2: *mut *mut c_void,
+    s3: *mut *mut c_void,
+) -> bool {
+    with_ctx(|ctx| {
+        let Some(t) = decode_signal(ctx, t) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, t) {
+            SigMatch::AssertBounds(a, b, c) => {
+                write_out_signal(ctx, s1, a);
+                write_out_signal(ctx, s2, b);
+                write_out_signal(ctx, s3, c);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+macro_rules! match_unary_predicate {
+    ($name:ident, $variant:path) => {
+        #[unsafe(no_mangle)]
+        /// Matches one unary Signal family.
+        pub extern "C" fn $name(s: *mut c_void, x: *mut *mut c_void) -> bool {
+            with_ctx(|ctx| {
+                let Some(s) = decode_signal(ctx, s) else {
+                    return false;
+                };
+                match match_sig(&ctx.arena, s) {
+                    $variant(value) => {
+                        write_out_signal(ctx, x, value);
+                        true
+                    }
+                    _ => false,
+                }
+            })
+        }
+    };
+}
+
+match_unary_predicate!(CisSigHighest, SigMatch::Highest);
+match_unary_predicate!(CisSigLowest, SigMatch::Lowest);
+match_unary_predicate!(CisSigIntCast, SigMatch::IntCast);
+match_unary_predicate!(CisSigFloatCast, SigMatch::FloatCast);
+
+#[unsafe(no_mangle)]
+/// Matches a foreign-function Signal.
+pub extern "C" fn CisSigFFun(
+    s: *mut c_void,
+    ff: *mut *mut c_void,
+    largs: *mut *mut c_void,
+) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::FFun(fun, args) => {
+                write_out_signal(ctx, ff, fun);
+                write_out_signal(ctx, largs, args);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+macro_rules! match_ternary_predicate {
+    ($name:ident, $variant:path, $a:ident, $b:ident, $c:ident) => {
+        #[unsafe(no_mangle)]
+        /// Matches one ternary Signal family.
+        pub extern "C" fn $name(
+            s: *mut c_void,
+            $a: *mut *mut c_void,
+            $b: *mut *mut c_void,
+            $c: *mut *mut c_void,
+        ) -> bool {
+            with_ctx(|ctx| {
+                let Some(s) = decode_signal(ctx, s) else {
+                    return false;
+                };
+                match match_sig(&ctx.arena, s) {
+                    $variant(first, second, third) => {
+                        write_out_signal(ctx, $a, first);
+                        write_out_signal(ctx, $b, second);
+                        write_out_signal(ctx, $c, third);
+                        true
+                    }
+                    _ => false,
+                }
+            })
+        }
+    };
+}
+
+match_ternary_predicate!(CisSigFConst, SigMatch::FConst, r#type, name, file);
+match_ternary_predicate!(CisSigFVar, SigMatch::FVar, r#type, name, file);
+
+#[unsafe(no_mangle)]
+/// Matches a projection Signal.
+pub extern "C" fn CisProj(s: *mut c_void, i: *mut c_int, rgroup: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::Proj(index, group) => {
+                write_out_int(i, index);
+                write_out_signal(ctx, rgroup, group);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a recursive Signal group.
+pub extern "C" fn CisRec(s: *mut c_void, var: *mut *mut c_void, body: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::Rec(rec_body) => {
+                let nil = ctx.arena.nil();
+                write_out_signal(ctx, var, nil);
+                write_out_signal(ctx, body, rec_body);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a button Signal.
+pub extern "C" fn CisSigButton(s: *mut c_void, lbl: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::Button(control) => match control_label(ctx, control) {
+                Some(label) => {
+                    write_out_signal(ctx, lbl, label);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a checkbox Signal.
+pub extern "C" fn CisSigCheckbox(s: *mut c_void, lbl: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::Checkbox(control) => match control_label(ctx, control) {
+                Some(label) => {
+                    write_out_signal(ctx, lbl, label);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a waveform Signal.
+pub extern "C" fn CisSigWaveform(s: *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        matches!(match_sig(&ctx.arena, s), SigMatch::Waveform(_))
+    })
+}
+
+macro_rules! match_slider_predicate {
+    ($name:ident, $variant:path) => {
+        #[unsafe(no_mangle)]
+        /// Matches one slider-like Signal family.
+        pub extern "C" fn $name(
+            s: *mut c_void,
+            lbl: *mut *mut c_void,
+            init: *mut *mut c_void,
+            min: *mut *mut c_void,
+            max: *mut *mut c_void,
+            step: *mut *mut c_void,
+        ) -> bool {
+            with_ctx(|ctx| {
+                let Some(s) = decode_signal(ctx, s) else {
+                    return false;
+                };
+                match match_sig(&ctx.arena, s) {
+                    $variant(control) => match control_slider_fields(ctx, control) {
+                        Some((label, init_v, min_v, max_v, step_v)) => {
+                            write_out_signal(ctx, lbl, label);
+                            write_out_signal(ctx, init, init_v);
+                            write_out_signal(ctx, min, min_v);
+                            write_out_signal(ctx, max, max_v);
+                            write_out_signal(ctx, step, step_v);
+                            true
+                        }
+                        None => false,
+                    },
+                    _ => false,
+                }
+            })
+        }
+    };
+}
+
+match_slider_predicate!(CisSigHSlider, SigMatch::HSlider);
+match_slider_predicate!(CisSigVSlider, SigMatch::VSlider);
+match_slider_predicate!(CisSigNumEntry, SigMatch::NumEntry);
+
+macro_rules! match_bargraph_predicate {
+    ($name:ident, $variant:path) => {
+        #[unsafe(no_mangle)]
+        /// Matches one bargraph Signal family.
+        pub extern "C" fn $name(
+            s: *mut c_void,
+            lbl: *mut *mut c_void,
+            min: *mut *mut c_void,
+            max: *mut *mut c_void,
+            x: *mut *mut c_void,
+        ) -> bool {
+            with_ctx(|ctx| {
+                let Some(s) = decode_signal(ctx, s) else {
+                    return false;
+                };
+                match match_sig(&ctx.arena, s) {
+                    $variant(control, signal) => match control_bargraph_fields(ctx, control) {
+                        Some((label, min_v, max_v)) => {
+                            write_out_signal(ctx, lbl, label);
+                            write_out_signal(ctx, min, min_v);
+                            write_out_signal(ctx, max, max_v);
+                            write_out_signal(ctx, x, signal);
+                            true
+                        }
+                        None => false,
+                    },
+                    _ => false,
+                }
+            })
+        }
+    };
+}
+
+match_bargraph_predicate!(CisSigHBargraph, SigMatch::HBargraph);
+match_bargraph_predicate!(CisSigVBargraph, SigMatch::VBargraph);
+
+macro_rules! match_binary_predicate {
+    ($name:ident, $variant:path, $left:ident, $right:ident) => {
+        #[unsafe(no_mangle)]
+        /// Matches one binary Signal family.
+        pub extern "C" fn $name(
+            s: *mut c_void,
+            $left: *mut *mut c_void,
+            $right: *mut *mut c_void,
+        ) -> bool {
+            with_ctx(|ctx| {
+                let Some(s) = decode_signal(ctx, s) else {
+                    return false;
+                };
+                match match_sig(&ctx.arena, s) {
+                    $variant(first, second) => {
+                        write_out_signal(ctx, $left, first);
+                        write_out_signal(ctx, $right, second);
+                        true
+                    }
+                    _ => false,
+                }
+            })
+        }
+    };
+}
+
+match_binary_predicate!(CisSigAttach, SigMatch::Attach, s0, s1);
+match_binary_predicate!(CisSigEnable, SigMatch::Enable, s0, s1);
+match_binary_predicate!(CisSigControl, SigMatch::Control, s0, s1);
+match_binary_predicate!(CisSigSoundfileLength, SigMatch::SoundfileLength, sf, part);
+match_binary_predicate!(CisSigSoundfileRate, SigMatch::SoundfileRate, sf, part);
+
+#[unsafe(no_mangle)]
+/// Matches a soundfile Signal.
+pub extern "C" fn CisSigSoundfile(s: *mut c_void, label: *mut *mut c_void) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::Soundfile(control) => match control_label(ctx, control) {
+                Some(lbl) => {
+                    write_out_signal(ctx, label, lbl);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Matches a soundfile buffer Signal.
+pub extern "C" fn CisSigSoundfileBuffer(
+    s: *mut c_void,
+    sf: *mut *mut c_void,
+    chan: *mut *mut c_void,
+    part: *mut *mut c_void,
+    ridx: *mut *mut c_void,
+) -> bool {
+    with_ctx(|ctx| {
+        let Some(s) = decode_signal(ctx, s) else {
+            return false;
+        };
+        match match_sig(&ctx.arena, s) {
+            SigMatch::SoundfileBuffer(sf_v, chan_v, part_v, ridx_v) => {
+                write_out_signal(ctx, sf, sf_v);
+                write_out_signal(ctx, chan, chan_v);
+                write_out_signal(ctx, part, part_v);
+                write_out_signal(ctx, ridx, ridx_v);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Deterministic false predicate for unsupported doc constant table Signals.
+pub extern "C" fn CisSigDocConstantTbl(
+    _t: *mut c_void,
+    _n: *mut *mut c_void,
+    _sig: *mut *mut c_void,
+) -> bool {
+    false
+}
+
+#[unsafe(no_mangle)]
+/// Deterministic false predicate for unsupported doc write table Signals.
+pub extern "C" fn CisSigDocWriteTbl(
+    _t: *mut c_void,
+    _n: *mut *mut c_void,
+    _sig: *mut *mut c_void,
+    _widx: *mut *mut c_void,
+    _wsig: *mut *mut c_void,
+) -> bool {
+    false
+}
+
+#[unsafe(no_mangle)]
+/// Deterministic false predicate for unsupported doc access table Signals.
+pub extern "C" fn CisSigDocAccessTbl(
+    _t: *mut c_void,
+    _tbl: *mut *mut c_void,
+    _ridx: *mut *mut c_void,
+) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,20 +1454,52 @@ mod tests {
         let mut waveform_values = [zero, one, ptr::null_mut()];
         let waveform = unsafe { CsigWaveform(waveform_values.as_mut_ptr()) };
         assert!(unsafe { print_signal(waveform) }.contains("SIGWAVEFORM"));
+        assert!(CisSigWaveform(waveform));
 
         let label = CString::new("drum[url:{'kick.wav'}]").expect("valid label");
         let soundfile = unsafe { CsigSoundfile(label.as_ptr()) };
         assert!(!soundfile.is_null());
-        assert!(!CsigSoundfileLength(soundfile, zero).is_null());
+        let mut label_out = ptr::null_mut();
+        assert!(CisSigSoundfile(soundfile, &mut label_out));
+        assert!(!label_out.is_null());
+        let length = CsigSoundfileLength(soundfile, zero);
+        assert!(!length.is_null());
+        let mut sf_out = ptr::null_mut();
+        let mut part_out = ptr::null_mut();
+        assert!(CisSigSoundfileLength(length, &mut sf_out, &mut part_out));
+        assert_eq!(sf_out, soundfile);
+        assert_eq!(part_out, zero);
         assert!(!CsigSoundfileRate(soundfile, zero).is_null());
         assert!(!CsigSoundfileBuffer(soundfile, zero, zero, input).is_null());
 
         let gain = CString::new("gain[style:knob]").expect("valid label");
         let slider = CsigHSlider(gain.as_ptr(), zero, zero, one, CsigReal(0.01));
         assert!(!slider.is_null());
+        let mut init_out = ptr::null_mut();
+        let mut min_out = ptr::null_mut();
+        let mut max_out = ptr::null_mut();
+        let mut step_out = ptr::null_mut();
+        assert!(CisSigHSlider(
+            slider,
+            &mut label_out,
+            &mut init_out,
+            &mut min_out,
+            &mut max_out,
+            &mut step_out
+        ));
+        assert_eq!(init_out, zero);
+        assert_eq!(min_out, zero);
+        assert_eq!(max_out, one);
         let button = unsafe { CsigButton(gain.as_ptr()) };
         assert!(!button.is_null());
-        assert!(!CsigAttach(slider, button).is_null());
+        assert!(CisSigButton(button, &mut label_out));
+        let attach = CsigAttach(slider, button);
+        assert!(!attach.is_null());
+        let mut lhs = ptr::null_mut();
+        let mut rhs = ptr::null_mut();
+        assert!(CisSigAttach(attach, &mut lhs, &mut rhs));
+        assert_eq!(lhs, slider);
+        assert_eq!(rhs, button);
 
         with_global_context(|ctx| {
             assert!(
@@ -944,6 +1533,15 @@ mod tests {
         let rendered = unsafe { print_signal(recursive) };
         assert!(rendered.contains("SIGPROJ"));
         assert!(rendered.contains("SIGREC"));
+        let mut rec_index = -1;
+        let mut rec_group = ptr::null_mut();
+        assert!(CisProj(recursive, &mut rec_index, &mut rec_group));
+        assert_eq!(rec_index, 0);
+        let mut rec_var = ptr::null_mut();
+        let mut rec_body = ptr::null_mut();
+        assert!(CisRec(rec_group, &mut rec_var, &mut rec_body));
+        assert!(!rec_var.is_null());
+        assert!(!rec_body.is_null());
 
         let closed = CsigReal(3.0);
         let mut block = [CsigAdd(input, CsigSelfN(0)), closed, ptr::null_mut()];
@@ -961,5 +1559,30 @@ mod tests {
         assert_eq!(real_out, 3.0);
         assert!(terminator.is_null());
         unsafe { faust_box::freeCMemory(outputs.cast()) };
+    }
+
+    #[test]
+    fn matches_int64_and_unsupported_doc_tables_deterministically() {
+        let _guard = lock_context();
+        reset_global_context();
+
+        let value = CsigInt64(i64::from(i32::MAX) + 42);
+        let mut out = 0_i64;
+        assert!(CisSigInt64(value, &mut out));
+        assert_eq!(out, i64::from(i32::MAX) + 42);
+
+        assert!(!CisSigDocConstantTbl(
+            value,
+            ptr::null_mut(),
+            ptr::null_mut()
+        ));
+        assert!(!CisSigDocWriteTbl(
+            value,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut()
+        ));
+        assert!(!CisSigDocAccessTbl(value, ptr::null_mut(), ptr::null_mut()));
     }
 }
