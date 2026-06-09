@@ -365,6 +365,13 @@ This must be tested against current Rust recursion carriers and C++ printed
 signal/source forms. RAD-specific carriers such as `BlockReverseAD` remain
 internal Rust IR unless a future public API requires them.
 
+Status 2026-06-09: implemented on Rust's canonical external recursion shape.
+`CsigSelfN(i)` builds `delay1(proj(i, DEBRUIJNREF(1)))`, `CsigSelf()` aliases
+slot 0, `CsigRecursion` wraps a single-body `SIGREC` and returns projection 0,
+and `CsigRecursionN` returns per-slot projections while preserving closed
+branches outside the recursion group. The regenerated Signal matrix now reports
+81 exact implementation candidates and 42 missing symbols.
+
 ### S5. Add signal structural predicates
 
 Map every `CisSig*` function to `SigMatch`.

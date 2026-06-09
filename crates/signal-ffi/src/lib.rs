@@ -14,7 +14,7 @@
 use std::ffi::{c_char, c_int, c_void};
 
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
-use tlib::TreeId;
+use tlib::{TreeId, de_bruijn_aperture, de_bruijn_ref, vec_to_list};
 use tree_ffi::{
     FfiSignalControlKind, FfiTreeContext, SOperator, with_global_context as with_ctx,
     write_out_handle as unsafe_write_out_signal, write_out_int as unsafe_write_out_int,
@@ -343,6 +343,71 @@ unary_export!(CsigFloatCast, float_cast);
 /// Builds one explicit delay Signal.
 pub extern "C" fn CsigDelay(s: *mut c_void, del: *mut c_void) -> *mut c_void {
     binary_signal(s, del, |b, s, del| b.delay(s, del))
+}
+
+#[unsafe(no_mangle)]
+/// Builds the single-output recursive self reference used inside `CsigRecursion`.
+pub extern "C" fn CsigSelf() -> *mut c_void {
+    CsigSelfN(0)
+}
+
+#[unsafe(no_mangle)]
+/// Builds one recursive Signal around a single body expression.
+pub extern "C" fn CsigRecursion(s: *mut c_void) -> *mut c_void {
+    with_ctx(|ctx| {
+        let Some(body) = decode_signal(ctx, s) else {
+            return null_signal();
+        };
+        let body_list = vec_to_list(&mut ctx.arena, &[body]);
+        let rec = SigBuilder::new(&mut ctx.arena).rec(body_list);
+        let output = SigBuilder::new(&mut ctx.arena).proj(0, rec);
+        encode_signal(ctx, output)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Builds one indexed recursive self reference used inside `CsigRecursionN`.
+pub extern "C" fn CsigSelfN(id: c_int) -> *mut c_void {
+    if id < 0 {
+        return null_signal();
+    }
+    with_ctx(|ctx| {
+        let rec_ref = de_bruijn_ref(&mut ctx.arena, 1);
+        let projection = SigBuilder::new(&mut ctx.arena).proj(id, rec_ref);
+        let output = SigBuilder::new(&mut ctx.arena).delay1(projection);
+        encode_signal(ctx, output)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Builds one recursive Signal block from a null-terminated Signal array.
+///
+/// # Safety
+/// `rf` must be null or point to a valid null-terminated array of Signal
+/// handles created by this shared FFI context.
+pub unsafe extern "C" fn CsigRecursionN(rf: *mut *mut c_void) -> *mut *mut c_void {
+    with_ctx(|ctx| {
+        // SAFETY: caller provides a valid null-terminated signal handle array.
+        let Some(inputs) = (unsafe { decode_signal_array(ctx, rf) }) else {
+            return std::ptr::null_mut();
+        };
+        let rec_body = vec_to_list(&mut ctx.arena, &inputs);
+        let rec = SigBuilder::new(&mut ctx.arena).rec(rec_body);
+        let outputs = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                if de_bruijn_aperture(&ctx.arena, *input) > 0 {
+                    let slot = c_int::try_from(index).unwrap_or_default();
+                    let projection = SigBuilder::new(&mut ctx.arena).proj(slot, rec);
+                    encode_signal(ctx, projection)
+                } else {
+                    encode_signal(ctx, *input)
+                }
+            })
+            .collect();
+        ctx.alloc_handle_ptr_array(outputs)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -864,5 +929,37 @@ mod tests {
                     .any(|control| control.kind == FfiSignalControlKind::Button)
             );
         });
+    }
+
+    #[test]
+    fn builds_recursive_signal_handles() {
+        let _guard = lock_context();
+        reset_global_context();
+
+        let input = CsigInput(0);
+        let self_ref = CsigSelf();
+        assert!(unsafe { print_signal(self_ref) }.contains("DEBRUIJNREF"));
+
+        let recursive = CsigRecursion(CsigAdd(input, self_ref));
+        let rendered = unsafe { print_signal(recursive) };
+        assert!(rendered.contains("SIGPROJ"));
+        assert!(rendered.contains("SIGREC"));
+
+        let closed = CsigReal(3.0);
+        let mut block = [CsigAdd(input, CsigSelfN(0)), closed, ptr::null_mut()];
+        let outputs = unsafe { CsigRecursionN(block.as_mut_ptr()) };
+        assert!(!outputs.is_null());
+        // SAFETY: `CsigRecursionN` returns a context-owned null-terminated handle array.
+        let first = unsafe { *outputs };
+        // SAFETY: second element exists because the input array had two elements.
+        let second = unsafe { *outputs.add(1) };
+        // SAFETY: third element is the terminating null pointer.
+        let terminator = unsafe { *outputs.add(2) };
+        assert!(unsafe { print_signal(first) }.contains("SIGPROJ"));
+        let mut real_out = 0.0;
+        assert!(CisSigReal(second, &mut real_out));
+        assert_eq!(real_out, 3.0);
+        assert!(terminator.is_null());
+        unsafe { faust_box::freeCMemory(outputs.cast()) };
     }
 }
