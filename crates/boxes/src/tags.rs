@@ -26,6 +26,7 @@ pub(crate) const BOX_OR_TAG: &str = "BOXOR";
 pub(crate) const BOX_XOR_TAG: &str = "BOXXOR";
 pub(crate) const BOX_LSH_TAG: &str = "BOXLSH";
 pub(crate) const BOX_RSH_TAG: &str = "BOXRSH";
+pub(crate) const BOX_LRSH_TAG: &str = "BOXLRSH";
 pub(crate) const BOX_LT_TAG: &str = "BOXLT";
 pub(crate) const BOX_LE_TAG: &str = "BOXLE";
 pub(crate) const BOX_GT_TAG: &str = "BOXGT";

@@ -270,11 +270,6 @@ fn classify_symbol(name: &str, implemented: bool) -> &'static str {
 
 fn manual_note(name: &str) -> Option<&'static str> {
     match name {
-        "CboxARightShift" | "CboxARightShiftAux" | "CboxLRightShift" | "CboxLRightShiftAux" => {
-            Some(
-                "Plan note: Rust currently maps logical/arithmetic right shift through the same `rsh` builder; semantic split needs audit.",
-            )
-        }
         "CboxExp10" | "CboxExp10Aux" => Some(
             "Plan note: Rust currently falls back to `exp`; exact `exp10` node support is still required.",
         ),

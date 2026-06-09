@@ -8,8 +8,8 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CDSPToBoxes` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxAND` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxANDAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CboxARightShift` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: Rust currently maps logical/arithmetic right shift through the same `rsh` builder; semantic split needs audit. |
-| `CboxARightShiftAux` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: Rust currently maps logical/arithmetic right shift through the same `rsh` builder; semantic split needs audit. |
+| `CboxARightShift` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
+| `CboxARightShiftAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxAbs` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxAbsAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxAcos` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
@@ -65,8 +65,8 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CboxIntCastAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxLE` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxLEAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CboxLRightShift` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: Rust currently maps logical/arithmetic right shift through the same `rsh` builder; semantic split needs audit. |
-| `CboxLRightShiftAux` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: Rust currently maps logical/arithmetic right shift through the same `rsh` builder; semantic split needs audit. |
+| `CboxLRightShift` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
+| `CboxLRightShiftAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxLT` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxLTAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxLeftShift` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |

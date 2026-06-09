@@ -82,6 +82,7 @@ fn main() {
             b.xor(),
             b.lsh(),
             b.rsh(),
+            b.lrsh(),
             b.lt(),
             b.le(),
             b.gt(),

@@ -147,6 +147,9 @@ fn propagate_inner(
                 BoxMatch::Rsh => {
                     binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.arsh(x, y))
                 }
+                BoxMatch::LRsh => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lrsh(x, y))
+                }
                 BoxMatch::Lt => {
                     binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lt(x, y))
                 }

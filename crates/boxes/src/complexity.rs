@@ -41,6 +41,7 @@ pub fn box_complexity(arena: &TreeArena, b: BoxId) -> usize {
         | BoxMatch::Xor
         | BoxMatch::Lsh
         | BoxMatch::Rsh
+        | BoxMatch::LRsh
         | BoxMatch::Lt
         | BoxMatch::Le
         | BoxMatch::Gt

@@ -427,7 +427,7 @@ pub(crate) fn inside_box_simplification(
         // Primitive operators (Prim0–Prim5 in C++ — operator boxes in Rust)
         | BoxMatch::Add | BoxMatch::Sub | BoxMatch::Mul | BoxMatch::Div | BoxMatch::Rem
         | BoxMatch::Pow | BoxMatch::Fmod | BoxMatch::Remainder
-        | BoxMatch::And | BoxMatch::Or | BoxMatch::Xor | BoxMatch::Lsh | BoxMatch::Rsh
+        | BoxMatch::And | BoxMatch::Or | BoxMatch::Xor | BoxMatch::Lsh | BoxMatch::Rsh | BoxMatch::LRsh
         | BoxMatch::Lt  | BoxMatch::Le  | BoxMatch::Gt  | BoxMatch::Ge
         | BoxMatch::Eq  | BoxMatch::Ne  | BoxMatch::Atan2
         | BoxMatch::Floor | BoxMatch::Ceil | BoxMatch::Round | BoxMatch::Rint

@@ -200,6 +200,7 @@ pub(crate) fn flat_node_kind(
         | BoxMatch::Xor
         | BoxMatch::Lsh
         | BoxMatch::Rsh
+        | BoxMatch::LRsh
         | BoxMatch::Lt
         | BoxMatch::Le
         | BoxMatch::Gt

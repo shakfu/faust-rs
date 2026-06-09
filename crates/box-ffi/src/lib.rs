@@ -47,10 +47,11 @@ use tlib::{
 };
 use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
 use tree_ffi::{
-    FfiTreeContext as BoxContext, SOperator, SType, read_c_string as unsafe_read_label,
+    FfiTreeContext as BoxContext, read_c_string as unsafe_read_label,
     write_out_handle as unsafe_write_out_box, write_out_int as unsafe_write_out_int,
     write_out_real as unsafe_write_out_real,
 };
+pub use tree_ffi::{SOperator, SType};
 use ui::{UiBuilder, UiProgram, UiRootOrigin};
 
 static BOX_CONTEXT: OnceLock<Mutex<BoxContext>> = OnceLock::new();
@@ -322,7 +323,7 @@ fn op_primitive(builder: &mut BoxBuilder<'_>, op: SOperator) -> TreeId {
         SOperator::kRem => builder.rem(),
         SOperator::kLsh => builder.lsh(),
         SOperator::kARsh => builder.rsh(),
-        SOperator::kLRsh => builder.rsh(),
+        SOperator::kLRsh => builder.lrsh(),
         SOperator::kGT => builder.gt(),
         SOperator::kLT => builder.lt(),
         SOperator::kGE => builder.ge(),
@@ -751,7 +752,7 @@ binop!(CboxMul, CboxMulAux, mul);
 binop!(CboxDiv, CboxDivAux, div);
 binop!(CboxRem, CboxRemAux, rem);
 binop!(CboxLeftShift, CboxLeftShiftAux, lsh);
-binop!(CboxLRightShift, CboxLRightShiftAux, rsh);
+binop!(CboxLRightShift, CboxLRightShiftAux, lrsh);
 binop!(CboxARightShift, CboxARightShiftAux, rsh);
 binop!(CboxGT, CboxGTAux, gt);
 binop!(CboxLT, CboxLTAux, lt);
@@ -1928,6 +1929,7 @@ pub extern "C" fn CisBoxPrim0(b: *mut c_void) -> bool {
                 | BoxMatch::Xor
                 | BoxMatch::Lsh
                 | BoxMatch::Rsh
+                | BoxMatch::LRsh
                 | BoxMatch::Lt
                 | BoxMatch::Le
                 | BoxMatch::Gt
@@ -2566,4 +2568,38 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    unsafe fn printed_box(ptr: *mut c_void) -> String {
+        let raw = CprintBox(ptr, false, 4096);
+        assert!(!raw.is_null());
+        let text = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("box dump must be UTF-8")
+            .to_owned();
+        unsafe { freeCMemory(raw.cast()) };
+        text
+    }
+
+    #[test]
+    fn logical_and_arithmetic_right_shift_use_distinct_box_tags() {
+        createLibContext();
+
+        let arsh = CboxARightShift();
+        let lrsh = CboxLRightShift();
+
+        let arsh_dump = unsafe { printed_box(arsh) };
+        let lrsh_dump = unsafe { printed_box(lrsh) };
+
+        assert!(arsh_dump.contains("BOXRSH"));
+        assert!(lrsh_dump.contains("BOXLRSH"));
+        assert_ne!(arsh_dump, lrsh_dump);
+
+        destroyLibContext();
+    }
 }

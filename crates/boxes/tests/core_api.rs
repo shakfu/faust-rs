@@ -83,6 +83,7 @@ fn builder_matches_all_primitive_families() {
         b.xor(),
         b.lsh(),
         b.rsh(),
+        b.lrsh(),
         b.lt(),
         b.le(),
         b.gt(),

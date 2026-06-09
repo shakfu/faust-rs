@@ -206,8 +206,6 @@ Initial output:
 
 Manual notes to capture from the current code:
 
-- `CboxARightShiftAux` and `CboxLRightShiftAux` currently both map to Rust
-  `rsh`; confirm whether Rust has arithmetic/logical distinction internally.
 - `CboxExp10` currently falls back to `exp`; decide whether to introduce a real
   `exp10` box/signal tag or document the fallback as temporary.
 - advanced predicates like `CisBoxPrim*` are nearest-shape approximations until
@@ -226,6 +224,11 @@ before expanding FFI:
 - any missing `boxPrimN` forms required by C++ parity;
 - public constructors for metadata/definition nodes where C API exposes
   matching predicates but no current constructor exists.
+
+Status 2026-06-09: logical right shift is no longer conflated with arithmetic
+right shift at the Box FFI boundary. `BoxBuilder::lrsh` and `BoxMatch::LRsh`
+now carry `CboxLRightShift*`, while the existing `rsh`/`BoxMatch::Rsh` path
+keeps arithmetic-right-shift behavior for compatibility.
 
 ### B3. Fill matcher gaps
 

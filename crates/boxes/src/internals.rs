@@ -215,6 +215,12 @@ pub(crate) fn node_rsh(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_RSH_TAG, &[])
 }
 
+/// Equivalent to C++ `boxLRightShift`.
+#[must_use]
+pub(crate) fn node_lrsh(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LRSH_TAG, &[])
+}
+
 /// Equivalent to C++ `boxLT`.
 #[must_use]
 pub(crate) fn node_lt(arena: &mut TreeArena) -> BoxId {

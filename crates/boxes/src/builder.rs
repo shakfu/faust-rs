@@ -175,6 +175,12 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one box node for logical right shift and returns its `BoxId`.
+    pub fn lrsh(&mut self) -> BoxId {
+        node_lrsh(self.arena)
+    }
+
+    #[must_use]
     /// Builds one box node for `lt` and returns its `BoxId`.
     pub fn lt(&mut self) -> BoxId {
         node_lt(self.arena)

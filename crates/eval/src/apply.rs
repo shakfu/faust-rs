@@ -474,6 +474,7 @@ pub(crate) fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, u
         | BoxMatch::Xor
         | BoxMatch::Lsh
         | BoxMatch::Rsh
+        | BoxMatch::LRsh
         | BoxMatch::Lt
         | BoxMatch::Le
         | BoxMatch::Gt
@@ -625,6 +626,7 @@ pub(crate) fn is_binary_primitive_non_prefix(arena: &TreeArena, id: TreeId) -> b
             | BoxMatch::Xor
             | BoxMatch::Lsh
             | BoxMatch::Rsh
+            | BoxMatch::LRsh
             | BoxMatch::Lt
             | BoxMatch::Le
             | BoxMatch::Gt
