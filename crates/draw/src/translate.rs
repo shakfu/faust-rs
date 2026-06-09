@@ -302,6 +302,7 @@ fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn 
         BoxMatch::Sin => make_block(1, 1, "sin", COLOR_NORMAL, ""),
         BoxMatch::Tan => make_block(1, 1, "tan", COLOR_NORMAL, ""),
         BoxMatch::Exp => make_block(1, 1, "exp", COLOR_NORMAL, ""),
+        BoxMatch::Exp10 => make_block(1, 1, "exp10", COLOR_NORMAL, ""),
         BoxMatch::Log => make_block(1, 1, "log", COLOR_NORMAL, ""),
         BoxMatch::Log10 => make_block(1, 1, "log10", COLOR_NORMAL, ""),
         BoxMatch::Sqrt => make_block(1, 1, "sqrt", COLOR_NORMAL, ""),

@@ -525,6 +525,7 @@ fn verify_prepared_signal(
         | SigMatch::Sin(inner)
         | SigMatch::Tan(inner)
         | SigMatch::Exp(inner)
+        | SigMatch::Exp10(inner)
         | SigMatch::Log(inner)
         | SigMatch::Log10(inner)
         | SigMatch::Sqrt(inner)

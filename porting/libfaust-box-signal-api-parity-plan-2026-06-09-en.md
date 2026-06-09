@@ -206,8 +206,6 @@ Initial output:
 
 Manual notes to capture from the current code:
 
-- `CboxExp10` currently falls back to `exp`; decide whether to introduce a real
-  `exp10` box/signal tag or document the fallback as temporary.
 - advanced predicates like `CisBoxPrim*` are nearest-shape approximations until
   primitive function pointer identity exists.
 - `CboxSoundfile` currently covers the two-argument C form; C++ also has a
@@ -229,6 +227,13 @@ Status 2026-06-09: logical right shift is no longer conflated with arithmetic
 right shift at the Box FFI boundary. `BoxBuilder::lrsh` and `BoxMatch::LRsh`
 now carry `CboxLRightShift*`, while the existing `rsh`/`BoxMatch::Rsh` path
 keeps arithmetic-right-shift behavior for compatibility.
+
+Status 2026-06-09: `CboxExp10*` no longer falls back to `exp`. Dedicated
+`BOXEXP10`, `SIGEXP10`, and `FirMathOp::Exp10` nodes carry the math operation
+through Box construction, signal propagation, typing/normalization, FIR
+lowering, and backend code generation. The interpreter backend implements the
+runtime call as `pow(10, x)` internally while preserving the external `exp10`
+FIR/source surface.
 
 ### B3. Fill matcher gaps
 

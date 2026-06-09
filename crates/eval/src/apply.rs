@@ -502,6 +502,7 @@ pub(crate) fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, u
         | BoxMatch::Sin
         | BoxMatch::Tan
         | BoxMatch::Exp
+        | BoxMatch::Exp10
         | BoxMatch::Log
         | BoxMatch::Log10
         | BoxMatch::Sqrt

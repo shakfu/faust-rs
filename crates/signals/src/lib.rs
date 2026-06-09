@@ -94,6 +94,7 @@ const SIG_COS_TAG: &str = "SIGCOS";
 const SIG_SIN_TAG: &str = "SIGSIN";
 const SIG_TAN_TAG: &str = "SIGTAN";
 const SIG_EXP_TAG: &str = "SIGEXP";
+const SIG_EXP10_TAG: &str = "SIGEXP10";
 const SIG_LOG_TAG: &str = "SIGLOG";
 const SIG_LOG10_TAG: &str = "SIGLOG10";
 const SIG_SQRT_TAG: &str = "SIGSQRT";
@@ -644,6 +645,12 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `exp10` and returns its `SigId`.
+    pub fn exp10(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_EXP10_TAG, &[x])
+    }
+
+    #[must_use]
     /// Builds one signal node for `log` and returns its `SigId`.
     pub fn log(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_LOG_TAG, &[x])
@@ -1129,6 +1136,7 @@ pub enum SigMatch<'a> {
     Sin(SigId),
     Tan(SigId),
     Exp(SigId),
+    Exp10(SigId),
     Log(SigId),
     Log10(SigId),
     Sqrt(SigId),
@@ -1253,6 +1261,7 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                 (SIG_SIN_TAG, [x]) => SigMatch::Sin(*x),
                 (SIG_TAN_TAG, [x]) => SigMatch::Tan(*x),
                 (SIG_EXP_TAG, [x]) => SigMatch::Exp(*x),
+                (SIG_EXP10_TAG, [x]) => SigMatch::Exp10(*x),
                 (SIG_LOG_TAG, [x]) => SigMatch::Log(*x),
                 (SIG_LOG10_TAG, [x]) => SigMatch::Log10(*x),
                 (SIG_SQRT_TAG, [x]) => SigMatch::Sqrt(*x),

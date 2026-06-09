@@ -39,6 +39,14 @@ extern "C" fn host_exp(x: f64) -> f64 {
     x.exp()
 }
 
+extern "C" fn host_exp10f(x: f32) -> f32 {
+    10.0_f32.powf(x)
+}
+
+extern "C" fn host_exp10(x: f64) -> f64 {
+    10.0_f64.powf(x)
+}
+
 extern "C" fn host_logf(x: f32) -> f32 {
     x.ln()
 }
@@ -284,6 +292,8 @@ pub(crate) fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("cos", host_cos as *const u8);
     jit_builder.symbol("expf", host_expf as *const u8);
     jit_builder.symbol("exp", host_exp as *const u8);
+    jit_builder.symbol("exp10f", host_exp10f as *const u8);
+    jit_builder.symbol("exp10", host_exp10 as *const u8);
     jit_builder.symbol("logf", host_logf as *const u8);
     jit_builder.symbol("log", host_log as *const u8);
     jit_builder.symbol("log10f", host_log10f as *const u8);

@@ -1240,6 +1240,7 @@ fn emit_cpp_fun_name(name: &str) -> String {
         _ => {}
     }
     match FirMathOp::from_symbol(name) {
+        Some(FirMathOp::Exp10) => "exp10".to_owned(),
         Some(op) => format!("std::{}", op.symbol()),
         None => name.to_owned(),
     }

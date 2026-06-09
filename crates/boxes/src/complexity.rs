@@ -64,6 +64,7 @@ pub fn box_complexity(arena: &TreeArena, b: BoxId) -> usize {
         | BoxMatch::Sin
         | BoxMatch::Tan
         | BoxMatch::Exp
+        | BoxMatch::Exp10
         | BoxMatch::Log
         | BoxMatch::Log10
         | BoxMatch::Sqrt

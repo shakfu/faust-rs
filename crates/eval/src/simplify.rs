@@ -440,7 +440,7 @@ pub(crate) fn inside_box_simplification(
         | BoxMatch::Attach | BoxMatch::Enable | BoxMatch::Control
         | BoxMatch::Acos | BoxMatch::Asin | BoxMatch::Atan
         | BoxMatch::Cos  | BoxMatch::Sin  | BoxMatch::Tan
-        | BoxMatch::Exp  | BoxMatch::Log  | BoxMatch::Log10 | BoxMatch::Sqrt
+        | BoxMatch::Exp  | BoxMatch::Exp10 | BoxMatch::Log  | BoxMatch::Log10 | BoxMatch::Sqrt
         // Foreign function / constant / variable
         | BoxMatch::FFun(_)
         | BoxMatch::FConst(_, _, _)

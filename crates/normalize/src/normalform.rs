@@ -434,6 +434,7 @@ impl<'a> SignalPromoter<'a> {
             SigMatch::Sin(inner) => self.promote_real_unary(|b, x| b.sin(x), inner)?,
             SigMatch::Tan(inner) => self.promote_real_unary(|b, x| b.tan(x), inner)?,
             SigMatch::Exp(inner) => self.promote_real_unary(|b, x| b.exp(x), inner)?,
+            SigMatch::Exp10(inner) => self.promote_real_unary(|b, x| b.exp10(x), inner)?,
             SigMatch::Log(inner) => self.promote_real_unary(|b, x| b.log(x), inner)?,
             SigMatch::Log10(inner) => self.promote_real_unary(|b, x| b.log10(x), inner)?,
             SigMatch::Sqrt(inner) => self.promote_real_unary(|b, x| b.sqrt(x), inner)?,

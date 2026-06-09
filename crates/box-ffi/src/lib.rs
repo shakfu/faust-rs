@@ -741,6 +741,7 @@ unop!(CboxLog, CboxLogAux, log);
 unop!(CboxLog10, CboxLog10Aux, log10);
 unop!(CboxFloor, CboxFloorAux, floor);
 unop!(CboxExp, CboxExpAux, exp);
+unop!(CboxExp10, CboxExp10Aux, exp10);
 unop!(CboxCos, CboxCosAux, cos);
 unop!(CboxCeil, CboxCeilAux, ceil);
 unop!(CboxAtan, CboxAtanAux, atan);
@@ -1441,27 +1442,6 @@ pub extern "C" fn CboxDelayAux(b: *mut c_void, del: *mut c_void) -> *mut c_void 
 }
 
 #[unsafe(no_mangle)]
-/// Creates `exp10` primitive placeholder node.
-///
-/// # Safety
-/// No pointer arguments.
-pub extern "C" fn CboxExp10() -> *mut c_void {
-    // Fallback mapping: exp10 is represented with the same primitive slot as exp
-    // until a dedicated EXP10 primitive is added in the Rust box IR.
-    CboxExp()
-}
-
-#[unsafe(no_mangle)]
-/// Builds `exp10` auxiliary placeholder from one input expression.
-///
-/// # Safety
-/// `x` must be a valid box handle.
-pub extern "C" fn CboxExp10Aux(x: *mut c_void) -> *mut c_void {
-    // See CboxExp10 fallback note.
-    CboxExpAux(x)
-}
-
-#[unsafe(no_mangle)]
 /// Matches `abstr(slot, body)` boxes.
 ///
 /// # Safety
@@ -1945,6 +1925,7 @@ pub extern "C" fn CisBoxPrim0(b: *mut c_void) -> bool {
                 | BoxMatch::Sin
                 | BoxMatch::Tan
                 | BoxMatch::Exp
+                | BoxMatch::Exp10
                 | BoxMatch::Log
                 | BoxMatch::Log10
                 | BoxMatch::Sqrt
@@ -2573,32 +2554,84 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
+    use std::sync::{Mutex, MutexGuard};
 
-    unsafe fn printed_box(ptr: *mut c_void) -> String {
-        let raw = CprintBox(ptr, false, 4096);
-        assert!(!raw.is_null());
-        let text = unsafe { CStr::from_ptr(raw) }
-            .to_str()
-            .expect("box dump must be UTF-8")
-            .to_owned();
-        unsafe { freeCMemory(raw.cast()) };
-        text
+    static TEST_CONTEXT_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fresh_test_context() -> MutexGuard<'static, ()> {
+        let guard = TEST_CONTEXT_LOCK
+            .lock()
+            .expect("test context lock poisoned");
+        createLibContext();
+        guard
+    }
+
+    fn assert_box_matches(ptr: *mut c_void, expected: BoxMatch) {
+        with_ctx(|ctx| {
+            let id = ctx.decode(ptr).expect("test box handle must be known");
+            assert_eq!(match_box(&ctx.arena, id), expected);
+        });
     }
 
     #[test]
     fn logical_and_arithmetic_right_shift_use_distinct_box_tags() {
-        createLibContext();
+        let _guard = fresh_test_context();
 
         let arsh = CboxARightShift();
         let lrsh = CboxLRightShift();
 
-        let arsh_dump = unsafe { printed_box(arsh) };
-        let lrsh_dump = unsafe { printed_box(lrsh) };
+        assert_box_matches(arsh, BoxMatch::Rsh);
+        assert_box_matches(lrsh, BoxMatch::LRsh);
+        assert_ne!(arsh, lrsh);
 
-        assert!(arsh_dump.contains("BOXRSH"));
-        assert!(lrsh_dump.contains("BOXLRSH"));
-        assert_ne!(arsh_dump, lrsh_dump);
+        destroyLibContext();
+    }
+
+    #[test]
+    fn exp10_uses_dedicated_box_tag() {
+        let _guard = fresh_test_context();
+
+        let exp = CboxExp();
+        let exp10 = CboxExp10();
+
+        assert_box_matches(exp, BoxMatch::Exp);
+        assert_box_matches(exp10, BoxMatch::Exp10);
+        assert_ne!(exp, exp10);
+
+        destroyLibContext();
+    }
+
+    #[test]
+    fn exp10_source_generation_keeps_exp10_math_call() {
+        let _guard = fresh_test_context();
+
+        let root = CboxExp10Aux(CboxWire());
+        let name = CString::new("Exp10Smoke").unwrap();
+        let lang = CString::new("fir").unwrap();
+        let mut err = vec![0_i8; 4096];
+        let source = unsafe {
+            CcreateSourceFromBoxes(
+                name.as_ptr(),
+                root,
+                lang.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+            )
+        };
+        assert!(
+            !source.is_null(),
+            "source generation failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        );
+        let text = unsafe { CStr::from_ptr(source) }
+            .to_str()
+            .expect("FIR dump must be UTF-8")
+            .to_owned();
+        unsafe { freeCMemory(source.cast()) };
+
+        assert!(text.contains("exp10"), "{text}");
 
         destroyLibContext();
     }

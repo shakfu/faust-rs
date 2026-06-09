@@ -72,6 +72,7 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Atan2(lhs, rhs) => self.lower_math2(FirMathOp::Atan2, lhs, rhs)?,
             SigMatch::Tan(value) => self.lower_math1(FirMathOp::Tan, value)?,
             SigMatch::Exp(value) => self.lower_math1(FirMathOp::Exp, value)?,
+            SigMatch::Exp10(value) => self.lower_math1(FirMathOp::Exp10, value)?,
             SigMatch::Log(value) => self.lower_math1(FirMathOp::Log, value)?,
             SigMatch::Log10(value) => self.lower_math1(FirMathOp::Log10, value)?,
             SigMatch::Sqrt(value) => self.lower_math1(FirMathOp::Sqrt, value)?,

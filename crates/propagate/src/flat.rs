@@ -228,6 +228,7 @@ pub(crate) fn flat_node_kind(
         | BoxMatch::Sin
         | BoxMatch::Tan
         | BoxMatch::Exp
+        | BoxMatch::Exp10
         | BoxMatch::Log
         | BoxMatch::Log10
         | BoxMatch::Sqrt

@@ -271,6 +271,12 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one box node for `exp10` and returns its `BoxId`.
+    pub fn exp10(&mut self) -> BoxId {
+        node_exp10(self.arena)
+    }
+
+    #[must_use]
     /// Builds one box node for `log` and returns its `BoxId`.
     pub fn log(&mut self) -> BoxId {
         node_log(self.arena)

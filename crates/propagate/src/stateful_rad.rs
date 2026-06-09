@@ -707,6 +707,7 @@ impl LinearityAnalyzer {
             | SigMatch::Cos(x)
             | SigMatch::Tan(x)
             | SigMatch::Exp(x)
+            | SigMatch::Exp10(x)
             | SigMatch::Log(x)
             | SigMatch::Log10(x)
             | SigMatch::Sqrt(x)

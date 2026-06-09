@@ -2221,6 +2221,11 @@ fn imported_math_signature(
             params: vec![ValType::F32],
             results: vec![ValType::F32],
         }),
+        (FirMathOp::Exp10, ValType::F32) => Some(WasmImport {
+            field_name: "_exp10f".to_owned(),
+            params: vec![ValType::F32],
+            results: vec![ValType::F32],
+        }),
         (FirMathOp::Log, ValType::F32) => Some(WasmImport {
             field_name: "_logf".to_owned(),
             params: vec![ValType::F32],
@@ -2288,6 +2293,11 @@ fn imported_math_signature(
         }),
         (FirMathOp::Exp, ValType::F64) => Some(WasmImport {
             field_name: "_exp".to_owned(),
+            params: vec![ValType::F64],
+            results: vec![ValType::F64],
+        }),
+        (FirMathOp::Exp10, ValType::F64) => Some(WasmImport {
+            field_name: "_exp10".to_owned(),
             params: vec![ValType::F64],
             results: vec![ValType::F64],
         }),

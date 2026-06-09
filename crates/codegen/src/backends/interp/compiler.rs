@@ -1700,6 +1700,17 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             self.compile_node(store, arg)?;
         }
 
+        if matches!(name, "exp10f" | "exp10") && args.len() == 1 {
+            self.current_block.push(FbcInstruction::with_values(
+                FbcOpcode::RealValue,
+                0,
+                R::from_f64(10.0),
+            ));
+            self.current_block
+                .push(FbcInstruction::new(FbcOpcode::Powf));
+            return Ok(());
+        }
+
         if let Some(opcode) = math_lib_lookup(name) {
             self.current_block.push(FbcInstruction::new(opcode));
             return Ok(());

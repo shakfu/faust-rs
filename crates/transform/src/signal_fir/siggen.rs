@@ -191,6 +191,7 @@ impl<'a> GeneratorInterpreter<'a> {
             SigMatch::Acos(x) => Ok(self.eval(x)?.acos()),
             SigMatch::Atan(x) => Ok(self.eval(x)?.atan()),
             SigMatch::Exp(x) => Ok(self.eval(x)?.exp()),
+            SigMatch::Exp10(x) => Ok(10.0_f64.powf(self.eval(x)?)),
             SigMatch::Log(x) => Ok(self.eval(x)?.ln()),
             SigMatch::Log10(x) => Ok(self.eval(x)?.log10()),
             SigMatch::Sqrt(x) => Ok(self.eval(x)?.sqrt()),

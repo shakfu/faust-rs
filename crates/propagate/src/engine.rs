@@ -233,6 +233,9 @@ fn propagate_inner(
                 BoxMatch::Sin => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.sin(x)),
                 BoxMatch::Tan => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.tan(x)),
                 BoxMatch::Exp => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.exp(x)),
+                BoxMatch::Exp10 => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.exp10(x))
+                }
                 BoxMatch::Log => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log(x)),
                 BoxMatch::Log10 => {
                     unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log10(x))

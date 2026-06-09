@@ -40,8 +40,8 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CboxEQ` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxEQAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxExp` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CboxExp10` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: Rust currently falls back to `exp`; exact `exp10` node support is still required. |
-| `CboxExp10Aux` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: Rust currently falls back to `exp`; exact `exp10` node support is still required. |
+| `CboxExp10` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
+| `CboxExp10Aux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxExpAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxFConst` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxFFun` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |

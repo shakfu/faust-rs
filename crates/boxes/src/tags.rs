@@ -42,6 +42,7 @@ pub(crate) const BOX_COS_TAG: &str = "BOXCOS";
 pub(crate) const BOX_SIN_TAG: &str = "BOXSIN";
 pub(crate) const BOX_TAN_TAG: &str = "BOXTAN";
 pub(crate) const BOX_EXP_TAG: &str = "BOXEXP";
+pub(crate) const BOX_EXP10_TAG: &str = "BOXEXP10";
 pub(crate) const BOX_LOG_TAG: &str = "BOXLOG";
 pub(crate) const BOX_LOG10_TAG: &str = "BOXLOG10";
 pub(crate) const BOX_SQRT_TAG: &str = "BOXSQRT";

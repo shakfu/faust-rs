@@ -99,6 +99,7 @@ fn builder_matches_all_primitive_families() {
         b.sin(),
         b.tan(),
         b.exp(),
+        b.exp10(),
         b.log(),
         b.log10(),
         b.sqrt(),

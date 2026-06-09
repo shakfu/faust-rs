@@ -337,7 +337,7 @@ pub use ops::{
     casts::{float_cast, float_num, int_cast, int_num, int64_num, label},
     delay_table::{delay, mem},
     logic::{and, eq, ge, gt, le, lsh, lt, max, min, ne, not, or, rsh, xor},
-    math::{ceil, exp, floor, log, log10, pow, rint, round, sqrt},
+    math::{ceil, exp, exp10, floor, log, log10, pow, rint, round, sqrt},
     missing::{
         attach, bit_cast, fix_point_update, foreign_const, foreign_function, foreign_var, r#gen,
         highest, input, lowest, nil, output, prefix, rd_tbl, select2, sound_file,

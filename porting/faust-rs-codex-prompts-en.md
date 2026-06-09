@@ -10,9 +10,9 @@ repository's local workflow and documentation rules.
 You are Codex, a senior Rust/C++ agent specialized in compiler porting.
 
 Context:
-I am working in /Users/letz/Developpements/RUST/faust-rs.
+I am working in RUST/faust-rs.
 Long-term objective: complete the Rust port of the Faust C++ compiler while preserving semantic parity with the C++ compiler.
-C++ reference: /Users/letz/Developpements/RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
+C++ reference: RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
 Strictly follow the repository's AGENTS.md instructions.
 
 Mission:
@@ -56,9 +56,9 @@ Concrete task:
 ## Short Prompt
 
 ```text
-In /Users/letz/Developpements/RUST/faust-rs, continue the Rust port of Faust C++ with strict parity.
+In RUST/faust-rs, continue the Rust port of Faust C++ with strict parity.
 Read AGENTS.md and the relevant porting/ documents before acting.
-C++ reference: /Users/letz/Developpements/RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
+C++ reference: RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
 
 Task: [FILL IN]
 
@@ -70,8 +70,8 @@ Final response: summary, validation, remaining risks, commit if requested.
 ## Parity Audit Variant
 
 ```text
-In /Users/letz/Developpements/RUST/faust-rs, perform a Rust/C++ parity audit for [MODULE/PHASE].
-C++ reference: /Users/letz/Developpements/RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
+In RUST/faust-rs, perform a Rust/C++ parity audit for [MODULE/PHASE].
+C++ reference: RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
 
 Compare:
 - the real C++ flow and relevant source functions,
@@ -92,8 +92,8 @@ Expected response:
 ## Golden Gap Fix Variant
 
 ```text
-In /Users/letz/Developpements/RUST/faust-rs, fix the following golden-output gap: [DESCRIBE CASE].
-C++ reference: /Users/letz/Developpements/RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
+In RUST/faust-rs, fix the following golden-output gap: [DESCRIBE CASE].
+C++ reference: RUST/faust, branch master-dev-ocpp-od-fir-2-FIR19, commit 8eebea429.
 
 Constraints:
 - First identify the divergence source in the pipeline parse -> boxes -> eval -> propagate -> normalize -> type/interval -> transform -> fir -> backend.

@@ -270,9 +270,6 @@ fn classify_symbol(name: &str, implemented: bool) -> &'static str {
 
 fn manual_note(name: &str) -> Option<&'static str> {
     match name {
-        "CboxExp10" | "CboxExp10Aux" => Some(
-            "Plan note: Rust currently falls back to `exp`; exact `exp10` node support is still required.",
-        ),
         "CboxSoundfile" | "CisBoxSoundfile" => Some(
             "Plan note: current Rust coverage needs audit against the fully-applied C++ soundfile read form.",
         ),

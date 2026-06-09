@@ -311,6 +311,12 @@ pub(crate) fn node_exp(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_EXP_TAG, &[])
 }
 
+/// Equivalent to C++ `gExp10Prim->box()`.
+#[must_use]
+pub(crate) fn node_exp10(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_EXP10_TAG, &[])
+}
+
 /// Equivalent to C++ `gLogPrim->box()`.
 #[must_use]
 pub(crate) fn node_log(arena: &mut TreeArena) -> BoxId {

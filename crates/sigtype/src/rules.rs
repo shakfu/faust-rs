@@ -421,6 +421,7 @@ impl<'a> TypeAnnotator<'a> {
             }
             SigMatch::Sqrt(x) => self.infer_unary_math(x, interval::ops::math::sqrt),
             SigMatch::Exp(x) => self.infer_unary_math(x, interval::ops::math::exp),
+            SigMatch::Exp10(x) => self.infer_unary_math(x, interval::ops::math::exp10),
             SigMatch::Log(x) => self.infer_unary_math(x, interval::ops::math::log),
             SigMatch::Log10(x) => self.infer_unary_math(x, interval::ops::math::log10),
             SigMatch::Floor(x) => self.infer_unary_math(x, interval::ops::math::floor),

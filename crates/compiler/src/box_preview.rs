@@ -191,6 +191,7 @@ pub(crate) fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth:
         | BoxMatch::Sin
         | BoxMatch::Tan
         | BoxMatch::Exp
+        | BoxMatch::Exp10
         | BoxMatch::Log
         | BoxMatch::Log10
         | BoxMatch::Sqrt
@@ -264,6 +265,7 @@ pub(crate) fn prim_readable_name(arena: &tlib::TreeArena, node: BoxId) -> Option
         BoxMatch::Sin => Some("sin"),
         BoxMatch::Tan => Some("tan"),
         BoxMatch::Exp => Some("exp"),
+        BoxMatch::Exp10 => Some("exp10"),
         BoxMatch::Log => Some("log"),
         BoxMatch::Log10 => Some("log10"),
         BoxMatch::Sqrt => Some("sqrt"),

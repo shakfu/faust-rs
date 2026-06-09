@@ -719,6 +719,17 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(exp_x, tangent_x)
                 },
             ),
+            SigMatch::Exp10(x) => self.unary_chain(
+                x,
+                |b, primal_x| b.exp10(primal_x),
+                |b, primal_x, tangent_x| {
+                    let exp10_x = b.exp10(primal_x);
+                    let ten = b.real(10.0);
+                    let log_ten = b.log(ten);
+                    let scale = b.mul(exp10_x, log_ten);
+                    b.mul(scale, tangent_x)
+                },
+            ),
             SigMatch::Log(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.log(primal_x),

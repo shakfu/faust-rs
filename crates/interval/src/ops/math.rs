@@ -108,6 +108,32 @@ pub fn exp(x: Interval) -> Interval {
 }
 
 // -------------------------------------------------------------------------
+// Exp10
+// -------------------------------------------------------------------------
+
+/// Interval base-10 exponential.
+///
+/// # C++ source
+/// `compiler/extended/exp10prim.hh`
+#[must_use]
+pub fn exp10(x: Interval) -> Interval {
+    if x.is_empty() {
+        return empty();
+    }
+
+    let u = (2.0_f64).powi(x.lsb());
+    let v = x.lo();
+    let f = |x: f64| 10.0_f64.powf(x);
+    let mut precision = exact_precision_unary(f, v, u);
+    if precision == i32::MIN {
+        // exp10'(x) = ln(10) * exp10(x).
+        precision = (x.lsb() as f64 + (std::f64::consts::LN_10 * f(v)).abs().log2()).floor() as i32;
+    }
+
+    Interval::new(f(x.lo()), f(x.hi()), precision)
+}
+
+// -------------------------------------------------------------------------
 // Log
 // -------------------------------------------------------------------------
 

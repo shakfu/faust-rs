@@ -126,6 +126,7 @@ pub(super) fn is_trivially_reverse_evaluable(arena: &TreeArena, sig: SigId) -> b
         | SigMatch::Acos(x)
         | SigMatch::Atan(x)
         | SigMatch::Exp(x)
+        | SigMatch::Exp10(x)
         | SigMatch::Log(x)
         | SigMatch::Log10(x)
         | SigMatch::Sqrt(x)
@@ -183,6 +184,7 @@ pub(super) fn collect_bra_postorder(
         | SigMatch::Acos(x)
         | SigMatch::Atan(x)
         | SigMatch::Exp(x)
+        | SigMatch::Exp10(x)
         | SigMatch::Log(x)
         | SigMatch::Log10(x)
         | SigMatch::Sqrt(x)
@@ -352,7 +354,7 @@ pub(super) fn collect_tape_needed_values(arena: &TreeArena, postorder: &[SigId])
                     needed.insert(x);
                 }
             }
-            SigMatch::Exp(x) | SigMatch::Sqrt(x) => {
+            SigMatch::Exp(x) | SigMatch::Exp10(x) | SigMatch::Sqrt(x) => {
                 // Backward rule uses val[sig], not x directly.
                 if !is_trivially_reverse_evaluable(arena, x) {
                     needed.insert(sig);

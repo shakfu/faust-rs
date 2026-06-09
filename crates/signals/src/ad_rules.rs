@@ -27,6 +27,7 @@ pub enum RadUnaryMathRule {
     Cos,
     Tan,
     Exp,
+    Exp10,
     Log,
     Log10,
     Sqrt,
@@ -243,6 +244,11 @@ pub fn rad_unary_contribution<B: RadFormulaBuilder>(
             b.div(y_bar, cos_sq)
         }
         RadUnaryMathRule::Exp => b.mul(y_bar, primal),
+        RadUnaryMathRule::Exp10 => {
+            let ln_10 = b.ln_10();
+            let scaled = b.mul(primal, ln_10);
+            b.mul(y_bar, scaled)
+        }
         RadUnaryMathRule::Log => b.div(y_bar, x),
         RadUnaryMathRule::Log10 => {
             let ln_10 = b.ln_10();
@@ -402,6 +408,7 @@ pub fn rad_unary_math_rule(sig: &SigMatch<'_>) -> Option<(RadUnaryMathRule, SigI
         SigMatch::Cos(x) => Some((RadUnaryMathRule::Cos, x)),
         SigMatch::Tan(x) => Some((RadUnaryMathRule::Tan, x)),
         SigMatch::Exp(x) => Some((RadUnaryMathRule::Exp, x)),
+        SigMatch::Exp10(x) => Some((RadUnaryMathRule::Exp10, x)),
         SigMatch::Log(x) => Some((RadUnaryMathRule::Log, x)),
         SigMatch::Log10(x) => Some((RadUnaryMathRule::Log10, x)),
         SigMatch::Sqrt(x) => Some((RadUnaryMathRule::Sqrt, x)),

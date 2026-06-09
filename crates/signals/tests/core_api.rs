@@ -37,6 +37,7 @@ fn builder_and_match_cover_core_signal_shapes() {
     let sin = b.sin(inp);
     let tan = b.tan(inp);
     let exp = b.exp(inp);
+    let exp10 = b.exp10(inp);
     let log = b.log(inp);
     let log10 = b.log10(inp);
     let sqrt = b.sqrt(inp);
@@ -69,6 +70,7 @@ fn builder_and_match_cover_core_signal_shapes() {
     assert_eq!(match_sig(&arena, sin), SigMatch::Sin(inp));
     assert_eq!(match_sig(&arena, tan), SigMatch::Tan(inp));
     assert_eq!(match_sig(&arena, exp), SigMatch::Exp(inp));
+    assert_eq!(match_sig(&arena, exp10), SigMatch::Exp10(inp));
     assert_eq!(match_sig(&arena, log), SigMatch::Log(inp));
     assert_eq!(match_sig(&arena, log10), SigMatch::Log10(inp));
     assert_eq!(match_sig(&arena, sqrt), SigMatch::Sqrt(inp));
