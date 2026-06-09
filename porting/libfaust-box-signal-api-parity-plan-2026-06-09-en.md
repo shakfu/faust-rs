@@ -452,6 +452,11 @@ These wrappers can be thin overload shims over the C ABI rather than a full C++
 object model. Preserve the C++ names where possible, but avoid exposing Rust
 implementation details.
 
+Status 2026-06-09: added `crates/signal-ffi/include/libfaust-signal.h` as a
+thin C++ inline wrapper over `libfaust-signal-c.h`. Shared common wrappers are
+guarded so Box and Signal C++ headers can be included together in either order.
+Local syntax checks cover both include orders with C++17.
+
 ### H3. Export verification
 
 Add a CI/local check that:

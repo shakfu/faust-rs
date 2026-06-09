@@ -6,10 +6,13 @@
 #ifdef __cplusplus
 #include <string>
 
+#ifndef LIBFAUST_COMMON_CPP_WRAPPERS_H
+#define LIBFAUST_COMMON_CPP_WRAPPERS_H
 inline bool isNil(Box b) { return CisNil(b); }
 inline const char* tree2str(Box b) { return Ctree2str(b); }
-inline int tree2int(Box b) { return Ctree2int(b); }
 inline void* getUserData(Box b) { return CgetUserData(b); }
+#endif
+inline int tree2int(Box b) { return Ctree2int(b); }
 
 inline Box boxInt(int n) { return CboxInt(n); }
 inline Box boxReal(double n) { return CboxReal(n); }
