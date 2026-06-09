@@ -19,6 +19,6 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 interp_ffi = { package = "interp-ffi", path = "../interp-ffi" }
-faust_cranelift = { package = "cranelift-ffi", path = "../cranelift-ffi", default-features = false }
-faust_box = { package = "box-ffi", path = "../box-ffi", default-features = false }
-faust_signal = { package = "signal-ffi", path = "../signal-ffi", default-features = false }
+cranelift_ffi = { package = "cranelift-ffi", path = "../cranelift-ffi", default-features = false }
+box_ffi = { package = "box-ffi", path = "../box-ffi", default-features = false }
+signal_ffi = { package = "signal-ffi", path = "../signal-ffi", default-features = false }

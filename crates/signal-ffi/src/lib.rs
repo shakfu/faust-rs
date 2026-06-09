@@ -1,12 +1,33 @@
 //! `signal-ffi` — C/C++ export layer for Faust signal construction/matching.
 //!
-//! This crate owns the `Csig*` and `CisSig*` symbols that map directly onto
-//! [`signals::SigBuilder`] and [`signals::match_sig`]. It intentionally shares
-//! the process-global [`tree_ffi::FfiTreeContext`] with `box-ffi`, so Signal
-//! handles can be printed and freed by the common libfaust helpers.
+//! # Overview
+//! This crate owns the `Csig*` (constructors) and `CisSig*` (matchers) symbols,
+//! plus the normalization (`CsimplifyToNormalForm`) and source-generation
+//! (`CcreateSourceFromSignals`) helpers, and a thin C++ wrapper header
+//! (`libfaust-signal.h`).
 //!
-//! Source provenance: C++ reference header
-//! `architecture/faust/dsp/libfaust-signal-c.h` in Faust commit `8eebea429`.
+//! The implementation is backed by:
+//! - [`signals::SigBuilder`] / [`signals::match_sig`] for signal
+//!   construction/matching,
+//! - [`tlib::TreeArena`] for hash-consed node storage,
+//! - `normalize` for normal-form simplification.
+//!
+//! # Context model
+//! Signal handles share the process-global [`tree_ffi::FfiTreeContext`] with
+//! `box-ffi` (`createLibContext` / `destroyLibContext`), so `Box` and `Signal`
+//! handles can be printed and freed through the common libfaust helpers
+//! (`CprintSignal`, `freeCMemory`) without a separate lifecycle.
+//!
+//! # Safety model
+//! All exported functions follow C ABI contracts. Caller pointers are validated
+//! at entry points; invalid handles produce null/false/0 results, and matcher
+//! out-parameters are written only on a successful match.
+//!
+//! # Mapping status
+//! The exported symbol names intentionally mirror the C++ reference header
+//! `architecture/faust/dsp/libfaust-signal-c.h` (Faust commit `8eebea429`).
+//! This is an incremental parity layer: rows marked as exact candidates in the
+//! generated Signal API matrix still need focused semantic parity tests.
 
 #![allow(unsafe_code)]
 #![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
@@ -772,7 +793,7 @@ pub extern "C" fn CsimplifyToNormalForm(s: *mut c_void) -> *mut c_void {
         let Some(signal) = decode_signal(ctx, s) else {
             return null_signal();
         };
-        let ui = faust_box::signal_only_root_ui(ctx, "FaustDSP");
+        let ui = box_ffi::signal_only_root_ui(ctx, "FaustDSP");
         let opts = normalize::normalform::NormalFormOpts::default();
         match normalize::normalform::prepare_signals(&mut ctx.arena, &ui, signal, &opts) {
             Ok((normal, _types)) => encode_signal(ctx, normal),
@@ -796,7 +817,7 @@ pub unsafe extern "C" fn CsimplifyToNormalForm2(siglist: *mut *mut c_void) -> *m
         if signals.is_empty() {
             return ctx.alloc_handle_ptr_array(Vec::new());
         }
-        let ui = faust_box::signal_only_root_ui(ctx, "FaustDSP");
+        let ui = box_ffi::signal_only_root_ui(ctx, "FaustDSP");
         let opts = normalize::normalform::NormalFormOpts::default();
         match normalize::normalform::prepare_signals_multi(&mut ctx.arena, &ui, &signals, &opts) {
             Ok((normal, _types)) => {
@@ -852,7 +873,7 @@ pub unsafe extern "C" fn CcreateSourceFromSignals(
     };
     // SAFETY: caller upholds the null-terminated Signal array contract.
     match unsafe {
-        faust_box::export_source_from_signal_array_handle(
+        box_ffi::export_source_from_signal_array_handle(
             &name_app,
             osigs.cast::<c_void>(),
             &lang,
@@ -1661,12 +1682,12 @@ mod tests {
     }
 
     unsafe fn print_signal(signal: *mut c_void) -> String {
-        let ptr = faust_box::CprintSignal(signal, false, 4096);
+        let ptr = box_ffi::CprintSignal(signal, false, 4096);
         assert!(!ptr.is_null());
         let text = unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
-        unsafe { faust_box::freeCMemory(ptr.cast()) };
+        unsafe { box_ffi::freeCMemory(ptr.cast()) };
         text
     }
 
@@ -1856,7 +1877,7 @@ mod tests {
         assert!(CisSigReal(second, &mut real_out));
         assert_eq!(real_out, 3.0);
         assert!(terminator.is_null());
-        unsafe { faust_box::freeCMemory(outputs.cast()) };
+        unsafe { box_ffi::freeCMemory(outputs.cast()) };
     }
 
     #[test]
@@ -1933,7 +1954,7 @@ mod tests {
         assert!(!first.is_null());
         assert!(!second.is_null());
         assert!(terminator.is_null());
-        unsafe { faust_box::freeCMemory(outputs.cast()) };
+        unsafe { box_ffi::freeCMemory(outputs.cast()) };
     }
 
     #[test]
@@ -1968,7 +1989,7 @@ mod tests {
         let source_text = unsafe { CStr::from_ptr(source) }.to_string_lossy();
         assert!(source_text.contains("SignalDSP"));
         assert!(source_text.contains("compute"));
-        unsafe { faust_box::freeCMemory(source.cast()) };
+        unsafe { box_ffi::freeCMemory(source.cast()) };
 
         let bad_lang = CString::new("rust").expect("valid lang");
         let failed = unsafe {

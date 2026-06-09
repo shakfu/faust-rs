@@ -14,7 +14,7 @@ unused_lifetimes = "warn"
 all = "warn"
 
 [lib]
-name = "faust_box"
+name = "box_ffi"
 crate-type = ["rlib"]
 
 [features]

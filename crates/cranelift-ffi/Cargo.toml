@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "faust_cranelift"
+name = "cranelift_ffi"
 crate-type = ["rlib"]
 
 [features]
@@ -14,7 +14,7 @@ default = []
 standalone-capi-globals = []
 
 [dependencies]
-faust_box = { package = "box-ffi", path = "../box-ffi", default-features = false }
+box_ffi = { package = "box-ffi", path = "../box-ffi", default-features = false }
 codegen = { path = "../codegen" }
 compiler = { path = "../compiler" }
 fir = { path = "../fir" }

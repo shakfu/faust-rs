@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 
-use faust_cranelift::factory::{
+use cranelift_ffi::factory::{
     createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory,
     writeCCraneliftDSPFactoryToBitcodeFile,
 };

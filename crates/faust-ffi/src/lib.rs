@@ -8,10 +8,10 @@
 #![allow(unsafe_code)]
 
 /// Box manipulation C API surface.
-pub use faust_box as box_api;
+pub use box_ffi as box_api;
 /// Cranelift backend C API surface.
-pub use faust_cranelift as cranelift;
-/// Signal manipulation C API surface.
-pub use faust_signal as signal_api;
+pub use cranelift_ffi as cranelift;
 /// Interpreter backend C API surface.
 pub use interp_ffi as interp;
+/// Signal manipulation C API surface.
+pub use signal_ffi as signal_api;

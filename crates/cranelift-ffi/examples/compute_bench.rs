@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
 use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
 use codegen::fixtures::{build_heavy_bench_test_module, build_sine_phasor_test_module};
-use faust_cranelift::factory::{createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory};
-use faust_cranelift::instance::{
+use cranelift_ffi::factory::{createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory};
+use cranelift_ffi::instance::{
     computeCCraneliftDSPInstance, createCCraneliftDSPInstance, deleteCCraneliftDSPInstance,
     getNumInputsCCraneliftDSPInstance, getNumOutputsCCraneliftDSPInstance,
     initCCraneliftDSPInstance,
 };
-use faust_cranelift::types::FaustFloat;
+use cranelift_ffi::types::FaustFloat;
 use interp_ffi::factory::{
     createCInterpreterDSPFactoryFromFile, deleteCInterpreterDSPFactory,
     readCInterpreterDSPFactoryFromBitcode,

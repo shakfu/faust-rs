@@ -19,6 +19,7 @@ use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use box_ffi::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signal_array_handle};
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
@@ -26,7 +27,6 @@ use compiler::{
     AuxFileArtifact, Compiler as FaustCompiler, ExpandDspRequest, GenerateAuxFilesRequest,
     SignalFirLane, default_import_search_paths,
 };
-use faust_box::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signal_array_handle};
 use fir::{FirMatch, match_fir};
 use utils::{
     decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
@@ -1827,7 +1827,7 @@ mod tests {
             let mut b = fir::FirBuilder::new(&mut store);
             b.int32(0)
         };
-        let bad_fir = faust_box::BoxFfiFirModule {
+        let bad_fir = box_ffi::BoxFfiFirModule {
             store,
             module: bad_root,
             num_inputs: 0,
@@ -1979,8 +1979,8 @@ mod tests {
     fn boxes_and_signals_constructor_match_string_constructor_sha() {
         let _guard = crate::test_serial_guard();
         super::clear_registered_foreign_functions();
-        faust_box::createLibContext();
-        let box_root = faust_box::CboxWire();
+        box_ffi::createLibContext();
+        let box_root = box_ffi::CboxWire();
         assert!(!box_root.is_null());
 
         let name = c"same";
@@ -1998,7 +1998,7 @@ mod tests {
             )
         };
         assert!(!from_box.is_null());
-        let signals = unsafe { faust_box::CboxesToSignals(box_root, err.as_mut_ptr()) };
+        let signals = unsafe { box_ffi::CboxesToSignals(box_root, err.as_mut_ptr()) };
         assert!(!signals.is_null());
         let from_signals = unsafe {
             createCCraneliftDSPFactoryFromSignals(
@@ -2042,12 +2042,12 @@ mod tests {
             freeCMemory(sha_box_ptr.cast());
             freeCMemory(sha_signals_ptr.cast());
             freeCMemory(sha_string_ptr.cast());
-            faust_box::freeCMemory(signals.cast());
+            box_ffi::freeCMemory(signals.cast());
             assert!(deleteCCraneliftDSPFactory(from_box));
             assert!(deleteCCraneliftDSPFactory(from_signals));
             assert!(deleteCCraneliftDSPFactory(from_string));
         }
-        faust_box::destroyLibContext();
+        box_ffi::destroyLibContext();
     }
 
     #[test]

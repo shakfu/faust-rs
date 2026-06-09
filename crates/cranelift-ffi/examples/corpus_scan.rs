@@ -3,7 +3,7 @@ use std::fs;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
-use faust_cranelift::factory::{
+use cranelift_ffi::factory::{
     createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory, freeCMemory,
     getCCraneliftDSPFactoryJSON,
 };

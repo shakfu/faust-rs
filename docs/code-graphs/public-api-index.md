@@ -862,8 +862,8 @@ This is a lightweight source scan for public items. Use `cargo doc --workspace -
 
 | Kind | Name | Location |
 |---|---|---|
-| `use` | `faust_box` | `crates/faust-ffi/src/lib.rs:11` |
-| `use` | `faust_cranelift` | `crates/faust-ffi/src/lib.rs:13` |
+| `use` | `box_ffi` | `crates/faust-ffi/src/lib.rs:11` |
+| `use` | `cranelift_ffi` | `crates/faust-ffi/src/lib.rs:13` |
 | `use` | `interp_ffi` | `crates/faust-ffi/src/lib.rs:15` |
 
 ## `fir`

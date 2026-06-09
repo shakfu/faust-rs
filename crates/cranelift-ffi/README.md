@@ -44,7 +44,7 @@ What is not final yet:
 
 Library name:
 
-- Rust lib target name: `faust_cranelift`
+- Rust lib target name: `cranelift_ffi`
 
 Distribution note:
 

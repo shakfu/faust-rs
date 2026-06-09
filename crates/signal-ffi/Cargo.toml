@@ -14,11 +14,11 @@ unused_lifetimes = "warn"
 all = "warn"
 
 [lib]
-name = "faust_signal"
+name = "signal_ffi"
 crate-type = ["rlib"]
 
 [dependencies]
-faust_box = { package = "box-ffi", path = "../box-ffi", default-features = false }
+box_ffi = { package = "box-ffi", path = "../box-ffi", default-features = false }
 normalize = { path = "../normalize" }
 signals = { path = "../signals" }
 tlib = { path = "../tlib" }
