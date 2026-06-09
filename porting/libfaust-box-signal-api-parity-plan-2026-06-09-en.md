@@ -343,6 +343,15 @@ directly; Rust `SigBuilder` carries `ui::ControlId`. The FFI layer should build
 or retrieve corresponding UI entries in the shared context, so repeated labels
 produce stable signal nodes and source generation can recover usable UI code.
 
+Status 2026-06-09: implemented. `tree-ffi` now owns a Signal FFI control
+registry keyed by control kind, label, and range expressions. `signal-ffi`
+constructors register or reuse `ControlId` values for UI and soundfile leaves,
+and `box-ffi` translates that registry into a synthesized `UiProgram` when
+lowering Signal handles to FIR/source. The S3 implementation also added
+`CsigSelect2` and `CsigSelect3` because they map directly to existing
+`SigBuilder` constructors. The regenerated Signal matrix now reports 77 exact
+implementation candidates and 46 missing symbols.
+
 ### S4. Add recursion API parity
 
 Implement:

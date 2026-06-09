@@ -46,13 +46,16 @@ use tlib::{
 };
 use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
 use tree_ffi::{
-    FfiTreeContext as BoxContext, read_c_string as unsafe_read_label,
-    reset_global_context as reset_shared_context, with_global_context as with_ctx,
-    write_out_handle as unsafe_write_out_box, write_out_int as unsafe_write_out_int,
-    write_out_real as unsafe_write_out_real,
+    FfiSignalControl, FfiSignalControlKind, FfiTreeContext as BoxContext,
+    read_c_string as unsafe_read_label, reset_global_context as reset_shared_context,
+    with_global_context as with_ctx, write_out_handle as unsafe_write_out_box,
+    write_out_int as unsafe_write_out_int, write_out_real as unsafe_write_out_real,
 };
 pub use tree_ffi::{SOperator, SType};
-use ui::{UiBuilder, UiProgram, UiRootOrigin};
+use ui::{
+    ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiProgramBuilder, UiRootOrigin,
+    ordering_key_from_metadata, split_label_metadata,
+};
 
 /// FIR package exported from box/signal handles for backend FFI constructors.
 ///
@@ -97,31 +100,119 @@ fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize
 }
 
 /// Lowers a propagated signal root list to a standalone FIR module for FFI callers.
-fn signal_only_root_ui(module_name: &str) -> UiProgram {
+fn control_label_and_metadata(
+    ctx: &BoxContext,
+    control: &FfiSignalControl,
+) -> (String, ui::UiMetadata) {
+    let raw = tree_to_str(&ctx.arena, control.label).unwrap_or_default();
+    split_label_metadata(raw)
+}
+
+fn control_range(ctx: &BoxContext, control: &FfiSignalControl) -> Option<ControlRange> {
+    let range_for = |id: Option<TreeId>, fallback| {
+        id.and_then(|id| tree_to_double(&ctx.arena, id))
+            .unwrap_or(fallback)
+    };
+    match control.kind {
+        FfiSignalControlKind::VSlider
+        | FfiSignalControlKind::HSlider
+        | FfiSignalControlKind::NumEntry => Some(ControlRange {
+            init: range_for(control.init, 0.0),
+            min: range_for(control.min, 0.0),
+            max: range_for(control.max, 1.0),
+            step: range_for(control.step, 0.0),
+        }),
+        FfiSignalControlKind::VBargraph | FfiSignalControlKind::HBargraph => Some(ControlRange {
+            init: 0.0,
+            min: range_for(control.min, 0.0),
+            max: range_for(control.max, 1.0),
+            step: 0.0,
+        }),
+        FfiSignalControlKind::Button
+        | FfiSignalControlKind::Checkbox
+        | FfiSignalControlKind::Soundfile => None,
+    }
+}
+
+fn control_kind(kind: FfiSignalControlKind) -> ControlKind {
+    match kind {
+        FfiSignalControlKind::Button => ControlKind::Button,
+        FfiSignalControlKind::Checkbox => ControlKind::Checkbox,
+        FfiSignalControlKind::VSlider => ControlKind::VSlider,
+        FfiSignalControlKind::HSlider => ControlKind::HSlider,
+        FfiSignalControlKind::NumEntry => ControlKind::NumEntry,
+        FfiSignalControlKind::VBargraph => ControlKind::VBargraph,
+        FfiSignalControlKind::HBargraph => ControlKind::HBargraph,
+        FfiSignalControlKind::Soundfile => ControlKind::Soundfile,
+    }
+}
+
+fn signal_only_root_ui(ctx: &BoxContext, module_name: &str) -> UiProgram {
     let mut arena = TreeArena::new();
-    let root = UiBuilder::new(&mut arena).vgroup(module_name, &[]);
+    if ctx.signal_controls().is_empty() {
+        let root = UiBuilder::new(&mut arena).vgroup(module_name, &[]);
+        return UiProgram {
+            arena,
+            root,
+            controls: Vec::new(),
+            root_origin: UiRootOrigin::Synthesized,
+            emit_ui: true,
+        };
+    }
+
+    let mut controls = Vec::with_capacity(ctx.signal_controls().len());
+    let mut builder = UiProgramBuilder::new();
+    for control in ctx.signal_controls() {
+        let (label, metadata) = control_label_and_metadata(ctx, control);
+        let order_key = ordering_key_from_metadata(&metadata);
+        controls.push(ControlSpec {
+            id: control.id,
+            kind: control_kind(control.kind),
+            label,
+            metadata,
+            range: control_range(ctx, control),
+        });
+        match control.kind {
+            FfiSignalControlKind::Button
+            | FfiSignalControlKind::Checkbox
+            | FfiSignalControlKind::VSlider
+            | FfiSignalControlKind::HSlider
+            | FfiSignalControlKind::NumEntry => {
+                builder.insert_input_control(&[], control.id, order_key);
+            }
+            FfiSignalControlKind::VBargraph | FfiSignalControlKind::HBargraph => {
+                builder.insert_output_control(&[], control.id, order_key);
+            }
+            FfiSignalControlKind::Soundfile => {
+                builder.insert_soundfile(&[], control.id, order_key);
+            }
+        }
+    }
+
+    let (mut arena, roots) = builder.finish();
+    let root = UiBuilder::new(&mut arena).vgroup(module_name, &roots);
     UiProgram {
         arena,
         root,
-        controls: Vec::new(),
+        controls,
         root_origin: UiRootOrigin::Synthesized,
         emit_ui: true,
     }
 }
 
 fn lower_signal_roots_to_fir(
-    arena: &TreeArena,
+    ctx: &BoxContext,
     signal_roots: &[TreeId],
     module_name: &str,
 ) -> Result<BoxFfiFirModule, String> {
     if signal_roots.is_empty() {
         return Err("signal list is empty".to_owned());
     }
-    let num_inputs = infer_num_inputs_from_signals(arena, signal_roots);
+    let num_inputs = infer_num_inputs_from_signals(&ctx.arena, signal_roots);
     let num_outputs = signal_roots.len();
-    let ui = signal_only_root_ui(module_name);
+    let ui = signal_only_root_ui(ctx, module_name);
     let lowered = compile_signals_to_fir_fastlane_with_ui(
-        arena,
+        &ctx.arena,
         signal_roots,
         num_inputs,
         num_outputs,
@@ -234,7 +325,7 @@ pub unsafe fn export_fir_from_signal_array_handle(
 ) -> Result<BoxFfiFirModule, String> {
     with_ctx(|ctx| {
         let roots = decode_signal_handle_array(ctx, signals)?;
-        lower_signal_roots_to_fir(&ctx.arena, &roots, module_name)
+        lower_signal_roots_to_fir(ctx, &roots, module_name)
     })
 }
 
@@ -2470,7 +2561,7 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             .module_name
             .clone()
             .unwrap_or_else(|| name_app.clone());
-        let fir = match lower_signal_roots_to_fir(&ctx.arena, &signals, &module_name) {
+        let fir = match lower_signal_roots_to_fir(ctx, &signals, &module_name) {
             Ok(v) => v,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e) };

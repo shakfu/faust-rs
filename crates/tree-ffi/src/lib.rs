@@ -45,6 +45,68 @@ pub enum SOperator {
     kXOR = 16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// UI/control families registered by Signal FFI constructors.
+pub enum FfiSignalControlKind {
+    Button,
+    Checkbox,
+    VSlider,
+    HSlider,
+    NumEntry,
+    VBargraph,
+    HBargraph,
+    Soundfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Context-owned metadata for one Signal FFI UI/control constructor.
+pub struct FfiSignalControl {
+    /// Stable control id embedded in Signal UI leaves.
+    pub id: u32,
+    /// Control family.
+    pub kind: FfiSignalControlKind,
+    /// Original C label stored as an arena symbol tree.
+    pub label: TreeId,
+    /// Optional initial value expression for sliders/numentries.
+    pub init: Option<TreeId>,
+    /// Optional minimum expression for sliders, numentries, and bargraphs.
+    pub min: Option<TreeId>,
+    /// Optional maximum expression for sliders, numentries, and bargraphs.
+    pub max: Option<TreeId>,
+    /// Optional step expression for sliders/numentries.
+    pub step: Option<TreeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FfiSignalControlKey {
+    kind: FfiSignalControlKind,
+    label: u32,
+    init: Option<u32>,
+    min: Option<u32>,
+    max: Option<u32>,
+    step: Option<u32>,
+}
+
+impl FfiSignalControlKey {
+    fn new(
+        kind: FfiSignalControlKind,
+        label: TreeId,
+        init: Option<TreeId>,
+        min: Option<TreeId>,
+        max: Option<TreeId>,
+        step: Option<TreeId>,
+    ) -> Self {
+        Self {
+            kind,
+            label: label.as_u32(),
+            init: init.map(TreeId::as_u32),
+            min: min.map(TreeId::as_u32),
+            max: max.map(TreeId::as_u32),
+            step: step.map(TreeId::as_u32),
+        }
+    }
+}
+
 /// Process-global arena and ownership state used behind opaque C tree handles.
 pub struct FfiTreeContext {
     /// Hash-consed Box/Signal tree arena.
@@ -53,6 +115,8 @@ pub struct FfiTreeContext {
     by_tree: HashMap<u32, usize>,
     string_pool: Vec<CString>,
     handle_array_allocs: HashMap<usize, usize>,
+    signal_controls: Vec<FfiSignalControl>,
+    signal_control_by_key: HashMap<FfiSignalControlKey, u32>,
     next_handle: usize,
 }
 
@@ -89,6 +153,8 @@ impl FfiTreeContext {
             by_tree: HashMap::new(),
             string_pool: Vec::new(),
             handle_array_allocs: HashMap::new(),
+            signal_controls: Vec::new(),
+            signal_control_by_key: HashMap::new(),
             next_handle: 1,
         };
         let nil = ctx.arena.nil();
@@ -164,6 +230,44 @@ impl FfiTreeContext {
             drop(Vec::from_raw_parts(ptr as *mut *mut c_void, len, len));
         }
         true
+    }
+
+    /// Registers or reuses one Signal FFI UI/control descriptor.
+    pub fn register_signal_control(
+        &mut self,
+        kind: FfiSignalControlKind,
+        label: TreeId,
+        init: Option<TreeId>,
+        min: Option<TreeId>,
+        max: Option<TreeId>,
+        step: Option<TreeId>,
+    ) -> u32 {
+        let key = FfiSignalControlKey::new(kind, label, init, min, max, step);
+        if let Some(id) = self.signal_control_by_key.get(&key).copied() {
+            return id;
+        }
+        let id = u32::try_from(self.signal_controls.len()).unwrap_or(u32::MAX);
+        self.signal_controls.push(FfiSignalControl {
+            id,
+            kind,
+            label,
+            init,
+            min,
+            max,
+            step,
+        });
+        self.signal_control_by_key.insert(key, id);
+        id
+    }
+
+    /// Returns one Signal FFI UI/control descriptor by id.
+    pub fn signal_control(&self, id: u32) -> Option<&FfiSignalControl> {
+        self.signal_controls.get(usize::try_from(id).ok()?)
+    }
+
+    /// Returns all Signal FFI UI/control descriptors in id order.
+    pub fn signal_controls(&self) -> &[FfiSignalControl] {
+        &self.signal_controls
     }
 }
 
@@ -260,5 +364,32 @@ mod tests {
         assert!(!raw.is_null());
         assert!(ctx.free_if_handle_ptr_array(raw.cast()));
         assert!(!ctx.free_if_handle_ptr_array(raw.cast()));
+    }
+
+    #[test]
+    fn reuses_signal_control_ids_for_identical_metadata() {
+        let mut ctx = FfiTreeContext::new();
+        let label = ctx.arena.symbol("gain");
+        let init = ctx.arena.float(0.5);
+
+        let first = ctx.register_signal_control(
+            FfiSignalControlKind::HSlider,
+            label,
+            Some(init),
+            None,
+            None,
+            None,
+        );
+        let second = ctx.register_signal_control(
+            FfiSignalControlKind::HSlider,
+            label,
+            Some(init),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(ctx.signal_controls().len(), 1);
     }
 }
