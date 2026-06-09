@@ -30,7 +30,6 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void};
-use std::sync::{Mutex, OnceLock};
 
 use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
 use codegen::backends::c::{COptions, generate_c_module};
@@ -48,24 +47,12 @@ use tlib::{
 use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
 use tree_ffi::{
     FfiTreeContext as BoxContext, read_c_string as unsafe_read_label,
+    reset_global_context as reset_shared_context, with_global_context as with_ctx,
     write_out_handle as unsafe_write_out_box, write_out_int as unsafe_write_out_int,
     write_out_real as unsafe_write_out_real,
 };
 pub use tree_ffi::{SOperator, SType};
 use ui::{UiBuilder, UiProgram, UiRootOrigin};
-
-static BOX_CONTEXT: OnceLock<Mutex<BoxContext>> = OnceLock::new();
-
-/// Returns the lazily initialized global FFI box context.
-fn context() -> &'static Mutex<BoxContext> {
-    BOX_CONTEXT.get_or_init(|| Mutex::new(BoxContext::new()))
-}
-
-/// Executes one closure while holding the global box context mutex.
-fn with_ctx<R>(f: impl FnOnce(&mut BoxContext) -> R) -> R {
-    let mut guard = context().lock().expect("box context poisoned");
-    f(&mut guard)
-}
 
 /// FIR package exported from box/signal handles for backend FFI constructors.
 ///
@@ -365,9 +352,7 @@ fn import_tree_rec(
 /// # Safety
 /// This function does not dereference caller pointers.
 pub extern "C" fn createLibContext() {
-    with_ctx(|ctx| {
-        *ctx = BoxContext::new();
-    });
+    reset_shared_context();
 }
 
 #[unsafe(no_mangle)]
@@ -376,9 +361,7 @@ pub extern "C" fn createLibContext() {
 /// # Safety
 /// This function does not dereference caller pointers.
 pub extern "C" fn destroyLibContext() {
-    with_ctx(|ctx| {
-        *ctx = BoxContext::new();
-    });
+    reset_shared_context();
 }
 
 #[cfg_attr(feature = "standalone-capi-globals", unsafe(no_mangle))]

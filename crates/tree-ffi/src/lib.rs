@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::sync::{Mutex, OnceLock};
 
 use tlib::{TreeArena, TreeId};
 
@@ -53,6 +54,30 @@ pub struct FfiTreeContext {
     string_pool: Vec<CString>,
     handle_array_allocs: HashMap<usize, usize>,
     next_handle: usize,
+}
+
+static GLOBAL_TREE_CONTEXT: OnceLock<Mutex<FfiTreeContext>> = OnceLock::new();
+
+/// Returns the lazily initialized global FFI tree context.
+///
+/// This process-global context is shared by Box and Signal C ABI crates so
+/// opaque handles produced by one API surface can be decoded by shared helpers
+/// such as `CprintSignal` and `freeCMemory`.
+pub fn global_context() -> &'static Mutex<FfiTreeContext> {
+    GLOBAL_TREE_CONTEXT.get_or_init(|| Mutex::new(FfiTreeContext::new()))
+}
+
+/// Executes one closure while holding the shared global FFI tree context mutex.
+pub fn with_global_context<R>(f: impl FnOnce(&mut FfiTreeContext) -> R) -> R {
+    let mut guard = global_context().lock().expect("FFI tree context poisoned");
+    f(&mut guard)
+}
+
+/// Resets the shared global FFI tree context.
+pub fn reset_global_context() {
+    with_global_context(|ctx| {
+        *ctx = FfiTreeContext::new();
+    });
 }
 
 impl FfiTreeContext {

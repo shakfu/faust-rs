@@ -315,6 +315,11 @@ Implement a first `signal-ffi` slice:
 
 Then export it from `faust-ffi`.
 
+Status 2026-06-09: the process-global tree context moved from `box-ffi` into
+`tree-ffi` before adding `signal-ffi`, so Box and Signal handles can share the
+same opaque handle arena and existing shared symbols such as `CprintSignal` and
+`freeCMemory` can decode handles from both API surfaces.
+
 ### S3. Add table, waveform, soundfile, and UI signal constructors
 
 Implement:
