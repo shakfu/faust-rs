@@ -1,11 +1,21 @@
 #ifndef LIBFAUST_BOX_C_H
 #define LIBFAUST_BOX_C_H
 
+/*
+ * C interface for the libfaust Box API.
+ *
+ * This header mirrors the Faust C++ `architecture/faust/dsp/libfaust-box-c.h`
+ * surface maintained by GRAME, adapted to the Rust port's unified `faust-ffi`
+ * library. Box and Signal values are opaque handles owned by the process-global
+ * libfaust context unless explicitly documented otherwise.
+ */
+
 #include <stdbool.h>
 
 #ifndef LIBFAUST_TREE_C_TYPES_H
 #define LIBFAUST_TREE_C_TYPES_H
 
+/* Opaque tree node used by both Box and Signal APIs. */
 #ifdef _MSC_VER
 typedef void CTree;
 #else
@@ -15,6 +25,7 @@ typedef struct CTree CTree;
 typedef CTree* Signal;
 typedef CTree* Box;
 
+/* Scalar type and primitive binary-operator tags shared with the Signal API. */
 enum SType { kSInt, kSReal };
 enum SOperator {
     kAdd,
@@ -42,18 +53,32 @@ enum SOperator {
 extern "C" {
 #endif
 
+/*
+ * Context and memory management.
+ *
+ * createLibContext() must be called before using the Box/Signal constructors
+ * and paired with destroyLibContext() when the process is done with the API.
+ * Strings and arrays returned by this API remain caller-owned and must be
+ * released with freeCMemory() when documented as returned allocations.
+ */
 void createLibContext(void);
 void destroyLibContext(void);
 void freeCMemory(void* ptr);
 
+/*
+ * Tree printing helpers. Returned strings are allocated by the library and must
+ * be released with freeCMemory().
+ */
 char* CprintBox(Box box, bool shared, int max_size);
 char* CprintSignal(Signal sig, bool shared, int max_size);
 
+/* Generic tree helpers. */
 bool CisNil(Box b);
 const char* Ctree2str(Box b);
 int Ctree2int(Box b);
 void* CgetUserData(Box b);
 
+/* Core Box constructors: constants and block-diagram composition. */
 Box CboxInt(int n);
 Box CboxReal(double n);
 Box CboxWire(void);
@@ -72,6 +97,7 @@ Box CboxRoute(Box n, Box m, Box r);
 Box CboxFad(Box exp, Box seed);
 Box CboxRad(Box exp, Box seeds);
 
+/* Signal-processing primitive boxes and their applied Aux forms. */
 Box CboxDelay(void);
 Box CboxDelayAux(Box b, Box del);
 Box CboxIntCast(void);
@@ -97,6 +123,7 @@ Box CboxFFun(enum SType rtype, const char** names, enum SType* atypes,
 Box CboxFConst(enum SType type, const char* name, const char* incfile);
 Box CboxFVar(enum SType type, const char* name, const char* incfile);
 
+/* Primitive binary operator constructors. */
 Box CboxBinOp(enum SOperator op);
 Box CboxBinOpAux(enum SOperator op, Box b1, Box b2);
 
@@ -142,6 +169,7 @@ Box CboxMax(void); Box CboxMaxAux(Box b1, Box b2);
 Box CboxFmod(void); Box CboxFmodAux(Box b1, Box b2);
 Box CboxAtan2(void); Box CboxAtan2Aux(Box b1, Box b2);
 
+/* UI, grouping, and attachment Box constructors. */
 Box CboxButton(const char* label);
 Box CboxCheckbox(const char* label);
 Box CboxVSlider(const char* label, Box init, Box min, Box max, Box step);
@@ -157,6 +185,13 @@ Box CboxTGroup(const char* label, Box group);
 Box CboxAttach(void);
 Box CboxAttachAux(Box b1, Box b2);
 
+/*
+ * Structural Box predicates.
+ *
+ * Functions return true when the input matches the requested Box family and
+ * write matched children into the non-null output parameters. Output handles
+ * remain owned by the libfaust context.
+ */
 bool CisBoxAbstr(Box t, Box* x, Box* y);
 bool CisBoxAccess(Box t, Box* exp, Box* id);
 bool CisBoxAppl(Box t, Box* x, Box* y);
@@ -210,6 +245,14 @@ bool CisBoxWaveform(Box b);
 bool CisBoxWire(Box t);
 bool CisBoxWithLocalDef(Box t, Box* body, Box* ldef);
 
+/*
+ * Front-end and lowering helpers.
+ *
+ * CDSPToBoxes parses Faust source into a Box tree and reports input/output
+ * arity. CboxesToSignals* lower Box trees to null-terminated Signal arrays
+ * released with freeCMemory(). CcreateSourceFromBoxes returns generated source
+ * text released with freeCMemory().
+ */
 Box CDSPToBoxes(const char* name_app, const char* dsp_content, int argc,
                 const char* argv[], int* inputs, int* outputs, char* error_msg);
 bool CgetBoxType(Box box, int* inputs, int* outputs);

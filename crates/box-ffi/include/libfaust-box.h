@@ -1,11 +1,21 @@
 #ifndef LIBFAUST_BOX_H
 #define LIBFAUST_BOX_H
 
+/*
+ * C++ convenience interface for the libfaust Box API.
+ *
+ * The reference Faust C++ header exposes named C++ functions over the same tree
+ * API. This Rust-port header keeps that shape as thin inline wrappers over
+ * `libfaust-box-c.h`, preserving the C ABI as the single implementation
+ * boundary.
+ */
+
 #include "libfaust-box-c.h"
 
 #ifdef __cplusplus
 #include <string>
 
+/* Common helpers shared with libfaust-signal.h. */
 #ifndef LIBFAUST_COMMON_CPP_WRAPPERS_H
 #define LIBFAUST_COMMON_CPP_WRAPPERS_H
 inline bool isNil(Box b) { return CisNil(b); }
@@ -14,6 +24,7 @@ inline void* getUserData(Box b) { return CgetUserData(b); }
 #endif
 inline int tree2int(Box b) { return Ctree2int(b); }
 
+/* Core Box constructors: constants and block-diagram composition. */
 inline Box boxInt(int n) { return CboxInt(n); }
 inline Box boxReal(double n) { return CboxReal(n); }
 inline Box boxWire() { return CboxWire(); }
@@ -26,6 +37,8 @@ inline Box boxRec(Box x, Box y) { return CboxRec(x, y); }
 inline Box boxFad(Box exp, Box seed) { return CboxFad(exp, seed); }
 inline Box boxRad(Box exp, Box seeds) { return CboxRad(exp, seeds); }
 inline Box boxRoute(Box n, Box m, Box r) { return CboxRoute(n, m, r); }
+
+/* Primitive Box constructors and applied Aux forms. */
 inline Box boxDelay() { return CboxDelay(); }
 inline Box boxDelayAux(Box b, Box d) { return CboxDelayAux(b, d); }
 inline Box boxIntCast() { return CboxIntCast(); }
@@ -51,6 +64,7 @@ inline Box boxFVar(enum SType t, const char* n, const char* i) { return CboxFVar
 inline Box boxBinOp(enum SOperator op) { return CboxBinOp(op); }
 inline Box boxBinOpAux(enum SOperator op, Box b1, Box b2) { return CboxBinOpAux(op, b1, b2); }
 
+/* Unary and binary math wrappers generated from the C API names. */
 #define FAUST_BOX_WRAP_0(name) inline Box name() { return C##name(); }
 #define FAUST_BOX_WRAP_1(name) inline Box name##Aux(Box x) { return C##name##Aux(x); }
 #define FAUST_BOX_WRAP_2(name) inline Box name##Aux(Box x, Box y) { return C##name##Aux(x, y); }
@@ -99,6 +113,7 @@ FAUST_BOX_WRAP_0(boxAtan2) FAUST_BOX_WRAP_2(boxAtan2)
 #undef FAUST_BOX_WRAP_1
 #undef FAUST_BOX_WRAP_2
 
+/* UI, grouping, and attachment wrappers. */
 inline Box boxButton(const char* label) { return CboxButton(label); }
 inline Box boxCheckbox(const char* label) { return CboxCheckbox(label); }
 inline Box boxVSlider(const char* l, Box i, Box mn, Box mx, Box st) { return CboxVSlider(l, i, mn, mx, st); }
@@ -114,6 +129,7 @@ inline Box boxTGroup(const char* l, Box g) { return CboxTGroup(l, g); }
 inline Box boxAttach() { return CboxAttach(); }
 inline Box boxAttachAux(Box b1, Box b2) { return CboxAttachAux(b1, b2); }
 
+/* Structural Box matchers. Output references receive context-owned handles. */
 inline bool isBoxAbstr(Box t, Box& x, Box& y) { return CisBoxAbstr(t, &x, &y); }
 inline bool isBoxAccess(Box t, Box& e, Box& id) { return CisBoxAccess(t, &e, &id); }
 inline bool isBoxAppl(Box t, Box& x, Box& y) { return CisBoxAppl(t, &x, &y); }
@@ -128,6 +144,7 @@ inline bool isBoxInt(Box b, int* v) { return CisBoxInt(b, v); }
 inline bool isBoxReal(Box b, double* v) { return CisBoxReal(b, v); }
 inline bool isBoxWire(Box b) { return CisBoxWire(b); }
 
+/* Printing helpers copy C-allocated strings into std::string and free them. */
 inline std::string printBox(Box b, bool shared = true, int max_size = 4096) {
     char* raw = CprintBox(b, shared, max_size);
     if (!raw) {

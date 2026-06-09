@@ -1,12 +1,22 @@
 #ifndef LIBFAUST_SIGNAL_C_H
 #define LIBFAUST_SIGNAL_C_H
 
+/*
+ * C interface for the libfaust Signal API.
+ *
+ * This header mirrors the Faust C++ `architecture/faust/dsp/libfaust-signal-c.h`
+ * surface maintained by GRAME, adapted to the Rust port's unified `faust-ffi`
+ * library. Signal and Box values are opaque tree handles owned by the
+ * process-global libfaust context unless explicitly documented otherwise.
+ */
+
 #include <stdbool.h>
 #include <stdint.h>
 
 #ifndef LIBFAUST_TREE_C_TYPES_H
 #define LIBFAUST_TREE_C_TYPES_H
 
+/* Opaque tree node used by both Signal and Box APIs. */
 #ifdef _MSC_VER
 typedef void CTree;
 #else
@@ -16,6 +26,7 @@ typedef struct CTree CTree;
 typedef CTree* Signal;
 typedef CTree* Box;
 
+/* Scalar type and primitive binary-operator tags shared with the Box API. */
 enum SType { kSInt, kSReal };
 enum SOperator {
     kAdd,
@@ -43,16 +54,31 @@ enum SOperator {
 extern "C" {
 #endif
 
+/*
+ * Context and memory management.
+ *
+ * createLibContext() must be called before using constructors and paired with
+ * destroyLibContext(). Strings and arrays returned by this API remain
+ * caller-owned and must be released with freeCMemory() when documented as
+ * returned allocations.
+ */
 void createLibContext(void);
 void destroyLibContext(void);
 void freeCMemory(void* ptr);
 
+/*
+ * Tree printing helpers. Returned strings are allocated by the library and must
+ * be released with freeCMemory().
+ */
 char* CprintBox(Box box, bool shared, int max_size);
 char* CprintSignal(Signal sig, bool shared, int max_size);
+
+/* Generic tree helpers. */
 bool CisNil(Signal s);
 const char* Ctree2str(Signal s);
 void* CgetUserData(Signal s);
 
+/* Core Signal constructors: constants, inputs, delays, casts, and tables. */
 Signal CsigInt(int n);
 Signal CsigInt64(int64_t n);
 Signal CsigReal(double n);
@@ -64,10 +90,14 @@ Signal CsigFloatCast(Signal s);
 Signal CsigReadOnlyTable(Signal n, Signal init, Signal ridx);
 Signal CsigWriteReadTable(Signal n, Signal init, Signal widx, Signal wsig, Signal ridx);
 Signal CsigWaveform(Signal* wf);
+
+/* Soundfile selectors and buffer accessors. */
 Signal CsigSoundfile(const char* label);
 Signal CsigSoundfileLength(Signal sf, Signal part);
 Signal CsigSoundfileRate(Signal sf, Signal part);
 Signal CsigSoundfileBuffer(Signal sf, Signal chan, Signal part, Signal ridx);
+
+/* Signal selection, foreign values/functions, and primitive operators. */
 Signal CsigSelect2(Signal selector, Signal s1, Signal s2);
 Signal CsigSelect3(Signal selector, Signal s1, Signal s2, Signal s3);
 Signal CsigFFun(enum SType rtype, const char** names, enum SType* atypes,
@@ -113,10 +143,14 @@ Signal CsigMin(Signal x, Signal y);
 Signal CsigMax(Signal x, Signal y);
 Signal CsigFmod(Signal x, Signal y);
 Signal CsigAtan2(Signal x, Signal y);
+
+/* Recursion constructors. */
 Signal CsigSelf(void);
 Signal CsigSelfN(int id);
 Signal CsigRecursion(Signal s);
 Signal* CsigRecursionN(Signal* rf);
+
+/* UI and attachment Signal constructors. */
 Signal CsigButton(const char* label);
 Signal CsigCheckbox(const char* label);
 Signal CsigVSlider(const char* label, Signal init, Signal min, Signal max, Signal step);
@@ -126,6 +160,15 @@ Signal CsigVBargraph(const char* label, Signal min, Signal max, Signal s);
 Signal CsigHBargraph(const char* label, Signal min, Signal max, Signal s);
 Signal CsigAttach(Signal s0, Signal s1);
 
+/*
+ * Structural Signal predicates.
+ *
+ * Functions return true when the input matches the requested Signal family and
+ * write matched children into the non-null output parameters. Output handles
+ * remain owned by the libfaust context. Unsupported/documentation-only families
+ * are exposed for reference API parity and return deterministic false until the
+ * Rust IR grows matching nodes.
+ */
 bool CisSigInt(Signal t, int* i);
 bool CisSigInt64(Signal t, int64_t* i);
 bool CisSigReal(Signal t, double* r);
@@ -169,6 +212,13 @@ bool CisSigDocConstantTbl(Signal t, Signal* n, Signal* sig);
 bool CisSigDocWriteTbl(Signal t, Signal* n, Signal* sig, Signal* widx, Signal* wsig);
 bool CisSigDocAccessTbl(Signal t, Signal* tbl, Signal* ridx);
 
+/*
+ * Normal-form and source-generation helpers.
+ *
+ * CsimplifyToNormalForm2 accepts and returns null-terminated Signal arrays.
+ * CcreateSourceFromSignals returns generated source text released with
+ * freeCMemory().
+ */
 Signal CsimplifyToNormalForm(Signal s);
 Signal* CsimplifyToNormalForm2(Signal* siglist);
 char* CcreateSourceFromSignals(const char* name_app, Signal* osigs, const char* lang,

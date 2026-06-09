@@ -1,11 +1,21 @@
 #ifndef LIBFAUST_SIGNAL_H
 #define LIBFAUST_SIGNAL_H
 
+/*
+ * C++ convenience interface for the libfaust Signal API.
+ *
+ * The reference Faust C++ header exposes named C++ functions over the same tree
+ * API. This Rust-port header keeps that shape as thin inline wrappers over
+ * `libfaust-signal-c.h`, preserving the C ABI as the single implementation
+ * boundary.
+ */
+
 #include "libfaust-signal-c.h"
 
 #ifdef __cplusplus
 #include <string>
 
+/* Common helpers shared with libfaust-box.h. */
 #ifndef LIBFAUST_COMMON_CPP_WRAPPERS_H
 #define LIBFAUST_COMMON_CPP_WRAPPERS_H
 inline bool isNil(Signal s) { return CisNil(s); }
@@ -13,6 +23,7 @@ inline const char* tree2str(Signal s) { return Ctree2str(s); }
 inline void* getUserData(Signal s) { return CgetUserData(s); }
 #endif
 
+/* Core Signal constructors: constants, inputs, delays, casts, and tables. */
 inline Signal sigInt(int n) { return CsigInt(n); }
 inline Signal sigInt64(int64_t n) { return CsigInt64(n); }
 inline Signal sigReal(double n) { return CsigReal(n); }
@@ -24,6 +35,8 @@ inline Signal sigFloatCast(Signal s) { return CsigFloatCast(s); }
 inline Signal sigReadOnlyTable(Signal n, Signal init, Signal ridx) { return CsigReadOnlyTable(n, init, ridx); }
 inline Signal sigWriteReadTable(Signal n, Signal init, Signal widx, Signal wsig, Signal ridx) { return CsigWriteReadTable(n, init, widx, wsig, ridx); }
 inline Signal sigWaveform(Signal* wf) { return CsigWaveform(wf); }
+
+/* Soundfile selectors and buffer accessors. */
 inline Signal sigSoundfile(const char* label) { return CsigSoundfile(label); }
 inline Signal sigSoundfile(const std::string& label) { return CsigSoundfile(label.c_str()); }
 inline Signal sigSoundfileLength(Signal sf, Signal part) { return CsigSoundfileLength(sf, part); }
@@ -36,6 +49,7 @@ inline Signal sigFConst(enum SType type, const char* name, const char* file) { r
 inline Signal sigFVar(enum SType type, const char* name, const char* file) { return CsigFVar(type, name, file); }
 inline Signal sigBinOp(enum SOperator op, Signal x, Signal y) { return CsigBinOp(op, x, y); }
 
+/* Unary and binary math wrappers generated from the C API names. */
 #define FAUST_SIGNAL_WRAP_1(name) inline Signal name(Signal x) { return C##name(x); }
 #define FAUST_SIGNAL_WRAP_2(name) inline Signal name(Signal x, Signal y) { return C##name(x, y); }
 
@@ -82,6 +96,7 @@ FAUST_SIGNAL_WRAP_2(sigAttach)
 #undef FAUST_SIGNAL_WRAP_1
 #undef FAUST_SIGNAL_WRAP_2
 
+/* Recursion, UI, and attachment wrappers. */
 inline Signal sigSelf() { return CsigSelf(); }
 inline Signal sigSelfN(int id) { return CsigSelfN(id); }
 inline Signal sigRecursion(Signal s) { return CsigRecursion(s); }
@@ -99,6 +114,7 @@ inline Signal sigNumEntry(const std::string& label, Signal init, Signal min, Sig
 inline Signal sigVBargraph(const char* label, Signal min, Signal max, Signal s) { return CsigVBargraph(label, min, max, s); }
 inline Signal sigHBargraph(const char* label, Signal min, Signal max, Signal s) { return CsigHBargraph(label, min, max, s); }
 
+/* Structural Signal matchers. Output references receive context-owned handles. */
 inline bool isSigInt(Signal s, int& i) { return CisSigInt(s, &i); }
 inline bool isSigInt64(Signal s, int64_t& i) { return CisSigInt64(s, &i); }
 inline bool isSigReal(Signal s, double& r) { return CisSigReal(s, &r); }
@@ -121,6 +137,7 @@ FAUST_SIGNAL_IS_1(isSigCheckbox)
 #undef FAUST_SIGNAL_IS_1
 #undef FAUST_SIGNAL_IS_2
 
+/* Normal-form and source-generation wrappers. */
 inline bool isSigWaveform(Signal s) { return CisSigWaveform(s); }
 inline Signal simplifyToNormalForm(Signal s) { return CsimplifyToNormalForm(s); }
 inline Signal* simplifyToNormalForm2(Signal* siglist) { return CsimplifyToNormalForm2(siglist); }
