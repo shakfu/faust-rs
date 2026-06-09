@@ -3,10 +3,13 @@
 
 #include <stdbool.h>
 
+#ifndef LIBFAUST_TREE_C_TYPES_H
+#define LIBFAUST_TREE_C_TYPES_H
+
 #ifdef _MSC_VER
 typedef void CTree;
 #else
-typedef struct {} CTree;
+typedef struct CTree CTree;
 #endif
 
 typedef CTree* Signal;
@@ -32,6 +35,8 @@ enum SOperator {
     kOR,
     kXOR
 };
+
+#endif
 
 #ifdef __cplusplus
 extern "C" {

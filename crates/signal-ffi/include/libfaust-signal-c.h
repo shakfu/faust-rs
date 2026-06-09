@@ -1,0 +1,181 @@
+#ifndef LIBFAUST_SIGNAL_C_H
+#define LIBFAUST_SIGNAL_C_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifndef LIBFAUST_TREE_C_TYPES_H
+#define LIBFAUST_TREE_C_TYPES_H
+
+#ifdef _MSC_VER
+typedef void CTree;
+#else
+typedef struct CTree CTree;
+#endif
+
+typedef CTree* Signal;
+typedef CTree* Box;
+
+enum SType { kSInt, kSReal };
+enum SOperator {
+    kAdd,
+    kSub,
+    kMul,
+    kDiv,
+    kRem,
+    kLsh,
+    kARsh,
+    kLRsh,
+    kGT,
+    kLT,
+    kGE,
+    kLE,
+    kEQ,
+    kNE,
+    kAND,
+    kOR,
+    kXOR
+};
+
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void createLibContext(void);
+void destroyLibContext(void);
+void freeCMemory(void* ptr);
+
+char* CprintBox(Box box, bool shared, int max_size);
+char* CprintSignal(Signal sig, bool shared, int max_size);
+bool CisNil(Signal s);
+const char* Ctree2str(Signal s);
+void* CgetUserData(Signal s);
+
+Signal CsigInt(int n);
+Signal CsigInt64(int64_t n);
+Signal CsigReal(double n);
+Signal CsigInput(int idx);
+Signal CsigDelay(Signal s, Signal del);
+Signal CsigDelay1(Signal s);
+Signal CsigIntCast(Signal s);
+Signal CsigFloatCast(Signal s);
+Signal CsigReadOnlyTable(Signal n, Signal init, Signal ridx);
+Signal CsigWriteReadTable(Signal n, Signal init, Signal widx, Signal wsig, Signal ridx);
+Signal CsigWaveform(Signal* wf);
+Signal CsigSoundfile(const char* label);
+Signal CsigSoundfileLength(Signal sf, Signal part);
+Signal CsigSoundfileRate(Signal sf, Signal part);
+Signal CsigSoundfileBuffer(Signal sf, Signal chan, Signal part, Signal ridx);
+Signal CsigSelect2(Signal selector, Signal s1, Signal s2);
+Signal CsigSelect3(Signal selector, Signal s1, Signal s2, Signal s3);
+Signal CsigFFun(enum SType rtype, const char** names, enum SType* atypes,
+                 const char* incfile, const char* libfile, Signal* largs);
+Signal CsigFConst(enum SType type, const char* name, const char* file);
+Signal CsigFVar(enum SType type, const char* name, const char* file);
+Signal CsigBinOp(enum SOperator op, Signal x, Signal y);
+Signal CsigAdd(Signal x, Signal y);
+Signal CsigSub(Signal x, Signal y);
+Signal CsigMul(Signal x, Signal y);
+Signal CsigDiv(Signal x, Signal y);
+Signal CsigRem(Signal x, Signal y);
+Signal CsigLeftShift(Signal x, Signal y);
+Signal CsigLRightShift(Signal x, Signal y);
+Signal CsigARightShift(Signal x, Signal y);
+Signal CsigGT(Signal x, Signal y);
+Signal CsigLT(Signal x, Signal y);
+Signal CsigGE(Signal x, Signal y);
+Signal CsigLE(Signal x, Signal y);
+Signal CsigEQ(Signal x, Signal y);
+Signal CsigNE(Signal x, Signal y);
+Signal CsigAND(Signal x, Signal y);
+Signal CsigOR(Signal x, Signal y);
+Signal CsigXOR(Signal x, Signal y);
+Signal CsigAbs(Signal x);
+Signal CsigAcos(Signal x);
+Signal CsigTan(Signal x);
+Signal CsigSqrt(Signal x);
+Signal CsigSin(Signal x);
+Signal CsigRint(Signal x);
+Signal CsigLog(Signal x);
+Signal CsigLog10(Signal x);
+Signal CsigFloor(Signal x);
+Signal CsigExp(Signal x);
+Signal CsigExp10(Signal x);
+Signal CsigCos(Signal x);
+Signal CsigCeil(Signal x);
+Signal CsigAtan(Signal x);
+Signal CsigAsin(Signal x);
+Signal CsigRemainder(Signal x, Signal y);
+Signal CsigPow(Signal x, Signal y);
+Signal CsigMin(Signal x, Signal y);
+Signal CsigMax(Signal x, Signal y);
+Signal CsigFmod(Signal x, Signal y);
+Signal CsigAtan2(Signal x, Signal y);
+Signal CsigSelf(void);
+Signal CsigSelfN(int id);
+Signal CsigRecursion(Signal s);
+Signal* CsigRecursionN(Signal* rf);
+Signal CsigButton(const char* label);
+Signal CsigCheckbox(const char* label);
+Signal CsigVSlider(const char* label, Signal init, Signal min, Signal max, Signal step);
+Signal CsigHSlider(const char* label, Signal init, Signal min, Signal max, Signal step);
+Signal CsigNumEntry(const char* label, Signal init, Signal min, Signal max, Signal step);
+Signal CsigVBargraph(const char* label, Signal min, Signal max, Signal s);
+Signal CsigHBargraph(const char* label, Signal min, Signal max, Signal s);
+Signal CsigAttach(Signal s0, Signal s1);
+
+bool CisSigInt(Signal t, int* i);
+bool CisSigInt64(Signal t, int64_t* i);
+bool CisSigReal(Signal t, double* r);
+bool CisSigInput(Signal t, int* i);
+bool CisSigOutput(Signal t, int* i, Signal* t0);
+bool CisSigDelay1(Signal t, Signal* t0);
+bool CisSigDelay(Signal t, Signal* t0, Signal* t1);
+bool CisSigPrefix(Signal t, Signal* t0, Signal* t1);
+bool CisSigRDTbl(Signal s, Signal* t, Signal* i);
+bool CisSigWRTbl(Signal u, Signal* id, Signal* t, Signal* i, Signal* s);
+bool CisSigGen(Signal t, Signal* x);
+bool CisSigGen1(Signal t);
+bool CisSigSelect2(Signal t, Signal* selector, Signal* s1, Signal* s2);
+bool CisSigAssertBounds(Signal t, Signal* s1, Signal* s2, Signal* s3);
+bool CisSigHighest(Signal s, Signal* x);
+bool CisSigLowest(Signal s, Signal* x);
+bool CisSigBinOp(Signal s, int* op, Signal* x, Signal* y);
+bool CisSigIntCast(Signal s, Signal* x);
+bool CisSigFloatCast(Signal s, Signal* x);
+bool CisSigFFun(Signal s, Signal* ff, Signal* largs);
+bool CisSigFConst(Signal s, Signal* type, Signal* name, Signal* file);
+bool CisSigFVar(Signal s, Signal* type, Signal* name, Signal* file);
+bool CisProj(Signal s, int* i, Signal* rgroup);
+bool CisRec(Signal s, Signal* var, Signal* body);
+bool CisSigButton(Signal s, Signal* lbl);
+bool CisSigCheckbox(Signal s, Signal* lbl);
+bool CisSigWaveform(Signal s);
+bool CisSigHSlider(Signal s, Signal* lbl, Signal* init, Signal* min, Signal* max, Signal* step);
+bool CisSigVSlider(Signal s, Signal* lbl, Signal* init, Signal* min, Signal* max, Signal* step);
+bool CisSigNumEntry(Signal s, Signal* lbl, Signal* init, Signal* min, Signal* max, Signal* step);
+bool CisSigHBargraph(Signal s, Signal* lbl, Signal* min, Signal* max, Signal* x);
+bool CisSigVBargraph(Signal s, Signal* lbl, Signal* min, Signal* max, Signal* x);
+bool CisSigAttach(Signal s, Signal* s0, Signal* s1);
+bool CisSigEnable(Signal s, Signal* s0, Signal* s1);
+bool CisSigControl(Signal s, Signal* s0, Signal* s1);
+bool CisSigSoundfile(Signal s, Signal* label);
+bool CisSigSoundfileLength(Signal s, Signal* sf, Signal* part);
+bool CisSigSoundfileRate(Signal s, Signal* sf, Signal* part);
+bool CisSigSoundfileBuffer(Signal s, Signal* sf, Signal* chan, Signal* part, Signal* ridx);
+bool CisSigDocConstantTbl(Signal t, Signal* n, Signal* sig);
+bool CisSigDocWriteTbl(Signal t, Signal* n, Signal* sig, Signal* widx, Signal* wsig);
+bool CisSigDocAccessTbl(Signal t, Signal* tbl, Signal* ridx);
+
+Signal CsimplifyToNormalForm(Signal s);
+Signal* CsimplifyToNormalForm2(Signal* siglist);
+char* CcreateSourceFromSignals(const char* name_app, Signal* osigs, const char* lang,
+                               int argc, const char* argv[], char* error_msg);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

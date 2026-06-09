@@ -435,6 +435,12 @@ equivalent distribution directory:
 They should compile as C and C++ and be usable with the `faust-ffi` staticlib or
 cdylib.
 
+Status 2026-06-09: added `crates/signal-ffi/include/libfaust-signal-c.h` as a
+maintained C header for the implemented Signal API and updated
+`crates/box-ffi/include/libfaust-box-c.h` so Box and Signal headers share one
+guarded `CTree`/`SType`/`SOperator` definition. A local syntax check verifies
+that including both headers compiles as C11 and C++17.
+
 ### H2. C++ overload wrappers
 
 After the C ABI is stable, add C++ convenience headers:
