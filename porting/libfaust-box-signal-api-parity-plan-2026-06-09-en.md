@@ -235,6 +235,12 @@ lowering, and backend code generation. The interpreter backend implements the
 runtime call as `pow(10, x)` internally while preserving the external `exp10`
 FIR/source surface.
 
+Status 2026-06-09: the C++ `boxSoundfile(label, chan, part, ridx)` overload is
+covered by the local wrapper header using the same reference composition as
+C++ Faust: `boxSeq(boxPar(part, ridx), boxSoundfile(label, chan))`. No extra C
+ABI symbol is introduced because the reference C header only exposes the
+two-argument `CboxSoundfile` form.
+
 ### B3. Fill matcher gaps
 
 Audit `BoxMatch` and `CisBox*` against `libfaust-box-c.h`.

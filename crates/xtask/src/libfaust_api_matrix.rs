@@ -270,9 +270,6 @@ fn classify_symbol(name: &str, implemented: bool) -> &'static str {
 
 fn manual_note(name: &str) -> Option<&'static str> {
     match name {
-        "CboxSoundfile" | "CisBoxSoundfile" => Some(
-            "Plan note: current Rust coverage needs audit against the fully-applied C++ soundfile read form.",
-        ),
         "CisBoxPrim0" | "CisBoxPrim1" | "CisBoxPrim2" | "CisBoxPrim3" | "CisBoxPrim4"
         | "CisBoxPrim5" => Some(
             "Plan note: primitive function pointer identity is approximated by Rust IR shape until exact metadata exists.",

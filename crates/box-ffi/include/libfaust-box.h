@@ -33,6 +33,9 @@ inline Box boxWriteReadTable() { return CboxWriteReadTable(); }
 inline Box boxWriteReadTableAux(Box n, Box i, Box widx, Box wsig, Box ridx) { return CboxWriteReadTableAux(n, i, widx, wsig, ridx); }
 inline Box boxWaveform(Box* wf) { return CboxWaveform(wf); }
 inline Box boxSoundfile(const char* label, Box chan) { return CboxSoundfile(label, chan); }
+inline Box boxSoundfile(const char* label, Box chan, Box part, Box ridx) { return boxSeq(boxPar(part, ridx), CboxSoundfile(label, chan)); }
+inline Box boxSoundfile(const std::string& label, Box chan) { return CboxSoundfile(label.c_str(), chan); }
+inline Box boxSoundfile(const std::string& label, Box chan, Box part, Box ridx) { return boxSoundfile(label.c_str(), chan, part, ridx); }
 inline Box boxSelect2() { return CboxSelect2(); }
 inline Box boxSelect2Aux(Box s, Box b1, Box b2) { return CboxSelect2Aux(s, b1, b2); }
 inline Box boxSelect3() { return CboxSelect3(); }

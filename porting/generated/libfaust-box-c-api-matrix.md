@@ -113,7 +113,7 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CboxSeq` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxSin` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxSinAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CboxSoundfile` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: current Rust coverage needs audit against the fully-applied C++ soundfile read form. |
+| `CboxSoundfile` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxSplit` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxSqrt` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CboxSqrtAux` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
@@ -179,7 +179,7 @@ Reference header: `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/
 | `CisBoxRoute` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisBoxSeq` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisBoxSlot` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
-| `CisBoxSoundfile` | crates/box-ffi/src/lib.rs | `implemented-nearest-rust-ir` | Plan note: current Rust coverage needs audit against the fully-applied C++ soundfile read form. |
+| `CisBoxSoundfile` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisBoxSplit` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisBoxSymbolic` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
 | `CisBoxTGroup` | crates/box-ffi/src/lib.rs | `implemented-exact-candidate` | - |
