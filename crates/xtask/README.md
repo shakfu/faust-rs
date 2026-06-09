@@ -408,6 +408,17 @@ The scanner is deliberately conservative: it classifies symbol presence, not
 semantic parity. Rows marked `implemented-exact-candidate` still need focused
 API tests before being treated as final parity.
 
+## libfaust Export Check
+
+`libfaust-export-check` validates the maintained local C/C++ distribution
+surface. It builds `faust-ffi`, extracts dynamic exports from the produced
+`libfaust` library, compares them against the Box and Signal C headers, and
+syntax-checks tiny C11 and C++17 clients using the maintained headers.
+
+```bash
+cargo run -p xtask -- libfaust-export-check
+```
+
 ## Differential Reports
 
 Report commands write Markdown reports under `porting/phases/`.

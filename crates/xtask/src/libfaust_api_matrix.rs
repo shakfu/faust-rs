@@ -128,7 +128,7 @@ fn parse_libfaust_api_symbols(header: &str) -> Vec<CApiSymbol> {
     symbols
 }
 
-fn extract_c_function_name(signature: &str) -> Option<String> {
+pub(crate) fn extract_c_function_name(signature: &str) -> Option<String> {
     let before_paren = signature.split_once('(')?.0;
     before_paren
         .split_whitespace()
