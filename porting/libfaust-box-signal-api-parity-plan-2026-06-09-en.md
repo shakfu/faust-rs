@@ -267,6 +267,12 @@ behavior:
 - propagated UI/control side effects are either preserved or explicitly
   dropped.
 
+Status 2026-06-09: `CboxesToSignals` and `CboxesToSignals2` now have direct
+FFI contract tests for null-terminated result arrays, release through
+`freeCMemory`, and signal handle validity after the array allocation is freed.
+The handles remain context-owned and valid until `destroyLibContext`, matching
+the shared `tree-ffi` handle model.
+
 ### B5. Source generation parity
 
 `CcreateSourceFromBoxes` should support the same high-level contract:

@@ -2574,6 +2574,40 @@ mod tests {
         });
     }
 
+    unsafe fn printed_signal(ptr: *mut c_void) -> String {
+        let raw = CprintSignal(ptr, false, 4096);
+        assert!(!raw.is_null());
+        let text = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("signal dump must be UTF-8")
+            .to_owned();
+        unsafe { freeCMemory(raw.cast()) };
+        text
+    }
+
+    unsafe fn assert_signal_array_contract(
+        convert: unsafe extern "C" fn(*mut c_void, *mut c_char) -> *mut *mut c_void,
+    ) {
+        let root = CboxWire();
+        let mut err = vec![0_i8; 4096];
+        let signals = unsafe { convert(root, err.as_mut_ptr()) };
+        assert!(
+            !signals.is_null(),
+            "signal conversion failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        );
+
+        let first = unsafe { *signals };
+        assert!(!first.is_null());
+        assert!(unsafe { (*signals.add(1)).is_null() });
+        let before_free = unsafe { printed_signal(first) };
+
+        unsafe { freeCMemory(signals.cast()) };
+
+        let after_free = unsafe { printed_signal(first) };
+        assert_eq!(before_free, after_free);
+    }
+
     #[test]
     fn logical_and_arithmetic_right_shift_use_distinct_box_tags() {
         let _guard = fresh_test_context();
@@ -2632,6 +2666,24 @@ mod tests {
         unsafe { freeCMemory(source.cast()) };
 
         assert!(text.contains("exp10"), "{text}");
+
+        destroyLibContext();
+    }
+
+    #[test]
+    fn boxes_to_signals_returns_null_terminated_context_owned_array() {
+        let _guard = fresh_test_context();
+
+        unsafe { assert_signal_array_contract(CboxesToSignals) };
+
+        destroyLibContext();
+    }
+
+    #[test]
+    fn boxes_to_signals2_returns_null_terminated_context_owned_array() {
+        let _guard = fresh_test_context();
+
+        unsafe { assert_signal_array_contract(CboxesToSignals2) };
 
         destroyLibContext();
     }
