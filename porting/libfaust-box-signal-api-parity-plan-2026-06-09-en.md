@@ -320,6 +320,14 @@ Status 2026-06-09: the process-global tree context moved from `box-ffi` into
 same opaque handle arena and existing shared symbols such as `CprintSignal` and
 `freeCMemory` can decode handles from both API surfaces.
 
+Status 2026-06-09: first slice implemented in `crates/signal-ffi` and exported
+through `faust-ffi`. The slice covers constants, inputs, binary operators,
+binary/unary math, shifts, comparisons, delays, casts, and the basic predicates
+listed above. `CprintSignal` remains owned by `box-ffi` but now works for
+`signal-ffi` handles through the shared `tree-ffi` context. The regenerated
+Signal matrix now reports 60 exact implementation candidates and 63 missing
+symbols; remaining missing rows are deferred to S3-S5.
+
 ### S3. Add table, waveform, soundfile, and UI signal constructors
 
 Implement:
@@ -491,6 +499,10 @@ Deliverables:
 Exit criteria:
 
 - C client can build and print a simple signal graph using only `Csig*`.
+
+Status 2026-06-09: satisfied for the first slice. `signal-ffi` tests build
+constant/input/math/delay graphs with `Csig*`, inspect them through basic
+`CisSig*` predicates, and print them through the shared `CprintSignal` helper.
 
 ### Phase 4 — Signal API full construction surface
 
