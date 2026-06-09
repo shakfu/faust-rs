@@ -23,6 +23,8 @@ inline Box boxPar(Box x, Box y) { return CboxPar(x, y); }
 inline Box boxSplit(Box x, Box y) { return CboxSplit(x, y); }
 inline Box boxMerge(Box x, Box y) { return CboxMerge(x, y); }
 inline Box boxRec(Box x, Box y) { return CboxRec(x, y); }
+inline Box boxFad(Box exp, Box seed) { return CboxFad(exp, seed); }
+inline Box boxRad(Box exp, Box seeds) { return CboxRad(exp, seeds); }
 inline Box boxRoute(Box n, Box m, Box r) { return CboxRoute(n, m, r); }
 inline Box boxDelay() { return CboxDelay(); }
 inline Box boxDelayAux(Box b, Box d) { return CboxDelayAux(b, d); }

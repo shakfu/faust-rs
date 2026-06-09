@@ -780,6 +780,8 @@ prim2!(CboxPar, par);
 prim2!(CboxSplit, split);
 prim2!(CboxMerge, merge);
 prim2!(CboxRec, rec);
+prim2!(CboxFad, forward_ad);
+prim2!(CboxRad, reverse_ad);
 
 #[unsafe(no_mangle)]
 /// Creates a 3-way parallel composition.

@@ -68,6 +68,10 @@ Box CboxMerge(Box x, Box y);
 Box CboxRec(Box x, Box y);
 Box CboxRoute(Box n, Box m, Box r);
 
+// Forward/reverse automatic differentiation (faust-rs extension).
+Box CboxFad(Box exp, Box seed);
+Box CboxRad(Box exp, Box seeds);
+
 Box CboxDelay(void);
 Box CboxDelayAux(Box b, Box del);
 Box CboxIntCast(void);

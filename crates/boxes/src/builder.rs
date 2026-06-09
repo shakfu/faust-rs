@@ -4,7 +4,6 @@ use tlib::TreeArena;
 
 use crate::BoxId;
 use crate::internals::*;
-use crate::tags::{BOX_FORWARD_AD_TAG, BOX_REVERSE_AD_TAG};
 
 /// Canonical builder API for constructing box nodes.
 ///
@@ -653,7 +652,7 @@ impl<'a> BoxBuilder<'a> {
     pub fn forward_ad(&mut self, expr: BoxId, seed: BoxId) -> BoxId {
         self.debug_assert_node_exists("boxForwardAD expr", expr);
         self.debug_assert_node_exists("boxForwardAD seed", seed);
-        intern_tag(self.arena, BOX_FORWARD_AD_TAG, &[expr, seed])
+        node_forward_ad(self.arena, expr, seed)
     }
 
     #[must_use]
@@ -666,7 +665,7 @@ impl<'a> BoxBuilder<'a> {
     pub fn reverse_ad(&mut self, expr: BoxId, seeds: BoxId) -> BoxId {
         self.debug_assert_node_exists("boxReverseAD expr", expr);
         self.debug_assert_node_exists("boxReverseAD seeds", seeds);
-        intern_tag(self.arena, BOX_REVERSE_AD_TAG, &[expr, seeds])
+        node_reverse_ad(self.arena, expr, seeds)
     }
 
     #[must_use]
