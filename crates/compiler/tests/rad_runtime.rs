@@ -698,10 +698,11 @@ fn fastlane_interp_coupled_lti_recursive_rad_matches_closed_form_contributions()
     let outputs = run_interp_temp_source(
         "rad-coupled-lti-recursive-feedback-coeff",
         r#"
-import("stdfaust.lib");
 p = 0.5;
 q = 0.25;
-core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+interleave22 = _,_,_,_ <: _,!,!,!, !,!,_,!, !,_,!,!, !,!,!,_;
+cross2 = _,_ <: !,_,_,!;
+core = (interleave22 : (+, +)) ~ ((*(p), *(q)) : cross2);
 process = rad((2, 3) : core, (p, q));
 "#,
         frame_count,
@@ -991,17 +992,17 @@ fn rad_vs_fad_parity_on_tanh_ffun() {
     // chain rule used by FAD.
     let rad = || {
         r#"
-import("stdfaust.lib");
+tanh = ffunction(float tanhf|tanh|tanhl (float), <math.h>, "");
 a = hslider("a", 0.5, -2.0, 2.0, 0.001);
-process = rad(ma.tanh(a*a), a);
+process = rad(tanh(a*a), a);
 "#
         .to_string()
     };
     let fad = || {
         r#"
-import("stdfaust.lib");
+tanh = ffunction(float tanhf|tanh|tanhl (float), <math.h>, "");
 a = hslider("a", 0.5, -2.0, 2.0, 0.001);
-process = fad(ma.tanh(a*a), a);
+process = fad(tanh(a*a), a);
 "#
         .to_string()
     };
@@ -1014,70 +1015,70 @@ fn rad_vs_fad_parity_on_supported_hyperbolic_ffuns() {
         (
             "rad-vs-fad-sinh-ffun",
             r#"
-import("stdfaust.lib");
+sinh = ffunction(float sinhf|sinh|sinhl (float), <math.h>, "");
 a = hslider("a", 0.35, -2.0, 2.0, 0.001);
-process = rad(ma.sinh(a*a), a);
+process = rad(sinh(a*a), a);
 "#,
             r#"
-import("stdfaust.lib");
+sinh = ffunction(float sinhf|sinh|sinhl (float), <math.h>, "");
 a = hslider("a", 0.35, -2.0, 2.0, 0.001);
-process = fad(ma.sinh(a*a), a);
+process = fad(sinh(a*a), a);
 "#,
             5.0e-5,
         ),
         (
             "rad-vs-fad-cosh-ffun",
             r#"
-import("stdfaust.lib");
+cosh = ffunction(float coshf|cosh|coshl (float), <math.h>, "");
 a = hslider("a", 0.35, -2.0, 2.0, 0.001);
-process = rad(ma.cosh(a*a), a);
+process = rad(cosh(a*a), a);
 "#,
             r#"
-import("stdfaust.lib");
+cosh = ffunction(float coshf|cosh|coshl (float), <math.h>, "");
 a = hslider("a", 0.35, -2.0, 2.0, 0.001);
-process = fad(ma.cosh(a*a), a);
+process = fad(cosh(a*a), a);
 "#,
             5.0e-5,
         ),
         (
             "rad-vs-fad-atanh-ffun",
             r#"
-import("stdfaust.lib");
+atanh = ffunction(float atanhf|atanh|atanhl (float), <math.h>, "");
 a = hslider("a", 0.2, -0.8, 0.8, 0.001);
-process = rad(ma.atanh(a*a), a);
+process = rad(atanh(a*a), a);
 "#,
             r#"
-import("stdfaust.lib");
+atanh = ffunction(float atanhf|atanh|atanhl (float), <math.h>, "");
 a = hslider("a", 0.2, -0.8, 0.8, 0.001);
-process = fad(ma.atanh(a*a), a);
+process = fad(atanh(a*a), a);
 "#,
             5.0e-5,
         ),
         (
             "rad-vs-fad-asinh-ffun",
             r#"
-import("stdfaust.lib");
+asinh = ffunction(float asinhf|asinh|asinhl (float), <math.h>, "");
 a = hslider("a", 0.45, -2.0, 2.0, 0.001);
-process = rad(ma.asinh(a*a), a);
+process = rad(asinh(a*a), a);
 "#,
             r#"
-import("stdfaust.lib");
+asinh = ffunction(float asinhf|asinh|asinhl (float), <math.h>, "");
 a = hslider("a", 0.45, -2.0, 2.0, 0.001);
-process = fad(ma.asinh(a*a), a);
+process = fad(asinh(a*a), a);
 "#,
             5.0e-5,
         ),
         (
             "rad-vs-fad-acosh-ffun",
             r#"
-import("stdfaust.lib");
+acosh = ffunction(float acoshf|acosh|acoshl (float), <math.h>, "");
 a = hslider("a", 1.4, 1.1, 3.0, 0.001);
-process = rad(ma.acosh(a*a), a);
+process = rad(acosh(a*a), a);
 "#,
             r#"
-import("stdfaust.lib");
+acosh = ffunction(float acoshf|acosh|acoshl (float), <math.h>, "");
 a = hslider("a", 1.4, 1.1, 3.0, 0.001);
-process = fad(ma.acosh(a*a), a);
+process = fad(acosh(a*a), a);
 "#,
             1.0e-4,
         ),
@@ -1855,7 +1856,6 @@ fn bra_reverse_sweep_skips_integer_noise_tape_candidates_compile_to_cpp() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let source = r#"
-import("stdfaust.lib");
 clip(v) = max(-1.0, min(1.0, v - (v*v*v)/3.0));
 ladder(g1, g2, g3, g4, res, x) = loop ~ (_,_,_,_) : !,!,!,_
 with {
@@ -1914,9 +1914,9 @@ fn bra_reverse_sweep_sr_constants_compile_to_cpp() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let source = r#"
-import("stdfaust.lib");
+SR = 48000.0;
 N = 2;
-nl_band(g, freq, x) = x : fi.resonbp(freq, 5, g) : max(-1.0) : min(1.0);
+nl_band(g, freq, x) = x * (g * freq / max(1.0, SR)) : max(-1.0) : min(1.0);
 massive_bank(g) = _ <: par(i, N, nl_band(g, 100 + i*15)) :> _;
 g = hslider("global_gain", 0.5, 0.1, 10, 0.01);
 process = rad(massive_bank(g), g);

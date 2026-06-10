@@ -1,5 +1,5 @@
 faust-rs-golden-v1
 source=rad_lti_recursive_state_space.dsp
-bytes=477
-lines=15
-fnv1a64=846151046f953eee
+bytes=528
+lines=16
+fnv1a64=53b94efb16be8131

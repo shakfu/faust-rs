@@ -7,9 +7,10 @@
 //
 // `p` and `q` are literal block-invariant seeds. Output bundle:
 // [y0, y1, dp, dq], with per-sample gradient contribution lanes.
-import("stdfaust.lib");
 
 p = 0.5;
 q = 0.25;
-core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+interleave22 = _,_,_,_ <: _,!,!,!, !,!,_,!, !,_,!,!, !,!,!,_;
+cross2 = _,_ <: !,_,_,!;
+core = (interleave22 : (+, +)) ~ ((*(p), *(q)) : cross2);
 process = rad((_, _) : core, (p, q));

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_tbptt_biquad1.dsp
+bytes=2138
+lines=66
+fnv1a64=9efadbf50eb6003f
