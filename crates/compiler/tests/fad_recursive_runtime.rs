@@ -443,9 +443,9 @@ fn fastlane_interp_multi_output_recursive_fad_matches_central_difference() {
     fn fad_source(p: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
-process = fad(si.bus(2) ~ (*(p), *(0.25)), p);
+bus2 = _,_;
+process = fad(bus2 ~ (*(p), *(0.25)), p);
 "#
         )
     }
@@ -453,9 +453,9 @@ process = fad(si.bus(2) ~ (*(p), *(0.25)), p);
     fn primal_source(p: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
-process = si.bus(2) ~ (*(p), *(0.25));
+bus2 = _,_;
+process = bus2 ~ (*(p), *(0.25));
 "#
         )
     }
@@ -477,9 +477,10 @@ fn fastlane_interp_mutual_recursive_fad_matches_central_difference() {
     fn fad_source(p: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
-process = fad(si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2)), p);
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+process = fad(bus2 ~ ((*(p), *(0.25)) : cross2), p);
 "#
         )
     }
@@ -487,9 +488,10 @@ process = fad(si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2)), p);
     fn primal_source(p: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
-process = si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+process = bus2 ~ ((*(p), *(0.25)) : cross2);
 "#
         )
     }
@@ -598,10 +600,11 @@ fn fastlane_interp_mutual_multi_seed_recursive_fad_matches_central_difference_pe
     fn fad_source(p: f32, q: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
 q = hslider("q", {q}, -0.9, 0.9, 0.001);
-process = fad(si.bus(2) ~ ((*(p), *(q)) : ro.cross(2)), (p, q));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+process = fad(bus2 ~ ((*(p), *(q)) : cross2), (p, q));
 "#
         )
     }
@@ -609,10 +612,11 @@ process = fad(si.bus(2) ~ ((*(p), *(q)) : ro.cross(2)), (p, q));
     fn primal_source(p: f32, q: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
 q = hslider("q", {q}, -0.9, 0.9, 0.001);
-process = si.bus(2) ~ ((*(p), *(q)) : ro.cross(2));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+process = bus2 ~ ((*(p), *(q)) : cross2);
 "#
         )
     }
@@ -693,9 +697,10 @@ fn fastlane_interp_nested_mutual_recursive_fad_matches_central_difference() {
     fn fad_source(p: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
-core = si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+core = bus2 ~ ((*(p), *(0.25)) : cross2);
 mix = 1 : + ~ *(core : +);
 process = fad(mix, p);
 "#
@@ -705,9 +710,10 @@ process = fad(mix, p);
     fn primal_source(p: f32) -> String {
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
-core = si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+core = bus2 ~ ((*(p), *(0.25)) : cross2);
 mix = 1 : + ~ *(core : +);
 process = mix;
 "#
@@ -772,10 +778,11 @@ fn fastlane_interp_multi_seed_nested_mutual_recursive_fad_matches_central_differ
         let (p, q) = (seeds[0], seeds[1]);
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
 q = hslider("q", {q}, -0.9, 0.9, 0.001);
-core = si.bus(2) ~ ((*(p), *(q)) : ro.cross(2));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+core = bus2 ~ ((*(p), *(q)) : cross2);
 mix = 1 : + ~ *(core : +);
 process = fad(mix, (p, q));
 "#
@@ -786,10 +793,11 @@ process = fad(mix, (p, q));
         let (p, q) = (seeds[0], seeds[1]);
         format!(
             r#"
-import("stdfaust.lib");
 p = hslider("p", {p}, -0.9, 0.9, 0.001);
 q = hslider("q", {q}, -0.9, 0.9, 0.001);
-core = si.bus(2) ~ ((*(p), *(q)) : ro.cross(2));
+bus2 = _,_;
+cross2 = _,_ <: !,_,_,!;
+core = bus2 ~ ((*(p), *(q)) : cross2);
 mix = 1 : + ~ *(core : +);
 process = mix;
 "#
