@@ -225,6 +225,22 @@ pub enum EvalError {
     NotAConstantExpression {
         node: TreeId,
     },
+    /// Slider or numentry init value is outside the declared [min, max] range.
+    ///
+    /// C++ equivalent: the `checkRange` diagnostic in `eval.cpp`:
+    /// `"init = ... outside of [min max] range in '...'"`.
+    ///
+    /// Values are stored as `u64` bit-patterns (via `f64::to_bits`) to keep the
+    /// enum `Eq`-derivable; use `f64::from_bits` to recover them.
+    SliderInitOutOfRange {
+        /// Widget kind: `"hslider"`, `"vslider"`, or `"nentry"`.
+        kind: &'static str,
+        /// Evaluated label string (e.g. `"gain"`).
+        label: String,
+        init_bits: u64,
+        min_bits: u64,
+        max_bits: u64,
+    },
     /// Internal evaluator error — indicates a bug in the evaluator, not a user error.
     InternalError {
         message: String,
@@ -340,6 +356,23 @@ impl Display for EvalError {
                     f,
                     "expression is not a compile-time numeric constant (type 0→1): node {}",
                     node.as_u32()
+                )
+            }
+            Self::SliderInitOutOfRange {
+                kind,
+                label,
+                init_bits,
+                min_bits,
+                max_bits,
+            } => {
+                let (init, min, max) = (
+                    f64::from_bits(*init_bits),
+                    f64::from_bits(*min_bits),
+                    f64::from_bits(*max_bits),
+                );
+                write!(
+                    f,
+                    "init = {init} outside of [{min} {max}] range in '{kind}(\"{label}\",{init},{min},{max},...)'"
                 )
             }
             Self::InternalError { message } => {
@@ -641,6 +674,30 @@ impl IntoDiagnostic for EvalError {
                 "computed: the evaluator crossed its recursion budget before finishing ({max_depth} frames)"
             ))
             .with_help("check recursive definitions for a missing base case or non-decreasing recursive call"),
+            Self::SliderInitOutOfRange {
+                kind,
+                label,
+                init_bits,
+                min_bits,
+                max_bits,
+            } => {
+                let (init, min, max) = (
+                    f64::from_bits(init_bits),
+                    f64::from_bits(min_bits),
+                    f64::from_bits(max_bits),
+                );
+                Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_SLIDER_INIT_OUT_OF_RANGE,
+                    message,
+                )
+                .with_note(format!(
+                    "cause: widget `{kind}(\"{label}\",...)` has init={init} outside [{min}, {max}]"
+                ))
+                .with_note("rule: init must satisfy min <= init <= max")
+                .with_help(format!("set init to a value in [{min}, {max}], e.g. {min}"))
+            }
             _ => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,

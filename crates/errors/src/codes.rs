@@ -35,6 +35,11 @@ pub const EVAL_ITERATION_INVALID: DiagnosticCode = DiagnosticCode("FRS-EVAL-0004
 /// C++ equivalent: the `addLayerDef` check in `environment.cpp` that calls
 /// `throw faustexception("redefinition of symbols are not allowed: ...")`.
 pub const EVAL_REDEFINED_SYMBOL: DiagnosticCode = DiagnosticCode("FRS-EVAL-0005");
+/// Slider/numentry init value is outside the [min, max] range.
+///
+/// C++ equivalent: the `checkRange` check in `eval.cpp` that emits
+/// `"init = ... outside of [min max] range in '...'"`.
+pub const EVAL_SLIDER_INIT_OUT_OF_RANGE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0006");
 /// Generic eval failure fallback code.
 pub const EVAL_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0099");
 

@@ -133,6 +133,35 @@ fn eval_slider_like(
     let min = simplify_slider_param(arena, min, env, loop_detector)?;
     let max = simplify_slider_param(arena, max, env, loop_detector)?;
     let step = simplify_slider_param(arena, step, env, loop_detector)?;
+
+    // Mirror C++ `checkRange`: if all three are known constants, verify init ∈ [min, max].
+    let as_f64 = |node| match match_box(arena, node) {
+        BoxMatch::Real(x) => Some(x),
+        BoxMatch::Int(i) => Some(f64::from(i)),
+        _ => None,
+    };
+    if let (Some(init_val), Some(min_val), Some(max_val)) =
+        (as_f64(cur), as_f64(min), as_f64(max))
+    {
+        if init_val < min_val || init_val > max_val {
+            let kind_name = match kind {
+                SliderKind::VSlider => "vslider",
+                SliderKind::HSlider => "hslider",
+                SliderKind::NumEntry => "nentry",
+            };
+            let label_text = label_node_text(arena, label)
+                .unwrap_or("")
+                .to_owned();
+            return Err(EvalError::SliderInitOutOfRange {
+                kind: kind_name,
+                label: label_text,
+                init_bits: init_val.to_bits(),
+                min_bits: min_val.to_bits(),
+                max_bits: max_val.to_bits(),
+            });
+        }
+    }
+
     let mut b = BoxBuilder::new(arena);
     Ok(match kind {
         SliderKind::VSlider => b.vslider(label, cur, min, max, step),
