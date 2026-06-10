@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_tbptt_lms_fir3.dsp
+bytes=2111
+lines=58
+fnv1a64=171307af8af3234c

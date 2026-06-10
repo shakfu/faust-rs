@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_tbptt_gain.dsp
+bytes=1317
+lines=41
+fnv1a64=9021abf09148a3d8
