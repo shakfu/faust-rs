@@ -95,7 +95,7 @@ Box CboxRoute(Box n, Box m, Box r);
 
 // Forward/reverse automatic differentiation (faust-rs extension).
 Box CboxFad(Box exp, Box seed);
-Box CboxRad(Box exp, Box seeds);
+Box CboxRad(Box exp, Box seed);
 
 /* Signal-processing primitive boxes and their applied Aux forms. */
 Box CboxDelay(void);

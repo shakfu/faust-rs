@@ -35,7 +35,7 @@ inline Box boxSplit(Box x, Box y) { return CboxSplit(x, y); }
 inline Box boxMerge(Box x, Box y) { return CboxMerge(x, y); }
 inline Box boxRec(Box x, Box y) { return CboxRec(x, y); }
 inline Box boxFad(Box exp, Box seed) { return CboxFad(exp, seed); }
-inline Box boxRad(Box exp, Box seeds) { return CboxRad(exp, seeds); }
+inline Box boxRad(Box exp, Box seed) { return CboxRad(exp, seed); }
 inline Box boxRoute(Box n, Box m, Box r) { return CboxRoute(n, m, r); }
 
 /* Primitive Box constructors and applied Aux forms. */
