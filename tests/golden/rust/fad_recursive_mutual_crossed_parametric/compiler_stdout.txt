@@ -1,5 +1,5 @@
 faust-rs-golden-v1
 source=fad_recursive_mutual_crossed_parametric.dsp
-bytes=315
+bytes=317
 lines=11
-fnv1a64=ab3b18a620040b41
+fnv1a64=5870f41e343369a2

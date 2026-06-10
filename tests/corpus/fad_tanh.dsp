@@ -3,6 +3,6 @@
 // so it reaches the FAD pass as SigMatch::FFun.
 //
 // d/dp tanh(p) = 1 - tanh²(p)   (= sech²(p))
-import("stdfaust.lib");
+tanh = ffunction(float tanhf|tanh|tanhl (float), <math.h>, "");
 p = hslider("p", 0, -3, 3, 0.01);
-process = fad(ma.tanh(p), p);
+process = fad(tanh(p), p);

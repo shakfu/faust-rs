@@ -5,12 +5,11 @@
 // the seed) allocated divergent fresh recursion names (`W0` vs. `W1`), so
 // the FAD transform could no longer recognise the seed inside the output
 // graph, producing a spurious second recursion slot in the generated code
-// and a tangent that silently differentiated with respect to the inner
-// `frac` accumulator (leaking a factor of `2 * PI`).
-import("stdfaust.lib");
+// and a tangent that silently differentiated with respect to the inner phase
+// accumulator.
 kin(phi) = eq, vel with {
     eq = sin(phi) + 0.3 * cos(2.5 * phi);
     vel = fad(eq, phi) : !, _;
 };
-phi_gen = (+(0.5 / ma.SR) : ma.frac) ~ _ : *(2 * ma.PI);
+phi_gen = +(0.5 / 48000.0) ~ _ : *(6.283185307179586);
 process = phi_gen : kin;

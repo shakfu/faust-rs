@@ -1,5 +1,5 @@
 faust-rs-golden-v1
 source=fad_recursive_multi_output_parametric.dsp
-bytes=256
-lines=8
-fnv1a64=503cdb32b1091fb9
+bytes=238
+lines=7
+fnv1a64=24cea9d05ab4f2bc

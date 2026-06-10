@@ -1,4 +1,4 @@
 // d/dp atanh(p) = 1 / (1 - p²)
-import("stdfaust.lib");
+atanh = ffunction(float atanhf|atanh|atanhl (float), <math.h>, "");
 p = hslider("p", 0, -0.99, 0.99, 0.01);
-process = fad(ma.atanh(p), p);
+process = fad(atanh(p), p);

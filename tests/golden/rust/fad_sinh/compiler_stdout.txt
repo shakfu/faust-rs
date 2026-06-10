@@ -1,5 +1,5 @@
 faust-rs-golden-v1
 source=fad_sinh.dsp
-bytes=136
+bytes=173
 lines=4
-fnv1a64=d94f865dc724d3ab
+fnv1a64=a3b412bbcbee4bd3
