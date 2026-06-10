@@ -499,6 +499,42 @@ impl Compiler {
         time_phase_with_sink(self.timing_sink.as_ref(), name, f)
     }
 
+    /// Bundles the facade-owned lowering knobs into a [`SignalLoweringContext`]
+    /// for the given lane. Shared by every native-backend emitter so they all
+    /// observe the same FIR verify policy, real type, delay parameters, and
+    /// timing sink.
+    fn lowering_ctx(&self, lane: SignalFirLane) -> SignalLoweringContext {
+        SignalLoweringContext {
+            lane,
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
+        }
+    }
+
+    /// Lowers propagated signals to a FIR module using the facade-owned verify
+    /// policy, real type, and delay parameters, mapping the lowering error into
+    /// the top-level [`CompilerError`] surface.
+    fn lower_to_fir(
+        &self,
+        source: &str,
+        signals: &SignalCompileOutput,
+        lane: SignalFirLane,
+    ) -> Result<FirCompileOutput, CompilerError> {
+        lower_signals_to_fir(
+            source,
+            signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|error| lower_fir_error_to_compiler(source, error))
+    }
+
     #[must_use]
     /// Returns the crate package version used by this binary/library build.
     pub fn version() -> &'static str {
@@ -751,14 +787,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_c(source_name, &signals, options, ctx)
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
@@ -773,14 +802,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_julia(source_name, &signals, options, ctx)
             .map_err(|e| lower_julia_error_to_compiler(source_name, e))
     }
@@ -795,14 +817,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_cpp(source_name, &signals, options, ctx)
             .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
     }
@@ -816,16 +831,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_fir(
-            source_name,
-            &signals,
-            lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_fir_error_to_compiler(source_name, e))
+        self.lower_to_fir(source_name, &signals, lane)
     }
 
     /// Parses + evaluates + propagates one source, then emits a WASM module
@@ -858,16 +864,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<WasmModule, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered = lower_signals_to_fir(
-            source_name,
-            &signals,
-            lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
+        let lowered = self.lower_to_fir(source_name, &signals, lane)?;
         let json_context = wasm_json_context_for_memory_source(
             source_name,
             &signals,
@@ -903,41 +900,18 @@ impl Compiler {
             &request.import_dirs,
             &request.virtual_sources,
         )?;
-        let lowered = lower_signals_to_fir(
-            &request.source_name,
-            &signals,
-            request.lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|error| lower_fir_error_to_compiler(&request.source_name, error))?;
-        let json_context = wasm_json_context_for_memory_source(
+        let lowered = self.lower_to_fir(&request.source_name, &signals, request.lane)?;
+        let mut json_context = wasm_json_context_for_memory_source(
             &request.source_name,
             &signals,
             compile_options.clone(),
         );
-        let mut json_context = json_context;
         json_context.include_pathnames = request
             .import_dirs
             .iter()
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect();
-        let mut library_list: Vec<String> = signals
-            .parse
-            .used_files
-            .iter()
-            .skip(1)
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        for file in &signals.loaded_files {
-            let file = file.to_string_lossy().into_owned();
-            if !library_list.iter().any(|existing| existing == &file) {
-                library_list.push(file);
-            }
-        }
-        json_context.library_list = library_list;
+        json_context.library_list = collect_library_list(&signals);
         let module = generate_wasm_module_with_context(
             &lowered.store,
             lowered.module,
@@ -993,16 +967,7 @@ impl Compiler {
         compile_options: String,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered = lower_signals_to_fir(
-            source_name,
-            &signals,
-            lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
+        let lowered = self.lower_to_fir(source_name, &signals, lane)?;
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
@@ -1078,14 +1043,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_c(&source, &signals, options, ctx)
             .map_err(|e| lower_c_error_to_compiler(&source, e))
     }
@@ -1101,14 +1059,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_julia(&source, &signals, options, ctx)
             .map_err(|e| lower_julia_error_to_compiler(&source, e))
     }
@@ -1124,14 +1075,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_cpp(&source, &signals, options, ctx)
             .map_err(|e| lower_cpp_error_to_compiler(&source, e))
     }
@@ -1146,16 +1090,7 @@ impl Compiler {
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_fir(
-            &source,
-            &signals,
-            lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_fir_error_to_compiler(&source, e))
+        self.lower_to_fir(&source, &signals, lane)
     }
 
     /// Parses + evaluates + propagates one file, then emits a WASM module
@@ -1185,16 +1120,7 @@ impl Compiler {
     ) -> Result<WasmModule, CompilerError> {
         let source = path.display().to_string();
         let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered = lower_signals_to_fir(
-            &source,
-            &signals,
-            lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
+        let lowered = self.lower_to_fir(&source, &signals, lane)?;
         let json_context = wasm_json_context_for_file(
             path,
             search_paths,
@@ -1271,29 +1197,8 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let source = path.display().to_string();
         let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered = lower_signals_to_fir(
-            &source,
-            &signals,
-            lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
-        let mut library_list: Vec<String> = signals
-            .parse
-            .used_files
-            .iter()
-            .skip(1)
-            .map(|file| file.to_string_lossy().into_owned())
-            .collect();
-        for file in &signals.loaded_files {
-            let file = file.to_string_lossy().into_owned();
-            if !library_list.iter().any(|existing| existing == &file) {
-                library_list.push(file);
-            }
-        }
+        let lowered = self.lower_to_fir(&source, &signals, lane)?;
+        let library_list = collect_library_list(&signals);
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
@@ -1634,20 +1539,13 @@ impl Compiler {
                 &request.virtual_sources,
             )
             .map_err(|error| FaustwasmServiceError::invalid_argument(error.to_string()))?;
-        let lowered = lower_signals_to_fir(
-            &request.source_name,
-            &signals,
-            SignalFirLane::TransformFastLane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|error| {
-            FaustwasmServiceError::invalid_argument(
-                lower_fir_error_to_compiler(&request.source_name, error).to_string(),
+        let lowered = self
+            .lower_to_fir(
+                &request.source_name,
+                &signals,
+                SignalFirLane::TransformFastLane,
             )
-        })?;
+            .map_err(|error| FaustwasmServiceError::invalid_argument(error.to_string()))?;
 
         let class_name = arg_value("-cn").unwrap_or_else(|| {
             sanitize_cpp_ident(source_name_to_class(&request.source_name).as_str())
@@ -1747,14 +1645,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_interp(source_name, &signals, options, ctx)
             .map_err(|e| lower_interp_error_to_compiler(source_name, e))
     }
@@ -1786,14 +1677,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        let ctx = SignalLoweringContext {
-            lane,
-            fir_verify: self.fir_verify,
-            real_type: self.real_type,
-            max_copy_delay: self.max_copy_delay,
-            delay_line_threshold: self.delay_line_threshold,
-            timing_sink: self.timing_sink.clone(),
-        };
+        let ctx = self.lowering_ctx(lane);
         lower_signals_to_interp(&source, &signals, options, ctx)
             .map_err(|e| lower_interp_error_to_compiler(&source, e))
     }
@@ -1989,6 +1873,26 @@ impl Default for Compiler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Collects the JSON `library_list` for a compiled program: every used parse
+/// file except the primary source (`skip(1)`), followed by evaluator-loaded
+/// `component`/`library` files not already present.
+fn collect_library_list(signals: &SignalCompileOutput) -> Vec<String> {
+    let mut library_list: Vec<String> = signals
+        .parse
+        .used_files
+        .iter()
+        .skip(1)
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+    for file in &signals.loaded_files {
+        let file = file.to_string_lossy().into_owned();
+        if !library_list.iter().any(|existing| existing == &file) {
+            library_list.push(file);
+        }
+    }
+    library_list
 }
 
 /// Compiler facade errors for parser-stage orchestration.
