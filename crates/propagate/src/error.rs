@@ -263,7 +263,8 @@ impl IntoDiagnostic for PropagateError {
                 } else {
                     let next = right_inputs
                         .saturating_add(left_outputs - 1)
-                        / left_outputs
+                        .checked_div(left_outputs)
+                        .expect("left_outputs is non-zero in split arity target")
                         * left_outputs;
                     format!(
                         "suggested target: set inputs(B) to {next} (next multiple of outputs(A)={left_outputs})"
@@ -295,7 +296,8 @@ impl IntoDiagnostic for PropagateError {
                 } else {
                     let next = left_outputs
                         .saturating_add(right_inputs - 1)
-                        / right_inputs
+                        .checked_div(right_inputs)
+                        .expect("right_inputs is non-zero in merge arity target")
                         * right_inputs;
                     format!(
                         "suggested target: set outputs(A) to {next} (next multiple of inputs(B)={right_inputs})"

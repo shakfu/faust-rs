@@ -522,7 +522,7 @@ pub fn generate_wasm_module_with_context(
         dsp_json.as_bytes().iter().copied(),
     );
     for (offset, bytes) in static_table_segments(store, static_decls, &memory_layout, options)? {
-        data.active(0, &ConstExpr::i32_const(offset as i32), bytes.into_iter());
+        data.active(0, &ConstExpr::i32_const(offset as i32), bytes);
     }
     wasm.section(&data);
 
@@ -896,8 +896,7 @@ fn lower_function_subset(
 
     let mut local_map = HashMap::with_capacity(local_specs.len());
     let mut wasm_locals = Vec::with_capacity(local_specs.len());
-    let mut next_local = param_count;
-    for (name, typ) in local_specs {
+    for (next_local, (name, typ)) in (param_count..).zip(local_specs) {
         local_map.insert(
             name,
             WasmLocal {
@@ -906,7 +905,6 @@ fn lower_function_subset(
             },
         );
         wasm_locals.push((1, wasm_val_type_for_fir(&typ, options)?));
-        next_local += 1;
     }
 
     let mut function = Function::new(wasm_locals);

@@ -92,7 +92,7 @@ impl VirtualSourceMap {
     /// Returns all logical source entries in deterministic path order.
     pub fn iter(&self) -> impl Iterator<Item = (&Path, &str)> {
         let mut ordered: Vec<_> = self.entries.iter().collect();
-        ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+        ordered.sort_by_key(|(path, _)| *path);
         ordered
             .into_iter()
             .map(|(path, source)| (path.as_path(), source.as_ref()))

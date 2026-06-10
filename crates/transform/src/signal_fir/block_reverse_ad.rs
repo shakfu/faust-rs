@@ -354,11 +354,11 @@ pub(super) fn collect_tape_needed_values(arena: &TreeArena, postorder: &[SigId])
                     needed.insert(x);
                 }
             }
-            SigMatch::Exp(x) | SigMatch::Exp10(x) | SigMatch::Sqrt(x) => {
+            SigMatch::Exp(x) | SigMatch::Exp10(x) | SigMatch::Sqrt(x)
+                if !is_trivially_reverse_evaluable(arena, x) =>
+            {
                 // Backward rule uses val[sig], not x directly.
-                if !is_trivially_reverse_evaluable(arena, x) {
-                    needed.insert(sig);
-                }
+                needed.insert(sig);
             }
             _ => {}
         }

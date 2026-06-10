@@ -568,7 +568,7 @@ pub(crate) fn build_struct_layout_for_module(
     let mut fields = Vec::new();
     let mut offset = 0u32;
     let mut struct_align = 1u32;
-    for item in dsp_struct_items.into_iter().chain(global_items.into_iter()) {
+    for item in dsp_struct_items.into_iter().chain(global_items) {
         match match_fir(store, item) {
             FirMatch::DeclareVar {
                 name,

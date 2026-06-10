@@ -854,11 +854,7 @@ fn verify_prepared_signal(
                     body_vec.len()
                 )));
             }
-            for child in body_vec
-                .into_iter()
-                .chain(seed_vec.into_iter())
-                .chain(cot_vec.into_iter())
-            {
+            for child in body_vec.into_iter().chain(seed_vec).chain(cot_vec) {
                 verify_prepared_signal(
                     arena,
                     ui,
