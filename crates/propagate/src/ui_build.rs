@@ -144,7 +144,15 @@ impl UiCollector {
         range: Option<ControlRange>,
     ) {
         let order_key = ui::ordering_key_from_label(&label, &metadata);
-        let id = self.register_control(source_node, context_hash, in_ad_seed, kind, label, metadata, range);
+        let id = self.register_control(
+            source_node,
+            context_hash,
+            in_ad_seed,
+            kind,
+            label,
+            metadata,
+            range,
+        );
         self.builder.insert_input_control(path, id, order_key);
     }
 
@@ -161,7 +169,15 @@ impl UiCollector {
         range: Option<ControlRange>,
     ) {
         let order_key = ui::ordering_key_from_label(&label, &metadata);
-        let id = self.register_control(source_node, context_hash, in_ad_seed, kind, label, metadata, range);
+        let id = self.register_control(
+            source_node,
+            context_hash,
+            in_ad_seed,
+            kind,
+            label,
+            metadata,
+            range,
+        );
         self.builder.insert_output_control(path, id, order_key);
     }
 
@@ -482,8 +498,14 @@ fn collect_ui_nodes(
                 normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
             let path = canonical_group_path(&normalized.groups);
             let (label, metadata) = split_label_metadata(&normalized.raw_label);
-            collector.soundfile(box_tree.as_tree_id(), &path, context_hash,
-                in_ad_seed, label, metadata);
+            collector.soundfile(
+                box_tree.as_tree_id(),
+                &path,
+                context_hash,
+                in_ad_seed,
+                label,
+                metadata,
+            );
             UiCollectSummary {
                 has_ui: true,
                 preserve_ancestor_chain: false,
@@ -517,7 +539,8 @@ fn collect_ui_nodes(
             box_tree.as_tree_id(),
         ),
         FlatNodeKind::ForwardAD { body, seed } => {
-            let body_s = collect_ui_nodes(source_arena, body, current_groups, in_ad_seed, collector);
+            let body_s =
+                collect_ui_nodes(source_arena, body, current_groups, in_ad_seed, collector);
             // Differentiation seeds are global parameters whose UI position is
             // independent of any group that wraps the surrounding `fad(…)` call.
             // Visiting with an empty context ensures that subsequent references to
@@ -532,7 +555,8 @@ fn collect_ui_nodes(
             }
         }
         FlatNodeKind::ReverseAD { body, seeds } => {
-            let body_s = collect_ui_nodes(source_arena, body, current_groups, in_ad_seed, collector);
+            let body_s =
+                collect_ui_nodes(source_arena, body, current_groups, in_ad_seed, collector);
             // Same rationale as ForwardAD: seed parameters are registered without
             // the surrounding group context so later references can find them.
             let seeds_s = collect_ui_nodes(source_arena, seeds, &[], true, collector);

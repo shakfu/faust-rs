@@ -24,7 +24,9 @@
 
 use std::fmt::Write as _;
 
-use fir::{AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir};
+use fir::{
+    AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
+};
 
 use crate::backends::faust_api;
 
@@ -161,7 +163,10 @@ pub fn generate_asc_module(
     let declared_functions = collect_module_function_names(store, module.functions)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "// Code generated with faust-rs (https://faust.grame.fr)");
+    let _ = writeln!(
+        out,
+        "// Code generated with faust-rs (https://faust.grame.fr)"
+    );
     let _ = writeln!(out, "// Language: AssemblyScript (experimental)");
     let _ = writeln!(out, "// name: {}", module.name);
     let _ = writeln!(out);
@@ -219,7 +224,11 @@ fn emit_toplevel_functions(
     let mut any = false;
     for item in items {
         if let FirMatch::DeclareFun {
-            name, typ, args, body, ..
+            name,
+            typ,
+            args,
+            body,
+            ..
         } = match_fir(store, item)
         {
             // Only real definitions (with a body) become top-level functions.
@@ -339,7 +348,11 @@ fn emit_methods_canonical_order(
     };
     for item in items {
         if let FirMatch::DeclareFun {
-            name, typ, args, body, ..
+            name,
+            typ,
+            args,
+            body,
+            ..
         } = match_fir(store, item)
         {
             if emitted.iter().any(|done| *done == name) {
@@ -378,7 +391,11 @@ fn emit_declared_method(
     };
     for item in items {
         if let FirMatch::DeclareFun {
-            name, typ, args, body, ..
+            name,
+            typ,
+            args,
+            body,
+            ..
         } = match_fir(store, item)
             && name == method
         {
@@ -454,7 +471,12 @@ fn emit_stmt(
 ) -> Result<(), CodegenError> {
     let tab = "    ".repeat(indent);
     match match_fir(store, stmt) {
-        FirMatch::DeclareVar { name, typ, access, init } => {
+        FirMatch::DeclareVar {
+            name,
+            typ,
+            access,
+            init,
+        } => {
             if phase == Phase::Fields {
                 if access == AccessType::Static {
                     let _ = write!(out, "{tab}static ");
@@ -485,7 +507,12 @@ fn emit_stmt(
             }
             Ok(())
         }
-        FirMatch::DeclareTable { name, elem_type, values, access } => {
+        FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            access,
+        } => {
             let prefix = if phase == Phase::Fields { "" } else { "let " };
             let static_kw = if phase == Phase::Fields && access == AccessType::Static {
                 "static "
@@ -501,13 +528,22 @@ fn emit_stmt(
             );
             Ok(())
         }
-        FirMatch::StoreVar { name, access, value } => {
+        FirMatch::StoreVar {
+            name,
+            access,
+            value,
+        } => {
             let value = emit_value(store, options, class_name, value)?;
             let lhs = qualify(&name, access, class_name);
             let _ = writeln!(out, "{tab}{lhs} = {value};");
             Ok(())
         }
-        FirMatch::StoreTable { name, index, value, access } => {
+        FirMatch::StoreTable {
+            name,
+            index,
+            value,
+            access,
+        } => {
             let index = emit_value(store, options, class_name, index)?;
             let value = emit_value(store, options, class_name, value)?;
             let lhs = qualify(&name, access, class_name);
@@ -530,7 +566,11 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::Block(_) => emit_block(store, out, options, class_name, stmt, indent),
-        FirMatch::If { cond, then_block, else_block } => {
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
             let cond = emit_value(store, options, class_name, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
             emit_block(store, out, options, class_name, then_block, indent + 1)?;
@@ -545,11 +585,26 @@ fn emit_stmt(
         FirMatch::Control { cond, stmt } => {
             let cond = emit_value(store, options, class_name, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_stmt(store, out, options, class_name, stmt, indent + 1, Phase::Body)?;
+            emit_stmt(
+                store,
+                out,
+                options,
+                class_name,
+                stmt,
+                indent + 1,
+                Phase::Body,
+            )?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
-        FirMatch::ForLoop { var, init, end, step, body, is_reverse } => {
+        FirMatch::ForLoop {
+            var,
+            init,
+            end,
+            step,
+            body,
+            is_reverse,
+        } => {
             let init_val =
                 if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(store, init) {
                     emit_value(store, options, class_name, v)?
@@ -573,7 +628,12 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
-        FirMatch::SimpleForLoop { var, upper, body, is_reverse } => {
+        FirMatch::SimpleForLoop {
+            var,
+            upper,
+            body,
+            is_reverse,
+        } => {
             let upper = emit_value(store, options, class_name, upper)?;
             if is_reverse {
                 let _ = writeln!(
@@ -590,7 +650,9 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
-        FirMatch::IteratorForLoop { iterators, body, .. } => {
+        FirMatch::IteratorForLoop {
+            iterators, body, ..
+        } => {
             // The scalar asc path doesn't lower vectorized iterator loops; emit
             // the body inline (parity with the C++ backend's comment + body).
             let _ = writeln!(out, "{tab}// iterator-for over [{}]", iterators.join(", "));
@@ -604,7 +666,11 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
-        FirMatch::Switch { cond, cases, default } => {
+        FirMatch::Switch {
+            cond,
+            cases,
+            default,
+        } => {
             let cond = emit_value(store, options, class_name, cond)?;
             let _ = writeln!(out, "{tab}switch ({cond}) {{");
             for (value, block) in cases {
@@ -643,22 +709,31 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddSoundfile { .. } => {
-            let _ = writeln!(out, "{tab}// ui soundfile unsupported in AssemblyScript backend");
+            let _ = writeln!(
+                out,
+                "{tab}// ui soundfile unsupported in AssemblyScript backend"
+            );
             Ok(())
         }
         FirMatch::AddMetaDeclare { key, .. } => {
             let _ = writeln!(out, "{tab}// metadata {key}");
             Ok(())
         }
-        FirMatch::Label(_) | FirMatch::ShiftArrayVar { .. } | FirMatch::DeclareStructType { .. } => {
-            Ok(())
-        }
+        FirMatch::Label(_)
+        | FirMatch::ShiftArrayVar { .. }
+        | FirMatch::DeclareStructType { .. } => Ok(()),
         FirMatch::DeclareBufferIterators {
-            name1, name2, channels, ..
+            name1,
+            name2,
+            channels,
+            ..
         } => {
             // Buffer-iterator hints are a vectorization aid; the scalar asc path
             // does not use them. Emit a comment for parity with the C++ backend.
-            let _ = writeln!(out, "{tab}// buffer iterators: {name1}, {name2}, channels={channels}");
+            let _ = writeln!(
+                out,
+                "{tab}// buffer iterators: {name1}, {name2}, channels={channels}"
+            );
             Ok(())
         }
         _ => Err(unsupported_node("statement", stmt, store)),
@@ -721,7 +796,9 @@ fn emit_declare_fun(
 
     // Canonical compute signature override (nested channel arrays).
     let params = if decl.name == "compute" {
-        format!("count: i32, inputs: Array<Array<{FAUST_FLOAT}>>, outputs: Array<Array<{FAUST_FLOAT}>>")
+        format!(
+            "count: i32, inputs: Array<Array<{FAUST_FLOAT}>>, outputs: Array<Array<{FAUST_FLOAT}>>"
+        )
     } else {
         params
     };
@@ -734,7 +811,11 @@ fn emit_declare_fun(
     if as_method {
         let _ = writeln!(out, "{tab}{}({params}): {ret} {{", decl.name);
     } else {
-        let _ = writeln!(out, "{tab}export function {}({params}): {ret} {{", decl.name);
+        let _ = writeln!(
+            out,
+            "{tab}export function {}({params}): {ret} {{",
+            decl.name
+        );
     }
     if decl.name == "instanceConstants" && !block_stores_var(store, body, "fSampleRate") {
         let _ = writeln!(out, "{tab}    this.fSampleRate = sample_rate;");
@@ -785,13 +866,26 @@ fn emit_value(
         FirMatch::LoadVar { name, access, .. } | FirMatch::LoadVarAddress { name, access, .. } => {
             Ok(qualify(&name, access, class_name))
         }
-        FirMatch::LoadTable { name, index, access, .. } => {
+        FirMatch::LoadTable {
+            name,
+            index,
+            access,
+            ..
+        } => {
             let index = emit_value(store, options, class_name, index)?;
             Ok(format!("{}[{index}]", qualify(&name, access, class_name)))
         }
-        FirMatch::TeeVar { name, access, value, .. } => {
+        FirMatch::TeeVar {
+            name,
+            access,
+            value,
+            ..
+        } => {
             let value = emit_value(store, options, class_name, value)?;
-            Ok(format!("({} = {value})", qualify(&name, access, class_name)))
+            Ok(format!(
+                "({} = {value})",
+                qualify(&name, access, class_name)
+            ))
         }
         FirMatch::BinOp { op, lhs, rhs, .. } => {
             let lhs = emit_value(store, options, class_name, lhs)?;
@@ -806,7 +900,12 @@ fn emit_value(
             let value = emit_value(store, options, class_name, value)?;
             Ok(format!("<{}>({value})", emit_type(&typ, options)))
         }
-        FirMatch::Select2 { cond, then_value, else_value, .. } => {
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
             let cond = emit_value(store, options, class_name, cond)?;
             let then_value = emit_value(store, options, class_name, then_value)?;
             let else_value = emit_value(store, options, class_name, else_value)?;
@@ -932,7 +1031,13 @@ fn emit_static_tables(
     };
     let mut any = false;
     for stmt in stmts {
-        if let FirMatch::DeclareTable { name, elem_type, values, .. } = match_fir(store, stmt) {
+        if let FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            ..
+        } = match_fir(store, stmt)
+        {
             let ty = emit_type(&elem_type, options);
             if values.is_empty() {
                 let _ = writeln!(
@@ -1005,18 +1110,18 @@ fn block_declares_var(store: &FirStore, block: FirId, name: &str) -> bool {
     let FirMatch::Block(items) = match_fir(store, block) else {
         return false;
     };
-    items.iter().any(|id| {
-        matches!(match_fir(store, *id), FirMatch::DeclareVar { name: v, .. } if v == name)
-    })
+    items.iter().any(
+        |id| matches!(match_fir(store, *id), FirMatch::DeclareVar { name: v, .. } if v == name),
+    )
 }
 
 fn block_stores_var(store: &FirStore, block: FirId, name: &str) -> bool {
     let FirMatch::Block(items) = match_fir(store, block) else {
         return false;
     };
-    items.iter().any(|id| {
-        matches!(match_fir(store, *id), FirMatch::StoreVar { name: v, .. } if v == name)
-    })
+    items
+        .iter()
+        .any(|id| matches!(match_fir(store, *id), FirMatch::StoreVar { name: v, .. } if v == name))
 }
 
 /// Escapes arbitrary text for embedding inside an AssemblyScript double-quoted
@@ -1107,7 +1212,9 @@ mod tests {
         assert!(out.contains("        return 1;"));
         assert!(out.contains("getNumOutputs(): i32 {"));
         assert!(out.contains("        return 2;"));
-        assert!(out.contains("compute(count: i32, inputs: Array<Array<f32>>, outputs: Array<Array<f32>>): void"));
+        assert!(out.contains(
+            "compute(count: i32, inputs: Array<Array<f32>>, outputs: Array<Array<f32>>): void"
+        ));
         assert!(out.contains("// Language: AssemblyScript"));
     }
 
@@ -1123,8 +1230,14 @@ mod tests {
             ret: Box::new(FirType::Void),
         };
         let args = vec![
-            NamedType { name: "dsp".to_owned(), typ: FirType::Ptr(Box::new(FirType::Obj)) },
-            NamedType { name: "sample_rate".to_owned(), typ: FirType::Int32 },
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "sample_rate".to_owned(),
+                typ: FirType::Int32,
+            },
         ];
         let fun = b.declare_fun("instanceConstants", fun_ty, &args, Some(body), false);
         let dsp_struct = b.block(&[]);

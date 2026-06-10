@@ -11,6 +11,7 @@ live here.
 
 ``` 
 parser → boxes → eval → propagate → signals → transform → fir → [codegen]
+                                                                → AssemblyScript source
                                                                 → C source
                                                                 → C++ source
                                                                 → .fbc bytecode
@@ -25,12 +26,13 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 
 | Rust path | C++ origin |
 |---|---|
+| `backends::asc` | `compiler/generator/asc/` |
 | `backends::c` | `compiler/generator/c/` |
 | `backends::cpp` | `compiler/generator/cpp/` |
-| `backends::interp` | `compiler/generator/interpreter/` |
 | `backends::cranelift` | *(new — no C++ equivalent)* |
-| `backends::wasm` | `compiler/generator/wasm/` + `code_container.hh` JSON path |
+| `backends::interp` | `compiler/generator/interpreter/` |
 | `backends::julia` | `compiler/generator/julia/` |
+| `backends::wasm` | `compiler/generator/wasm/` + `code_container.hh` JSON path |
 | Other backends | `compiler/generator/<backend>/` *(planned)* |
 
 ---
@@ -39,13 +41,14 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 
 | Backend | Status | Entry point |
 |---|---|---|
+| `asc` | ✅ Implemented | `generate_asc_module` |
 | `c` | ✅ Implemented | `generate_c_module` |
 | `cpp` | ✅ Implemented | `generate_cpp_module` |
-| `interp` | ✅ Implemented | `generate_interp_module` |
-| `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
 | `cranelift` | 🔧 Bring-up | `generate_cranelift_module` |
-| `wasm` | 🔧 Bring-up | `generate_wasm_module` |
+| `interp` | ✅ Implemented | `generate_interp_module` |
 | `julia` | 🔧 Bring-up | `generate_julia_module` |
+| `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
+| `wasm` | 🔧 Bring-up | `generate_wasm_module` |
 | `cmajor` | 🗂 Scaffolded | — |
 | `codebox` | 🗂 Scaffolded | — |
 | `csharp` | 🗂 Scaffolded | — |
@@ -60,6 +63,42 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 ---
 
 ## Public API
+
+### AssemblyScript backend — `backends::asc`
+
+Emits an `export class <name>` TypeScript/AssemblyScript module with the full
+Faust DSP lifecycle (`instanceInit`, `instanceResetUserInterface`,
+`instanceClear`, `compute`). Instance state is addressed as `this.<field>`;
+static struct fields as `<ClassName>.<field>`. Arrays are `StaticArray<T>`,
+numeric literals are cast-wrapped (`<i32>(n)`, `<f32>(n)`, `<f64>(n)`), and
+math routes through `Math.*` / `Mathf.*`. UI/soundfile nodes are lowered to
+comments (parity with the C++ `asc` backend). An optional embedded
+`getJSON(): string` method is emitted when `AscOptions::json` is provided.
+
+```rust
+use codegen::backends::asc::{AscOptions, generate_asc_module};
+
+let opts = AscOptions {
+    class_name: Some("mydsp".to_owned()),
+    json: Some(dsp_json_string),
+    ..Default::default()
+};
+let asc_source = generate_asc_module(&store, root_id, &opts)?;
+```
+
+| Item | Description |
+|---|---|
+| `AscOptions` | `class_name`, `quad_type_name`, `fixed_type_name`, `json` |
+| `generate_asc_module` | `(&FirStore, FirId, &AscOptions) → Result<String, CodegenError>` |
+| `CodegenError` | Codes `FRS-CGEN-ASC-0001..0003` |
+
+CLI entry point lives in `compiler`:
+
+```sh
+cargo run -p compiler -- --lang asc my.dsp -o mydsp.ts
+```
+
+---
 
 ### C backend — `backends::c`
 
@@ -106,6 +145,28 @@ let cpp_source = generate_cpp_module(&store, root_id, &opts)?;
 | `CppOptions` | `class_name`, `namespace`, `quad_type_name`, `fixed_type_name` |
 | `generate_cpp_module` | `(&FirStore, FirId, &CppOptions) → Result<String, CodegenError>` |
 | `CodegenError` | Codes `FRS-CGEN-CPP-0001..0003` |
+
+---
+
+### Cranelift backend — `backends::cranelift`
+
+JIT-compiles a FIR module to native machine code via Cranelift. Prioritizes
+compile-path coverage and diagnosability; falls back to a no-op `compute` stub
+for FIR nodes outside the current lowering subset.
+
+```rust
+use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
+
+let opts = CraneliftOptions::default(); // opt_level: Speed
+let jit = generate_cranelift_module(&store, root_id, &opts)?;
+```
+
+| Item | Description |
+|---|---|
+| `CraneliftOptions` | `opt_level`, `target_triple`, `enable_nan_canonicalization`, `fail_on_subset_gap` |
+| `CraneliftOptLevel` | `None`, `Speed` (default), `SpeedAndSize` |
+| `generate_cranelift_module` | Main entry point; returns compiled JIT module |
+| `diagnose_cranelift_compute_subset_gap` | Reports unsupported FIR nodes |
 
 ---
 
@@ -250,25 +311,47 @@ cargo run -p compiler -- --dump-cpp-from-fbc my.fbc -o my.h
 
 ---
 
-### Cranelift backend — `backends::cranelift`
+### Julia backend — `backends::julia`
 
-JIT-compiles a FIR module to native machine code via Cranelift. Prioritizes
-compile-path coverage and diagnosability; falls back to a no-op `compute` stub
-for FIR nodes outside the current lowering subset.
+Lowers a FIR module to Faust-style Julia source. The current backend slice
+emits the standard Julia DSP shell (`mutable struct mydsp{T} <: dsp`),
+lifecycle/API methods, UI/metadata calls, and `compute!` over
+`Matrix{FAUSTFLOAT}` input/output buffers.
 
 ```rust
-use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
+use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_module};
 
-let opts = CraneliftOptions::default(); // opt_level: Speed
-let jit = generate_cranelift_module(&store, root_id, &opts)?;
+let opts = JuliaOptions {
+    class_name: Some("mydsp".to_owned()),
+    real_type: JuliaRealType::Float64,
+};
+let julia = generate_julia_module(&store, root_id, &opts)?;
+std::fs::write("mydsp.jl", julia)?;
 ```
+
+Important emitter rules:
+
+- Julia table/vector indexing is one-based only at the final access boundary;
+  FIR loop variables and offsets remain Faust/C-style zero-based internally.
+- Real casts inside parametric DSP methods emit `T(...)`.
+- `Int32` casts use `faust_wrap_int32(...)` to preserve C++-style wrapping
+  instead of Julia `InexactError`.
+- The generated source assumes the host provides the Faust Julia runtime names
+  (`dsp`, `UI`, `FMeta`, `FAUSTFLOAT`, and UI callback functions).
 
 | Item | Description |
 |---|---|
-| `CraneliftOptions` | `opt_level`, `target_triple`, `enable_nan_canonicalization`, `fail_on_subset_gap` |
-| `CraneliftOptLevel` | `None`, `Speed` (default), `SpeedAndSize` |
-| `generate_cranelift_module` | Main entry point; returns compiled JIT module |
-| `diagnose_cranelift_compute_subset_gap` | Reports unsupported FIR nodes |
+| `JuliaOptions` | `class_name`, `real_type` |
+| `JuliaRealType` | `Float32` (default) or `Float64` |
+| `generate_julia_module` | `(&FirStore, FirId, &JuliaOptions) -> Result<String, CodegenError>` |
+| `CodegenError` | Codes `FRS-CGEN-JULIA-0001..0003` |
+
+CLI entry point lives in `compiler`:
+
+```sh
+cargo run -p compiler -- --lang julia my.dsp -o mydsp.jl
+cargo run -p compiler -- --lang julia -double my.dsp -o mydsp.jl
+```
 
 ---
 
@@ -358,50 +441,6 @@ cargo run -p compiler -- --lang wasm my.dsp -o mydsp.wasm
 
 # Emit WAST text from the same backend
 cargo run -p compiler -- --lang wast my.dsp -o mydsp.wat
-```
-
----
-
-### Julia backend — `backends::julia`
-
-Lowers a FIR module to Faust-style Julia source. The current backend slice
-emits the standard Julia DSP shell (`mutable struct mydsp{T} <: dsp`),
-lifecycle/API methods, UI/metadata calls, and `compute!` over
-`Matrix{FAUSTFLOAT}` input/output buffers.
-
-```rust
-use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_module};
-
-let opts = JuliaOptions {
-    class_name: Some("mydsp".to_owned()),
-    real_type: JuliaRealType::Float64,
-};
-let julia = generate_julia_module(&store, root_id, &opts)?;
-std::fs::write("mydsp.jl", julia)?;
-```
-
-Important emitter rules:
-
-- Julia table/vector indexing is one-based only at the final access boundary;
-  FIR loop variables and offsets remain Faust/C-style zero-based internally.
-- Real casts inside parametric DSP methods emit `T(...)`.
-- `Int32` casts use `faust_wrap_int32(...)` to preserve C++-style wrapping
-  instead of Julia `InexactError`.
-- The generated source assumes the host provides the Faust Julia runtime names
-  (`dsp`, `UI`, `FMeta`, `FAUSTFLOAT`, and UI callback functions).
-
-| Item | Description |
-|---|---|
-| `JuliaOptions` | `class_name`, `real_type` |
-| `JuliaRealType` | `Float32` (default) or `Float64` |
-| `generate_julia_module` | `(&FirStore, FirId, &JuliaOptions) -> Result<String, CodegenError>` |
-| `CodegenError` | Codes `FRS-CGEN-JULIA-0001..0003` |
-
-CLI entry point lives in `compiler`:
-
-```sh
-cargo run -p compiler -- --lang julia my.dsp -o mydsp.jl
-cargo run -p compiler -- --lang julia -double my.dsp -o mydsp.jl
 ```
 
 ---

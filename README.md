@@ -58,31 +58,35 @@ faust-rs
 DSP compilation examples:
 
 ```bash
+
+# Generate AssemblyScript
+faust-rs -lang asc foo.dsp
+
 # Generate C
 faust-rs -lang c foo.dsp
 
 # Generate C++
 faust-rs -lang cpp foo.dsp
 
+# Generate experimental Cranelift backend report
+faust-rs -lang cranelift foo.dsp
+
 # Generate interpreter bytecode (.fbc)
 faust-rs -lang interp foo.dsp
 # alias: -lang interp-fbc
 # shorthand flag: --dump-interp
+
+# Dump FIR text IR
+faust-rs -lang fir foo.dsp
+
+# Generate Julia source
+faust-rs -lang julia foo.dsp -o foo.jl
 
 # Generate WebAssembly plus companion JSON
 faust-rs -lang wasm foo.dsp -o foo.wasm
 
 # Generate textual WAT/WAST from the same WASM backend
 faust-rs -lang wast foo.dsp -o foo.wat
-
-# Generate Julia source
-faust-rs -lang julia foo.dsp -o foo.jl
-
-# Generate experimental Cranelift backend report
-faust-rs -lang cranelift foo.dsp
-
-# Dump FIR text IR
-faust-rs -lang fir foo.dsp
 
 # Emit strict Faust JSON description
 faust-rs --json foo.dsp
@@ -130,27 +134,30 @@ If your installed command is named `faust` (for example via a symlink/wrapper),
 the same model applies:
 
 ```bash
+faust -lang asc foo.dsp
 faust -lang c foo.dsp
 faust -lang cpp foo.dsp
-faust -lang interp foo.dsp
 faust -lang cranelift foo.dsp
 faust -lang fir foo.dsp
+faust -lang interp foo.dsp
+faust -lang julia foo.dsp
 faust -lang wasm foo.dsp
 faust -lang wast foo.dsp
-faust -lang julia foo.dsp
 ```
 
 Without installation (equivalent):
 
 ```bash
+cargo run -p compiler -- -lang asc foo.dsp
 cargo run -p compiler -- -lang c foo.dsp
 cargo run -p compiler -- -lang cpp foo.dsp
-cargo run -p compiler -- -lang interp foo.dsp
 cargo run -p compiler -- -lang cranelift foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
+cargo run -p compiler -- -lang interp foo.dsp
+cargo run -p compiler -- -lang julia foo.dsp
 cargo run -p compiler -- -lang wasm foo.dsp
 cargo run -p compiler -- -lang wast foo.dsp
-cargo run -p compiler -- -lang julia foo.dsp
+
 ```
 
 ## Environment variables

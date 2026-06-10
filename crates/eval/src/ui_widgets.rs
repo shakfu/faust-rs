@@ -140,26 +140,22 @@ fn eval_slider_like(
         BoxMatch::Int(i) => Some(f64::from(i)),
         _ => None,
     };
-    if let (Some(init_val), Some(min_val), Some(max_val)) =
-        (as_f64(cur), as_f64(min), as_f64(max))
+    if let (Some(init_val), Some(min_val), Some(max_val)) = (as_f64(cur), as_f64(min), as_f64(max))
+        && (init_val < min_val || init_val > max_val)
     {
-        if init_val < min_val || init_val > max_val {
-            let kind_name = match kind {
-                SliderKind::VSlider => "vslider",
-                SliderKind::HSlider => "hslider",
-                SliderKind::NumEntry => "nentry",
-            };
-            let label_text = label_node_text(arena, label)
-                .unwrap_or("")
-                .to_owned();
-            return Err(EvalError::SliderInitOutOfRange {
-                kind: kind_name,
-                label: label_text,
-                init_bits: init_val.to_bits(),
-                min_bits: min_val.to_bits(),
-                max_bits: max_val.to_bits(),
-            });
-        }
+        let kind_name = match kind {
+            SliderKind::VSlider => "vslider",
+            SliderKind::HSlider => "hslider",
+            SliderKind::NumEntry => "nentry",
+        };
+        let label_text = label_node_text(arena, label).unwrap_or("").to_owned();
+        return Err(EvalError::SliderInitOutOfRange {
+            kind: kind_name,
+            label: label_text,
+            init_bits: init_val.to_bits(),
+            min_bits: min_val.to_bits(),
+            max_bits: max_val.to_bits(),
+        });
     }
 
     let mut b = BoxBuilder::new(arena);

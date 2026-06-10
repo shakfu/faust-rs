@@ -10,6 +10,7 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 
 use boxes::dump_box;
+use codegen::backends::asc::{AscOptions, generate_asc_module};
 use codegen::backends::c::COptions;
 use codegen::backends::c::generate_c_module;
 use codegen::backends::cpp::CppOptions;
@@ -22,7 +23,6 @@ use codegen::backends::interp::{
     FbcCppOptions, InterpOptions, generate_cpp_from_fbc, generate_interp_module, read_fbc,
     write_fbc,
 };
-use codegen::backends::asc::{AscOptions, generate_asc_module};
 use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_module};
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
