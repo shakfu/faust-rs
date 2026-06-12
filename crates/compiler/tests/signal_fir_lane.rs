@@ -84,7 +84,7 @@ fn fastlane_julia_emits_faust_style_shell() {
     assert!(julia.contains("getNumInputs(dsp::mydsp{T}) where {T} = Int32(1)"));
     assert!(julia.contains("getNumOutputs(dsp::mydsp{T}) where {T} = Int32(1)"));
     assert!(julia.contains("function compute!(dsp::mydsp{T}, count::Int32"));
-    assert!(julia.contains("outputs::Matrix{FAUSTFLOAT}"));
+    assert!(julia.contains("outputs::AbstractMatrix{FAUSTFLOAT}"));
 }
 
 #[test]

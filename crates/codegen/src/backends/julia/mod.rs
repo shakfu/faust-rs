@@ -618,7 +618,7 @@ fn emit_julia_api(
     } else {
         let _ = writeln!(
             out,
-            "function compute!(dsp::{class_name}{{T}}, count::Int32, inputs::Matrix{{FAUSTFLOAT}}, outputs::Matrix{{FAUSTFLOAT}}) where {{T}}"
+            "function compute!(dsp::{class_name}{{T}}, count::Int32, inputs::AbstractMatrix{{FAUSTFLOAT}}, outputs::AbstractMatrix{{FAUSTFLOAT}}) where {{T}}"
         );
         let _ = writeln!(out, "\tnothing");
         let _ = writeln!(out, "end");
@@ -743,7 +743,7 @@ fn emit_named_fun(
             )
         }
         "compute" => format!(
-            "function compute!(dsp::{class_name}{{T}}, count::Int32, inputs::Matrix{{FAUSTFLOAT}}, outputs::Matrix{{FAUSTFLOAT}}) where {{T}}"
+            "function compute!(dsp::{class_name}{{T}}, count::Int32, inputs::AbstractMatrix{{FAUSTFLOAT}}, outputs::AbstractMatrix{{FAUSTFLOAT}}) where {{T}}"
         ),
         _ => format!(
             "function {}!(dsp::{class_name}{{T}}) where {{T}}",
@@ -1700,7 +1700,7 @@ mod tests {
             out.contains("function buildUserInterface!(dsp::mydsp{T}, ui_interface::UI) where {T}")
         );
         assert!(out.contains("addHorizontalSlider!(ui_interface, \"freq\", :fFreq"));
-        assert!(out.contains("function compute!(dsp::mydsp{T}, count::Int32, inputs::Matrix{FAUSTFLOAT}, outputs::Matrix{FAUSTFLOAT}) where {T}"));
+        assert!(out.contains("function compute!(dsp::mydsp{T}, count::Int32, inputs::AbstractMatrix{FAUSTFLOAT}, outputs::AbstractMatrix{FAUSTFLOAT}) where {T}"));
         assert!(out.contains("for i0 in 0:((count) - 1)"));
         assert!(out.contains("output0[(i0) + 1] = "));
         assert!(out.contains("sin("));
