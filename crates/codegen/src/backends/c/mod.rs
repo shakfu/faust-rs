@@ -1459,7 +1459,7 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     )
 }
 
-/// Formats a floating-point literal with stable trimmed C syntax.
+/// Formats a floating-point literal with stable C syntax.
 fn trim_float(value: f64) -> String {
     if value.is_nan() {
         return "NAN".to_owned();
@@ -1471,12 +1471,9 @@ fn trim_float(value: f64) -> String {
             "INFINITY".to_owned()
         };
     }
-    let mut s = format!("{value:.15}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
-    }
-    if s.ends_with('.') {
-        s.push('0');
+    let mut s = format!("{value}");
+    if !s.contains(['.', 'e', 'E']) {
+        s.push_str(".0");
     }
     if s == "-0.0" { "0.0".to_owned() } else { s }
 }
@@ -1666,5 +1663,14 @@ mod tests {
         ));
         assert!(out.contains("void metadatamydsp(MetaGlue* m)"));
         assert!(out.contains("m->declare(m->metaInterface, 0, \"author\", \"faust-rs\");"));
+    }
+
+    #[test]
+    fn double_literal_format_preserves_grain_prng_scale_precision() {
+        assert_eq!(
+            super::trim_float(1.0 / 2147483647.0),
+            "0.0000000004656612875245797",
+            "C backend double literals must preserve enough precision for grain/table DSPs"
+        );
     }
 }

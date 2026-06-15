@@ -33,7 +33,8 @@ KNOWN_FAIL_all := subcontainer1      # faust-rs sub-container codegen gap (compi
 KNOWN_FAIL_cpp :=
 
 # --- C backend ---------------------------------------------------------------
-KNOWN_FAIL_c := grain3               # 2.6e-3 drift, pass 1 (grain/table path)
+# grain3 was fixed by preserving full double literal precision in the C emitter.
+KNOWN_FAIL_c :=
 
 # --- Cranelift JIT backend (64-bit) ------------------------------------------
 # Runs in `-double`; matches 84/93. Remaining gaps:
