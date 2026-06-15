@@ -195,11 +195,15 @@ suite turns them into actionable backend bugs. Their first-divergence deltas:
   `RealType::Float64` from `-double`). The runtime UI-zone writer
   (`apply_control_defaults`) now writes a `FaustFloat` zone at the field's actual
   width (the f32-into-8-byte bug that corrupted slider inits, e.g. freeverb).
-- Result: **81/93** match the `-double` reference (was f32-only before; better
-  than interp's 74). Curated `KNOWN_FAIL_cranelift`: `prefix`/`phasor`
-  (prefix-primitive gap, upstream bug #1071), `table2` (rwtable), `bells`,
-  `karplus`/`karplus32`, `UITester` (needs button driving), `reverb_designer`/
-  `reverb_tester` (shared drift), `sound` (soundfile JIT crash), `grain3`.
+- Result: **83/93** match the `-double` reference (was f32-only before; better
+  than interp). A second fix made the runtime run the JIT-compiled
+  `instanceClear` at init (api.rs now compiles it; `JitDspModule` carries
+  `instance_clear_entry_addr`); some DSPs fill state buffers with non-zero init
+  values there (e.g. `prefix` writes `fRec7 = 1.0`), so skipping it broke
+  `prefix`/`phasor` — now fixed. Curated `KNOWN_FAIL_cranelift`: `table2`
+  (rwtable), `bells`, `karplus`/`karplus32`, `UITester` (needs button driving),
+  `reverb_designer`/`reverb_tester` (shared drift), `sound` (soundfile JIT
+  crash), `grain3`.
 - No f32 regression (cranelift-ffi 31 + codegen 251 tests still pass).
 
 ### Phase 5 — wasm / wast backends

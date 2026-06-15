@@ -30,6 +30,9 @@ type ComputeFn =
 /// Typed JIT `instanceConstants` signature used by the standalone runtime.
 type InstanceConstantsFn = unsafe extern "C" fn(*mut c_void, c_int);
 
+/// Typed JIT `instanceClear` signature used by the standalone runtime.
+type InstanceClearFn = unsafe extern "C" fn(*mut c_void);
+
 /// Converts a Rust channel count to the C ABI integer type with saturation.
 fn arity_to_c_int(value: usize) -> c_int {
     i32::try_from(value).unwrap_or(i32::MAX)
@@ -311,6 +314,15 @@ pub unsafe extern "C" fn instanceClearCCraneliftDSPInstance(dsp: *mut CraneliftD
             return;
         };
         clear_runtime_state(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
+        // Run the JIT-compiled `instanceClear`: it resets state buffers and, for
+        // some DSPs (e.g. `prefix`), fills them with non-zero initial values that
+        // the descriptor-based `clear_runtime_state` does not capture.
+        if let Some(instance_clear) = instance_clear_fn_from_addr(jit.instance_clear_entry_addr()) {
+            let dsp_ptr = (*dsp).dsp_state.as_mut_ptr().cast::<c_void>();
+            if !dsp_ptr.is_null() {
+                instance_clear(dsp_ptr);
+            }
+        }
         for name in &factory.runtime.sample_rate_fields {
             if let Some(field) = jit.struct_layout().field(name) {
                 match &field.kind {
@@ -847,6 +859,14 @@ fn instance_constants_fn_from_addr(addr: usize) -> Option<InstanceConstantsFn> {
         None
     } else {
         Some(unsafe { std::mem::transmute::<usize, InstanceConstantsFn>(addr) })
+    }
+}
+
+fn instance_clear_fn_from_addr(addr: usize) -> Option<InstanceClearFn> {
+    if addr == 0 {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute::<usize, InstanceClearFn>(addr) })
     }
 }
 

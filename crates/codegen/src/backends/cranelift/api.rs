@@ -142,6 +142,30 @@ pub(crate) fn try_generate_cranelift_module(
             }
             Err(_) => 0,
         };
+    // `instanceClear` resets state; some DSPs (e.g. `prefix`) fill buffers with
+    // non-zero init values here, so it must be JIT-compiled and run at init.
+    let instance_clear_entry_addr = match find_module_and_function(store, module, "instanceClear") {
+        Ok((_module_name, instance_clear_decl)) => {
+            let (_symbol_name, entry_addr, _lowered, instance_clear_clif) = declare_jit_function(
+                &format!("{module_name}::instanceClear"),
+                instance_clear_decl,
+                store,
+                &struct_layout,
+                true,
+                &options.extern_data_symbols,
+                &options.extern_function_symbols,
+                false,
+                &mut jit,
+                &static_data_ids,
+                &extern_data_ids,
+                options.double_precision,
+            )?;
+            generated_functions_clif
+                .push((format!("{module_name}::instanceClear"), instance_clear_clif));
+            entry_addr
+        }
+        Err(_) => 0,
+    };
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
             "finalized compute symbol address is null",
@@ -153,6 +177,7 @@ pub(crate) fn try_generate_cranelift_module(
         compute_symbol_name,
         compute_entry_addr,
         instance_constants_entry_addr,
+        instance_clear_entry_addr,
         compute_body_lowered,
         generated_functions_clif,
         struct_layout,

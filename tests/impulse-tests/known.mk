@@ -36,15 +36,15 @@ KNOWN_FAIL_cpp :=
 KNOWN_FAIL_c := grain3               # 2.6e-3 drift, pass 1 (grain/table path)
 
 # --- Cranelift JIT backend (64-bit) ------------------------------------------
-# Runs in `-double`; matches 81/93. Remaining gaps:
-#   prefix, phasor  prefix primitive lowering (upstream bug #1071)
+# Runs in `-double`; matches 83/93. Remaining gaps:
 #   table2          rwtable indexing divergence
 #   bells karplus karplus32  excitation/delay path divergence
 #   UITester        button zones not driven by the runner yet
 #   reverb_designer reverb_tester  shared numerical drift
 #   sound           soundfile unsupported (JIT compute crashes)
 #   grain3          grain/table path (shared with the C backend)
-KNOWN_FAIL_cranelift := prefix phasor table2 bells karplus karplus32 UITester \
+# (prefix, phasor were fixed by running the JIT instanceClear at init.)
+KNOWN_FAIL_cranelift := table2 bells karplus karplus32 UITester \
                         reverb_designer reverb_tester sound grain3
 
 # --- interpreter backend (real divergences the suite surfaces) ---------------

@@ -175,6 +175,7 @@ pub struct JitDspModule {
     pub(crate) compute_symbol_name: String,
     pub(crate) compute_entry_addr: usize,
     pub(crate) instance_constants_entry_addr: usize,
+    pub(crate) instance_clear_entry_addr: usize,
     pub(crate) compute_body_lowered: bool,
     pub(crate) generated_functions_clif: Vec<(String, String)>,
     pub(crate) struct_layout: StructLayoutPlan,
@@ -191,6 +192,10 @@ impl std::fmt::Debug for JitDspModule {
             .field(
                 "instance_constants_entry_addr",
                 &self.instance_constants_entry_addr,
+            )
+            .field(
+                "instance_clear_entry_addr",
+                &self.instance_clear_entry_addr,
             )
             .field(
                 "generated_functions_clif_count",
@@ -232,6 +237,15 @@ impl JitDspModule {
     #[must_use]
     pub fn instance_constants_entry_addr(&self) -> usize {
         self.instance_constants_entry_addr
+    }
+
+    /// Returns the finalized `instanceClear` entry address when emitted.
+    ///
+    /// `instanceClear` resets state buffers; some DSPs (e.g. `prefix`) fill them
+    /// with non-zero initial values here, so the runtime must run it at init.
+    #[must_use]
+    pub fn instance_clear_entry_addr(&self) -> usize {
+        self.instance_clear_entry_addr
     }
 
     /// Returns `true` when a finalized non-null `compute` symbol address exists.

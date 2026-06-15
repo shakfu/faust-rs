@@ -39,11 +39,11 @@ When a divergence is fixed, remove the entry so the gate re-covers it.
 
 ## Cranelift JIT backend — excluded
 
-Runs in 64-bit (`-double`); **81/93** match. The remaining gaps:
+Runs in 64-bit (`-double`); **83/93** match. (`prefix`/`phasor` were fixed by
+running the JIT `instanceClear` at init.) The remaining gaps:
 
 | DSP | Max \|Δ\| | Cause |
 |---|---|---|
-| `prefix`, `phasor` | 0.7 / 0.084 | `prefix` primitive lowering (upstream bug #1071) |
 | `table2` | 10.0 | rwtable indexing divergence |
 | `bells` | 0.46 | excitation/delay path |
 | `karplus`, `karplus32` | 0.92 / 0.68 | Karplus-Strong excitation/delay |
