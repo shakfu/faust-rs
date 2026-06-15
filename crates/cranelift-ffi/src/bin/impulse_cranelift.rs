@@ -5,27 +5,20 @@
 //! scalar impulse pass (SR 44100, block 64, impulse on frame 0), emitting the
 //! reference `.ir` text format with the same `normalize()` zero-clamp.
 //!
-//! Limitations (documented as known failures in the harness):
-//! - the Cranelift backend buffer type is `f32` only, so output is compared
-//!   against an `f32` (`-single`) reference;
-//! - button/checkbox zones are not driven yet (no zone-setter in the C-API
-//!   surface used here), so button-gated DSPs diverge.
-//!
 //! Usage: `impulse_cranelift <file.dsp> [-n <frames>] [-I <dir>]...`
-//! (`-single`/`-double` are accepted and ignored: the backend is f32-only.)
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread;
 
 use cranelift_ffi::factory::{createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory};
 use cranelift_ffi::instance::{
-    computeCCraneliftDSPInstance, createCCraneliftDSPInstance, deleteCCraneliftDSPInstance,
-    getNumInputsCCraneliftDSPInstance, getNumOutputsCCraneliftDSPInstance,
-    initCCraneliftDSPInstance,
+    buildUserInterfaceCCraneliftDSPInstance, computeCCraneliftDSPInstance,
+    createCCraneliftDSPInstance, deleteCCraneliftDSPInstance, getNumInputsCCraneliftDSPInstance,
+    getNumOutputsCCraneliftDSPInstance, initCCraneliftDSPInstance,
 };
-use cranelift_ffi::types::FaustFloat;
+use cranelift_ffi::types::{FaustFloat, UIGlue};
 
 const SAMPLE_RATE: i32 = 44100;
 const BLOCK_SIZE: usize = 64;
@@ -153,6 +146,25 @@ fn run() -> Result<String, String> {
     }
     unsafe { initCCraneliftDSPInstance(dsp, SAMPLE_RATE) };
 
+    let mut ui_capture = UiCapture::default();
+    let mut ui = UIGlue {
+        ui_interface: (&mut ui_capture as *mut UiCapture).cast::<c_void>(),
+        open_tab_box: None,
+        open_horizontal_box: None,
+        open_vertical_box: None,
+        close_box: None,
+        add_button: Some(capture_button),
+        add_check_button: None,
+        add_vertical_slider: None,
+        add_horizontal_slider: None,
+        add_num_entry: None,
+        add_horizontal_bargraph: None,
+        add_vertical_bargraph: None,
+        add_soundfile: Some(capture_soundfile),
+        declare: None,
+    };
+    unsafe { buildUserInterfaceCCraneliftDSPInstance(dsp, &mut ui) };
+
     let num_inputs = usize::try_from(unsafe { getNumInputsCCraneliftDSPInstance(dsp) })
         .map_err(|_| "negative input arity".to_string())?;
     let num_outputs = usize::try_from(unsafe { getNumOutputsCCraneliftDSPInstance(dsp) })
@@ -172,6 +184,7 @@ fn run() -> Result<String, String> {
             let mut in_buffer = vec![vec![<$elem>::default(); BLOCK_SIZE]; num_inputs];
             let mut out_buffer = vec![vec![<$elem>::default(); BLOCK_SIZE]; num_outputs];
             let mut written = 0usize;
+            let mut cycle = 0usize;
             while written < frames {
                 let n = BLOCK_SIZE.min(frames - written);
                 for channel in &mut in_buffer {
@@ -182,6 +195,8 @@ fn run() -> Result<String, String> {
                         channel[0] = 1.0;
                     }
                 }
+                let button_value = if cycle == 0 { 1.0 } else { 0.0 };
+                set_button_zones::<$elem>(&ui_capture.button_zones, button_value);
                 let mut in_ptrs: Vec<*mut FaustFloat> = in_buffer
                     .iter_mut()
                     .map(|c| c.as_mut_ptr().cast::<FaustFloat>())
@@ -207,6 +222,7 @@ fn run() -> Result<String, String> {
                     out.push('\n');
                     written += 1;
                 }
+                cycle += 1;
             }
         }};
     }
@@ -232,5 +248,197 @@ fn normalize(value: f64) -> f64 {
         0.0
     } else {
         value
+    }
+}
+
+#[derive(Default)]
+struct UiCapture {
+    button_zones: Vec<*mut c_void>,
+    soundfiles: Vec<TestSoundfile>,
+}
+
+unsafe extern "C" fn capture_button(
+    ui_interface: *mut c_void,
+    _label: *const c_char,
+    zone: *mut FaustFloat,
+) {
+    if ui_interface.is_null() || zone.is_null() {
+        return;
+    }
+    let capture = unsafe { &mut *ui_interface.cast::<UiCapture>() };
+    capture.button_zones.push(zone.cast::<c_void>());
+}
+
+unsafe extern "C" fn capture_soundfile(
+    ui_interface: *mut c_void,
+    _label: *const c_char,
+    url: *const c_char,
+    zone: *mut *mut c_void,
+) {
+    if ui_interface.is_null() || zone.is_null() {
+        return;
+    }
+    let capture = unsafe { &mut *ui_interface.cast::<UiCapture>() };
+    let url = if url.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(url) }.to_str().unwrap_or("")
+    };
+    capture
+        .soundfiles
+        .push(TestSoundfile::impulse_test_memory_reader(
+            soundfile_part_count(url),
+        ));
+    let soundfile = capture
+        .soundfiles
+        .last_mut()
+        .expect("just pushed soundfile")
+        .as_mut_ptr();
+    unsafe {
+        *zone = soundfile;
+    }
+}
+
+fn set_button_zones<T: From<f32>>(zones: &[*mut c_void], value: f32) {
+    for &zone in zones {
+        if !zone.is_null() {
+            unsafe {
+                *zone.cast::<T>() = T::from(value);
+            }
+        }
+    }
+}
+
+/// Counts the resource parts encoded in a Faust soundfile URL.
+fn soundfile_part_count(url: &str) -> usize {
+    let trimmed = url.trim();
+    let Some(open) = trimmed.find('{') else {
+        return usize::from(!trimmed.is_empty()).max(1);
+    };
+    let Some(close) = trimmed[open + 1..].find('}') else {
+        return 1;
+    };
+    let body = &trimmed[open + 1..open + 1 + close];
+    let count = body
+        .split(';')
+        .filter(|part| !part.trim().trim_matches('\'').is_empty())
+        .count();
+    count.max(1)
+}
+
+#[repr(C)]
+struct RawSoundfile {
+    buffers: *mut c_void,
+    lengths: *mut i32,
+    sample_rates: *mut i32,
+    offsets: *mut i32,
+    channels: i32,
+    parts: i32,
+    is_double: bool,
+}
+
+struct TestSoundfile {
+    raw: Box<RawSoundfile>,
+    #[allow(dead_code)]
+    lengths: Vec<i32>,
+    #[allow(dead_code)]
+    sample_rates: Vec<i32>,
+    #[allow(dead_code)]
+    offsets: Vec<i32>,
+    #[allow(dead_code)]
+    channel_ptrs: Vec<*mut f64>,
+    #[allow(dead_code)]
+    buffers: Vec<Vec<f64>>,
+}
+
+impl TestSoundfile {
+    fn impulse_test_memory_reader(num_real_parts: usize) -> Self {
+        const SOUND_CHAN: usize = 2;
+        const SOUND_LENGTH: usize = 4096;
+        const SOUND_SR: i32 = 44100;
+        const BUFFER_SIZE: usize = 1024;
+        const MAX_CHAN: usize = 64;
+        const MAX_SOUNDFILE_PARTS: usize = 256;
+
+        let real_parts = num_real_parts.min(MAX_SOUNDFILE_PARTS);
+        let mut lengths = Vec::with_capacity(MAX_SOUNDFILE_PARTS);
+        let mut sample_rates = Vec::with_capacity(MAX_SOUNDFILE_PARTS);
+        let mut offsets = Vec::with_capacity(MAX_SOUNDFILE_PARTS);
+        let mut offset = 0usize;
+
+        for _part in 0..real_parts {
+            lengths.push(SOUND_LENGTH as i32);
+            sample_rates.push(SOUND_SR);
+            offsets.push(offset as i32);
+            offset += SOUND_LENGTH;
+        }
+        for _part in real_parts..MAX_SOUNDFILE_PARTS {
+            lengths.push(BUFFER_SIZE as i32);
+            sample_rates.push(SOUND_SR);
+            offsets.push(offset as i32);
+            offset += BUFFER_SIZE;
+        }
+
+        let mut buffers = vec![vec![0.0; offset]; SOUND_CHAN];
+        for (part, part_offset) in offsets.iter().copied().enumerate().take(real_parts) {
+            let part_offset = part_offset as usize;
+            for sample in 0..SOUND_LENGTH {
+                let value = (part as f64
+                    + (2.0 * std::f64::consts::PI * sample as f64 / SOUND_LENGTH as f64))
+                    .sin();
+                for channel in buffers.iter_mut().take(SOUND_CHAN) {
+                    channel[part_offset + sample] = value;
+                }
+            }
+        }
+
+        let mut channel_ptrs = Vec::with_capacity(MAX_CHAN);
+        for channel in 0..MAX_CHAN {
+            channel_ptrs.push(buffers[channel % SOUND_CHAN].as_mut_ptr());
+        }
+
+        let raw = Box::new(RawSoundfile {
+            buffers: channel_ptrs.as_mut_ptr().cast::<c_void>(),
+            lengths: lengths.as_mut_ptr(),
+            sample_rates: sample_rates.as_mut_ptr(),
+            offsets: offsets.as_mut_ptr(),
+            channels: SOUND_CHAN as i32,
+            parts: real_parts as i32,
+            is_double: true,
+        });
+
+        Self {
+            raw,
+            lengths,
+            sample_rates,
+            offsets,
+            channel_ptrs,
+            buffers,
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.raw.as_mut() as *mut RawSoundfile as *mut c_void
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TestSoundfile, soundfile_part_count};
+
+    #[test]
+    fn soundfile_part_count_follows_sound_ui_menu_urls() {
+        assert_eq!(soundfile_part_count("{'sound1';'sound2'}"), 2);
+        assert_eq!(soundfile_part_count("sound1"), 1);
+        assert_eq!(soundfile_part_count(""), 1);
+    }
+
+    #[test]
+    fn test_soundfile_shares_channels_like_cpp_fixture() {
+        let mut sf = TestSoundfile::impulse_test_memory_reader(2);
+        assert_eq!(sf.lengths[0], 4096);
+        assert_eq!(sf.offsets[1], 4096);
+        assert_eq!(sf.channel_ptrs[0], sf.buffers[0].as_mut_ptr());
+        assert_eq!(sf.channel_ptrs[2], sf.buffers[0].as_mut_ptr());
     }
 }

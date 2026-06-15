@@ -37,18 +37,15 @@ KNOWN_FAIL_cpp :=
 KNOWN_FAIL_c :=
 
 # --- Cranelift JIT backend (64-bit) ------------------------------------------
-# Runs in `-double`; matches 84/93. Remaining gaps:
-#   bells karplus karplus32  excitation/delay path divergence
-#   UITester        button zones not driven by the runner yet
-#   reverb_designer reverb_tester  shared numerical drift
-#   sound           soundfile unsupported (JIT compute crashes)
-#   grain3          grain/table path (shared with the C backend)
+# Runs in `-double`.
+# (bells/karplus/karplus32, UITester, reverb_designer/reverb_tester, sound,
+#  and grain3 were fixed by matching the C++ impulse UI/soundfile harness and
+#  coercing mixed-type select2 branches before CLIF emission.)
 # (prefix, phasor were fixed by running the JIT instanceClear at init.)
 # (table2 was fixed by following the Faust C++ lifecycle contract: compiled
 #  instanceConstants initializes rwtable storage; compiled instanceClear does
 #  not zero it unless the FIR clear body says so.)
-KNOWN_FAIL_cranelift := bells karplus karplus32 UITester \
-                        reverb_designer reverb_tester sound grain3
+KNOWN_FAIL_cranelift :=
 
 # --- interpreter backend -----------------------------------------------------
 # The former UI/soundfile gaps were fixed by matching the C++ impulse harness:

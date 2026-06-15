@@ -1071,7 +1071,9 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             } => {
                 let cond_v = self.lower_expr(cond, Some(&FirType::Bool))?.value();
                 let then_v = self.lower_expr(then_value, Some(&typ))?.value();
+                let then_v = self.coerce_value_to_fir_type(then_v, &typ)?;
                 let else_v = self.lower_expr(else_value, Some(&typ))?.value();
+                let else_v = self.coerce_value_to_fir_type(else_v, &typ)?;
                 let bool_cond = self.fb.ins().icmp_imm(IntCC::NotEqual, cond_v, 0);
                 let out = self.fb.ins().select(bool_cond, then_v, else_v);
                 Ok(LoweredExpr::Scalar(out))

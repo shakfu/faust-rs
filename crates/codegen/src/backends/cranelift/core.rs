@@ -193,10 +193,7 @@ impl std::fmt::Debug for JitDspModule {
                 "instance_constants_entry_addr",
                 &self.instance_constants_entry_addr,
             )
-            .field(
-                "instance_clear_entry_addr",
-                &self.instance_clear_entry_addr,
-            )
+            .field("instance_clear_entry_addr", &self.instance_clear_entry_addr)
             .field(
                 "generated_functions_clif_count",
                 &self.generated_functions_clif.len(),

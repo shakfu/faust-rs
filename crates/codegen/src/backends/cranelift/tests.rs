@@ -662,12 +662,84 @@ fn build_subset_lowerable_compute_module() -> (fir::FirStore, FirId) {
     (store, module)
 }
 
+fn build_select2_mixed_bool_int_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let zero = b.int32(0);
+    let flag = b.declare_var("fFlag", FirType::Int32, AccessType::Struct, Some(zero));
+    let dsp_struct = b.block(&[flag]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let lhs = b.float64(1.0);
+    let rhs = b.float64(0.0);
+    let cond = b.binop(FirBinOp::Gt, lhs, rhs, FirType::Bool);
+    let previous = b.load_var("fFlag", AccessType::Struct, FirType::Int32);
+    let selected = b.select2(cond, cond, previous, FirType::Int32);
+    let store_flag = b.store_var("fFlag", AccessType::Struct, selected);
+    let compute_body = b.block(&[store_flag]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        0,
+        0,
+        "select2_mixed_bool_int",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
 #[test]
 /// Verifies the current arithmetic/control subset lowers without fallback.
 fn compile_module_lowers_requested_compute_subset_body() {
     let (store, module) = build_subset_lowerable_compute_module();
     let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .expect("subset fixture should compile with body lowering");
+    assert!(compiled.has_compute_entry());
+    assert!(compiled.compute_body_lowered());
+}
+
+#[test]
+fn compile_module_coerces_select2_branches_to_result_type() {
+    let (store, module) = build_select2_mixed_bool_int_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("mixed bool/int select2 should compile with body lowering");
     assert!(compiled.has_compute_entry());
     assert!(compiled.compute_body_lowered());
 }

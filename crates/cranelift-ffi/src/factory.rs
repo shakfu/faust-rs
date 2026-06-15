@@ -304,7 +304,9 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let fir = export_fir_from_signal_array_handle(source_name, signals)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
-            let double = parse_ffi_compile_args(args).map(|a| a.double).unwrap_or(false);
+            let double = parse_ffi_compile_args(args)
+                .map(|a| a.double)
+                .unwrap_or(false);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
@@ -363,7 +365,9 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let fir = export_fir_from_box_handle(source_name, box_expr)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
-            let double = parse_ffi_compile_args(args).map(|a| a.double).unwrap_or(false);
+            let double = parse_ffi_compile_args(args)
+                .map(|a| a.double)
+                .unwrap_or(false);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
@@ -878,7 +882,9 @@ fn preflight_compile_file_to_cranelift(
     argv: &[String],
     opt_level: c_int,
 ) -> Result<CompiledCraneliftFactory, String> {
-    let double = parse_ffi_compile_args(argv).map(|a| a.double).unwrap_or(false);
+    let double = parse_ffi_compile_args(argv)
+        .map(|a| a.double)
+        .unwrap_or(false);
     let compiler = FaustCompiler::new().with_real_type(if double {
         RealType::Float64
     } else {
@@ -914,7 +920,9 @@ fn preflight_compile_source_to_cranelift(
     opt_level: c_int,
     argv: &[String],
 ) -> Result<CompiledCraneliftFactory, String> {
-    let double = parse_ffi_compile_args(argv).map(|a| a.double).unwrap_or(false);
+    let double = parse_ffi_compile_args(argv)
+        .map(|a| a.double)
+        .unwrap_or(false);
     let compiler = FaustCompiler::new().with_real_type(if double {
         RealType::Float64
     } else {
