@@ -63,6 +63,13 @@ pub struct CraneliftOptions {
     /// `registerForeignFunction`, but uses an explicit name -> pointer map
     /// rather than process-global symbol lookup.
     pub extern_function_symbols: HashMap<String, *const c_void>,
+    /// Use 64-bit (`double`) precision for `FAUSTFLOAT` I/O, UI zones and state.
+    ///
+    /// When `true`, the abstract [`FirType::FaustFloat`] maps to Cranelift `F64`
+    /// (and an 8-byte/8-align struct field) instead of `F32`. This must match the
+    /// precision the FIR was produced with (`RealType::Float64`) so the internal
+    /// real type (`Float64`) and the I/O type agree.
+    pub double_precision: bool,
 }
 
 /// Stable error codes for the Cranelift backend scaffold and future lowering.
@@ -478,11 +485,14 @@ pub(crate) fn find_module_and_compute(
 pub(crate) fn fir_type_layout_scalar(
     ptr_size: u32,
     typ: &FirType,
+    double: bool,
 ) -> Result<LayoutScalar, CraneliftBackendError> {
     let s = match typ {
         FirType::Bool => LayoutScalar { size: 1, align: 1 },
         FirType::Int32 => LayoutScalar { size: 4, align: 4 },
-        FirType::Float32 | FirType::FaustFloat => LayoutScalar { size: 4, align: 4 },
+        FirType::Float32 => LayoutScalar { size: 4, align: 4 },
+        FirType::FaustFloat if double => LayoutScalar { size: 8, align: 8 },
+        FirType::FaustFloat => LayoutScalar { size: 4, align: 4 },
         FirType::Int64 | FirType::Float64 => LayoutScalar { size: 8, align: 8 },
         FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
             LayoutScalar {
@@ -499,12 +509,17 @@ pub(crate) fn fir_type_layout_scalar(
     Ok(s)
 }
 
-pub(crate) fn fir_type_to_clif_type(ptr_ty: Type, typ: &FirType) -> Result<Type, String> {
+pub(crate) fn fir_type_to_clif_type(
+    ptr_ty: Type,
+    typ: &FirType,
+    double: bool,
+) -> Result<Type, String> {
     match typ {
         FirType::Int32 => Ok(types::I32),
         FirType::Int64 => Ok(types::I64),
         FirType::Float32 => Ok(types::F32),
         FirType::Float64 => Ok(types::F64),
+        FirType::FaustFloat if double => Ok(types::F64),
         FirType::FaustFloat => Ok(types::F32),
         FirType::Bool => Ok(types::I8),
         FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => Ok(ptr_ty),
@@ -532,6 +547,7 @@ pub(crate) fn build_struct_layout_for_module(
     store: &FirStore,
     module: FirId,
     ptr_size: u32,
+    double: bool,
 ) -> Result<StructLayoutPlan, CraneliftBackendError> {
     let (dsp_struct, globals) = match match_fir(store, module) {
         FirMatch::Module {
@@ -578,7 +594,7 @@ pub(crate) fn build_struct_layout_for_module(
             } => match typ {
                 FirType::Array(inner, len) => {
                     let elem_type = *inner;
-                    let scalar = fir_type_layout_scalar(ptr_size, &elem_type)?;
+                    let scalar = fir_type_layout_scalar(ptr_size, &elem_type, double)?;
                     let len = u32::try_from(len).map_err(|_| {
                         CraneliftBackendError::unsupported_module_shape(
                             "Cranelift dsp* array field length does not fit in u32",
@@ -605,7 +621,7 @@ pub(crate) fn build_struct_layout_for_module(
                     struct_align = struct_align.max(scalar.align);
                 }
                 scalar_ty => {
-                    let scalar = fir_type_layout_scalar(ptr_size, &scalar_ty)?;
+                    let scalar = fir_type_layout_scalar(ptr_size, &scalar_ty, double)?;
                     offset = align_up(offset, scalar.align);
                     fields.push(StructFieldLayout {
                         name,
@@ -641,7 +657,7 @@ pub(crate) fn build_struct_layout_for_module(
                 elem_type,
                 values,
             } => {
-                let scalar = fir_type_layout_scalar(ptr_size, &elem_type)?;
+                let scalar = fir_type_layout_scalar(ptr_size, &elem_type, double)?;
                 let len = u32::try_from(values.len()).map_err(|_| {
                     CraneliftBackendError::unsupported_module_shape(
                         "Cranelift dsp* table length does not fit in u32",

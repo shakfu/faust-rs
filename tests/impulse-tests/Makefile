@@ -27,7 +27,7 @@ MAKE ?= make
 
 .PHONY: all reference interp c cpp cranelift wasm build tools help clean distclean
 
-all: cpp c interp
+all: cpp c interp cranelift
 
 reference:
 	$(MAKE) -f Make.ref reference
@@ -41,17 +41,18 @@ cpp:
 c:
 	$(MAKE) -f Make.gcc all outdir=c lang=c
 
-# Placeholders for backends not yet wired into the harness (see the porting
-# plan). They intentionally fail loudly until their runners land.
 cranelift:
-	@echo "cranelift backend runner not implemented yet (see porting plan)"; false
+	$(MAKE) -f Make.cranelift all outdir=cranelift
 
+# Placeholder for backends not yet wired into the harness (see the porting
+# plan). Intentionally fails loudly until the runner lands.
 wasm:
 	@echo "wasm/wast backend runner not implemented yet (see porting plan)"; false
 
 # Build the faust-rs binaries the harness drives.
 build:
-	cd ../.. && cargo build --release -p compiler -p impulse-runner
+	cd ../.. && cargo build --release -p compiler -p impulse-runner \
+		-p cranelift-ffi --bin impulse_cranelift
 
 tools: $(COMPARE)
 
@@ -70,9 +71,10 @@ help:
 	@echo "  build      : cargo build the faust-rs compiler + impulse runner"
 	@echo "  reference  : generate the genuine C++ reference .ir files (oracle)"
 	@echo "  interp     : check the faust-rs interpreter backend (scalar prefix)"
+	@echo "  cranelift  : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
 	@echo "  cpp        : check the faust-rs C++ backend (full 4-pass)"
 	@echo "  c          : check the faust-rs C backend (full 4-pass)"
-	@echo "  all        : cpp + c + interp"
+	@echo "  all        : cpp + c + interp + cranelift"
 	@echo "  tools      : build the filesCompare comparator"
 	@echo "  clean      : remove ir/ and build/"
 	@echo "  distclean  : also remove reference/"

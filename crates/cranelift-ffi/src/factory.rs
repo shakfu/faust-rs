@@ -25,7 +25,7 @@ use codegen::backends::cranelift::{
 };
 use compiler::{
     AuxFileArtifact, Compiler as FaustCompiler, ExpandDspRequest, GenerateAuxFilesRequest,
-    SignalFirLane, default_import_search_paths,
+    RealType, SignalFirLane, default_import_search_paths,
 };
 use fir::{FirMatch, match_fir};
 use utils::{
@@ -242,7 +242,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
             }
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
-            let compiled = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
+            let compiled =
+                preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level, args)?;
             build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: name_app,
@@ -303,7 +304,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let fir = export_fir_from_signal_array_handle(source_name, signals)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
-            let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+            let double = parse_ffi_compile_args(args).map(|a| a.double).unwrap_or(false);
+            let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
@@ -361,7 +363,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let fir = export_fir_from_box_handle(source_name, box_expr)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
-            let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+            let double = parse_ffi_compile_args(args).map(|a| a.double).unwrap_or(false);
+            let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
@@ -875,7 +878,12 @@ fn preflight_compile_file_to_cranelift(
     argv: &[String],
     opt_level: c_int,
 ) -> Result<CompiledCraneliftFactory, String> {
-    let compiler = FaustCompiler::new();
+    let double = parse_ffi_compile_args(argv).map(|a| a.double).unwrap_or(false);
+    let compiler = FaustCompiler::new().with_real_type(if double {
+        RealType::Float64
+    } else {
+        RealType::Float32
+    });
     let search_paths = collect_search_paths_for_file(path, argv);
     let fir = compiler
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
@@ -889,7 +897,7 @@ fn preflight_compile_file_to_cranelift(
         num_inputs,
         num_outputs,
     };
-    let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+    let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
     Ok(CompiledCraneliftFactory {
         fir,
         jit,
@@ -904,8 +912,14 @@ fn preflight_compile_source_to_cranelift(
     source_name: &str,
     source: &str,
     opt_level: c_int,
+    argv: &[String],
 ) -> Result<CompiledCraneliftFactory, String> {
-    let compiler = FaustCompiler::new();
+    let double = parse_ffi_compile_args(argv).map(|a| a.double).unwrap_or(false);
+    let compiler = FaustCompiler::new().with_real_type(if double {
+        RealType::Float64
+    } else {
+        RealType::Float32
+    });
     let fir = compiler
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
@@ -918,7 +932,7 @@ fn preflight_compile_source_to_cranelift(
         num_inputs,
         num_outputs,
     };
-    let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+    let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
     Ok(CompiledCraneliftFactory {
         fir,
         jit,
@@ -928,14 +942,19 @@ fn preflight_compile_source_to_cranelift(
 }
 
 /// Compiles one FIR module to Cranelift using one C ABI opt-level request.
+///
+/// `double` must match the precision the FIR was produced with so the backend
+/// resolves `FAUSTFLOAT` to the same width (`F64` under `-double`).
 fn compile_fir_module_to_cranelift(
     fir: &BoxFfiFirModule,
     opt_level: c_int,
+    double: bool,
 ) -> Result<JitDspModule, String> {
     let extern_function_symbols = snapshot_registered_foreign_functions();
     let options = CraneliftOptions {
         opt_level: map_c_opt_level(opt_level),
         extern_function_symbols,
+        double_precision: double,
         ..CraneliftOptions::default()
     };
     generate_cranelift_module(&fir.store, fir.module, &options).map_err(|e| e.to_string())
@@ -1113,7 +1132,7 @@ fn rebuild_factory_from_source(
     expected_sha: &str,
     expected_compile_options: &str,
 ) -> Result<CraneliftDspFactory, String> {
-    let compiled = preflight_compile_source_to_cranelift(name, source, opt_level)?;
+    let compiled = preflight_compile_source_to_cranelift(name, source, opt_level, argv)?;
     let rebuilt = build_scaffold_factory_common(
         FactoryBuildSpec {
             name,

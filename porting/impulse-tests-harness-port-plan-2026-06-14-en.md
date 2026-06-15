@@ -179,10 +179,23 @@ suite turns them into actionable backend bugs. Their first-divergence deltas:
 - Remaining curated divergences are real backend bugs to fix (interp delay
   lines/primitives, `c` `grain3`) — removing a `KNOWN_FAIL_*` entry re-covers it.
 
-### Phase 4 — cranelift backend
-- Add `--backend cranelift` to `impulse-runner` (or a sibling binary) using the
-  in-process JIT (`cranelift-ffi`); scalar pass + `-part`. Skip cases hitting
-  `diagnose_cranelift_compute_subset_gap`.
+### Phase 4 — cranelift backend (DONE, 64-bit)
+- `crates/cranelift-ffi/src/bin/impulse_cranelift.rs` runs the in-process JIT
+  (scalar pass + `-part`), wired via `Make.cranelift`.
+- The Cranelift backend was f32-only; it was extended to **64-bit** so it can be
+  compared directly against the `-double` reference. `FirType::FaustFloat` now
+  resolves to `F64`/8-byte under a new `CraneliftOptions::double_precision`,
+  threaded through the type map, struct layout, static-table data, op/const
+  selection (`canon_real`), and the C-API factory (which sets
+  `RealType::Float64` from `-double`). The runtime UI-zone writer
+  (`apply_control_defaults`) now writes a `FaustFloat` zone at the field's actual
+  width (the f32-into-8-byte bug that corrupted slider inits, e.g. freeverb).
+- Result: **81/93** match the `-double` reference (was f32-only before; better
+  than interp's 74). Curated `KNOWN_FAIL_cranelift`: `prefix`/`phasor`
+  (prefix-primitive gap, upstream bug #1071), `table2` (rwtable), `bells`,
+  `karplus`/`karplus32`, `UITester` (needs button driving), `reverb_designer`/
+  `reverb_tester` (shared drift), `sound` (soundfile JIT crash), `grain3`.
+- No f32 regression (cranelift-ffi 31 + codegen 251 tests still pass).
 
 ### Phase 5 — wasm / wast backends
 - `Make.wasm`: `faust-rs -lang wasm` → a Node harness driving the scalar pass

@@ -744,11 +744,21 @@ fn apply_control_defaults(
             continue;
         };
         match &field.kind {
-            StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat) => {
+            StructFieldKind::Scalar(FirType::Float32) => {
                 write_f32(dsp_state, field.offset_bytes as usize, *value);
             }
+            // A `FaustFloat` control zone resolves to f32 or f64 depending on the
+            // precision the backend compiled with; write it at the field's actual
+            // width so a `-double` zone (8 bytes) is not corrupted by an f32 store.
+            StructFieldKind::Scalar(FirType::FaustFloat) => {
+                if field.size_bytes >= 8 {
+                    write_f64(dsp_state, field.offset_bytes as usize, f64::from(*value));
+                } else {
+                    write_f32(dsp_state, field.offset_bytes as usize, *value);
+                }
+            }
             StructFieldKind::Scalar(FirType::Float64) => {
-                write_f64(dsp_state, field.offset_bytes as usize, *value as f64);
+                write_f64(dsp_state, field.offset_bytes as usize, f64::from(*value));
             }
             StructFieldKind::Scalar(FirType::Int32) => {
                 write_i32(dsp_state, field.offset_bytes as usize, *value as i32);

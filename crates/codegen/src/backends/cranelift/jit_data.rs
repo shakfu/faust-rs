@@ -20,6 +20,7 @@ pub(crate) fn define_static_tables_in_jit(
     store: &FirStore,
     module: FirId,
     jit: &mut JITModule,
+    double: bool,
 ) -> Result<HashMap<String, DataId>, CraneliftBackendError> {
     let static_decls_block = match match_fir(store, module) {
         FirMatch::Module { static_decls, .. } => static_decls,
@@ -56,7 +57,9 @@ pub(crate) fn define_static_tables_in_jit(
                 }
                 buf.into_boxed_slice()
             }
-            FirType::Float32 | FirType::FaustFloat => {
+            FirType::Float32 | FirType::FaustFloat
+                if !(matches!(elem_type, FirType::FaustFloat) && double) =>
+            {
                 let mut buf = Vec::with_capacity(values.len() * 4);
                 for &v in &values {
                     match match_fir(store, v) {
@@ -71,7 +74,8 @@ pub(crate) fn define_static_tables_in_jit(
                 }
                 buf.into_boxed_slice()
             }
-            FirType::Float64 => {
+            // `FaustFloat` static table under `-double`: emit 64-bit elements.
+            FirType::Float64 | FirType::FaustFloat => {
                 let mut buf = Vec::with_capacity(values.len() * 8);
                 for &v in &values {
                     match match_fir(store, v) {
@@ -95,6 +99,7 @@ pub(crate) fn define_static_tables_in_jit(
 
         let align: u64 = match &elem_type {
             FirType::Float64 | FirType::Int64 => 8,
+            FirType::FaustFloat if double => 8,
             _ => 4,
         };
 
@@ -171,6 +176,7 @@ pub(crate) fn declare_jit_function(
     jit: &mut JITModule,
     static_data_ids: &HashMap<String, DataId>,
     extern_data_ids: &HashMap<String, DataId>,
+    double: bool,
 ) -> Result<(String, usize, bool, String), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
     let function_symbol_name = symbol_name.to_owned();
@@ -200,7 +206,7 @@ pub(crate) fn declare_jit_function(
     ctx.func.signature.params = arg_types
         .iter()
         .map(|typ| {
-            let clif_ty = fir_type_to_clif_type(ptr_ty, typ).map_err(|e| {
+            let clif_ty = fir_type_to_clif_type(ptr_ty, typ, double).map_err(|e| {
                 CraneliftBackendError::unsupported_module_shape(format!(
                     "unsupported JIT helper arg type for `{function_name}`: {e}"
                 ))
@@ -243,6 +249,7 @@ pub(crate) fn declare_jit_function(
                     static_data_ids,
                     extern_data_ids,
                     extern_function_symbols,
+                    double,
                 },
                 &mut fb,
                 function_decl,

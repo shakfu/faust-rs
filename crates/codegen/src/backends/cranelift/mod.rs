@@ -25,7 +25,8 @@
 //! # Design notes (current phase)
 //! - The backend prioritizes compile-path integration and diagnosability over
 //!   runtime parity completeness.
-//! - `FAUSTFLOAT` is currently mapped to `f32` in the Cranelift lowering path.
+//! - `FAUSTFLOAT` maps to `f32` by default, or `f64` when
+//!   `CraneliftOptions::double_precision` is set (`-double`).
 //! - The exported FFI/runtime layer (`cranelift_dsp`) can consume diagnostic
 //!   metadata such as whether `compute` was really lowered or stubbed.
 

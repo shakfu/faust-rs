@@ -171,6 +171,8 @@ pub(crate) struct ComputeLowering<'a, 'b, 'c> {
     /// Registered host addresses for foreign function symbols resolved through
     /// `CraneliftOptions::extern_function_symbols`.
     pub(crate) extern_function_symbols: &'a HashMap<String, *const c_void>,
+    /// 64-bit (`double`) precision flag: resolves `FaustFloat` to `F64`/8 bytes.
+    double: bool,
     _marker: std::marker::PhantomData<&'c ()>,
 }
 
@@ -203,7 +205,18 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     ///
     /// This reflects current bring-up decisions, especially `FAUSTFLOAT -> F32`.
     fn fir_type_to_clif(&self, typ: &FirType) -> Result<Type, LoweringError> {
-        fir_type_to_clif_type(self.ptr_ty, typ).map_err(LoweringError::Unsupported)
+        fir_type_to_clif_type(self.ptr_ty, typ, self.double).map_err(LoweringError::Unsupported)
+    }
+
+    /// Resolves the abstract `FaustFloat` type to its concrete real type for the
+    /// active precision (`Float64` under `-double`, else `Float32`), so type-keyed
+    /// op/const selection below routes `FaustFloat` to the matching width.
+    fn canon_real(&self, typ: &FirType) -> FirType {
+        match typ {
+            FirType::FaustFloat if self.double => FirType::Float64,
+            FirType::FaustFloat => FirType::Float32,
+            other => other.clone(),
+        }
     }
 
     /// Returns the CLIF `dsp*` base pointer argument from the local environment.
@@ -290,7 +303,8 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         &mut self,
         typ: &FirType,
     ) -> Result<LoweredExpr, LoweringError> {
-        match typ {
+        let typ = self.canon_real(typ);
+        match &typ {
             FirType::Int32 => Ok(LoweredExpr::Scalar(self.fb.ins().iconst(types::I32, 0))),
             FirType::Int64 => Ok(LoweredExpr::Scalar(self.fb.ins().iconst(types::I64, 0))),
             FirType::Bool => Ok(LoweredExpr::Scalar(self.fb.ins().iconst(types::I8, 0))),
@@ -1127,6 +1141,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         rhs: FirId,
         typ: &FirType,
     ) -> Result<LoweredExpr, LoweringError> {
+        // Resolve `FaustFloat` to its concrete real width so type-keyed op
+        // selection below uses f32/f64 ops consistently under `-double`.
+        let canon = self.canon_real(typ);
+        let typ = &canon;
         let l = self.lower_expr(lhs, Some(typ))?.value();
         let r = self.lower_expr(rhs, Some(typ))?.value();
         let lty = self.fb.func.dfg.value_type(l);
@@ -1307,6 +1325,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         args: &[FirId],
         typ: &FirType,
     ) -> Result<LoweredExpr, LoweringError> {
+        // Resolve `FaustFloat` to its concrete real width so the f32/f64 math
+        // arms below are selected consistently under `-double`.
+        let canon = self.canon_real(typ);
+        let typ = &canon;
         match (name, typ, args) {
             ("abs", FirType::Int32, [x]) => {
                 let xv = self.lower_expr(*x, Some(typ))?.value();
@@ -1713,6 +1735,8 @@ pub(crate) struct FunctionBodyLoweringContext<'a> {
     pub(crate) static_data_ids: &'a HashMap<String, DataId>,
     pub(crate) extern_data_ids: &'a HashMap<String, DataId>,
     pub(crate) extern_function_symbols: &'a HashMap<String, *const c_void>,
+    /// 64-bit (`double`) precision: resolves `FaustFloat` to `F64`.
+    pub(crate) double: bool,
 }
 
 pub(crate) fn try_lower_function_body(
@@ -1771,6 +1795,7 @@ pub(crate) fn try_lower_function_body(
         static_data_ids: cx.static_data_ids,
         extern_data_ids: cx.extern_data_ids,
         extern_function_symbols: cx.extern_function_symbols,
+        double: cx.double,
         _marker: std::marker::PhantomData,
     };
     lowering.lower_stmt(body)?;

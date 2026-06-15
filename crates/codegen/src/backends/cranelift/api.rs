@@ -92,10 +92,12 @@ pub(crate) fn try_generate_cranelift_module(
     }
     let mut jit = JITModule::new(jit_builder);
     let ptr_size = jit.target_config().pointer_type().bytes();
-    let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
+    let struct_layout =
+        build_struct_layout_for_module(store, module, ptr_size, options.double_precision)?;
     // Define file-scope static tables as JIT read-only data objects before
     // compiling `compute`, so function bodies can reference them by DataId.
-    let static_data_ids = define_static_tables_in_jit(store, module, &mut jit)?;
+    let static_data_ids =
+        define_static_tables_in_jit(store, module, &mut jit, options.double_precision)?;
     let extern_data_ids =
         declare_extern_data_symbols_in_jit(&mut jit, &options.extern_data_symbols)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered, compute_clif_text) =
@@ -111,6 +113,7 @@ pub(crate) fn try_generate_cranelift_module(
             &mut jit,
             &static_data_ids,
             &extern_data_ids,
+            options.double_precision,
         )?;
     let mut generated_functions_clif = vec![(compute_symbol_name.clone(), compute_clif_text)];
     let instance_constants_entry_addr =
@@ -129,6 +132,7 @@ pub(crate) fn try_generate_cranelift_module(
                         &mut jit,
                         &static_data_ids,
                         &extern_data_ids,
+                        options.double_precision,
                     )?;
                 generated_functions_clif.push((
                     format!("{module_name}::instanceConstants"),

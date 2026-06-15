@@ -27,6 +27,8 @@ See the design write-up in
      the scalar impulse pass (first 15000 frames) and is compared as a **prefix**
      with `filesCompare -part` (same approach the C++ suite uses for its Rust
      target).
+   - `make cranelift` — the faust-rs Cranelift JIT runs in-process via
+     `impulse_cranelift` in 64-bit (`-double`), scalar prefix, `-part`.
 
 ## Requirements
 
@@ -67,6 +69,7 @@ There is no `reference` rebuild on every run: delete `reference/` (or
 | `Make.ref` | genuine C++ 4-pass reference generation |
 | `Make.gcc` | faust-rs C / C++ backends (full 4-pass, exact compare) |
 | `Make.interp` | faust-rs interpreter backend (scalar prefix, `-part`) |
+| `Make.cranelift` | faust-rs Cranelift JIT backend (scalar prefix, 64-bit, `-part`) |
 | `tools/filesCompare.cpp` | the comparator |
 | `reference/`, `ir/`, `build/` | generated, gitignored |
 
@@ -81,6 +84,7 @@ Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
 | C++ (full 4-pass, exact) | **92** | 0 | 1 (`subcontainer1`) |
 | C (full 4-pass, exact) | **87** | 5 | 1 (`subcontainer1`) |
 | interpreter (scalar prefix, `-part`) | **74** | 18 | 1 (`subcontainer1`) |
+| Cranelift JIT (scalar prefix, `-part`, 64-bit) | **81** | 9 | 3 (incl. `sound` crash) |
 
 The C++ backend reproduces the full 60000-frame reference exactly on 92/93 DSPs,
 so the remaining mismatches are backend-specific divergences the harness
@@ -88,7 +92,8 @@ pinpoints. Each was classified by its *max* delta and either given a per-DSP
 tolerance (bounded rounding) or listed as a known failure (real gap) in
 [`known.mk`](known.mk) / [`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those
 applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
-(91), `make interp` (78) build and pass; excluded cases (e.g. interpreter
-delay-line handling in `comb_delay*`, C `grain3`) are documented to fix later.
+(91), `make cranelift` (81), `make interp` (78) build and pass; excluded cases
+(e.g. interpreter delay-line handling in `comb_delay*`, C `grain3`) are
+documented to fix later.
 
 cranelift and wasm/wast runners are planned.
