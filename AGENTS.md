@@ -76,6 +76,15 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - Document known gaps and temporary scaffolding in `JOURNAL.md`.
 - Follow the canonical pipeline described in the plan:
   - `parse -> boxes -> eval -> propagate -> normalize -> type/interval -> transform -> fir -> backend`
+- New backends must preserve the Faust C++ lifecycle contract documented in
+  `porting/backend-lifecycle-contract-en.md`. Before a backend is added to
+  impulse, golden, or parity gates, it must include a backend-specific lifecycle
+  conformance test proving:
+  - `init = classInit -> instanceInit`;
+  - `instanceInit = instanceConstants -> instanceResetUserInterface -> instanceClear`;
+  - `instanceInit` does not call `classInit`;
+  - runtime code does not duplicate `instanceClear` with ad-hoc field clearing;
+  - compiled `instanceConstants` is authoritative when present.
 
 ## 6. Scope and Non-Goals (Frozen)
 
