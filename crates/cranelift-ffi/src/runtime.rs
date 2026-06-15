@@ -3,9 +3,8 @@
 //! This replaces the previous interpreter-sidecar dependency for UI/metadata
 //! dispatch and basic instance initialization/reset behavior.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use codegen::backends::cranelift::StructFieldKind;
 use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
 
 /// Concrete initializer payload extracted from FIR globals/struct fields.
@@ -111,7 +110,6 @@ pub(crate) enum RuntimeUiItem {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RuntimeDescriptor {
     pub(crate) field_inits: HashMap<String, RuntimeFieldInit>,
-    pub(crate) clear_fields: HashSet<String>,
     pub(crate) control_defaults: HashMap<String, f32>,
     /// Ordered `buildUserInterface` callback stream reconstructed from FIR.
     ///
@@ -175,9 +173,6 @@ pub(crate) fn build_runtime_descriptor(
                     if name == "fSampleRate" || name == "fSamplingFreq" {
                         desc.sample_rate_fields.push(name.clone());
                     }
-                    if should_clear_field(&name, &StructFieldKind::Scalar(typ)) {
-                        desc.clear_fields.insert(name);
-                    }
                 }
                 FirMatch::DeclareTable {
                     name,
@@ -187,15 +182,6 @@ pub(crate) fn build_runtime_descriptor(
                 } => {
                     if let Some(init) = decode_table_values(store, &elem_type, &values) {
                         desc.field_inits.insert(name.clone(), init);
-                    }
-                    if should_clear_field(
-                        &name,
-                        &StructFieldKind::Table {
-                            elem_type,
-                            len: values.len() as u32,
-                        },
-                    ) {
-                        desc.clear_fields.insert(name);
                     }
                 }
                 _ => {}
@@ -232,25 +218,6 @@ pub(crate) fn build_runtime_descriptor(
     }
 
     Ok(desc)
-}
-
-/// Returns whether one struct field should be zero/reset during `instanceClear`.
-///
-/// The policy deliberately preserves host-controlled state such as sample rate
-/// while clearing recursive carriers, delay buffers, and explicit tables.
-fn should_clear_field(name: &str, kind: &StructFieldKind) -> bool {
-    if name == "fSampleRate" || name == "fSamplingFreq" {
-        return false;
-    }
-    if matches!(kind, StructFieldKind::Table { .. }) {
-        return true;
-    }
-    name == "IOTA"
-        || name == "fIOTA"
-        || name.starts_with("fRec")
-        || name.starts_with("iRec")
-        || name.starts_with("fVec")
-        || name.starts_with("iVec")
 }
 
 /// Collects UI declaration items from FIR `buildUserInterface`.

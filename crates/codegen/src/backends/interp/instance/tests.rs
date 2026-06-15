@@ -46,6 +46,67 @@ fn make_factory_with_dsp_block(
     )
 }
 
+fn append_lifecycle_digit_block(arena: &mut FbcBlockArena<f32>, digit: i32) -> BlockId {
+    let mut block = FbcBlock::new();
+    block.push(FbcInstruction::with_values_and_offsets(
+        FbcOpcode::LoadInt,
+        0,
+        0.0,
+        2,
+        -1,
+    ));
+    block.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 10, 0.0));
+    block.push(FbcInstruction::new(FbcOpcode::MultInt));
+    block.push(FbcInstruction::with_values(
+        FbcOpcode::Int32Value,
+        digit,
+        0.0,
+    ));
+    block.push(FbcInstruction::new(FbcOpcode::AddInt));
+    block.push(FbcInstruction::with_values_and_offsets(
+        FbcOpcode::StoreInt,
+        0,
+        0.0,
+        2,
+        -1,
+    ));
+    block.push(FbcInstruction::new(FbcOpcode::Return));
+    arena.alloc(block)
+}
+
+fn make_factory_with_lifecycle_blocks(arena: &mut FbcBlockArena<f32>) -> FbcDspFactory<f32> {
+    let class_init = append_lifecycle_digit_block(arena, 1);
+    let instance_constants = append_lifecycle_digit_block(arena, 1);
+    let reset_ui = append_lifecycle_digit_block(arena, 2);
+    let clear = append_lifecycle_digit_block(arena, 3);
+    let compute_control = trivial_block(arena);
+    let dsp = trivial_block(arena);
+
+    FbcDspFactory::new(
+        "lifecycle_test",
+        "",
+        "",
+        INTERP_FILE_VERSION,
+        0,
+        0,
+        16,
+        16,
+        0,
+        1,
+        -1,
+        0,
+        std::mem::take(arena),
+        vec![],
+        vec![],
+        class_init,
+        instance_constants,
+        reset_ui,
+        clear,
+        compute_control,
+        dsp,
+    )
+}
+
 #[test]
 fn instance_lifecycle() {
     let mut arena = FbcBlockArena::<f32>::new();
@@ -61,6 +122,26 @@ fn instance_lifecycle() {
     assert!(instance.is_initialized());
     assert_eq!(instance.get_sample_rate(), 44100);
     assert_eq!(instance.cycle(), 0);
+}
+
+#[test]
+fn instance_lifecycle_order_matches_cpp_backend_contract() {
+    let mut arena = FbcBlockArena::<f32>::new();
+    let mut factory = make_factory_with_lifecycle_blocks(&mut arena);
+
+    let mut instance = FbcDspInstance::new(&mut factory);
+    instance.init(48_000);
+    assert_eq!(
+        instance.executor.int_heap[2], 1123,
+        "init must execute classInit, then instanceConstants, resetUI, clear"
+    );
+
+    let mut instance = FbcDspInstance::new(&mut factory);
+    instance.instance_init(48_000);
+    assert_eq!(
+        instance.executor.int_heap[2], 123,
+        "instanceInit must not execute classInit"
+    );
 }
 
 #[test]

@@ -169,6 +169,7 @@ pub unsafe extern "C" fn initCCraneliftDSPInstance(
             return;
         }
         (*dsp).initialized = true;
+        class_init_instance(dsp);
         instanceInitCCraneliftDSPInstance(dsp, sample_rate);
     }
 }
@@ -186,7 +187,6 @@ pub unsafe extern "C" fn instanceInitCCraneliftDSPInstance(
         if dsp.is_null() {
             return;
         }
-        class_init_instance(dsp);
         instanceConstantsCCraneliftDSPInstance(dsp, sample_rate);
         instanceResetUserInterfaceCCraneliftDSPInstance(dsp);
         instanceClearCCraneliftDSPInstance(dsp);
@@ -213,13 +213,6 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
         let Some(jit) = factory.compiled_jit.as_ref() else {
             return;
         };
-        apply_constant_inits(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
-        apply_sample_rate(
-            &mut (*dsp).dsp_state,
-            jit.struct_layout(),
-            &factory.runtime,
-            sample_rate,
-        );
         if let Some(instance_constants) =
             instance_constants_fn_from_addr(jit.instance_constants_entry_addr())
         {
@@ -227,6 +220,14 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
             if !dsp_ptr.is_null() {
                 instance_constants(dsp_ptr, sample_rate);
             }
+        } else {
+            apply_constant_inits(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
+            apply_sample_rate(
+                &mut (*dsp).dsp_state,
+                jit.struct_layout(),
+                &factory.runtime,
+                sample_rate,
+            );
         }
     }
 }
@@ -313,42 +314,13 @@ pub unsafe extern "C" fn instanceClearCCraneliftDSPInstance(dsp: *mut CraneliftD
         let Some(jit) = factory.compiled_jit.as_ref() else {
             return;
         };
-        clear_runtime_state(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
-        // Run the JIT-compiled `instanceClear`: it resets state buffers and, for
-        // some DSPs (e.g. `prefix`), fills them with non-zero initial values that
-        // the descriptor-based `clear_runtime_state` does not capture.
+        // Match the generated C++ backend: `instanceClear` is the compiled FIR
+        // clear body. Runtime-side clearing would duplicate or contradict that
+        // backend contract.
         if let Some(instance_clear) = instance_clear_fn_from_addr(jit.instance_clear_entry_addr()) {
             let dsp_ptr = (*dsp).dsp_state.as_mut_ptr().cast::<c_void>();
             if !dsp_ptr.is_null() {
                 instance_clear(dsp_ptr);
-            }
-        }
-        for name in &factory.runtime.sample_rate_fields {
-            if let Some(field) = jit.struct_layout().field(name) {
-                match &field.kind {
-                    StructFieldKind::Scalar(FirType::Int32) => {
-                        write_i32(
-                            &mut (*dsp).dsp_state,
-                            field.offset_bytes as usize,
-                            (*dsp).sample_rate,
-                        );
-                    }
-                    StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat) => {
-                        write_f32(
-                            &mut (*dsp).dsp_state,
-                            field.offset_bytes as usize,
-                            (*dsp).sample_rate as f32,
-                        );
-                    }
-                    StructFieldKind::Scalar(FirType::Float64) => {
-                        write_f64(
-                            &mut (*dsp).dsp_state,
-                            field.offset_bytes as usize,
-                            (*dsp).sample_rate as f64,
-                        );
-                    }
-                    _ => {}
-                }
             }
         }
         (*dsp).cycle = 0;
@@ -722,29 +694,6 @@ fn soundfile_zone_ptr(
     }
 }
 
-/// Clears the runtime-managed subset of the `dsp*` state buffer.
-///
-/// The exact clear set is precomputed in [`RuntimeDescriptor`] so instance code
-/// does not need to infer policy from field names repeatedly.
-fn clear_runtime_state(
-    dsp_state: &mut DspStateBuffer,
-    layout: &StructLayoutPlan,
-    runtime: &RuntimeDescriptor,
-) {
-    for name in &runtime.clear_fields {
-        let Some(field) = layout.field(name) else {
-            continue;
-        };
-        unsafe {
-            std::ptr::write_bytes(
-                dsp_state.ptr_at(field.offset_bytes as usize),
-                0_u8,
-                field.size_bytes as usize,
-            );
-        }
-    }
-}
-
 /// Restores UI control defaults recorded from FIR `buildUserInterface`.
 fn apply_control_defaults(
     dsp_state: &mut DspStateBuffer,
@@ -894,10 +843,79 @@ mod tests {
             .expect("workspace root")
     }
 
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source.find(signature).expect("function signature");
+        let open = source[start..].find('{').expect("function body open") + start;
+        let mut depth = 0_i32;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..=open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("function body should close");
+    }
+
     #[test]
     fn instance_status_is_stable() {
         let _guard = crate::test_serial_guard();
         assert_eq!(instance_status(), "cranelift-ffi instance runtime");
+    }
+
+    #[test]
+    fn lifecycle_scaffold_matches_faust_cpp_backend_contract() {
+        let source = include_str!("instance.rs");
+        let init_body = function_body(
+            source,
+            "pub unsafe extern \"C\" fn initCCraneliftDSPInstance",
+        );
+        let init_class_i = init_body
+            .find("class_init_instance(dsp);")
+            .expect("init should call classInit");
+        let init_instance_i = init_body
+            .find("instanceInitCCraneliftDSPInstance(dsp, sample_rate);")
+            .expect("init should call instanceInit");
+        assert!(
+            init_class_i < init_instance_i,
+            "init must call classInit before instanceInit"
+        );
+
+        let instance_init_body = function_body(
+            source,
+            "pub unsafe extern \"C\" fn instanceInitCCraneliftDSPInstance",
+        );
+        assert!(
+            !instance_init_body.contains("class_init_instance(dsp);"),
+            "instanceInit must not call classInit"
+        );
+        let constants_i = instance_init_body
+            .find("instanceConstantsCCraneliftDSPInstance(dsp, sample_rate);")
+            .expect("instanceInit should call instanceConstants");
+        let reset_i = instance_init_body
+            .find("instanceResetUserInterfaceCCraneliftDSPInstance(dsp);")
+            .expect("instanceInit should call instanceResetUserInterface");
+        let clear_i = instance_init_body
+            .find("instanceClearCCraneliftDSPInstance(dsp);")
+            .expect("instanceInit should call instanceClear");
+        assert!(
+            constants_i < reset_i && reset_i < clear_i,
+            "instanceInit must call constants, resetUI, clear in order"
+        );
+
+        let clear_body = function_body(
+            source,
+            "pub unsafe extern \"C\" fn instanceClearCCraneliftDSPInstance",
+        );
+        assert!(
+            !clear_body.contains("clear_runtime_state"),
+            "instanceClear must delegate to the compiled FIR body, not a runtime-side clear policy"
+        );
     }
 
     unsafe extern "C" fn capture_meta(ctx: *mut c_void, key: *const c_char, value: *const c_char) {

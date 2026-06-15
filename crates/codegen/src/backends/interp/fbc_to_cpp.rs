@@ -328,9 +328,10 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         writeln!(out, "\t}}\n").unwrap();
 
         // ── instanceInit ─────────────────────────────────────────────────
-        // Pure orchestrator — no inline code, matching dsp.h call sequence.
+        // Pure orchestrator — no inline code, matching the generated C++
+        // backend: constants, UI reset, then clear. `classInit` belongs to
+        // `init`, not `instanceInit`.
         writeln!(out, "\tvoid instanceInit(int sample_rate) override {{").unwrap();
-        writeln!(out, "\t\tclassInit(sample_rate);").unwrap();
         writeln!(out, "\t\tinstanceConstants(sample_rate);").unwrap();
         writeln!(out, "\t\tinstanceResetUserInterface();").unwrap();
         writeln!(out, "\t\tinstanceClear();").unwrap();
@@ -338,6 +339,7 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
 
         // ── init ────────────────────────────────────────────────────────
         writeln!(out, "\tvoid init(int sample_rate) override {{").unwrap();
+        writeln!(out, "\t\tclassInit(sample_rate);").unwrap();
         writeln!(out, "\t\tinstanceInit(sample_rate);").unwrap();
         writeln!(out, "\t}}\n").unwrap();
 

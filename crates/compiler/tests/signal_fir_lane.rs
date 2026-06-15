@@ -555,11 +555,35 @@ fn fastlane_cpp_lifecycle_order_matches_faust_instance_init_flow() {
         SignalFirLane::TransformFastLane,
     );
     assert!(fast.contains("void instanceInit(int sample_rate)"));
+    let init_sig = "virtual void init(int sample_rate) {";
+    let init_start = fast
+        .find(init_sig)
+        .expect("init signature should be present");
+    let init_body = &fast[init_start..];
+    let init_class_i = init_body
+        .find("classInit(sample_rate);")
+        .expect("init should call classInit");
+    let init_instance_i = init_body
+        .find("instanceInit(sample_rate);")
+        .expect("init should call instanceInit");
+    assert!(
+        init_class_i < init_instance_i,
+        "init should call classInit before instanceInit"
+    );
+
     let instance_init_sig = "virtual void instanceInit(int sample_rate) {";
     let instance_init_start = fast
         .find(instance_init_sig)
         .expect("instanceInit signature should be present");
     let instance_init_body = &fast[instance_init_start..];
+    let instance_init_end = instance_init_body
+        .find("\n    }")
+        .expect("instanceInit body should close");
+    let instance_init_body = &instance_init_body[..instance_init_end];
+    assert!(
+        !instance_init_body.contains("classInit(sample_rate);"),
+        "instanceInit must not call classInit"
+    );
     let constants_i = instance_init_body
         .find("instanceConstants(sample_rate);")
         .expect("instanceConstants call should be present");
@@ -835,11 +859,35 @@ fn fastlane_c_lifecycle_order_matches_faust_instance_init_flow() {
         "rep_10_two_in_two_out_ui.dsp",
         SignalFirLane::TransformFastLane,
     );
+    let public_init_sig = "void initmydsp(mydsp* dsp, int sample_rate) {";
+    let public_init_start = fast
+        .find(public_init_sig)
+        .expect("init signature should be present");
+    let public_init_body = &fast[public_init_start..];
+    let init_class_i = public_init_body
+        .find("classInitmydsp(sample_rate);")
+        .expect("init should call classInit");
+    let init_instance_i = public_init_body
+        .find("instanceInitmydsp(dsp, sample_rate);")
+        .expect("init should call instanceInit");
+    assert!(
+        init_class_i < init_instance_i,
+        "init should call classInit before instanceInit"
+    );
+
     let instance_init_sig = "void instanceInitmydsp(mydsp* dsp, int sample_rate) {";
     let instance_init_start = fast
         .find(instance_init_sig)
         .expect("instanceInit signature should be present");
     let instance_init_body = &fast[instance_init_start..];
+    let instance_init_end = instance_init_body
+        .find("\n}")
+        .expect("instanceInit body should close");
+    let instance_init_body = &instance_init_body[..instance_init_end];
+    assert!(
+        !instance_init_body.contains("classInitmydsp(sample_rate);"),
+        "instanceInit must not call classInit"
+    );
     let constants_i = instance_init_body
         .find("instanceConstantsmydsp(dsp, sample_rate);")
         .expect("instanceConstants call should be present");

@@ -72,6 +72,54 @@ fn generate_basic_structure() {
 }
 
 #[test]
+fn generate_lifecycle_matches_cpp_backend_contract() {
+    let factory = make_factory();
+    let opts = FbcCppOptions::default();
+    let cpp = generate_cpp_from_fbc(&factory, &opts).expect("generation should succeed");
+
+    let init_start = cpp
+        .find("void init(int sample_rate) override {")
+        .expect("init should be emitted");
+    let init_body = &cpp[init_start..];
+    let init_class_i = init_body
+        .find("classInit(sample_rate);")
+        .expect("init should call classInit");
+    let init_instance_i = init_body
+        .find("instanceInit(sample_rate);")
+        .expect("init should call instanceInit");
+    assert!(
+        init_class_i < init_instance_i,
+        "init should call classInit before instanceInit"
+    );
+
+    let instance_init_start = cpp
+        .find("void instanceInit(int sample_rate) override {")
+        .expect("instanceInit should be emitted");
+    let instance_init_end = cpp[instance_init_start..]
+        .find("\n\t}\n")
+        .map(|offset| instance_init_start + offset)
+        .expect("instanceInit body should close");
+    let instance_init_body = &cpp[instance_init_start..instance_init_end];
+    assert!(
+        !instance_init_body.contains("classInit(sample_rate);"),
+        "instanceInit must not call classInit"
+    );
+    let constants_i = instance_init_body
+        .find("instanceConstants(sample_rate);")
+        .expect("instanceInit should call instanceConstants");
+    let reset_i = instance_init_body
+        .find("instanceResetUserInterface();")
+        .expect("instanceInit should call instanceResetUserInterface");
+    let clear_i = instance_init_body
+        .find("instanceClear();")
+        .expect("instanceInit should call instanceClear");
+    assert!(
+        constants_i < reset_i && reset_i < clear_i,
+        "instanceInit should call constants, resetUI, clear in order"
+    );
+}
+
+#[test]
 fn generate_with_pragma_once() {
     let factory = make_factory();
     let opts = FbcCppOptions {

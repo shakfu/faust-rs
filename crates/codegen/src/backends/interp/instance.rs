@@ -102,17 +102,18 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
 
     /// Full initialization entrypoint used by the public DSP lifecycle.
     ///
-    /// This marks the instance initialized, then runs the canonical
-    /// `instance_init` sequence (`classInit`, constants, UI reset, clear).
+    /// This marks the instance initialized, then runs the canonical C++ backend
+    /// sequence: `classInit(sample_rate); instanceInit(sample_rate);`.
     ///
     /// # Source provenance (C++)
     /// - `interpreter_dsp_aux::init()` in `interpreter_dsp_aux.hh` (lines 653–668).
     pub fn init(&mut self, sample_rate: i32) {
         self.initialized = true;
+        self.class_init(sample_rate);
         self.instance_init(sample_rate);
     }
 
-    /// Instance initialization: `class_init + constants + reset UI + clear`.
+    /// Instance initialization: `constants + reset UI + clear`.
     ///
     /// This matches the Faust DSP lifecycle contract rather than merely setting
     /// heap defaults: stateful tables, controls, and delay memory are all
@@ -122,9 +123,6 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::instanceInit()` in `interpreter_dsp_aux.hh`
     ///   (lines 637–651).
     pub fn instance_init(&mut self, sample_rate: i32) {
-        // classInit has to be called for each instance since the tables are
-        // actually not shared between instances.
-        self.class_init(sample_rate);
         self.instance_constants(sample_rate);
         self.instance_reset_user_interface();
         self.instance_clear();
