@@ -1,0 +1,36 @@
+#
+# Test the faust-rs WASM backend against the reference.
+#
+# Like the interpreter and Cranelift runners, `impulsewasm.js` reproduces only
+# the scalar impulse pass (the first 15000 reference frames) and is compared
+# with `filesCompare -part`. The backend runs in 64-bit (`-double`) so it can be
+# compared directly against the `-double` reference.
+#
+# Run from this directory:  make -f Make.wasm
+#
+
+include common.mk
+
+outdir ?= wasm
+RUNNER_WASM ?= node tools/impulsewasm.js
+
+# Build everything except the documented known failures for this backend.
+allnames  := $(dspfiles:dsp/%.dsp=%)
+testnames := $(filter-out $(call known_fail_for,$(outdir)),$(allnames))
+listfiles := $(testnames:%=ir/$(outdir)/%.ir)
+
+.PHONY: all
+.DELETE_ON_ERROR:
+
+all: $(COMPARE) ir/$(outdir)/.dir $(listfiles)
+
+ir/$(outdir)/.dir:
+	mkdir -p ir/$(outdir)
+	touch $@
+
+$(COMPARE): tools/filesCompare.cpp
+	$(CXX) -O2 -std=c++11 $< -o $@
+
+ir/$(outdir)/%.ir: dsp/%.dsp reference/%.ir | ir/$(outdir)/.dir
+	FAUST_RS=$(FAUST_RS) $(RUNNER_WASM) $< -double -I dsp -n $(SCALARFRAMES) > $@ || (rm -f $@; false)
+	$(COMPARE) $@ reference/$*.ir -part $(call dsp_precision,$*) || (rm -f $@; false)

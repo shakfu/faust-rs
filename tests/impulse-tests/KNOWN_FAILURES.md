@@ -31,52 +31,21 @@ When a divergence is fixed, remove the entry so the gate re-covers it.
 | `noiseabs` | 1e-5 | 3e-6 | poly pass | C backend |
 | `comb_bug_exp` | 1e-3 | 1.1e-4 | poly pass | C backend |
 
-## C backend — excluded
+## C / C++ / interpreter / Cranelift exclusions
 
-| DSP | Max \|Δ\| | Where | Likely cause |
-|---|---|---|---|
-| `grain3` | 2.6e-3 | pass 1 (frame ~14k) | grain/table path drift |
+No backend-specific exclusions remain for C, C++, interpreter, or Cranelift.
+Only the shared `subcontainer1` compile gap is excluded for those gates.
 
-## Cranelift JIT backend — excluded
+## WASM backend — excluded
 
-Runs in 64-bit (`-double`); **83/93** match. (`prefix`/`phasor` were fixed by
-running the JIT `instanceClear` at init.) The remaining gaps:
+Runs in 64-bit (`-double`) through Node WebAssembly; **70/93** match on the
+scalar prefix. The remaining gaps are backend/runtime parity issues to
+classify:
 
-| DSP | Max \|Δ\| | Cause |
-|---|---|---|
-| `table2` | 10.0 | rwtable indexing divergence |
-| `bells` | 0.46 | excitation/delay path |
-| `karplus`, `karplus32` | 0.92 / 0.68 | Karplus-Strong excitation/delay |
-| `UITester` | 1.0 | button zones not driven by the runner yet |
-| `reverb_designer`, `reverb_tester` | 0.02 / 2.0 | shared numerical drift |
-| `sound` | — | soundfile unsupported (JIT compute segfaults) |
-| `grain3` | — | grain/table path (shared with the C backend) |
-
-## Interpreter backend — excluded
-
-The C++ backend reproduces all of these exactly, so they are interpreter-runtime
-divergences, not DSP or harness issues.
-
-(`comb_delay1`/`comb_delay2`, `math_simp`, `norm3` were **fixed** by honoring
-`is_reverse` in the interpreter's general `ForLoop` compiler — the shift-array
-short-delay strategy `@(3..mcd)` now runs instead of emitting silence.)
-
-Structural:
-
-| DSP | Cause |
+| DSPs | Likely area |
 |---|---|
-| `UITester` | UI/button default semantics |
-| `sound` | soundfile not supported by the interpreter runtime |
-
-Numerical drift (max \|Δ\| 5e-3 … 1e-1, recursive/filter paths):
-
-| DSP | Max \|Δ\| |
-|---|---|
-| `virtual_analog_oscillators` | 6.1e-2 |
-| `carre_volterra` | 9.9e-2 |
-| `parametric_eq` | 1.7e-2 |
-| `reverb_designer` | 1.0e-2 |
-| `phaser_flanger` | 8.3e-3 |
-| `spectral_tilt` | 5.8e-3 |
-| `tester` | 5.5e-3 |
-| `reverb_tester` | 4.9e-3 |
+| `UITester`, `switcher`, `vumeter` | UI/control edge cases |
+| `sound` | soundfile fixture/runtime support |
+| `delays`, `prefix`, `quadecho`, `smoothdelay`, `stereoecho`, `tapiir`, `thru_zero_flanger` | delay or multi-output delayed paths |
+| `freeverb`, `reverb_designer`, `zita_rev1` | reverb/recursive paths |
+| `logical`, `math`, `math_simp`, `matrix`, `norm2`, `norm3`, `priority1`, `waveform6` | math/control/table lowering divergences |

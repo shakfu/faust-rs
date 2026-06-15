@@ -11,7 +11,8 @@
 #   make interp         # check the faust-rs interpreter backend
 #   make cpp            # check the faust-rs C++ backend
 #   make c              # check the faust-rs C backend
-#   make all            # interp + c + cpp
+#   make wasm           # check the faust-rs WASM backend
+#   make all            # interp + c + cpp + cranelift
 #
 # Add `-k` to keep going past failing cases and `-j N` for parallelism, e.g.
 #   make -k -j8 cpp
@@ -44,10 +45,8 @@ c:
 cranelift:
 	$(MAKE) -f Make.cranelift all outdir=cranelift
 
-# Placeholder for backends not yet wired into the harness (see the porting
-# plan). Intentionally fails loudly until the runner lands.
 wasm:
-	@echo "wasm/wast backend runner not implemented yet (see porting plan)"; false
+	$(MAKE) -f Make.wasm all outdir=wasm
 
 # Build the faust-rs binaries the harness drives.
 build:
@@ -72,6 +71,7 @@ help:
 	@echo "  reference  : generate the genuine C++ reference .ir files (oracle)"
 	@echo "  interp     : check the faust-rs interpreter backend (scalar prefix)"
 	@echo "  cranelift  : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
+	@echo "  wasm       : check the faust-rs WASM backend (scalar prefix, 64-bit, Node)"
 	@echo "  cpp        : check the faust-rs C++ backend (full 4-pass)"
 	@echo "  c          : check the faust-rs C backend (full 4-pass)"
 	@echo "  all        : cpp + c + interp + cranelift"

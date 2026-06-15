@@ -29,6 +29,9 @@ See the design write-up in
      target).
    - `make cranelift` — the faust-rs Cranelift JIT runs in-process via
      `impulse_cranelift` in 64-bit (`-double`), scalar prefix, `-part`.
+   - `make wasm` — the faust-rs WASM backend is compiled to `.wasm + .json`
+     and executed through Node's native WebAssembly runtime in 64-bit
+     (`-double`), scalar prefix, `-part`.
 
 ## Requirements
 
@@ -39,6 +42,7 @@ See the design write-up in
   [`common.mk`](common.mk) and overridable:
   `CPP_TESTS`, `FAUST_ARCH`, `FAUST_CPP`, `FAUSTLIBS`.
 - `c++` and the Faust standard libraries (default `/usr/local/share/faust`).
+- Node.js for the WASM impulse runner.
 
 ## Usage
 
@@ -50,6 +54,7 @@ make interp        # check the interpreter backend
 make cpp           # check the C++ backend
 make c             # check the C backend
 make cranelift     # check the Cranelift JIT backend (64-bit)
+make wasm          # check the WASM backend (64-bit scalar prefix)
 make all           # cpp + c + interp + cranelift
 make -k -j8 cpp    # parallel, keep going past failures
 make help          # list targets and variables
@@ -71,7 +76,9 @@ There is no `reference` rebuild on every run: delete `reference/` (or
 | `Make.gcc` | faust-rs C / C++ backends (full 4-pass, exact compare) |
 | `Make.interp` | faust-rs interpreter backend (scalar prefix, `-part`) |
 | `Make.cranelift` | faust-rs Cranelift JIT backend (scalar prefix, 64-bit, `-part`) |
+| `Make.wasm` | faust-rs WASM backend (scalar prefix, 64-bit, Node WebAssembly, `-part`) |
 | `tools/filesCompare.cpp` | the comparator |
+| `tools/impulsewasm.js` | Node WebAssembly scalar impulse runner |
 | `reference/`, `ir/`, `build/` | generated, gitignored |
 
 ## Status
@@ -82,8 +89,9 @@ Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
 |---|---|---|---|
 | C++ (full 4-pass, exact) | **92** | 0 | 1 (`subcontainer1`) |
 | C (full 4-pass, exact) | **87** | 5 | 1 (`subcontainer1`) |
-| interpreter (scalar prefix, `-part`) | **78** | 14 | 1 (`subcontainer1`) |
-| Cranelift JIT (scalar prefix, `-part`, 64-bit) | **83** | 7 | 3 (incl. `sound` crash) |
+| interpreter (scalar prefix, `-part`) | **92** | 0 | 1 (`subcontainer1`) |
+| Cranelift JIT (scalar prefix, `-part`, 64-bit) | **92** | 0 | 1 (`subcontainer1`) |
+| WASM (scalar prefix, `-part`, 64-bit, Node) | **70** | 22 | 1 (`subcontainer1`) |
 
 The C++ backend reproduces the full 60000-frame reference exactly on 92/93 DSPs,
 so the remaining mismatches are backend-specific divergences the harness
@@ -91,7 +99,5 @@ pinpoints. Each was classified by its *max* delta and either given a per-DSP
 tolerance (bounded rounding) or listed as a known failure (real gap) in
 [`known.mk`](known.mk) / [`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those
 applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
-(91), `make cranelift` (83), `make interp` (82) build and pass; excluded cases
-(e.g. C `grain3`, Cranelift `table2`) are documented to fix later.
-
-A wasm/wast runner is planned.
+(92), `make cranelift` (92), `make interp` (92), and `make wasm` (70) build and
+pass; excluded cases are documented in `known.mk` to fix later.
