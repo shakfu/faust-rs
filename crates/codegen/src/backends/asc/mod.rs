@@ -170,6 +170,8 @@ pub fn generate_asc_module(
     let _ = writeln!(out, "// Language: AssemblyScript (experimental)");
     let _ = writeln!(out, "// name: {}", module.name);
     let _ = writeln!(out);
+    emit_runtime_helpers(&mut out);
+    let _ = writeln!(out);
 
     // Top-level helper functions (non-DSP-API DeclareFun in the globals section)
     // are emitted as module-level `export function`s before the class.
@@ -208,6 +210,47 @@ pub fn generate_asc_module(
 
     let _ = writeln!(out, "}}");
     Ok(out)
+}
+
+/// Emits small runtime helpers for FIR math names that AssemblyScript does not
+/// expose with C/libm spelling.
+fn emit_runtime_helpers(out: &mut String) {
+    let _ = writeln!(
+        out,
+        r#"function _fmodf(a: f32, b: f32): f32 {{
+  return a % b;
+}}
+
+function _remainderf(a: f32, b: f32): f32 {{
+  return a - _rintf(a / b) * b;
+}}
+
+function _rintf(x: f32): f32 {{
+  let floor: f32 = Mathf.floor(x);
+  let frac: f32 = x - floor;
+  if (frac < 0.5) return floor;
+  if (frac > 0.5) return floor + 1.0;
+  let i: i32 = <i32>floor;
+  return (i & 1) == 0 ? floor : floor + 1.0;
+}}
+
+function _exp10f(x: f32): f32 {{
+  return Mathf.pow(10.0, x);
+}}
+
+function _isnanf(x: f32): i32 {{
+  return isNaN<f32>(x) ? 1 : 0;
+}}
+
+function _isinff(x: f32): i32 {{
+  return isFinite<f32>(x) ? 0 : (isNaN<f32>(x) ? 0 : 1);
+}}
+
+function _copysignf(a: f32, b: f32): f32 {{
+  let sign: bool = b < 0.0 || (b == 0.0 && 1.0 / b < 0.0);
+  return sign ? -Mathf.abs(a) : Mathf.abs(a);
+}}"#
+    );
 }
 
 /// Emits module-level helper functions found in the globals section.
@@ -337,7 +380,7 @@ fn emit_methods_canonical_order(
     } else {
         let _ = writeln!(
             out,
-            "    compute(count: i32, inputs: Array<Array<{FAUST_FLOAT}>>, outputs: Array<Array<{FAUST_FLOAT}>>): void {{"
+            "    compute(count: i32, inputs: Array<StaticArray<{FAUST_FLOAT}>>, outputs: Array<StaticArray<{FAUST_FLOAT}>>): void {{"
         );
         let _ = writeln!(out, "    }}");
     }
@@ -797,7 +840,7 @@ fn emit_declare_fun(
     // Canonical compute signature override (nested channel arrays).
     let params = if decl.name == "compute" {
         format!(
-            "count: i32, inputs: Array<Array<{FAUST_FLOAT}>>, outputs: Array<Array<{FAUST_FLOAT}>>"
+            "count: i32, inputs: Array<StaticArray<{FAUST_FLOAT}>>, outputs: Array<StaticArray<{FAUST_FLOAT}>>"
         )
     } else {
         params
@@ -940,27 +983,32 @@ fn emit_member_decl(typ: &FirType, name: &str, options: &AscOptions) -> String {
 
 /// Maps a bare FIR math/function name to the AssemblyScript spelling.
 ///
-/// FAUST_FLOAT is f32 here (single precision), so unsuffixed float math names
-/// mean f32 — exactly how the C++ backend resolves them by real type. C++
-/// narrows doubles implicitly, AssemblyScript does not, so emitting the f64
-/// variants produces AS200 errors at every `f32` assignment (and would be
-/// numerically unfaithful to single-precision Faust anyway). The reference
-/// C++ asc backend output uses `Mathf.*` / `min<f32>` exclusively in single
-/// precision.
+/// The AssemblyScript backend currently lowers FaustFloat to `f32`, so float
+/// helpers must use the `Mathf`/`f32` intrinsics unless the FIR name explicitly
+/// asks for an integer helper.
 fn map_fun_name(name: &str) -> String {
     match name {
-        "abs" | "fabs" | "fabsf" => return "Mathf.abs".to_owned(),
+        "abs" => return "abs<i32>".to_owned(),
+        "fabs" | "fabsf" => return "Mathf.abs".to_owned(),
         "min_i" => return "min<i32>".to_owned(),
         "max_i" => return "max<i32>".to_owned(),
-        "min_f" | "fminf" | "min_" | "fmin" => return "min<f32>".to_owned(),
-        "max_f" | "fmaxf" | "max_" | "fmax" => return "max<f32>".to_owned(),
-        // fmod has no Math helper; AssemblyScript uses the `%` operator instead,
-        // but as a call site we fall back to the remainder helper.
-        "fmod" | "fmodf" => return "_fmod".to_owned(),
+        "min_f" | "min_" | "fmin" | "fminf" => return "min<f32>".to_owned(),
+        "max_f" | "max_" | "fmax" | "fmaxf" => return "max<f32>".to_owned(),
+        "fmod" | "fmodf" => return "_fmodf".to_owned(),
+        "remainder" | "remainderf" => return "_remainderf".to_owned(),
+        "rint" | "rintf" => return "_rintf".to_owned(),
+        "exp10" | "exp10f" => return "_exp10f".to_owned(),
+        "isnan" | "isnanf" => return "_isnanf".to_owned(),
+        "isinf" | "isinff" => return "_isinff".to_owned(),
+        "copysign" | "copysignf" => return "_copysignf".to_owned(),
+        "acosh" | "acoshf" => return "Mathf.acosh".to_owned(),
+        "asinh" | "asinhf" => return "Mathf.asinh".to_owned(),
+        "atanh" | "atanhf" => return "Mathf.atanh".to_owned(),
+        "cosh" | "coshf" => return "Mathf.cosh".to_owned(),
+        "sinh" | "sinhf" => return "Mathf.sinh".to_owned(),
+        "tanh" | "tanhf" => return "Mathf.tanh".to_owned(),
         _ => {}
     }
-    // Both the `*f`-suffixed and unsuffixed spellings resolve to the f32
-    // intrinsics (FAUST_FLOAT = f32).
     if let Some(stripped) = name.strip_suffix('f')
         && let Some(op) = FirMathOp::from_symbol(stripped)
     {
@@ -1213,7 +1261,7 @@ mod tests {
         assert!(out.contains("getNumOutputs(): i32 {"));
         assert!(out.contains("        return 2;"));
         assert!(out.contains(
-            "compute(count: i32, inputs: Array<Array<f32>>, outputs: Array<Array<f32>>): void"
+            "compute(count: i32, inputs: Array<StaticArray<f32>>, outputs: Array<StaticArray<f32>>): void"
         ));
         assert!(out.contains("// Language: AssemblyScript"));
     }

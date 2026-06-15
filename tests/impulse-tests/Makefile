@@ -12,6 +12,7 @@
 #   make cpp            # check the faust-rs C++ backend
 #   make c              # check the faust-rs C backend
 #   make wasm           # check the faust-rs WASM backend
+#   make assemblyscript # check the faust-rs AssemblyScript backend
 #   make all            # interp + c + cpp + cranelift
 #
 # Add `-k` to keep going past failing cases and `-j N` for parallelism, e.g.
@@ -26,7 +27,7 @@ include common.mk
 
 MAKE ?= make
 
-.PHONY: all reference interp c cpp cranelift wasm build tools help clean distclean
+.PHONY: all reference interp c cpp cranelift wasm assemblyscript build tools help clean distclean
 
 all: cpp c interp cranelift
 
@@ -47,6 +48,9 @@ cranelift:
 
 wasm:
 	$(MAKE) -f Make.wasm all outdir=wasm
+
+assemblyscript:
+	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript
 
 # Build the faust-rs binaries the harness drives.
 build:
@@ -72,6 +76,7 @@ help:
 	@echo "  interp     : check the faust-rs interpreter backend (scalar prefix)"
 	@echo "  cranelift  : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
 	@echo "  wasm       : check the faust-rs WASM backend (scalar prefix, 64-bit, Node)"
+	@echo "  assemblyscript : check the faust-rs AssemblyScript backend (scalar prefix, Node/asc)"
 	@echo "  cpp        : check the faust-rs C++ backend (full 4-pass)"
 	@echo "  c          : check the faust-rs C backend (full 4-pass)"
 	@echo "  all        : cpp + c + interp + cranelift"
