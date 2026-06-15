@@ -29,6 +29,7 @@ members = [
   "crates/signal-ffi",
   "crates/faust-ffi",
   "crates/wasm-ffi",
+  "crates/impulse-runner",
 ]
 resolver = "2"
 

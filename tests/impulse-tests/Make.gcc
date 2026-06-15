@@ -1,0 +1,52 @@
+#
+# Test a native faust-rs backend (C or C++) against the reference.
+#
+# faust-rs generates C/C++ source, it is wrapped in the *same* 4-pass impulse
+# architecture as the reference, compiled natively and run. Because faust-rs's
+# generated class implements the standard Faust `dsp` interface (clone(),
+# buildUserInterface(), compute()...), it runs the full polyphonic protocol and
+# the produced 60000-frame `.ir` is compared with the reference with no -part.
+#
+# Run from this directory, e.g.:
+#   make -f Make.gcc outdir=cpp lang=cpp
+#   make -f Make.gcc outdir=c   lang=c
+#
+
+include common.mk
+
+outdir ?= cpp
+lang   ?= cpp
+
+# C output is wrapped by a C-specific impulse architecture (see common.mk).
+ifeq ($(lang),c)
+ARCH := $(IMPULSE_ARCH_C)
+else
+ARCH := $(IMPULSE_ARCH)
+endif
+
+# Build everything except the documented known failures for this backend.
+allnames  := $(dspfiles:dsp/%.dsp=%)
+testnames := $(filter-out $(call known_fail_for,$(outdir)),$(allnames))
+listfiles := $(testnames:%=ir/$(outdir)/%.ir)
+
+.PHONY: all
+.DELETE_ON_ERROR:
+
+all: $(COMPARE) ir/$(outdir)/.dir build/$(outdir)/.dir $(listfiles)
+
+ir/$(outdir)/.dir:
+	mkdir -p ir/$(outdir)
+	touch $@
+
+build/$(outdir)/.dir:
+	mkdir -p build/$(outdir)
+	touch $@
+
+$(COMPARE): tools/filesCompare.cpp
+	$(CXX) -O2 -std=c++11 $< -o $@
+
+ir/$(outdir)/%.ir: dsp/%.dsp reference/%.ir | ir/$(outdir)/.dir build/$(outdir)/.dir
+	$(FAUST_RS) -lang $(lang) -double -a $(ARCH) -I dsp -I $(FAUSTLIBS) $< -o build/$(outdir)/$*.cpp
+	$(CXX) $(CXXFLAGS) build/$(outdir)/$*.cpp -o build/$(outdir)/$*
+	./build/$(outdir)/$* -n $(NFRAMES) > $@
+	$(COMPARE) $@ reference/$*.ir $(call dsp_precision,$*) || (rm -f $@; false)

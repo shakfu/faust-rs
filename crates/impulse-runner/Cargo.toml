@@ -1,0 +1,18 @@
+[package]
+name = "impulse-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+compiler = { path = "../compiler" }
+codegen = { path = "../codegen" }
+fir = { path = "../fir" }
+
+[[bin]]
+name = "impulse-runner"
+path = "src/main.rs"
+
+[lints]
+workspace = true

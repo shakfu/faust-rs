@@ -1,0 +1,37 @@
+#
+# Build the genuine C++ reference impulse responses (the test oracle).
+#
+# Each reference is the full 4-pass protocol (impulse + random-split block +
+# polyphonic 4 voices + polyphonic 1 voice = 60000 frames) produced by the
+# reference C++ Faust compiler in `controlTools.h::runDSP/runPolyDSP`.
+#
+# Run from this directory:  make -f Make.ref reference
+#
+
+include common.mk
+
+reffiles := $(patsubst dsp/%.dsp,reference/%.ir,$(dspfiles))
+
+.PHONY: reference
+.DELETE_ON_ERROR:
+
+reference: $(COMPARE) reference/.dir build/ref/.dir $(reffiles)
+
+reference/.dir:
+	mkdir -p reference
+	touch $@
+
+build/ref/.dir:
+	mkdir -p build/ref
+	touch $@
+
+$(COMPARE): tools/filesCompare.cpp
+	$(CXX) -O2 -std=c++11 $< -o $@
+
+# Compile the DSP with the reference C++ compiler + 4-pass architecture, build
+# the native binary, then run it to capture the 60000-frame response.
+reference/%.ir: dsp/%.dsp | reference/.dir build/ref/.dir
+	$(FAUST_CPP) -lang cpp -double -i -a $(IMPULSE_ARCH) -I dsp -I $(FAUSTLIBS) $< -o build/ref/$*.cpp
+	$(CXX) $(CXXFLAGS) build/ref/$*.cpp -o build/ref/$*
+	./build/ref/$* -n $(NFRAMES) > $@
+	@echo "reference $*"

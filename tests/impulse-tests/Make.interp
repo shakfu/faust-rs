@@ -1,0 +1,36 @@
+#
+# Test the faust-rs interpreter backend against the reference.
+#
+# The faust-rs interpreter runtime has no polyphonic / MIDI / soundfile wrapper,
+# so `impulse-runner` reproduces only the scalar impulse pass (the first 15000
+# reference frames). The output is therefore compared with `filesCompare -part`,
+# which checks the produced prefix against the start of the full reference —
+# exactly how the C++ suite's own `Make.rust` validates a scalar-only Rust arch.
+#
+# Run from this directory:  make -f Make.interp
+#
+
+include common.mk
+
+outdir ?= interp
+
+# Build everything except the documented known failures for this backend.
+allnames  := $(dspfiles:dsp/%.dsp=%)
+testnames := $(filter-out $(call known_fail_for,$(outdir)),$(allnames))
+listfiles := $(testnames:%=ir/$(outdir)/%.ir)
+
+.PHONY: all
+.DELETE_ON_ERROR:
+
+all: $(COMPARE) ir/$(outdir)/.dir $(listfiles)
+
+ir/$(outdir)/.dir:
+	mkdir -p ir/$(outdir)
+	touch $@
+
+$(COMPARE): tools/filesCompare.cpp
+	$(CXX) -O2 -std=c++11 $< -o $@
+
+ir/$(outdir)/%.ir: dsp/%.dsp reference/%.ir | ir/$(outdir)/.dir
+	$(RUNNER) $< -double -I dsp -n $(SCALARFRAMES) > $@ || (rm -f $@; false)
+	$(COMPARE) $@ reference/$*.ir -part $(call dsp_precision,$*) || (rm -f $@; false)

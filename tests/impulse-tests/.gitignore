@@ -1,0 +1,9 @@
+# Generated impulse responses and native build artifacts
+/ir/
+/build/
+/reference/
+# Compiled comparator
+/tools/filesCompare
+/tools/filesCompare.exe
+# directory sentinels
+**/.dir
