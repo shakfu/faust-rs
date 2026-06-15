@@ -856,6 +856,7 @@ pub fn run_main() {
         if matches!(cli.lang, Some(CliLang::Asc)) {
             let options = AscOptions {
                 class_name: selected_class_name(&cli),
+                double_precision: cli.double,
                 ..AscOptions::default()
             };
             match generate_asc_module(&store, module, &options) {
@@ -1496,6 +1497,7 @@ pub fn run_main() {
             Ok(out) => {
                 let options = AscOptions {
                     class_name: selected_class_name(&cli),
+                    double_precision: cli.double,
                     ..AscOptions::default()
                 };
                 match generate_asc_module(&out.store, out.module, &options) {

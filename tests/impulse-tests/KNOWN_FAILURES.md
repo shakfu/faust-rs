@@ -31,22 +31,8 @@ When a divergence is fixed, remove the entry so the gate re-covers it.
 | `noiseabs` | 1e-5 | 3e-6 | poly pass | C backend |
 | `comb_bug_exp` | 1e-3 | 1.1e-4 | poly pass | C backend |
 
-## C / C++ / interpreter / Cranelift / WASM exclusions
+## C / C++ / interpreter / Cranelift / WASM / AssemblyScript exclusions
 
-No backend-specific exclusions remain for C, C++, interpreter, Cranelift, or
-WASM. Only the shared `subcontainer1` compile gap is excluded for those gates.
-
-## AssemblyScript backend — excluded
-
-Measured 2026-06-15 through `asc` 0.28.9 + Node WebAssembly. The backend passes
-66/93 DSPs as a scalar-prefix gate. It currently lowers `FaustFloat` to `f32`,
-so many mismatches are expected f32-vs-double reference differences that still
-need per-DSP tolerance classification before being admitted to the green gate.
-
-| DSPs | Cause |
-|---|---|
-| `bells`, `carre_volterra`, `comb_delay1`, `comb_delay2`, `cubic_distortion`, `lfboost`, `math`, `modulations`, `osc`, `osci`, `parametric_eq`, `phaser_flanger`, `pow`, `priority`, `priority1`, `spectral_tilt`, `tester`, `tester2`, `thru_zero_flanger`, `virtual_analog_oscillators`, `zita_rev1` | numerical divergence versus the double-precision reference; needs f32 tolerance/parity classification |
-| `grain3` | late scalar-prefix mismatch; needs state/lifecycle investigation |
-| `parseint` | integer saturation/rounding mismatch around i32 limits |
-| `sound` | AssemblyScript backend does not yet lower soundfile FIR loads (`LoadSoundfileLength`) |
-| `table`, `table2` | table/indexing divergence after adding `fmod` helper support |
+No backend-specific exclusions remain for C, C++, interpreter, Cranelift, WASM,
+or AssemblyScript. Only the shared `subcontainer1` compile gap is excluded for
+those gates.

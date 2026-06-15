@@ -37,6 +37,8 @@ pub const BACKEND_NAME: &str = "asc";
 pub struct AscOptions {
     /// Optional class name override for the FIR module name.
     pub class_name: Option<String>,
+    /// Emit double-precision FaustFloat (`f64`) instead of single (`f32`).
+    pub double_precision: bool,
     /// AssemblyScript spelling used for FIR `Quad` values (unsupported; kept for parity).
     pub quad_type_name: String,
     /// AssemblyScript spelling used for FIR `FixedPoint` values.
@@ -53,6 +55,7 @@ impl Default for AscOptions {
     fn default() -> Self {
         Self {
             class_name: Some("mydsp".to_owned()),
+            double_precision: false,
             quad_type_name: "f64".to_owned(),
             fixed_type_name: "f32".to_owned(),
             json: None,
@@ -140,9 +143,6 @@ enum Phase {
     /// Inside a method/function body: emit `let name: type` locals.
     Body,
 }
-
-/// Float type used for `FaustFloat` (the asc backend is single-precision).
-const FAUST_FLOAT: &str = "f32";
 
 /// Generates AssemblyScript code from a FIR module root.
 ///
@@ -249,7 +249,50 @@ function _isinff(x: f32): i32 {{
 function _copysignf(a: f32, b: f32): f32 {{
   let sign: bool = b < 0.0 || (b == 0.0 && 1.0 / b < 0.0);
   return sign ? -Mathf.abs(a) : Mathf.abs(a);
-}}"#
+}}
+
+function _fmod(a: f64, b: f64): f64 {{
+  return a % b;
+}}
+
+function _remainder(a: f64, b: f64): f64 {{
+  return a - _rint(a / b) * b;
+}}
+
+function _rint(x: f64): f64 {{
+  let floor: f64 = Math.floor(x);
+  let frac: f64 = x - floor;
+  if (frac < 0.5) return floor;
+  if (frac > 0.5) return floor + 1.0;
+  let i: i64 = <i64>floor;
+  return (i & 1) == 0 ? floor : floor + 1.0;
+}}
+
+function _exp10(x: f64): f64 {{
+  return Math.pow(10.0, x);
+}}
+
+function _isnan(x: f64): i32 {{
+  return isNaN<f64>(x) ? 1 : 0;
+}}
+
+function _isinf(x: f64): i32 {{
+  return isFinite<f64>(x) ? 0 : (isNaN<f64>(x) ? 0 : 1);
+}}
+
+function _copysign(a: f64, b: f64): f64 {{
+  let sign: bool = b < 0.0 || (b == 0.0 && 1.0 / b < 0.0);
+  return sign ? -Math.abs(a) : Math.abs(a);
+}}
+
+@external("env", "_soundfileLength")
+declare function _soundfileLength(slot: i32, part: i32): i32;
+
+@external("env", "_soundfileRate")
+declare function _soundfileRate(slot: i32, part: i32): i32;
+
+@external("env", "_soundfileBuffer")
+declare function _soundfileBuffer(slot: i32, chan: i32, part: i32, idx: i32): f64;"#
     );
 }
 
@@ -378,9 +421,10 @@ fn emit_methods_canonical_order(
         emit_declared_method(store, out, options, class_name, module.functions, "compute")?;
         emitted.push("compute");
     } else {
+        let real_type = faust_float_type(options);
         let _ = writeln!(
             out,
-            "    compute(count: i32, inputs: Array<StaticArray<{FAUST_FLOAT}>>, outputs: Array<StaticArray<{FAUST_FLOAT}>>): void {{"
+            "    compute(count: i32, inputs: Array<StaticArray<{real_type}>>, outputs: Array<StaticArray<{real_type}>>): void {{"
         );
         let _ = writeln!(out, "    }}");
     }
@@ -839,8 +883,9 @@ fn emit_declare_fun(
 
     // Canonical compute signature override (nested channel arrays).
     let params = if decl.name == "compute" {
+        let real_type = faust_float_type(options);
         format!(
-            "count: i32, inputs: Array<StaticArray<{FAUST_FLOAT}>>, outputs: Array<StaticArray<{FAUST_FLOAT}>>"
+            "count: i32, inputs: Array<StaticArray<{real_type}>>, outputs: Array<StaticArray<{real_type}>>"
         )
     } else {
         params
@@ -918,6 +963,36 @@ fn emit_value(
             let index = emit_value(store, options, class_name, index)?;
             Ok(format!("{}[{index}]", qualify(&name, access, class_name)))
         }
+        FirMatch::LoadSoundfileLength { var, part } => {
+            let part = emit_value(store, options, class_name, part)?;
+            Ok(format!(
+                "_soundfileLength(<i32>({}), {part})",
+                qualify(&var, AccessType::Struct, class_name)
+            ))
+        }
+        FirMatch::LoadSoundfileRate { var, part } => {
+            let part = emit_value(store, options, class_name, part)?;
+            Ok(format!(
+                "_soundfileRate(<i32>({}), {part})",
+                qualify(&var, AccessType::Struct, class_name)
+            ))
+        }
+        FirMatch::LoadSoundfileBuffer {
+            var,
+            chan,
+            part,
+            idx,
+            typ,
+        } => {
+            let chan = emit_value(store, options, class_name, chan)?;
+            let part = emit_value(store, options, class_name, part)?;
+            let idx = emit_value(store, options, class_name, idx)?;
+            Ok(format!(
+                "<{}>(_soundfileBuffer(<i32>({}), {chan}, {part}, {idx}))",
+                emit_type(&typ, options),
+                qualify(&var, AccessType::Struct, class_name)
+            ))
+        }
         FirMatch::TeeVar {
             name,
             access,
@@ -959,7 +1034,11 @@ fn emit_value(
             for arg in args {
                 rendered.push(emit_value(store, options, class_name, arg)?);
             }
-            Ok(format!("{}({})", map_fun_name(&name), rendered.join(", ")))
+            Ok(format!(
+                "{}({})",
+                map_fun_name(&name, options),
+                rendered.join(", ")
+            ))
         }
         FirMatch::NullValue { .. } => Ok("null".to_owned()),
         FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
@@ -983,30 +1062,82 @@ fn emit_member_decl(typ: &FirType, name: &str, options: &AscOptions) -> String {
 
 /// Maps a bare FIR math/function name to the AssemblyScript spelling.
 ///
-/// The AssemblyScript backend currently lowers FaustFloat to `f32`, so float
-/// helpers must use the `Mathf`/`f32` intrinsics unless the FIR name explicitly
-/// asks for an integer helper.
-fn map_fun_name(name: &str) -> String {
+/// FaustFloat helpers follow `AscOptions::double_precision`; explicit `*f`
+/// libm names stay on the `Mathf`/`f32` path.
+fn map_fun_name(name: &str, options: &AscOptions) -> String {
+    let real_type = faust_float_type(options);
+    let math = math_namespace(options);
+    let fmod = if options.double_precision {
+        "_fmod"
+    } else {
+        "_fmodf"
+    };
+    let remainder = if options.double_precision {
+        "_remainder"
+    } else {
+        "_remainderf"
+    };
+    let rint = if options.double_precision {
+        "_rint"
+    } else {
+        "_rintf"
+    };
+    let exp10 = if options.double_precision {
+        "_exp10"
+    } else {
+        "_exp10f"
+    };
+    let isnan = if options.double_precision {
+        "_isnan"
+    } else {
+        "_isnanf"
+    };
+    let isinf = if options.double_precision {
+        "_isinf"
+    } else {
+        "_isinff"
+    };
+    let copysign = if options.double_precision {
+        "_copysign"
+    } else {
+        "_copysignf"
+    };
     match name {
         "abs" => return "abs<i32>".to_owned(),
-        "fabs" | "fabsf" => return "Mathf.abs".to_owned(),
+        "fabs" => return format!("{math}.abs"),
+        "fabsf" => return "Mathf.abs".to_owned(),
         "min_i" => return "min<i32>".to_owned(),
         "max_i" => return "max<i32>".to_owned(),
-        "min_f" | "min_" | "fmin" | "fminf" => return "min<f32>".to_owned(),
-        "max_f" | "max_" | "fmax" | "fmaxf" => return "max<f32>".to_owned(),
-        "fmod" | "fmodf" => return "_fmodf".to_owned(),
-        "remainder" | "remainderf" => return "_remainderf".to_owned(),
-        "rint" | "rintf" => return "_rintf".to_owned(),
-        "exp10" | "exp10f" => return "_exp10f".to_owned(),
-        "isnan" | "isnanf" => return "_isnanf".to_owned(),
-        "isinf" | "isinff" => return "_isinff".to_owned(),
-        "copysign" | "copysignf" => return "_copysignf".to_owned(),
-        "acosh" | "acoshf" => return "Mathf.acosh".to_owned(),
-        "asinh" | "asinhf" => return "Mathf.asinh".to_owned(),
-        "atanh" | "atanhf" => return "Mathf.atanh".to_owned(),
-        "cosh" | "coshf" => return "Mathf.cosh".to_owned(),
-        "sinh" | "sinhf" => return "Mathf.sinh".to_owned(),
-        "tanh" | "tanhf" => return "Mathf.tanh".to_owned(),
+        "min_f" | "min_" | "fmin" => return format!("min<{real_type}>"),
+        "max_f" | "max_" | "fmax" => return format!("max<{real_type}>"),
+        "fminf" => return "min<f32>".to_owned(),
+        "fmaxf" => return "max<f32>".to_owned(),
+        "fmod" => return fmod.to_owned(),
+        "fmodf" => return "_fmodf".to_owned(),
+        "remainder" => return remainder.to_owned(),
+        "remainderf" => return "_remainderf".to_owned(),
+        "rint" => return rint.to_owned(),
+        "rintf" => return "_rintf".to_owned(),
+        "exp10" => return exp10.to_owned(),
+        "exp10f" => return "_exp10f".to_owned(),
+        "isnan" => return isnan.to_owned(),
+        "isnanf" => return "_isnanf".to_owned(),
+        "isinf" => return isinf.to_owned(),
+        "isinff" => return "_isinff".to_owned(),
+        "copysign" => return copysign.to_owned(),
+        "copysignf" => return "_copysignf".to_owned(),
+        "acosh" => return format!("{math}.acosh"),
+        "asinh" => return format!("{math}.asinh"),
+        "atanh" => return format!("{math}.atanh"),
+        "cosh" => return format!("{math}.cosh"),
+        "sinh" => return format!("{math}.sinh"),
+        "tanh" => return format!("{math}.tanh"),
+        "acoshf" => return "Mathf.acosh".to_owned(),
+        "asinhf" => return "Mathf.asinh".to_owned(),
+        "atanhf" => return "Mathf.atanh".to_owned(),
+        "coshf" => return "Mathf.cosh".to_owned(),
+        "sinhf" => return "Mathf.sinh".to_owned(),
+        "tanhf" => return "Mathf.tanh".to_owned(),
         _ => {}
     }
     if let Some(stripped) = name.strip_suffix('f')
@@ -1015,9 +1146,25 @@ fn map_fun_name(name: &str) -> String {
         return format!("Mathf.{}", op.symbol());
     }
     if let Some(op) = FirMathOp::from_symbol(name) {
-        return format!("Mathf.{}", op.symbol());
+        return format!("{math}.{}", op.symbol());
     }
     name.to_owned()
+}
+
+fn faust_float_type(options: &AscOptions) -> &'static str {
+    if options.double_precision {
+        "f64"
+    } else {
+        "f32"
+    }
+}
+
+fn math_namespace(options: &AscOptions) -> &'static str {
+    if options.double_precision {
+        "Math"
+    } else {
+        "Mathf"
+    }
 }
 
 /// Maps one FIR binary operator to its AssemblyScript token spelling.
@@ -1050,7 +1197,7 @@ fn emit_type(typ: &FirType, options: &AscOptions) -> String {
         FirType::Int64 => "i64".to_owned(),
         FirType::Float32 => "f32".to_owned(),
         FirType::Float64 => "f64".to_owned(),
-        FirType::FaustFloat => FAUST_FLOAT.to_owned(),
+        FirType::FaustFloat => faust_float_type(options).to_owned(),
         FirType::Quad => options.quad_type_name.clone(),
         FirType::FixedPoint => options.fixed_type_name.clone(),
         FirType::Bool => "bool".to_owned(),
@@ -1267,6 +1414,29 @@ mod tests {
     }
 
     #[test]
+    fn double_precision_uses_f64_compute_buffers() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let functions = b.block(&[]);
+        let static_decls = b.block(&[]);
+        let module = b.module(1, 1, "mydsp", dsp_struct, globals, functions, static_decls);
+        let out = generate_asc_module(
+            &store,
+            module,
+            &AscOptions {
+                double_precision: true,
+                ..AscOptions::default()
+            },
+        )
+        .expect("module should generate");
+        assert!(out.contains(
+            "compute(count: i32, inputs: Array<StaticArray<f64>>, outputs: Array<StaticArray<f64>>): void"
+        ));
+    }
+
+    #[test]
     fn emits_this_prefix_for_struct_access() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1297,5 +1467,77 @@ mod tests {
             .expect("module should generate");
         assert!(out.contains("this.fHslider0 = 0.5;"));
         assert!(out.contains("instanceConstants(sample_rate: i32): void {"));
+    }
+
+    #[test]
+    fn lowers_soundfile_access_to_host_imports() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let soundfile = b.declare_var("fSound0", FirType::Sound, AccessType::Struct, None);
+        let dsp_struct = b.block(&[soundfile]);
+        let globals = b.block(&[]);
+        let static_decls = b.block(&[]);
+
+        let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let args = vec![
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_owned(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let zero = b.int32(0);
+        let output0_ptr = b.load_table("outputs", AccessType::FunArgs, zero, ptr_ty.clone());
+        let output0 = b.declare_var(
+            "output0",
+            ptr_ty.clone(),
+            AccessType::Stack,
+            Some(output0_ptr),
+        );
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let chan0 = b.int32(0);
+        let part0 = b.int32(0);
+        let sample = b.load_soundfile_buffer("fSound0", chan0, part0, i0, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, sample);
+        let len = b.load_soundfile_length("fSound0", part0);
+        let rate = b.load_soundfile_rate("fSound0", part0);
+        let drop_len = b.drop_(len);
+        let drop_rate = b.drop_(rate);
+        let loop_body = b.block(&[store_out]);
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let loop_stmt = b.simple_for_loop("i0", count, loop_body, false);
+        let body = b.block(&[output0, drop_len, drop_rate, loop_stmt]);
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: args.iter().map(|arg| arg.typ.clone()).collect(),
+                ret: Box::new(FirType::Void),
+            },
+            &args,
+            Some(body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 1, "mydsp", dsp_struct, globals, functions, static_decls);
+
+        let out = generate_asc_module(&store, module, &AscOptions::default())
+            .expect("soundfile access should generate");
+        assert!(out.contains("declare function _soundfileLength"));
+        assert!(out.contains("_soundfileLength(<i32>(this.fSound0), <i32>(0))"));
+        assert!(out.contains("_soundfileRate(<i32>(this.fSound0), <i32>(0))"));
+        assert!(
+            out.contains("<f32>(_soundfileBuffer(<i32>(this.fSound0), <i32>(0), <i32>(0), i0))")
+        );
     }
 }

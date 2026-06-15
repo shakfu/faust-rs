@@ -99,7 +99,7 @@ Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
 | interpreter (scalar prefix, `-part`) | **92** | 0 | 1 (`subcontainer1`) |
 | Cranelift JIT (scalar prefix, `-part`, 64-bit) | **92** | 0 | 1 (`subcontainer1`) |
 | WASM (scalar prefix, `-part`, 64-bit, Node) | **92** | 0 | 1 (`subcontainer1`) |
-| AssemblyScript (scalar prefix, `-part`, `asc` + Node) | **66** | 26 | 1 (`subcontainer1`) |
+| AssemblyScript (scalar prefix, `-part`, `asc` + Node) | **92** | 0 | 1 (`subcontainer1`) |
 
 The C++ backend reproduces the full 60000-frame reference exactly on 92/93 DSPs,
 so the remaining mismatches are backend-specific divergences the harness
@@ -108,7 +108,5 @@ tolerance (bounded rounding) or listed as a known failure (real gap) in
 [`known.mk`](known.mk) / [`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those
 applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
 (92), `make cranelift` (92), `make interp` (92), `make wasm` (92), and
-`make assemblyscript` (66) build and pass; excluded cases are documented in
-`known.mk` to fix later. AssemblyScript is currently an f32 backend, so many of
-its exclusions are measured against the double-precision reference and need a
-separate tolerance/parity classification pass.
+`make assemblyscript` (92) build and pass; excluded cases are documented in
+`known.mk` to fix later.

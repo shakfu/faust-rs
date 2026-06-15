@@ -61,15 +61,11 @@ KNOWN_FAIL_interp :=
 # widgets use the TestMemoryReader fixture in WASM linear memory.
 KNOWN_FAIL_wasm :=
 
-# --- AssemblyScript backend (f32 scalar prefix through asc + Node) -----------
-# The backend compiles and runs through AssemblyScript/wasm for 66 DSPs. The
-# exclusions are f32-vs-double tolerance bands that still need classification,
-# plus real backend gaps (`sound` soundfile FIR load support and table/indexing
-# divergences in table/table2).
-KNOWN_FAIL_assemblyscript := bells carre_volterra comb_delay1 comb_delay2 \
-	cubic_distortion grain3 lfboost math modulations osc osci parametric_eq \
-	parseint phaser_flanger pow priority priority1 sound spectral_tilt table \
-	table2 tester tester2 thru_zero_flanger virtual_analog_oscillators zita_rev1
+# --- AssemblyScript backend (scalar prefix through asc + Node) ---------------
+# Matches the scalar prefix in `-double`: the Node runner forwards precision,
+# mirrors the C++ impulse harness controls, and installs the same soundfile
+# fixture through imported soundfile helpers.
+KNOWN_FAIL_assemblyscript :=
 
 # Tolerance to apply when a per-DSP override exists, else the global `precision`.
 dsp_precision = $(if $(PRECISION_$1),$(PRECISION_$1),$(precision))

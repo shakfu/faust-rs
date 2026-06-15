@@ -9,10 +9,16 @@ const { spawnSync } = require("child_process");
 const SAMPLE_RATE = 44100;
 const BLOCK_SIZE = 64;
 const DEFAULT_FRAMES = 15000;
+const SOUND_CHAN = 2;
+const SOUND_LENGTH = 4096;
+const SOUND_SR = 44100;
+const SOUND_BUFFER_SIZE = 1024;
+const MAX_SOUNDFILE_PARTS = 256;
 
 function parseArgs(argv) {
   let input = null;
   let frames = DEFAULT_FRAMES;
+  let doublePrecision = false;
   const importDirs = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -25,9 +31,10 @@ function parseArgs(argv) {
       i += 1;
       if (i >= argv.length) throw new Error("-I requires a directory");
       importDirs.push(argv[i]);
-    } else if (arg === "-double" || arg === "-single") {
-      // Accepted for parity with the other impulse runners. The AssemblyScript
-      // backend exposes an f32 audio interface either way.
+    } else if (arg === "-double") {
+      doublePrecision = true;
+    } else if (arg === "-single") {
+      doublePrecision = false;
     } else if (arg.startsWith("-")) {
       throw new Error(`unknown option: ${arg}`);
     } else if (input === null) {
@@ -37,7 +44,7 @@ function parseArgs(argv) {
     }
   }
   if (input === null) throw new Error("missing DSP input");
-  return { input, frames, importDirs };
+  return { input, frames, importDirs, doublePrecision };
 }
 
 function normalize(value) {
@@ -69,9 +76,77 @@ function collectItems(ui, out = []) {
   return out;
 }
 
-function compileAsc(faustRs, input, importDirs, tmpDir) {
+function soundfilePartCount(url) {
+  const trimmed = String(url || "").trim();
+  const open = trimmed.indexOf("{");
+  if (open < 0) return 1;
+  const close = trimmed.indexOf("}", open + 1);
+  if (close < 0) return 1;
+  const body = trimmed.slice(open + 1, close);
+  const count = body
+    .split(";")
+    .filter((part) => part.trim().replace(/^'+|'+$/g, "").length > 0)
+    .length;
+  return Math.max(1, count);
+}
+
+function createSoundfile(numRealParts) {
+  const realParts = Math.min(numRealParts, MAX_SOUNDFILE_PARTS);
+  const lengths = [];
+  const sampleRates = [];
+  const offsets = [];
+  let totalFrames = 0;
+  for (let part = 0; part < realParts; part += 1) {
+    lengths.push(SOUND_LENGTH);
+    sampleRates.push(SOUND_SR);
+    offsets.push(totalFrames);
+    totalFrames += SOUND_LENGTH;
+  }
+  for (let part = realParts; part < MAX_SOUNDFILE_PARTS; part += 1) {
+    lengths.push(SOUND_BUFFER_SIZE);
+    sampleRates.push(SOUND_SR);
+    offsets.push(totalFrames);
+    totalFrames += SOUND_BUFFER_SIZE;
+  }
+
+  const buffers = Array.from({ length: SOUND_CHAN }, () => new Float64Array(totalFrames));
+  for (let part = 0; part < realParts; part += 1) {
+    const partOffset = offsets[part];
+    for (let sample = 0; sample < SOUND_LENGTH; sample += 1) {
+      const value = Math.sin(part + (2.0 * Math.PI * sample) / SOUND_LENGTH);
+      for (let channel = 0; channel < SOUND_CHAN; channel += 1) {
+        buffers[channel][partOffset + sample] = value;
+      }
+    }
+  }
+  return { lengths, sampleRates, offsets, buffers };
+}
+
+function createSoundfileHost(soundfiles) {
+  const read = (slot) => soundfiles[slot] || soundfiles[0];
+  return {
+    _soundfileLength(slot, part) {
+      const sf = read(slot);
+      return sf && sf.lengths[part] !== undefined ? sf.lengths[part] : 0;
+    },
+    _soundfileRate(slot, part) {
+      const sf = read(slot);
+      return sf && sf.sampleRates[part] !== undefined ? sf.sampleRates[part] : SAMPLE_RATE;
+    },
+    _soundfileBuffer(slot, chan, part, idx) {
+      const sf = read(slot);
+      if (!sf) return 0.0;
+      const channel = ((chan % SOUND_CHAN) + SOUND_CHAN) % SOUND_CHAN;
+      const offset = sf.offsets[part] || 0;
+      const sample = offset + Math.max(0, idx | 0);
+      return sf.buffers[channel][sample] || 0.0;
+    },
+  };
+}
+
+function compileAsc(faustRs, input, importDirs, tmpDir, doublePrecision) {
   const ascPath = path.join(tmpDir, `${path.basename(input, ".dsp")}.ts`);
-  const args = ["-lang", "asc", "--json", input, "-o", ascPath];
+  const args = ["-lang", "asc", doublePrecision ? "-double" : "-single", "--json", input, "-o", ascPath];
   for (const dir of importDirs) args.push("-I", dir);
   const result = spawnSync(faustRs, args, { encoding: "utf8" });
   if (result.status !== 0) {
@@ -81,30 +156,37 @@ function compileAsc(faustRs, input, importDirs, tmpDir) {
   return { ascPath, jsonPath: ascPath.replace(/\.ts$/i, ".json") };
 }
 
-function wrapperSource(source, json) {
+function wrapperSource(source, json, doublePrecision) {
   const classMatch = source.match(/export\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/);
   if (!classMatch) throw new Error("generated AssemblyScript class not found");
   const className = classMatch[1];
+  const realType = doublePrecision ? "f64" : "f32";
   const buttons = collectItems(json.ui)
     .filter((item) => item.type === "button" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(item.varname || ""))
     .map((item) => item.varname);
+  const soundfiles = collectItems(json.ui)
+    .filter((item) => item.type === "soundfile" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(item.varname || ""))
+    .map((item, index) => ({ varname: item.varname, index }));
   const buttonAssignments = buttons
     .map((name) => `  dsp.${name} = value;`)
+    .join("\n");
+  const soundfileAssignments = soundfiles
+    .map((item) => `  dsp.${item.varname} = ${item.index};`)
     .join("\n");
   return `${source}
 
 let dsp: ${className} = new ${className}();
-let inputsBuf: Array<StaticArray<f32>> = new Array<StaticArray<f32>>(0);
-let outputsBuf: Array<StaticArray<f32>> = new Array<StaticArray<f32>>(0);
+let inputsBuf: Array<StaticArray<${realType}>> = new Array<StaticArray<${realType}>>(0);
+let outputsBuf: Array<StaticArray<${realType}>> = new Array<StaticArray<${realType}>>(0);
 
 export function setup(size: i32): void {
-  inputsBuf = new Array<StaticArray<f32>>(dsp.getNumInputs());
-  outputsBuf = new Array<StaticArray<f32>>(dsp.getNumOutputs());
+  inputsBuf = new Array<StaticArray<${realType}>>(dsp.getNumInputs());
+  outputsBuf = new Array<StaticArray<${realType}>>(dsp.getNumOutputs());
   for (let i: i32 = 0; i < dsp.getNumInputs(); i = i + 1) {
-    inputsBuf[i] = new StaticArray<f32>(size);
+    inputsBuf[i] = new StaticArray<${realType}>(size);
   }
   for (let i: i32 = 0; i < dsp.getNumOutputs(); i = i + 1) {
-    outputsBuf[i] = new StaticArray<f32>(size);
+    outputsBuf[i] = new StaticArray<${realType}>(size);
   }
 }
 
@@ -120,16 +202,20 @@ export function getNumOutputs(): i32 {
   return dsp.getNumOutputs();
 }
 
-export function setInput(channel: i32, frame: i32, value: f32): void {
+export function setInput(channel: i32, frame: i32, value: ${realType}): void {
   inputsBuf[channel][frame] = value;
 }
 
-export function getOutput(channel: i32, frame: i32): f32 {
+export function getOutput(channel: i32, frame: i32): ${realType} {
   return outputsBuf[channel][frame];
 }
 
-export function setButtons(value: f32): void {
+export function setButtons(value: ${realType}): void {
 ${buttonAssignments}
+}
+
+export function setSoundfiles(): void {
+${soundfileAssignments}
 }
 
 export function compute(count: i32): void {
@@ -151,20 +237,24 @@ function compileWrapper(ascBin, ascPath, wasmPath) {
 }
 
 async function run() {
-  const { input, frames, importDirs } = parseArgs(process.argv.slice(2));
+  const { input, frames, importDirs, doublePrecision } = parseArgs(process.argv.slice(2));
   const faustRs = process.env.FAUST_RS || path.join("..", "..", "target", "release", "faust-rs");
   const ascBin = process.env.ASC || "asc";
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "faust-rs-impulse-asc-"));
   try {
-    const { ascPath, jsonPath } = compileAsc(faustRs, input, importDirs, tmpDir);
+    const { ascPath, jsonPath } = compileAsc(faustRs, input, importDirs, tmpDir, doublePrecision);
     const json = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+    const soundfiles = collectItems(json.ui)
+      .filter((item) => item.type === "soundfile")
+      .map((item) => createSoundfile(soundfilePartCount(item.url)));
     const wrappedPath = path.join(tmpDir, "wrapped.ts");
     const wasmPath = path.join(tmpDir, "wrapped.wasm");
-    fs.writeFileSync(wrappedPath, wrapperSource(fs.readFileSync(ascPath, "utf8"), json));
+    fs.writeFileSync(wrappedPath, wrapperSource(fs.readFileSync(ascPath, "utf8"), json, doublePrecision));
     compileWrapper(ascBin, wrappedPath, wasmPath);
 
     const instance = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {
       env: {
+        ...createSoundfileHost(soundfiles),
         abort(_msg, _file, line, col) {
           throw new Error(`AssemblyScript abort at ${line}:${col}`);
         },
@@ -173,6 +263,7 @@ async function run() {
     const exp = instance.instance.exports;
     exp.setup(BLOCK_SIZE);
     exp.init(SAMPLE_RATE);
+    exp.setSoundfiles();
     const inputs = exp.getNumInputs();
     const outputs = exp.getNumOutputs();
     const lines = formatHeader(inputs, outputs, frames);

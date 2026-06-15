@@ -1574,6 +1574,7 @@ impl Compiler {
 
         let options = AscOptions {
             class_name: Some(class_name.clone()),
+            double_precision: self.real_type == RealType::Float64,
             json,
             ..AscOptions::default()
         };

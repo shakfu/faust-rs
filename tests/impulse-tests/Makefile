@@ -29,7 +29,7 @@ MAKE ?= make
 
 .PHONY: all reference interp c cpp cranelift wasm assemblyscript build tools help clean distclean
 
-all: cpp c interp cranelift
+all: cpp c interp cranelift wasm assemblyscript
 
 reference:
 	$(MAKE) -f Make.ref reference
