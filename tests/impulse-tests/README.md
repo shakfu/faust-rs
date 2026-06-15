@@ -88,10 +88,10 @@ Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
 | Backend | Match | Mismatch | Compile-fail |
 |---|---|---|---|
 | C++ (full 4-pass, exact) | **92** | 0 | 1 (`subcontainer1`) |
-| C (full 4-pass, exact) | **87** | 5 | 1 (`subcontainer1`) |
+| C (full 4-pass, exact) | **92** | 0 | 1 (`subcontainer1`) |
 | interpreter (scalar prefix, `-part`) | **92** | 0 | 1 (`subcontainer1`) |
 | Cranelift JIT (scalar prefix, `-part`, 64-bit) | **92** | 0 | 1 (`subcontainer1`) |
-| WASM (scalar prefix, `-part`, 64-bit, Node) | **70** | 22 | 1 (`subcontainer1`) |
+| WASM (scalar prefix, `-part`, 64-bit, Node) | **92** | 0 | 1 (`subcontainer1`) |
 
 The C++ backend reproduces the full 60000-frame reference exactly on 92/93 DSPs,
 so the remaining mismatches are backend-specific divergences the harness
@@ -99,5 +99,5 @@ pinpoints. Each was classified by its *max* delta and either given a per-DSP
 tolerance (bounded rounding) or listed as a known failure (real gap) in
 [`known.mk`](known.mk) / [`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those
 applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
-(92), `make cranelift` (92), `make interp` (92), and `make wasm` (70) build and
+(92), `make cranelift` (92), `make interp` (92), and `make wasm` (92) build and
 pass; excluded cases are documented in `known.mk` to fix later.

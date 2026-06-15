@@ -56,13 +56,10 @@ KNOWN_FAIL_cranelift :=
 KNOWN_FAIL_interp :=
 
 # --- WASM backend (64-bit scalar prefix through Node WebAssembly) ------------
-# Initial impulse gate wiring passes 70/93. Remaining gaps are backend/runtime
-# parity issues to classify: UI edge cases, delayed multi-output paths,
-# soundfile fixture support, and math/control divergences.
-KNOWN_FAIL_wasm := UITester delays freeverb logical math math_simp matrix \
-                   norm2 norm3 prefix priority1 quadecho reverb_designer \
-                   smoothdelay sound stereoecho switcher tapiir \
-                   thru_zero_flanger vumeter waveform6 zita_rev1
+# Matches the scalar prefix once the Node runner mirrors the C++ impulse
+# harness: all input channels receive the first-frame impulse and soundfile
+# widgets use the TestMemoryReader fixture in WASM linear memory.
+KNOWN_FAIL_wasm :=
 
 # Tolerance to apply when a per-DSP override exists, else the global `precision`.
 dsp_precision = $(if $(PRECISION_$1),$(PRECISION_$1),$(precision))

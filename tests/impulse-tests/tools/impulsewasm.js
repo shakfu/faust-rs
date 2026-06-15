@@ -10,6 +10,12 @@ const SAMPLE_RATE = 44100;
 const BLOCK_SIZE = 64;
 const DEFAULT_FRAMES = 15000;
 const DSP_PTR = 0;
+const SOUND_CHAN = 2;
+const SOUND_LENGTH = 4096;
+const SOUND_SR = 44100;
+const SOUND_BUFFER_SIZE = 1024;
+const MAX_CHAN = 64;
+const MAX_SOUNDFILE_PARTS = 256;
 
 function usage() {
   console.error("usage: impulsewasm.js <file.dsp> [-n <frames>] [-I <dir>]... [-single|-double]");
@@ -78,6 +84,83 @@ function collectItems(ui, out = []) {
     }
   }
   return out;
+}
+
+function soundfilePartCount(url) {
+  const trimmed = String(url || "").trim();
+  const open = trimmed.indexOf("{");
+  if (open < 0) return trimmed.length === 0 ? 1 : 1;
+  const close = trimmed.indexOf("}", open + 1);
+  if (close < 0) return 1;
+  const body = trimmed.slice(open + 1, close);
+  const count = body
+    .split(";")
+    .filter((part) => part.trim().replace(/^'+|'+$/g, "").length > 0)
+    .length;
+  return Math.max(1, count);
+}
+
+function ensureMemory(memory, requiredBytes) {
+  if (requiredBytes <= memory.buffer.byteLength) return;
+  const needPages = Math.ceil((requiredBytes - memory.buffer.byteLength) / 65536);
+  memory.grow(needPages);
+}
+
+function installSoundfile(memory, dspPtr, zoneIndex, numRealParts, cursor) {
+  const realParts = Math.min(numRealParts, MAX_SOUNDFILE_PARTS);
+  cursor = align(cursor, 8);
+  const rawPtr = cursor;
+  cursor += 16;
+  const channelPtrsPtr = align(cursor, 4);
+  cursor = channelPtrsPtr + MAX_CHAN * 4;
+  const lengthsPtr = align(cursor, 4);
+  cursor = lengthsPtr + MAX_SOUNDFILE_PARTS * 4;
+  const sampleRatesPtr = align(cursor, 4);
+  cursor = sampleRatesPtr + MAX_SOUNDFILE_PARTS * 4;
+  const offsetsPtr = align(cursor, 4);
+  cursor = offsetsPtr + MAX_SOUNDFILE_PARTS * 4;
+
+  const partOffsets = [];
+  let totalFrames = 0;
+  for (let part = 0; part < realParts; part += 1) {
+    partOffsets.push(totalFrames);
+    totalFrames += SOUND_LENGTH;
+  }
+  for (let part = realParts; part < MAX_SOUNDFILE_PARTS; part += 1) {
+    partOffsets.push(totalFrames);
+    totalFrames += SOUND_BUFFER_SIZE;
+  }
+
+  const buffersPtr = align(cursor, 8);
+  const channelBytes = totalFrames * 8;
+  cursor = buffersPtr + SOUND_CHAN * channelBytes;
+  ensureMemory(memory, cursor);
+
+  const data = new DataView(memory.buffer);
+  data.setUint32(dspPtr + zoneIndex, rawPtr, true);
+  data.setUint32(rawPtr, channelPtrsPtr, true);
+  data.setUint32(rawPtr + 4, lengthsPtr, true);
+  data.setUint32(rawPtr + 8, sampleRatesPtr, true);
+  data.setUint32(rawPtr + 12, offsetsPtr, true);
+
+  for (let channel = 0; channel < MAX_CHAN; channel += 1) {
+    data.setUint32(channelPtrsPtr + channel * 4, buffersPtr + (channel % SOUND_CHAN) * channelBytes, true);
+  }
+  for (let part = 0; part < MAX_SOUNDFILE_PARTS; part += 1) {
+    data.setInt32(lengthsPtr + part * 4, part < realParts ? SOUND_LENGTH : SOUND_BUFFER_SIZE, true);
+    data.setInt32(sampleRatesPtr + part * 4, SOUND_SR, true);
+    data.setInt32(offsetsPtr + part * 4, partOffsets[part], true);
+  }
+  for (let part = 0; part < realParts; part += 1) {
+    const partOffset = partOffsets[part];
+    for (let sample = 0; sample < SOUND_LENGTH; sample += 1) {
+      const value = Math.sin(part + (2.0 * Math.PI * sample) / SOUND_LENGTH);
+      for (let channel = 0; channel < SOUND_CHAN; channel += 1) {
+        data.setFloat64(buffersPtr + channel * channelBytes + (partOffset + sample) * 8, value, true);
+      }
+    }
+  }
+  return cursor;
 }
 
 function mathImports() {
@@ -175,17 +258,24 @@ async function run() {
       channelPtrs.push(audioPtr);
       audioPtr += channelBytes;
     }
-    if (audioPtr > memory.buffer.byteLength) {
-      const needPages = Math.ceil((audioPtr - memory.buffer.byteLength) / 65536);
-      memory.grow(needPages);
-    }
+    ensureMemory(memory, audioPtr);
 
-    const u32 = new Uint32Array(memory.buffer);
+    let u32 = new Uint32Array(memory.buffer);
     for (let i = 0; i < inputs; i += 1) u32[(inputsPtr >> 2) + i] = channelPtrs[i];
     for (let i = 0; i < outputs; i += 1) u32[(outputsPtr >> 2) + i] = channelPtrs[inputs + i];
 
     exp.init(DSP_PTR, SAMPLE_RATE);
     const uiItems = collectItems(json.ui);
+    let cursor = audioPtr;
+    for (const item of uiItems) {
+      if (item.type === "soundfile" && Number.isInteger(item.index)) {
+        cursor = installSoundfile(memory, DSP_PTR, item.index, soundfilePartCount(item.url), cursor);
+      }
+    }
+    u32 = new Uint32Array(memory.buffer);
+    for (let i = 0; i < inputs; i += 1) u32[(inputsPtr >> 2) + i] = channelPtrs[i];
+    for (let i = 0; i < outputs; i += 1) u32[(outputsPtr >> 2) + i] = channelPtrs[inputs + i];
+
     const buttonIndices = uiItems
       .filter((item) => item.type === "button" && Number.isInteger(item.index))
       .map((item) => item.index);
@@ -201,8 +291,10 @@ async function run() {
       for (const ptr of channelPtrs) {
         view.fill(0, ptr / sampleBytes, ptr / sampleBytes + BLOCK_SIZE);
       }
-      if (inputs > 0 && written === 0) {
-        view[channelPtrs[0] / sampleBytes] = 1.0;
+      if (written === 0) {
+        for (let channel = 0; channel < inputs; channel += 1) {
+          view[channelPtrs[channel] / sampleBytes] = 1.0;
+        }
       }
       const buttonValue = cycle === 0 ? 1.0 : 0.0;
       for (const index of buttonIndices) {

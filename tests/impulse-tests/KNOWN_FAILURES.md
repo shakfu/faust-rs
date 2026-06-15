@@ -38,14 +38,6 @@ Only the shared `subcontainer1` compile gap is excluded for those gates.
 
 ## WASM backend — excluded
 
-Runs in 64-bit (`-double`) through Node WebAssembly; **70/93** match on the
-scalar prefix. The remaining gaps are backend/runtime parity issues to
-classify:
-
-| DSPs | Likely area |
-|---|---|
-| `UITester`, `switcher`, `vumeter` | UI/control edge cases |
-| `sound` | soundfile fixture/runtime support |
-| `delays`, `prefix`, `quadecho`, `smoothdelay`, `stereoecho`, `tapiir`, `thru_zero_flanger` | delay or multi-output delayed paths |
-| `freeverb`, `reverb_designer`, `zita_rev1` | reverb/recursive paths |
-| `logical`, `math`, `math_simp`, `matrix`, `norm2`, `norm3`, `priority1`, `waveform6` | math/control/table lowering divergences |
+No backend-specific exclusions remain for WASM. The Node WebAssembly impulse
+runner mirrors the scalar C++ harness by pulsing every input channel and
+installing the same `TestMemoryReader` soundfile fixture in WASM linear memory.
