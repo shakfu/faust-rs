@@ -6,12 +6,13 @@
 //!
 //! - sample rate 44100, block size 64 (`kFrames`),
 //! - first frame of every input channel = 1.0 (impulse), all other inputs 0.0,
-//! - every `button`/`checkbox` zone held at 1.0 during the first block then 0.0,
+//! - every `button` zone held at 1.0 during the first block then 0.0
+//!   (`FUI::setButtons` does not drive checkboxes),
 //! - output samples printed as `"%6d :  %8.6f ..."` after the same
 //!   `normalize()` zero-clamp (|x| < 1e-6 → 0) the C++ harness applies.
 //!
-//! The faust-rs interpreter runtime has no polyphonic / MIDI / soundfile
-//! wrapper, so this runner only reproduces the scalar pass (the first 15000
+//! The faust-rs interpreter runtime has no polyphonic / MIDI wrapper, so this
+//! runner only reproduces the scalar pass (the first 15000
 //! reference frames). The generated `.ir` is therefore compared against the
 //! genuine 4-pass C++ reference with `filesCompare -part`, which compares only
 //! the produced prefix — exactly how the C++ suite's own `Make.rust` tests a
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use codegen::backends::interp::{
-    FbcDspInstance, FbcOpcode, FbcReal, InterpOptions, generate_interp_module,
+    FbcDspInstance, FbcOpcode, FbcReal, InterpOptions, Soundfile, generate_interp_module,
 };
 use compiler::{Compiler, FirVerifyOptions, RealType, SignalFirLane};
 use fir::{FirId, FirStore};
@@ -78,7 +79,11 @@ fn real_main() -> Result<String, String> {
         });
 
     let fir = compiler
-        .compile_file_to_fir_with_lane(&options.dsp, &search_paths, SignalFirLane::TransformFastLane)
+        .compile_file_to_fir_with_lane(
+            &options.dsp,
+            &search_paths,
+            SignalFirLane::TransformFastLane,
+        )
         .map_err(|e| format!("compilation failed for {}: {e}", options.dsp.display()))?;
 
     if options.double {
@@ -103,7 +108,9 @@ fn parse_args() -> Result<Options, String> {
             "-single" => double = false,
             "-n" => {
                 let value = args.next().ok_or("missing value after -n")?;
-                frames = value.parse::<usize>().map_err(|e| format!("bad -n value: {e}"))?;
+                frames = value
+                    .parse::<usize>()
+                    .map_err(|e| format!("bad -n value: {e}"))?;
             }
             "-I" => {
                 let value = args.next().ok_or("missing value after -I")?;
@@ -165,13 +172,31 @@ fn run<R: FbcReal>(store: &FirStore, module: FirId, frames: usize) -> Result<Str
     let num_outputs = usize::try_from(instance.get_num_outputs())
         .map_err(|_| "negative output arity".to_string())?;
 
-    // Discover button / checkbox zones to drive like `FUI::setButtons`.
+    // Discover button zones to drive like `FUI::setButtons`.
     let button_zones: Vec<i32> = instance
         .ui_instructions()
         .iter()
-        .filter(|ui| matches!(ui.opcode, FbcOpcode::AddButton | FbcOpcode::AddCheckButton))
+        .filter(|ui| ui.opcode == FbcOpcode::AddButton)
         .map(|ui| ui.offset)
         .collect();
+
+    let soundfiles: Vec<(usize, Soundfile)> = instance
+        .ui_instructions()
+        .iter()
+        .filter(|ui| ui.opcode == FbcOpcode::AddSoundfile)
+        .filter_map(|ui| {
+            let slot = usize::try_from(ui.offset).ok()?;
+            Some((
+                slot,
+                Soundfile::impulse_test_memory_reader(soundfile_part_count(&ui.key)),
+            ))
+        })
+        .collect();
+    for (slot, soundfile) in soundfiles {
+        if !instance.set_soundfile(slot, soundfile) {
+            return Err(format!("invalid soundfile slot {slot}"));
+        }
+    }
 
     let mut out = String::new();
     out.push_str(&format!("number_of_inputs  : {num_inputs:3}\n"));
@@ -207,8 +232,7 @@ fn run<R: FbcReal>(store: &FirStore, module: FirId, frames: usize) -> Result<Str
         }
 
         let input_refs: Vec<&[R]> = in_buffer.iter().map(|c| &c[..n]).collect();
-        let mut output_refs: Vec<&mut [R]> =
-            out_buffer.iter_mut().map(|c| &mut c[..n]).collect();
+        let mut output_refs: Vec<&mut [R]> = out_buffer.iter_mut().map(|c| &mut c[..n]).collect();
         instance
             .try_compute(n as i32, &input_refs, &mut output_refs)
             .map_err(|e| format!("compute failed at frame {written}: {e}"))?;
@@ -242,6 +266,41 @@ fn normalize(value: f64) -> f64 {
     }
 }
 
+/// Counts the resource parts encoded in a Faust soundfile URL.
+///
+/// `SoundUI::addSoundfile` uses `parseMenuList2`: a menu list such as
+/// `{'sound1';'sound2'}` creates one part per entry, otherwise the URL is a
+/// single file. The exact names do not matter for the impulse tests because
+/// `TestMemoryReader::checkFile` accepts every path and synthesizes data from
+/// the part index.
+fn soundfile_part_count(url: &str) -> usize {
+    let trimmed = url.trim();
+    let Some(open) = trimmed.find('{') else {
+        return usize::from(!trimmed.is_empty()).max(1);
+    };
+    let Some(close) = trimmed[open + 1..].find('}') else {
+        return 1;
+    };
+    let body = &trimmed[open + 1..open + 1 + close];
+    let count = body
+        .split(';')
+        .filter(|part| !part.trim().trim_matches('\'').is_empty())
+        .count();
+    count.max(1)
+}
+
 /// Kept to document the runner's contract against a known-good reference path.
 #[allow(dead_code)]
 fn _reference_protocol_note(_: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::soundfile_part_count;
+
+    #[test]
+    fn soundfile_part_count_follows_sound_ui_menu_urls() {
+        assert_eq!(soundfile_part_count("{'sound1';'sound2'}"), 2);
+        assert_eq!(soundfile_part_count("sound1"), 1);
+        assert_eq!(soundfile_part_count(""), 1);
+    }
+}

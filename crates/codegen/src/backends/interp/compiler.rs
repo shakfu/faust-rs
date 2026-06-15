@@ -88,6 +88,16 @@ pub struct MemoryDesc {
     pub heap_type: HeapType,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ForLoopParams<'a> {
+    var: &'a str,
+    init: FirId,
+    end: FirId,
+    step: FirId,
+    body: FirId,
+    is_reverse: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -349,7 +359,17 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 step,
                 body,
                 is_reverse,
-            } => self.compile_for_loop(store, var, init, end, step, body, is_reverse),
+            } => self.compile_for_loop(
+                store,
+                ForLoopParams {
+                    var,
+                    init,
+                    end,
+                    step,
+                    body,
+                    is_reverse,
+                },
+            ),
             FirMatch::SimpleForLoop {
                 ref var,
                 upper,
@@ -1482,29 +1502,22 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
     fn compile_for_loop(
         &mut self,
         store: &FirStore,
-        var: &str,
-        init: FirId,
-        end: FirId,
-        step: FirId,
-        body: FirId,
-        is_reverse: bool,
+        params: ForLoopParams<'_>,
     ) -> Result<(), CompileError> {
         // Init sub-block: the `DeclareVar` allocates and seeds the loop variable.
         self.begin_sub_block();
-        self.compile_node(store, init)?;
+        self.compile_node(store, params.init)?;
         let init_block_id = self.end_sub_block();
 
-        let desc =
-            self.field_table
-                .get(var)
-                .cloned()
-                .ok_or_else(|| CompileError::UndeclaredVariable {
-                    name: var.to_string(),
-                })?;
+        let desc = self.field_table.get(params.var).cloned().ok_or_else(|| {
+            CompileError::UndeclaredVariable {
+                name: params.var.to_string(),
+            }
+        })?;
 
         // Body sub-block: body → `var += step` → condition → kCondBranch(loop back).
         self.begin_sub_block();
-        self.compile_node(store, body)?;
+        self.compile_node(store, params.body)?;
 
         // var = var + step (step carries its sign, e.g. -1 for reverse).
         self.current_block
@@ -1515,7 +1528,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
-        self.compile_node(store, step)?;
+        self.compile_node(store, params.step)?;
         self.current_block
             .push(FbcInstruction::new(FbcOpcode::AddInt));
         self.current_block
@@ -1529,7 +1542,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
 
         // Condition: continue while `is_reverse ? var > end : var < end`.
         // Stack convention: LHS on TOS → push `end` (RHS) first, then `var` (LHS).
-        self.compile_node(store, end)?;
+        self.compile_node(store, params.end)?;
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::LoadInt,
@@ -1538,11 +1551,12 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
-        self.current_block.push(FbcInstruction::new(if is_reverse {
-            FbcOpcode::GTInt
-        } else {
-            FbcOpcode::LTInt
-        }));
+        self.current_block
+            .push(FbcInstruction::new(if params.is_reverse {
+                FbcOpcode::GTInt
+            } else {
+                FbcOpcode::LTInt
+            }));
 
         // Predict the next BlockId for the CondBranch loop-back.
         let next_id = BlockId::from_raw(self.arena.len() as u32);

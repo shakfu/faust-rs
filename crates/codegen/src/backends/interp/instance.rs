@@ -311,6 +311,22 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
         *slot = value;
         true
     }
+
+    /// Replaces one runtime soundfile slot with host-provided data.
+    ///
+    /// # Source provenance (C++)
+    /// - `SoundUI::addSoundfile` writes a `Soundfile*` into the DSP soundfile
+    ///   zone before processing starts.
+    ///
+    /// The slot index is the `offset` carried by the `AddSoundfile` UI
+    /// instruction.
+    pub fn set_soundfile(&mut self, slot: usize, soundfile: Soundfile) -> bool {
+        let Some(current) = self.executor.soundfiles.get_mut(slot) else {
+            return false;
+        };
+        **current = soundfile;
+        true
+    }
 }
 
 #[cfg(test)]

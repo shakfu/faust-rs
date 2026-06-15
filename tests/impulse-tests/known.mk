@@ -50,18 +50,13 @@ KNOWN_FAIL_c :=
 KNOWN_FAIL_cranelift := bells karplus karplus32 UITester \
                         reverb_designer reverb_tester sound grain3
 
-# --- interpreter backend (real divergences the suite surfaces) ---------------
-# Structural gaps:
-#   UITester          UI/button default semantics
-#   sound             soundfile unsupported by the interp runtime
-# Numerical drift (max |delta| 5e-3 .. 1e-1, recursive/filter paths):
-#   carre_volterra parametric_eq phaser_flanger reverb_designer reverb_tester
-#   spectral_tilt tester virtual_analog_oscillators
+# --- interpreter backend -----------------------------------------------------
+# The former UI/soundfile gaps were fixed by matching the C++ impulse harness:
+# `FUI::setButtons` only drives buttons, and soundfile tests use the same
+# `TestMemoryReader` fixture.
 # (comb_delay1/2, math_simp, norm3 were fixed by honoring is_reverse in the
 #  general ForLoop compiler -- the shift-array delay strategy now runs.)
-KNOWN_FAIL_interp := UITester sound \
-                     carre_volterra parametric_eq phaser_flanger reverb_designer \
-                     reverb_tester spectral_tilt tester virtual_analog_oscillators
+KNOWN_FAIL_interp :=
 
 # Tolerance to apply when a per-DSP override exists, else the global `precision`.
 dsp_precision = $(if $(PRECISION_$1),$(PRECISION_$1),$(precision))
