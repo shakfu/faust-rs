@@ -176,8 +176,13 @@ suite turns them into actionable backend bugs. Their first-divergence deltas:
   the per-DSP tolerance, so `make interp` / `c` / `cpp` are **green gates**
   (78 / 91 / 92 cases). `filesCompare` was patched to accept a tolerance
   together with `-part` (upstream ignored it).
-- Remaining curated divergences are real backend bugs to fix (interp delay
-  lines/primitives, `c` `grain3`) — removing a `KNOWN_FAIL_*` entry re-covers it.
+- Remaining curated divergences are real backend bugs to fix — removing a
+  `KNOWN_FAIL_*` entry re-covers it.
+- Fixed via the harness: the interpreter ignored `is_reverse` in its general
+  `ForLoop` compiler, so short fixed delays (`@(3..mcd)`, shift-array strategy)
+  emitted silence. Honoring it (matching the Cranelift `lower_for_loop`
+  contract) fixed `comb_delay1/2`, `math_simp`, `norm3` and moved the interp
+  gate 78 -> 82/93.
 
 ### Phase 4 — cranelift backend (DONE, 64-bit)
 - `crates/cranelift-ffi/src/bin/impulse_cranelift.rs` runs the in-process JIT

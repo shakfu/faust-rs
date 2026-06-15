@@ -48,16 +48,15 @@ KNOWN_FAIL_cranelift := prefix phasor table2 bells karplus karplus32 UITester \
                         reverb_designer reverb_tester sound grain3
 
 # --- interpreter backend (real divergences the suite surfaces) ---------------
-# Structural gaps (max |delta| ~= 1):
+# Structural gaps:
 #   UITester          UI/button default semantics
-#   comb_delay1/2     delay line emits silence where reference has the echo
-#   math_simp         math primitive (output 24)
-#   norm3             primitive (output 2)
 #   sound             soundfile unsupported by the interp runtime
 # Numerical drift (max |delta| 5e-3 .. 1e-1, recursive/filter paths):
 #   carre_volterra parametric_eq phaser_flanger reverb_designer reverb_tester
 #   spectral_tilt tester virtual_analog_oscillators
-KNOWN_FAIL_interp := UITester comb_delay1 comb_delay2 math_simp norm3 sound \
+# (comb_delay1/2, math_simp, norm3 were fixed by honoring is_reverse in the
+#  general ForLoop compiler -- the shift-array delay strategy now runs.)
+KNOWN_FAIL_interp := UITester sound \
                      carre_volterra parametric_eq phaser_flanger reverb_designer \
                      reverb_tester spectral_tilt tester virtual_analog_oscillators
 

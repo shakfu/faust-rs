@@ -57,13 +57,14 @@ Runs in 64-bit (`-double`); **81/93** match. The remaining gaps:
 The C++ backend reproduces all of these exactly, so they are interpreter-runtime
 divergences, not DSP or harness issues.
 
-Structural (max \|Δ\| ≈ 1):
+(`comb_delay1`/`comb_delay2`, `math_simp`, `norm3` were **fixed** by honoring
+`is_reverse` in the interpreter's general `ForLoop` compiler — the shift-array
+short-delay strategy `@(3..mcd)` now runs instead of emitting silence.)
+
+Structural:
 
 | DSP | Cause |
 |---|---|
-| `comb_delay1`, `comb_delay2` | delay line emits silence where the reference has the comb echo |
-| `math_simp` | math primitive divergence (output 24) |
-| `norm3` | primitive divergence (output 2) |
 | `UITester` | UI/button default semantics |
 | `sound` | soundfile not supported by the interpreter runtime |
 

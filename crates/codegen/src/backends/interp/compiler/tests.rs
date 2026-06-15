@@ -620,20 +620,16 @@ fn test_roundtrip_for_loop() {
     let x_init = b.int32(0);
     let x_decl = b.declare_var("x", FirType::Int32, AccessType::Struct, Some(x_init));
 
-    // for (i = 0; i < 10; i++) { x = x + 1; }
+    // for (i = 0; i < 10; i += 1) { x = x + 1; }
+    //
+    // Canonical `ForLoop` contract (matches the signal->FIR transform and the
+    // Cranelift backend): `init` is a `DeclareVar(kLoop)` seeding the variable,
+    // `end` is the (exclusive) bound value, `step` is the signed increment value,
+    // and the direction comes from `is_reverse`.
     let i_init = b.int32(0);
     let i_decl = b.declare_var("i", FirType::Int32, AccessType::Loop, Some(i_init));
-
-    // Condition: i < 10
-    let load_i = b.load_var("i", AccessType::Loop, FirType::Int32);
-    let ten = b.int32(10);
-    let cond = b.binop(FirBinOp::Lt, load_i, ten, FirType::Bool);
-
-    // Step: i = i + 1
-    let load_i2 = b.load_var("i", AccessType::Loop, FirType::Int32);
-    let one = b.int32(1);
-    let incr = b.binop(FirBinOp::Add, load_i2, one, FirType::Int32);
-    let step = b.store_var("i", AccessType::Loop, incr);
+    let end = b.int32(10);
+    let step = b.int32(1);
 
     // Body: x = x + 1
     let load_x = b.load_var("x", AccessType::Struct, FirType::Int32);
@@ -642,7 +638,7 @@ fn test_roundtrip_for_loop() {
     let store_x = b.store_var("x", AccessType::Struct, add_x);
     let body = b.block(&[store_x]);
 
-    let loop_node = b.for_loop("i", i_decl, cond, step, body, false);
+    let loop_node = b.for_loop("i", i_decl, end, step, body, false);
 
     let mut compiler = FirToFbcCompiler::<f32>::new();
     compiler.compile_node(&store, x_decl).unwrap();

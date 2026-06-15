@@ -343,13 +343,13 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 default,
             } => self.compile_switch(store, cond, cases, default),
             FirMatch::ForLoop {
+                ref var,
                 init,
                 end,
                 step,
                 body,
                 is_reverse,
-                ..
-            } => self.compile_for_loop(store, init, end, step, body, is_reverse),
+            } => self.compile_for_loop(store, var, init, end, step, body, is_reverse),
             FirMatch::SimpleForLoop {
                 ref var,
                 upper,
@@ -1468,26 +1468,81 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
 
     /// # Source provenance (C++)
     /// - `visit(ForLoopInst*)` — block-switching for loop with init + body.
+    ///
+    /// A general `ForLoop` carries an explicit loop variable plus `init`/`end`/
+    /// `step` nodes and a direction. `init` is a `DeclareVar` that allocates and
+    /// seeds the variable; `step` and `end` are the (signed) increment value and
+    /// the exclusive bound. The loop runs `var = init; do { body; var += step }
+    /// while (is_reverse ? var > end : var < end)`.
+    ///
+    /// Earlier this compiled `step`/`end` as plain expressions and never updated
+    /// the loop variable or built a real condition, so reverse loops (the
+    /// shift-array strategy used by short delays `@(3..mcd)`) produced no
+    /// iterations and the delay line emitted silence.
     fn compile_for_loop(
         &mut self,
         store: &FirStore,
+        var: &str,
         init: FirId,
         end: FirId,
         step: FirId,
         body: FirId,
-        _is_reverse: bool,
+        is_reverse: bool,
     ) -> Result<(), CompileError> {
-        // Compile init in a new sub-block.
+        // Init sub-block: the `DeclareVar` allocates and seeds the loop variable.
         self.begin_sub_block();
         self.compile_node(store, init)?;
         let init_block_id = self.end_sub_block();
 
-        // Compile loop body in a new sub-block.
-        // Order: body → increment → test → kCondBranch → kReturn.
+        let desc =
+            self.field_table
+                .get(var)
+                .cloned()
+                .ok_or_else(|| CompileError::UndeclaredVariable {
+                    name: var.to_string(),
+                })?;
+
+        // Body sub-block: body → `var += step` → condition → kCondBranch(loop back).
         self.begin_sub_block();
         self.compile_node(store, body)?;
+
+        // var = var + step (step carries its sign, e.g. -1 for reverse).
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadInt,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
         self.compile_node(store, step)?;
+        self.current_block
+            .push(FbcInstruction::new(FbcOpcode::AddInt));
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::StoreInt,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
+
+        // Condition: continue while `is_reverse ? var > end : var < end`.
+        // Stack convention: LHS on TOS → push `end` (RHS) first, then `var` (LHS).
         self.compile_node(store, end)?;
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadInt,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
+        self.current_block.push(FbcInstruction::new(if is_reverse {
+            FbcOpcode::GTInt
+        } else {
+            FbcOpcode::LTInt
+        }));
 
         // Predict the next BlockId for the CondBranch loop-back.
         let next_id = BlockId::from_raw(self.arena.len() as u32);
