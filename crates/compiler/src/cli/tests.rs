@@ -64,6 +64,15 @@ fn normalize_legacy_args_maps_dash_pn_to_process_name() {
 }
 
 #[test]
+fn cli_help_lists_lang_possible_values_alphabetically() {
+    let help = CliArgs::command().render_long_help().to_string();
+    assert!(
+        help.contains("possible values: asc, c, cpp, cranelift, fir, interp, julia, wasm, wast"),
+        "{help}"
+    );
+}
+
+#[test]
 fn cli_parse_accepts_lang_fir() {
     let cli = CliArgs::parse_from(["faust-rs", "--lang", "fir", "foo.dsp"]);
     assert!(matches!(cli.lang, Some(CliLang::Fir)));

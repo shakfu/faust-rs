@@ -201,6 +201,23 @@ fn compiler_compile_source_accepts_valid_dsp() {
 }
 
 #[test]
+fn compiler_rejects_conflicting_zero_arity_redefinition() {
+    let compiler = Compiler::new();
+    let err = compiler
+        .compile_source_to_signals("multi.dsp", "foo = 1;\nfoo = 2;\nprocess = foo;\n")
+        .expect_err("conflicting zero-arity redefinition should fail");
+    let CompilerError::Parse { diagnostics, .. } = err else {
+        panic!("expected parse error for duplicate zero-arity definition, got {err}");
+    };
+    assert!(
+        diagnostics.as_slice().iter().any(|diag| diag
+            .message
+            .contains("multiple definitions of symbol 'foo'")),
+        "expected multiple-definitions diagnostic, got {diagnostics:?}"
+    );
+}
+
+#[test]
 fn compiler_compile_source_rejects_malformed_dsp() {
     let compiler = Compiler::new();
     let err = compiler

@@ -17,7 +17,7 @@
 //! - Token parsing still uses `i64` as an intermediate and clamps to `i32`
 //!   bounds at the parser boundary for deterministic behavior.
 
-use boxes::{BoxMatch, match_box};
+use boxes::{BoxMatch, dump_box, match_box};
 use cfgrammar::Span;
 use errors::codes;
 use errors::{
@@ -157,7 +157,10 @@ impl ParseState {
     /// - one no-arg clause -> body
     /// - one standard identifier arglist -> nested `abstr`
     /// - one non-standard arglist -> `case` with one rule
-    /// - multiple clauses -> `case` (all clauses must have the same arity and arity > 0)
+    /// - multiple no-arg clauses -> parser error, because ordinary
+    ///   definitions cannot be repeated
+    /// - multiple clauses with parameters -> `case` pattern-matching
+    ///   definition (all clauses must have the same arity and arity > 0)
     ///
     /// Import-file nodes are preserved structurally instead of being grouped or
     /// erased. This matches the C++ `formatDefinitions(...)` contract where
@@ -207,11 +210,27 @@ impl ParseState {
             out = self.cons(*import, out);
         }
         for (_key, (name, variants_rev)) in grouped {
-            let formatted = self.make_definition_from_variants(name, &variants_rev);
-            if self.arena.is_nil(formatted) {
-                continue;
+            // C++ `makeDefinition(symbol, variants)` rejects repeated
+            // zero-arity variants before evaluation:
+            //
+            //   foo = 1;
+            //   foo = 2;
+            //
+            // is a multiple-definition error, not a pattern-matching
+            // definition. Only clauses with at least one parameter can be
+            // grouped into `boxCase`. Keep this check here instead of relying
+            // on `eval::bind_definitions`: `--dump-box` must fail too, exactly
+            // like C++ Faust fails while formatting parser definitions.
+            if variants_rev.len() > 1 && self.group_has_zero_arity_variants(&variants_rev) {
+                self.report_zero_arity_redefinition(name, &variants_rev);
+                return self.nil();
+            } else {
+                let formatted = self.make_definition_from_variants(name, &variants_rev);
+                if self.arena.is_nil(formatted) {
+                    continue;
+                }
+                out = self.cons(formatted, out);
             }
-            out = self.cons(formatted, out);
         }
         out
     }
@@ -511,6 +530,57 @@ impl ParseState {
         Some(len)
     }
 
+    /// Returns true when a same-name definition group contains at least one
+    /// plain `name = body;` clause.
+    ///
+    /// C++ uses the first variant's arity as the pattern-matching reference and
+    /// errors when that arity is zero. Detecting any zero-arity variant here
+    /// also catches mixed invalid forms such as `foo = 1; foo(x) = x;` before
+    /// they can be lowered to a misleading `case`.
+    fn group_has_zero_arity_variants(&self, variants_rev: &[TreeId]) -> bool {
+        variants_rev.iter().any(|payload| {
+            self.definition_payload_parts(*payload)
+                .is_some_and(|(args, _)| self.arena.is_nil(args))
+        })
+    }
+
+    /// Emits the parser diagnostic equivalent of C++ `printRedefinitionError`.
+    ///
+    /// `variants_rev` stores payloads in parser-list reverse order. Iterate it
+    /// in reverse when printing so diagnostics follow source order, matching
+    /// the C++ message shape:
+    ///
+    /// ```text
+    /// multiple definitions of symbol 'foo'
+    /// foo = ...;
+    /// foo = ...;
+    /// ```
+    ///
+    /// `dump_box` is used for the expression snippets because this parser layer
+    /// only has normalized box nodes at this point; exact pretty-print parity is
+    /// less important than preserving the semantic error boundary.
+    fn report_zero_arity_redefinition(&mut self, name: TreeId, variants_rev: &[TreeId]) {
+        let name_text = self
+            .definition_name_key(name)
+            .unwrap_or_else(|| "<invalid>".to_owned());
+        let mut message = format!("multiple definitions of symbol '{name_text}'");
+        for payload in variants_rev.iter().rev() {
+            let Some((args, body)) = self.definition_payload_parts(*payload) else {
+                continue;
+            };
+            if self.arena.is_nil(args) {
+                message.push_str(&format!("\n{name_text} = {};", dump_box(&self.arena, body)));
+            } else {
+                message.push_str(&format!(
+                    "\n{name_text}{} = {};",
+                    dump_box(&self.arena, args),
+                    dump_box(&self.arena, body)
+                ));
+            }
+        }
+        self.ctx.error(&message);
+    }
+
     fn make_definition_from_variants(&mut self, name: TreeId, variants_rev: &[TreeId]) -> TreeId {
         let mut variants = variants_rev.iter().rev();
         let Some(first_payload) = variants.next().copied() else {
@@ -537,16 +607,6 @@ impl ParseState {
                 self.ctx.error("invalid definition arglist");
                 return self.nil();
             };
-            if expected_arity == 0 {
-                // Multiple definitions of the same zero-arity symbol arise when two libraries
-                // (e.g. stdfaust.lib and demos.lib) both define the same alias like
-                // `ma = library("maths.lib")`.  The C++ compiler resolves this silently via
-                // import-shadowing (later import wins).  Mirror that: use the newest definition
-                // (first_body, which comes from variants_rev.iter().rev() — newest first).
-                let nil = self.nil();
-                return self.make_definition(name, nil, first_body);
-            }
-
             let mut rules = self.nil();
             let mut prev_args = first_args;
             let mut prev_body = first_body;

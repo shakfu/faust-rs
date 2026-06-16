@@ -13,16 +13,16 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 /// Code generation language/backend selected from the CLI.
 pub enum CliLang {
+    Asc,
     #[value(alias = "c99")]
     C,
     #[value(alias = "cxx", alias = "c++")]
     Cpp,
-    Asc,
+    #[value(alias = "clif")]
+    Cranelift,
     Fir,
     #[value(alias = "interp-fbc")]
     Interp,
-    #[value(alias = "clif")]
-    Cranelift,
     #[value(alias = "jl")]
     Julia,
     Wasm,
