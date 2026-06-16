@@ -27,7 +27,7 @@ use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_modul
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
-    Compiler, FirVerifyOptions, RealType, compile_options_json_string,
+    Compiler, FaustInstallPaths, FirVerifyOptions, RealType, compile_options_json_string,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
     golden_snapshot_from_file,
 };
@@ -95,6 +95,24 @@ pub fn render_version_text() -> String {
         "faust-rs {}\nCopyright (C) 2002-2026, GRAME - Centre National de Creation Musicale. All rights reserved.",
         Compiler::version()
     )
+}
+
+/// Renders the first requested Faust directory-info flag, following the C++
+/// precedence order in `global::printDirectories()`.
+pub fn render_directory_info(cli: &CliArgs, paths: &FaustInstallPaths) -> Option<String> {
+    if cli.libdir {
+        Some(paths.render_lib_dir())
+    } else if cli.includedir {
+        Some(paths.render_include_dir())
+    } else if cli.archdir {
+        Some(paths.render_arch_dir())
+    } else if cli.dspdir {
+        Some(paths.render_dsp_dir())
+    } else if cli.pathslist {
+        Some(paths.render_paths_list())
+    } else {
+        None
+    }
 }
 
 /// Writes generated output either to stdout or to the requested file.
@@ -511,6 +529,10 @@ pub fn run_main() {
         return;
     }
     maybe_print_error_format_help(cli.help_error_format);
+    if let Some(info) = render_directory_info(&cli, &FaustInstallPaths::from_environment()) {
+        print!("{info}");
+        return;
+    }
 
     // Cooperative cancellation flag + CLI watchdog.
     //

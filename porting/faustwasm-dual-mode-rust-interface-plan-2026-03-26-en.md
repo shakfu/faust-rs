@@ -447,7 +447,7 @@ Current helper-surface status snapshot:
 | `createDSPFactory(...)` | implemented through the Rust artifact compile service |
 | `getInfos("version")` | implemented |
 | `getInfos("help")` | implemented |
-| `getInfos("libdir"\\|"includedir"\\|"archdir"\\|"dspdir"\\|"pathslist")` | explicit `unsupported` |
+| `getInfos("libdir"\\|"includedir"\\|"archdir"\\|"dspdir"\\|"pathslist")` | supported; mirrors C++ Faust directory-info queries |
 | `expandDSP(...)` | API present, still not parity-complete |
 | `generateAuxFiles(...)` | API present, still not parity-complete |
 | polyphonic internal mixer | implemented through packaged mixer fallback, not compiler `FS` |

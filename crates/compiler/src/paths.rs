@@ -12,6 +12,151 @@ use super::*;
 
 // ─── Helpers: path resolution ─────────────────────────────────────────────────
 
+/// Installed Faust directory information exposed by C++ Faust through
+/// `-libdir`, `-includedir`, `-archdir`, `-dspdir`, and `-pathslist`.
+///
+/// # Source provenance (C++)
+/// - `global::initDirectories()`
+/// - `global::printLibDir()` / `printIncludeDir()` / `printArchDir()` /
+///   `printDspDir()` / `printPaths()` in `compiler/global.cpp`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaustInstallPaths {
+    /// Root directory inferred from the running executable.
+    pub root_dir: PathBuf,
+    /// Directory containing libfaust libraries.
+    pub lib_dir: PathBuf,
+    /// Directory containing Faust C++ headers.
+    pub include_dir: PathBuf,
+    /// Directory containing Faust architecture files.
+    pub arch_dir: PathBuf,
+    /// Directory containing Faust DSP libraries.
+    pub dsp_dir: PathBuf,
+    /// Default DSP import search paths.
+    pub import_dirs: Vec<PathBuf>,
+    /// Default architecture search paths.
+    pub architecture_dirs: Vec<PathBuf>,
+}
+
+impl FaustInstallPaths {
+    /// Builds the installed-path view from explicit inputs.
+    ///
+    /// The C++ compiler infers `gFaustRootDir` from `argv[0]` by taking the
+    /// parent of the executable directory. The Rust CLI mirrors that rule when
+    /// `current_exe` is available and falls back to `/usr/local`.
+    #[must_use]
+    pub fn from_parts(
+        current_exe: Option<PathBuf>,
+        faust_lib_path: Option<OsString>,
+        faust_arch_path: Option<OsString>,
+    ) -> Self {
+        fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+            if !paths.iter().any(|existing| existing == &candidate) {
+                paths.push(candidate);
+            }
+        }
+
+        let root_dir = current_exe
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/usr/local"));
+
+        let lib_dir = root_dir.join("lib");
+        let include_dir = root_dir.join("include");
+        let dsp_dir = root_dir.join("share").join("faust");
+        let arch_dir = dsp_dir.clone();
+
+        let mut import_dirs = Vec::new();
+        if let Some(env_path) = faust_lib_path {
+            push_unique(&mut import_dirs, PathBuf::from(env_path));
+        }
+        push_unique(&mut import_dirs, dsp_dir.clone());
+        push_unique(&mut import_dirs, PathBuf::from("/usr/local/share/faust"));
+        push_unique(&mut import_dirs, PathBuf::from("/usr/share/faust"));
+
+        let mut architecture_dirs = Vec::new();
+        if let Some(env_path) = faust_arch_path {
+            push_unique(&mut architecture_dirs, PathBuf::from(env_path));
+        }
+        push_unique(&mut architecture_dirs, arch_dir.clone());
+        push_unique(&mut architecture_dirs, include_dir.clone());
+        push_unique(
+            &mut architecture_dirs,
+            PathBuf::from("/usr/local/share/faust"),
+        );
+        push_unique(&mut architecture_dirs, PathBuf::from("/usr/share/faust"));
+        push_unique(&mut architecture_dirs, PathBuf::from("/usr/local/include"));
+        push_unique(&mut architecture_dirs, PathBuf::from("/usr/include"));
+
+        Self {
+            root_dir,
+            lib_dir,
+            include_dir,
+            arch_dir,
+            dsp_dir,
+            import_dirs,
+            architecture_dirs,
+        }
+    }
+
+    /// Builds the installed-path view from the process environment.
+    #[must_use]
+    pub fn from_environment() -> Self {
+        Self::from_parts(
+            std::env::current_exe().ok(),
+            std::env::var_os("FAUST_LIB_PATH"),
+            std::env::var_os("FAUST_ARCH_PATH"),
+        )
+    }
+
+    /// Renders one path with C++ Faust's trailing newline convention.
+    #[must_use]
+    pub fn render_path(path: &Path) -> String {
+        format!("{}\n", path.display())
+    }
+
+    /// Renders `-libdir` output.
+    #[must_use]
+    pub fn render_lib_dir(&self) -> String {
+        Self::render_path(&self.lib_dir)
+    }
+
+    /// Renders `-includedir` output.
+    #[must_use]
+    pub fn render_include_dir(&self) -> String {
+        Self::render_path(&self.include_dir)
+    }
+
+    /// Renders `-archdir` output.
+    #[must_use]
+    pub fn render_arch_dir(&self) -> String {
+        Self::render_path(&self.arch_dir)
+    }
+
+    /// Renders `-dspdir` output.
+    #[must_use]
+    pub fn render_dsp_dir(&self) -> String {
+        Self::render_path(&self.dsp_dir)
+    }
+
+    /// Renders `-pathslist` output.
+    #[must_use]
+    pub fn render_paths_list(&self) -> String {
+        let mut out = String::new();
+        out.push_str("FAUST dsp library paths:\n");
+        for path in &self.import_dirs {
+            out.push_str(&format!("{}\n", path.display()));
+        }
+        out.push_str("\nFAUST architectures paths:\n");
+        for path in &self.architecture_dirs {
+            out.push_str(&format!("{}\n", path.display()));
+        }
+        out.push('\n');
+        out
+    }
+}
+
 /// Resolves the default built-in import search paths for one file-backed
 /// compilation session.
 ///

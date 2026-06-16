@@ -60,6 +60,8 @@ make c             # check the C backend
 make cranelift     # check the Cranelift JIT backend (64-bit)
 make wasm          # check the WASM backend (64-bit scalar prefix)
 make assemblyscript # check the AssemblyScript backend (scalar prefix)
+make bench         # compare C++ Faust and faust-rs performance with faustbench -single
+make compile-bench # compare C++ Faust and faust-rs compile time
 make all           # cpp + c + interp + cranelift
 make -k -j8 cpp    # parallel, keep going past failures
 make help          # list targets and variables
@@ -83,6 +85,7 @@ There is no `reference` rebuild on every run: delete `reference/` (or
 | `Make.cranelift` | faust-rs Cranelift JIT backend (scalar prefix, 64-bit, `-part`) |
 | `Make.wasm` | faust-rs WASM backend (scalar prefix, 64-bit, Node WebAssembly, `-part`) |
 | `Make.assemblyscript` | faust-rs AssemblyScript backend (scalar prefix, `asc` + Node WebAssembly, `-part`) |
+| `Make.bench` | generated-code performance comparison with `faustbench -single` |
 | `tools/filesCompare.cpp` | the comparator |
 | `tools/impulsewasm.js` | Node WebAssembly scalar impulse runner |
 | `tools/impulseasc.js` | AssemblyScript/Node scalar impulse runner |
@@ -110,3 +113,30 @@ applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
 (92), `make cranelift` (92), `make interp` (92), `make wasm` (92), and
 `make assemblyscript` (92) build and pass; excluded cases are documented in
 `known.mk` to fix later.
+
+## Performance Bench
+
+`make bench` runs the impulse DSP corpus through `faustbench -single` twice:
+once with `FAUST_CPP` and once with `FAUST_RS`. Because `faustbench` finds a
+binary named `faust` on `PATH`, the target creates temporary wrappers under
+`build/bench/` and writes:
+
+- `build/bench/summary.csv` — DSP name, C++ Faust throughput, faust-rs
+  throughput, and relative delta.
+- `build/bench/logs/*.log` — full `faustbench` output for each compiler.
+
+The default precision option is `BENCH_OPTIONS=-double`; the recipe also passes
+`-I dsp -I $(FAUSTLIBS)`. Override as needed:
+
+```bash
+make bench BENCH_OPTIONS="-double -run 3" BENCH_WARN_MIN=10
+```
+
+`make compile-bench` measures compiler wall-clock time on the same corpus. It
+generates C++ with `-lang cpp -double` through both `FAUST_CPP` and
+`FAUST_RS`, writes generated sources under `build/bench/compile/`, and records:
+
+- `build/bench/compile-summary.csv` — DSP name, C++ Faust compile time,
+  faust-rs compile time, and relative delta.
+- `build/bench/logs/*.compile.*.log` — compiler stderr plus high-resolution
+  wall-clock timing output.

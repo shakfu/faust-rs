@@ -539,7 +539,7 @@ fn compile_options_json_string_tracks_lang_and_float_mode() {
 }
 
 #[test]
-fn compiler_get_faustwasm_info_supports_version_and_help_only() {
+fn compiler_get_faustwasm_info_supports_cpp_directory_keys() {
     let compiler = Compiler::new();
 
     assert_eq!(
@@ -552,12 +552,35 @@ fn compiler_get_faustwasm_info_supports_version_and_help_only() {
         .get_faustwasm_info("help")
         .expect("help should be supported");
     assert!(help.contains("supported keys"));
-    assert!(help.contains("stubbed keys"));
+    assert!(help.contains("- libdir"));
+    assert!(help.contains("- pathslist"));
 
-    let unsupported = compiler
+    let libdir = compiler
         .get_faustwasm_info("libdir")
-        .expect_err("libdir should stay stubbed");
-    assert!(unsupported.message.contains("not implemented yet"));
+        .expect("libdir should be supported");
+    assert!(libdir.ends_with("/lib\n") || libdir.ends_with("\\lib\n"));
+
+    let includedir = compiler
+        .get_faustwasm_info("includedir")
+        .expect("includedir should be supported");
+    assert!(includedir.ends_with("/include\n") || includedir.ends_with("\\include\n"));
+
+    let archdir = compiler
+        .get_faustwasm_info("archdir")
+        .expect("archdir should be supported");
+    assert!(archdir.contains("share"));
+    assert!(archdir.ends_with("/faust\n") || archdir.ends_with("\\faust\n"));
+
+    let dspdir = compiler
+        .get_faustwasm_info("dspdir")
+        .expect("dspdir should be supported");
+    assert_eq!(dspdir, archdir);
+
+    let pathslist = compiler
+        .get_faustwasm_info("pathslist")
+        .expect("pathslist should be supported");
+    assert!(pathslist.contains("FAUST dsp library paths:"));
+    assert!(pathslist.contains("FAUST architectures paths:"));
 
     let invalid = compiler
         .get_faustwasm_info("wat")

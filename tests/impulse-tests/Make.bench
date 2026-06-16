@@ -1,0 +1,282 @@
+# Compare C++ Faust and faust-rs on the impulse DSP corpus.
+#
+# This file exposes two independent benchmark targets:
+#
+#   bench
+#       Measures generated DSP throughput with `faustbench -single`.
+#       Higher MBytes/sec is better. Results are written to BENCH_CSV.
+#
+#   compile-bench
+#       Measures compiler wall-clock time for direct C++ code generation
+#       (`-lang cpp -double`) on the same DSP list. Lower seconds is better.
+#       Results are written to COMPILE_BENCH_CSV.
+#
+# Both targets iterate over `testnames`, i.e. all `dsp/*.dsp` inputs except the
+# DSPs listed as known C++ backend failures in known.mk. They are intentionally
+# not correctness gates: failures are reported in the CSV and logs, and the run
+# continues so the corpus gives a complete comparison table.
+#
+# Run from this directory:
+#
+#   make -f Make.bench bench
+#   make -f Make.bench compile-bench
+#
+# Or through the aggregate Makefile:
+#
+#   make bench
+#   make compile-bench
+#
+# Relevant knobs come from common.mk:
+#
+#   FAUST_CPP          C++ Faust compiler used as the reference compiler.
+#   FAUST_RS           faust-rs compiler under test.
+#   FAUSTBENCH         faustbench executable.
+#   BENCH_OPTIONS      options passed to faustbench, defaulting to -double.
+#   BENCH_WARN_MIN     warning threshold for generated-code regressions.
+#   BENCH_CSV          output CSV for `bench`.
+#   COMPILE_BENCH_CSV  output CSV for `compile-bench`.
+#
+
+include common.mk
+
+allnames  := $(dspfiles:dsp/%.dsp=%)
+testnames := $(filter-out $(call known_fail_for,cpp),$(allnames))
+
+# Keep all generated benchmark artifacts under build/bench:
+#   cpp-bin/, rs-bin/       temporary command wrappers used by faustbench
+#   logs/                   per-DSP compiler and faustbench logs
+#   compile/{cpp,faust-rs}/ generated C++ sources for compile-bench
+#   summary CSVs            BENCH_CSV and COMPILE_BENCH_CSV
+benchdir := build/bench
+cppbindir := $(benchdir)/cpp-bin
+rsbindir := $(benchdir)/rs-bin
+logdir := $(benchdir)/logs
+
+# Resolve paths once at make evaluation time so the generated shell wrappers do
+# not depend on the caller's later PATH or working directory.
+cppbindir_abs := $(abspath $(cppbindir))
+rsbindir_abs := $(abspath $(rsbindir))
+cxx_wrapper_abs := $(abspath $(benchdir)/cxx)
+faust_cpp_abs := $(shell command -v $(FAUST_CPP) 2>/dev/null || printf '%s' "$(FAUST_CPP)")
+faust_rs_abs := $(abspath $(FAUST_RS))
+cxx_abs := $(shell command -v $(CXX) 2>/dev/null || printf '%s' "$(CXX)")
+
+.PHONY: bench compile-bench force
+.DELETE_ON_ERROR:
+
+bench: $(BENCH_CSV)
+
+compile-bench: $(COMPILE_BENCH_CSV)
+
+# Generated-code runtime benchmark.
+#
+# faustbench requires an executable named `faust` on PATH. The target therefore
+# runs it twice with different PATH prefixes:
+#
+#   build/bench/cpp-bin/faust -> FAUST_CPP
+#   build/bench/rs-bin/faust  -> FAUST_RS, with compatibility filtering
+#
+# Each per-compiler run writes its raw faustbench output to logs/. The recipe
+# extracts the "Best value is : ... MBytes/sec" line and stores both values plus
+# the faust-rs relative delta in BENCH_CSV:
+#
+#   delta_pct = (faust_rs_mbytes_sec - faust_cpp_mbytes_sec)
+#               / faust_cpp_mbytes_sec * 100
+$(BENCH_CSV): force | $(cppbindir)/faust $(cppbindir)/uname $(rsbindir)/faust $(rsbindir)/uname $(benchdir)/cxx $(logdir)/.dir
+	@set -e; \
+	printf 'dsp,faust_cpp_mbytes_sec,faust_rs_mbytes_sec,delta_pct,status\n' > "$@"; \
+	total=0; better=0; worse=0; failed=0; \
+	bench_value() { \
+		compiler_path="$$1"; \
+		dsp="$$2"; \
+		log="$$3"; \
+		CXX="$(cxx_wrapper_abs)" CXXFLAGS="$${CXXFLAGS:--Ofast -fbracket-depth=512}" PATH="$$compiler_path:$$PATH" $(FAUSTBENCH) $(BENCH_OPTIONS) -I dsp -I $(FAUSTLIBS) "$$dsp" > "$$log" 2>&1 || return 1; \
+		sed -nE 's/^Best value is : ([0-9.]+) MBytes\/sec.*/\1/p' "$$log" | tail -1; \
+	}; \
+	for name in $(testnames); do \
+		dsp="dsp/$$name.dsp"; \
+		printf '[bench] %s\n' "$$name"; \
+		cpp_log="$(logdir)/$$name.cpp.log"; \
+		rs_log="$(logdir)/$$name.faust-rs.log"; \
+		status=ok; \
+		cpp_val="$$(bench_value "$(cppbindir_abs)" "$$dsp" "$$cpp_log" || true)"; \
+		rs_val="$$(bench_value "$(rsbindir_abs)" "$$dsp" "$$rs_log" || true)"; \
+		if [ -z "$$cpp_val" ] || [ -z "$$rs_val" ]; then \
+			status=failed; \
+			failed=$$((failed + 1)); \
+			printf '%s,%s,%s,,%s\n' "$$name" "$$cpp_val" "$$rs_val" "$$status" >> "$@"; \
+			printf '[bench][failed] %s (logs: %s, %s)\n' "$$name" "$$cpp_log" "$$rs_log" >&2; \
+			continue; \
+		fi; \
+		total=$$((total + 1)); \
+		delta="$$(LC_ALL=C awk -v rs="$$rs_val" -v cpp="$$cpp_val" 'BEGIN { if (cpp == 0) { print "inf"; } else { printf "%.2f", (rs - cpp) / cpp * 100; } }')"; \
+		printf '%s,%s,%s,%s,%s\n' "$$name" "$$cpp_val" "$$rs_val" "$$delta" "$$status" >> "$@"; \
+		if LC_ALL=C awk -v d="$$delta" 'BEGIN { exit !(d > 0) }'; then \
+			better=$$((better + 1)); \
+			printf '[bench][better] %s +%s%% (cpp %s, faust-rs %s)\n' "$$name" "$$delta" "$$cpp_val" "$$rs_val"; \
+		elif LC_ALL=C awk -v d="$$delta" 'BEGIN { exit !(d < 0) }'; then \
+			worse=$$((worse + 1)); \
+			abs_delta="$$(LC_ALL=C awk -v d="$$delta" 'BEGIN { if (d < 0) d = -d; printf "%.2f", d; }')"; \
+			printf '[bench][worse] %s -%s%% (cpp %s, faust-rs %s)\n' "$$name" "$$abs_delta" "$$cpp_val" "$$rs_val"; \
+			if LC_ALL=C awk -v d="$$abs_delta" -v min="$(BENCH_WARN_MIN)" 'BEGIN { exit !(d >= min) }'; then \
+				printf '[bench][warn] %s regression exceeds %s%%\n' "$$name" "$(BENCH_WARN_MIN)" >&2; \
+			fi; \
+		else \
+			printf '[bench][same] %s 0.00%% (cpp %s, faust-rs %s)\n' "$$name" "$$cpp_val" "$$rs_val"; \
+		fi; \
+	done; \
+	printf '[bench] summary: total=%s better=%s worse=%s failed=%s csv=%s\n' "$$total" "$$better" "$$worse" "$$failed" "$@"
+
+# Compiler-time benchmark.
+#
+# This target measures only direct C++ source generation by each compiler. It
+# does not compile or execute the generated source; that is covered by the
+# correctness harness and by faustbench itself. The command line is deliberately
+# minimal and shared:
+#
+#   <compiler> -lang cpp -double -I dsp -I $(FAUSTLIBS) <dsp> -o <out.cpp>
+#
+# `/usr/bin/time -p` rounds very small runs to 0.00s on some systems, so the
+# recipe uses Perl Time::HiRes and emits a normalized `real <seconds>` line into
+# each log. The parser accepts both dot and comma decimal separators.
+$(COMPILE_BENCH_CSV): force | $(logdir)/.dir
+	@set -e; \
+	printf 'dsp,faust_cpp_seconds,faust_rs_seconds,delta_pct,status\n' > "$@"; \
+	total=0; faster=0; slower=0; failed=0; \
+	run_compile() { \
+		compiler="$$1"; \
+		dsp="$$2"; \
+		out="$$3"; \
+		log="$$4"; \
+		mkdir -p "$$(dirname "$$out")"; \
+		rm -f "$$out"; \
+		perl -MTime::HiRes=time -e '$$t=time; system @ARGV; $$c=$$?; printf STDERR "real %.6f\n", time - $$t; exit($$c >> 8)' "$$compiler" -lang cpp -double -I dsp -I "$(FAUSTLIBS)" "$$dsp" -o "$$out" > /dev/null 2> "$$log" || return 1; \
+		sed -nE 's/^real[[:space:]]+([0-9]+([.,][0-9]+)?)$$/\1/p' "$$log" | tail -1 | tr ',' '.'; \
+	}; \
+	for name in $(testnames); do \
+		dsp="dsp/$$name.dsp"; \
+		printf '[compile-bench] %s\n' "$$name"; \
+		cpp_log="$(logdir)/$$name.compile.cpp.log"; \
+		rs_log="$(logdir)/$$name.compile.faust-rs.log"; \
+		cpp_out="$(benchdir)/compile/cpp/$$name.cpp"; \
+		rs_out="$(benchdir)/compile/faust-rs/$$name.cpp"; \
+		status=ok; \
+		cpp_time="$$(run_compile "$(faust_cpp_abs)" "$$dsp" "$$cpp_out" "$$cpp_log" || true)"; \
+		rs_time="$$(run_compile "$(faust_rs_abs)" "$$dsp" "$$rs_out" "$$rs_log" || true)"; \
+		if [ -z "$$cpp_time" ] || [ -z "$$rs_time" ]; then \
+			status=failed; \
+			failed=$$((failed + 1)); \
+			printf '%s,%s,%s,,%s\n' "$$name" "$$cpp_time" "$$rs_time" "$$status" >> "$@"; \
+			printf '[compile-bench][failed] %s (logs: %s, %s)\n' "$$name" "$$cpp_log" "$$rs_log" >&2; \
+			continue; \
+		fi; \
+		total=$$((total + 1)); \
+		delta="$$(LC_ALL=C awk -v rs="$$rs_time" -v cpp="$$cpp_time" 'BEGIN { if (cpp == 0) { print "inf"; } else { printf "%.2f", (rs - cpp) / cpp * 100; } }')"; \
+		printf '%s,%s,%s,%s,%s\n' "$$name" "$$cpp_time" "$$rs_time" "$$delta" "$$status" >> "$@"; \
+		if LC_ALL=C awk -v d="$$delta" 'BEGIN { exit !(d < 0) }'; then \
+			faster=$$((faster + 1)); \
+			abs_delta="$$(LC_ALL=C awk -v d="$$delta" 'BEGIN { if (d < 0) d = -d; printf "%.2f", d; }')"; \
+			printf '[compile-bench][faster] %s -%s%% (cpp %ss, faust-rs %ss)\n' "$$name" "$$abs_delta" "$$cpp_time" "$$rs_time"; \
+		elif LC_ALL=C awk -v d="$$delta" 'BEGIN { exit !(d > 0) }'; then \
+			slower=$$((slower + 1)); \
+			printf '[compile-bench][slower] %s +%s%% (cpp %ss, faust-rs %ss)\n' "$$name" "$$delta" "$$cpp_time" "$$rs_time"; \
+		else \
+			printf '[compile-bench][same] %s 0.00%% (cpp %ss, faust-rs %ss)\n' "$$name" "$$cpp_time" "$$rs_time"; \
+		fi; \
+	done; \
+	printf '[compile-bench] summary: total=%s faster=%s slower=%s failed=%s csv=%s\n' "$$total" "$$faster" "$$slower" "$$failed" "$@"
+
+# C++ Faust wrapper used by faustbench. It forwards all arguments unchanged.
+$(cppbindir)/faust: force
+	@mkdir -p $(cppbindir)
+	@printf '%s\n' \
+		'#!/bin/sh' \
+		'exec $(faust_cpp_abs) "$$@"' \
+		> $@
+	@chmod +x $@
+
+# faust-rs wrapper used by faustbench.
+#
+# faustbench probes `faust -includedir`, `-libdir`, `-dspdir`, and `-archdir`
+# before compiling the benchmark program. The wrapper answers them from the C++
+# Faust installation configured in common.mk so benchmark builds use the same
+# architecture/header tree even when FAUST_RS points to an uninstalled
+# target/release/faust-rs binary. faustbench also passes `-clang`; the faust-rs
+# CLI does not accept it, and the actual C++ compiler is controlled by the CXX
+# wrapper below, so the flag is filtered out.
+$(rsbindir)/faust: force
+	@mkdir -p $(rsbindir)
+	@printf '%s\n' \
+		'#!/bin/sh' \
+		'if [ "$$1" = "-includedir" ] && [ "$$#" -eq 1 ]; then' \
+		'  printf "%s\n" "$(FAUST_INCLUDE_DIR)"' \
+		'  exit 0' \
+		'fi' \
+		'if [ "$$1" = "-libdir" ] && [ "$$#" -eq 1 ]; then' \
+		'  printf "%s\n" "$(FAUST_LIB_DIR)"' \
+		'  exit 0' \
+		'fi' \
+		'if [ "$$1" = "-dspdir" ] && [ "$$#" -eq 1 ]; then' \
+		'  printf "%s\n" "$(FAUSTLIBS)"' \
+		'  exit 0' \
+		'fi' \
+		'if [ "$$1" = "-archdir" ] && [ "$$#" -eq 1 ]; then' \
+		'  printf "%s\n" "$(FAUST_ARCH)"' \
+		'  exit 0' \
+		'fi' \
+		'filtered_args=""' \
+		'for arg in "$$@"; do' \
+		'  [ "$$arg" = "-clang" ] && continue' \
+		'  filtered_args="$$filtered_args $$arg"' \
+		'done' \
+		'exec $(faust_rs_abs) $$filtered_args' \
+		> $@
+	@chmod +x $@
+
+# faustbench uses `uname` to decide which C++ compiler flags to pass. For this
+# cross-compiler comparison we force the Linux/x86_64 branch for both compilers
+# so the generated benchmark build line is stable across macOS and Linux.
+$(cppbindir)/uname $(rsbindir)/uname: force
+	@mkdir -p $(dir $@)
+	@printf '%s\n' \
+		'#!/bin/sh' \
+		'case "$$1" in' \
+		'  -m|-p) printf "%s\n" "x86_64" ;;' \
+		'  *) printf "%s\n" "Linux" ;;' \
+		'esac' \
+		> $@
+	@chmod +x $@
+
+# C++ compiler wrapper used only by faustbench.
+#
+# On macOS, faustbench.cpp contains Apple-specific `-clang` handling that
+# conflicts with the forced Linux uname branch above. Instead of changing the
+# source in place, the wrapper patches the temporary faustbench.cpp copy by
+# disabling only the `defined(__APPLE__)` preprocessor checks and then delegates
+# to the real CXX. System macros remain untouched.
+$(benchdir)/cxx: force
+	@mkdir -p $(benchdir)
+	@printf '%s\n' \
+		'#!/bin/sh' \
+		'args=""' \
+		'for arg in "$$@"; do' \
+		'  case "$$arg" in' \
+		'    *faustbench.cpp)' \
+		'      patched="$$(dirname "$$arg")/faustbench-no-apple.cpp"' \
+		'      sed "s/defined(__APPLE__)/0/g" "$$arg" > "$$patched"' \
+		'      args="$$args $$patched"' \
+		'      ;;' \
+		'    *)' \
+		'      args="$$args $$arg"' \
+		'      ;;' \
+		'  esac' \
+		'done' \
+		'exec $(cxx_abs) $$args' \
+		> $@
+	@chmod +x $@
+
+$(logdir)/.dir:
+	@mkdir -p $(logdir)
+	@touch $@
+
+force:

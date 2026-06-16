@@ -117,6 +117,21 @@ pub struct CliArgs {
     /// Print version information and exit.
     #[arg(short = 'v', long = "version", action = ArgAction::SetTrue)]
     pub version: bool,
+    /// Print directory containing libfaust libraries and exit.
+    #[arg(long = "libdir", action = ArgAction::SetTrue)]
+    pub libdir: bool,
+    /// Print directory containing Faust headers and exit.
+    #[arg(long = "includedir", action = ArgAction::SetTrue)]
+    pub includedir: bool,
+    /// Print directory containing Faust architecture files and exit.
+    #[arg(long = "archdir", action = ArgAction::SetTrue)]
+    pub archdir: bool,
+    /// Print directory containing Faust DSP libraries and exit.
+    #[arg(long = "dspdir", action = ArgAction::SetTrue)]
+    pub dspdir: bool,
+    /// Print architecture and DSP library search paths and exit.
+    #[arg(long = "pathslist", action = ArgAction::SetTrue)]
+    pub pathslist: bool,
     /// Print dedicated help for diagnostic output formats and exit.
     #[arg(long = "help-error-format", action = ArgAction::SetTrue)]
     pub help_error_format: bool,
@@ -285,6 +300,26 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
         }
         if arg == "-version" {
             normalized.push("--version".to_owned());
+            continue;
+        }
+        if arg == "-libdir" {
+            normalized.push("--libdir".to_owned());
+            continue;
+        }
+        if arg == "-includedir" {
+            normalized.push("--includedir".to_owned());
+            continue;
+        }
+        if arg == "-archdir" {
+            normalized.push("--archdir".to_owned());
+            continue;
+        }
+        if arg == "-dspdir" {
+            normalized.push("--dspdir".to_owned());
+            continue;
+        }
+        if arg == "-pathslist" {
+            normalized.push("--pathslist".to_owned());
             continue;
         }
         if arg == "-mcd" {

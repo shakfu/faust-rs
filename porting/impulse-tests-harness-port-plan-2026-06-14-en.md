@@ -76,18 +76,27 @@ Consequences:
 
 ```
 tests/impulse-tests/
-├── common.mk         # shared, overridable configuration
-├── Makefile          # top-level driver (build/reference/interp/c/cpp/all/help)
-├── Make.ref          # genuine C++ 4-pass reference generation (the oracle)
-├── Make.gcc          # faust-rs C / C++ native backends (full 4-pass, exact)
-├── Make.interp       # faust-rs interpreter backend (scalar prefix, -part)
-├── archs/README.md   # why the impulse architecture is referenced in place
+├── common.mk             # shared, overridable configuration
+├── known.mk              # per-DSP tolerances and known backend exclusions
+├── KNOWN_FAILURES.md     # documented expected failures
+├── Makefile              # top-level driver
+├── Make.ref              # genuine C++ 4-pass reference generation (the oracle)
+├── Make.gcc              # faust-rs C / C++ native backends (full 4-pass, exact)
+├── Make.interp           # faust-rs interpreter backend (scalar prefix, -part)
+├── Make.cranelift        # faust-rs cranelift backend (scalar prefix, -part)
+├── Make.wasm             # faust-rs wasm backend through Node runner
+├── Make.assemblyscript   # faust-rs AssemblyScript backend through Node runner
+├── Make.bench            # faustbench -single and compiler-time comparisons
+├── archs/
+│   └── README.md         # why the impulse architecture is referenced in place
 ├── tools/
-│   └── filesCompare.cpp   # the comparator (vendored, compiles standalone)
-├── dsp/              # 93 test DSP programs (copied from the C++ suite)
-├── reference/        # generated .ir oracle           (gitignored)
-├── ir/<backend>/     # generated per-backend .ir       (gitignored)
-└── build/<backend>/  # generated sources + binaries    (gitignored)
+│   ├── filesCompare.cpp  # the comparator (vendored, compiles standalone)
+│   ├── impulsewasm.js    # wasm impulse runner
+│   └── impulseasc.js     # AssemblyScript impulse runner
+├── dsp/                  # 93 test DSP programs (copied from the C++ suite)
+├── reference/            # generated .ir oracle           (gitignored)
+├── ir/<backend>/         # generated per-backend .ir       (gitignored)
+└── build/<backend>/      # generated sources, binaries, logs, bench CSVs
 ```
 
 The interpreter runner is a workspace binary: `crates/impulse-runner`
@@ -116,9 +125,15 @@ pass in-process via `FbcDspInstance`:
   run → `ir/<outdir>/%.ir` → `filesCompare` (no `-part`).
 - `Make.interp`: `impulse-runner … -n 15000` → `ir/interp/%.ir` →
   `filesCompare -part`.
+- `Make.bench`: wraps `FAUST_CPP` and `FAUST_RS` as temporary `faust` binaries
+  on `PATH`, runs `faustbench -single` on the impulse DSP corpus, and writes a
+  throughput comparison CSV plus per-compiler logs under `build/bench/`. It
+  also provides `compile-bench`, which measures direct `-lang cpp -double`
+  code-generation wall time for both compilers on the same corpus with a
+  high-resolution timer.
 - `common.mk` centralizes overridable paths (`FAUST_CPP`, `FAUST_RS`, `RUNNER`,
   `CPP_TESTS`, `FAUST_ARCH`, `IMPULSE_ARCH`, `FAUSTLIBS`, `precision`,
-  `NFRAMES`, `SCALARFRAMES`).
+  `NFRAMES`, `SCALARFRAMES`, `FAUSTBENCH`, `BENCH_OPTIONS`).
 
 ### 5.3 Comparator — DONE
 
@@ -229,6 +244,8 @@ make reference             # generate the C++ oracle (needs a Faust checkout)
 make interp                # check the interpreter backend (scalar prefix)
 make cpp                   # check the C++ backend (full 4-pass)
 make c                     # check the C backend (full 4-pass)
+make bench                 # compare generated-code performance with faustbench -single
+make compile-bench         # compare compiler wall time on the same DSP corpus
 make -k -j8 all            # everything, keep going past failures
 make help                  # variables and targets
 ```

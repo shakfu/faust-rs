@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser};
-use compiler::Compiler;
+use compiler::{Compiler, FaustInstallPaths};
 use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Severity, SourceSpan, Stage};
 use serde_json::Value;
 use signals::{SigMatch, match_sig};
@@ -19,7 +19,9 @@ use super::diagnostics::{
     format_diagnostics_human, format_diagnostics_human_with_verbosity, format_diagnostics_json,
     format_diagnostics_json_with_verbosity,
 };
-use super::runner::{emit_wasm_output, render_version_text, render_wast_output};
+use super::runner::{
+    emit_wasm_output, render_directory_info, render_version_text, render_wast_output,
+};
 
 #[test]
 fn normalize_legacy_args_maps_dash_fir_to_lang_fir() {
@@ -271,6 +273,64 @@ fn version_mentions_faust_copyright() {
     assert!(rendered.contains(
         "Copyright (C) 2002-2026, GRAME - Centre National de Creation Musicale. All rights reserved."
     ));
+}
+
+#[test]
+fn normalize_legacy_args_maps_directory_info_flags() {
+    let normalized = normalize_legacy_args(vec![
+        "faust-rs".to_owned(),
+        "-includedir".to_owned(),
+        "-libdir".to_owned(),
+        "-dspdir".to_owned(),
+        "-archdir".to_owned(),
+        "-pathslist".to_owned(),
+    ]);
+    assert_eq!(
+        normalized,
+        vec![
+            "faust-rs".to_owned(),
+            "--includedir".to_owned(),
+            "--libdir".to_owned(),
+            "--dspdir".to_owned(),
+            "--archdir".to_owned(),
+            "--pathslist".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn cli_parse_accepts_directory_info_flags() {
+    let cli = CliArgs::parse_from(["faust-rs", "--includedir", "--pathslist"]);
+    assert!(cli.includedir);
+    assert!(cli.pathslist);
+}
+
+#[test]
+fn render_directory_info_uses_cpp_precedence() {
+    let cli = CliArgs::parse_from(["faust-rs", "--includedir", "--libdir"]);
+    let paths = FaustInstallPaths::from_parts(
+        Some(PathBuf::from("/opt/faust/bin/faust-rs")),
+        Some("custom-dsp".into()),
+        Some("custom-arch".into()),
+    );
+    assert_eq!(
+        render_directory_info(&cli, &paths),
+        Some("/opt/faust/lib\n".to_owned())
+    );
+}
+
+#[test]
+fn render_directory_info_pathslist_matches_cpp_shape() {
+    let cli = CliArgs::parse_from(["faust-rs", "--pathslist"]);
+    let paths = FaustInstallPaths::from_parts(
+        Some(PathBuf::from("/opt/faust/bin/faust-rs")),
+        Some("custom-dsp".into()),
+        Some("custom-arch".into()),
+    );
+    let rendered = render_directory_info(&cli, &paths).expect("pathslist should render");
+    assert!(rendered.starts_with("FAUST dsp library paths:\ncustom-dsp\n"));
+    assert!(rendered.contains("\nFAUST architectures paths:\ncustom-arch\n"));
+    assert!(rendered.ends_with('\n'));
 }
 
 #[test]

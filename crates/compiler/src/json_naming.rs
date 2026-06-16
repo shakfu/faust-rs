@@ -87,15 +87,13 @@ pub(crate) fn source_name_to_filename(source_name: &str) -> String {
 
 /// Returns the help text emitted for `faustwasm --info` queries.
 ///
-/// Lists supported and currently-stubbed query keys so tooling can report
-/// capability without attempting unsupported operations.
+/// Lists supported query keys so tooling can report capability.
 pub(crate) fn faustwasm_info_help_text() -> String {
     let mut out = String::new();
     out.push_str("faust-rs faustwasm helper info\n");
     out.push_str("supported keys:\n");
     out.push_str("- version\n");
     out.push_str("- help\n");
-    out.push_str("stubbed keys (unsupported for now):\n");
     out.push_str("- libdir\n");
     out.push_str("- includedir\n");
     out.push_str("- archdir\n");

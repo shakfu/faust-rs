@@ -20,6 +20,8 @@ RUNNER_CRANELIFT ?= ../../target/release/impulse_cranelift
 FAUST_CPP  ?= faust
 CPP_TESTS  ?= /Users/letz/Developpements/RUST/faust/tests/impulse-tests
 FAUST_ARCH ?= /Users/letz/Developpements/RUST/faust/architecture
+FAUST_INCLUDE_DIR ?= $(shell $(FAUST_CPP) -includedir 2>/dev/null || printf /usr/local/include)
+FAUST_LIB_DIR ?= $(shell $(FAUST_CPP) -libdir 2>/dev/null || printf /usr/local/lib)
 IMPULSE_ARCH ?= $(CPP_TESTS)/archs/impulsearch.cpp
 # The C backend emits C functions wrapped by a C++ `Cdsp` adaptor, so it uses a
 # dedicated impulse architecture.
@@ -41,6 +43,15 @@ SCALARFRAMES ?= 15000
 
 # filesCompare tolerance override (empty -> default 2e-06).
 precision ?=
+
+# --- performance benchmark --------------------------------------------------
+# `faustbench` invokes a `faust` binary found on PATH, so Make.bench creates
+# temporary PATH wrappers around FAUST_CPP and FAUST_RS.
+FAUSTBENCH ?= faustbench -single
+BENCH_OPTIONS ?= -double
+BENCH_WARN_MIN ?= 5
+BENCH_CSV ?= build/bench/summary.csv
+COMPILE_BENCH_CSV ?= build/bench/compile-summary.csv
 
 dspfiles := $(wildcard dsp/*.dsp)
 

@@ -13,6 +13,8 @@
 #   make c              # check the faust-rs C backend
 #   make wasm           # check the faust-rs WASM backend
 #   make assemblyscript # check the faust-rs AssemblyScript backend
+#   make bench          # compare C++ Faust vs faust-rs generated-code speed
+#   make compile-bench  # compare C++ Faust vs faust-rs compile time
 #   make all            # interp + c + cpp + cranelift
 #
 # Add `-k` to keep going past failing cases and `-j N` for parallelism, e.g.
@@ -27,7 +29,7 @@ include common.mk
 
 MAKE ?= make
 
-.PHONY: all reference interp c cpp cranelift wasm assemblyscript build tools help clean distclean
+.PHONY: all reference interp c cpp cranelift wasm assemblyscript bench compile-bench build tools help clean distclean
 
 all: cpp c interp cranelift wasm assemblyscript
 
@@ -51,6 +53,12 @@ wasm:
 
 assemblyscript:
 	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript
+
+bench:
+	@$(MAKE) -f Make.bench bench
+
+compile-bench:
+	@$(MAKE) -f Make.bench compile-bench
 
 # Build the faust-rs binaries the harness drives.
 build:
@@ -77,6 +85,8 @@ help:
 	@echo "  cranelift  : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
 	@echo "  wasm       : check the faust-rs WASM backend (scalar prefix, 64-bit, Node)"
 	@echo "  assemblyscript : check the faust-rs AssemblyScript backend (scalar prefix, Node/asc)"
+	@echo "  bench      : compare C++ Faust and faust-rs generated-code speed with faustbench -single"
+	@echo "  compile-bench : compare C++ Faust and faust-rs compile time on the DSP corpus"
 	@echo "  cpp        : check the faust-rs C++ backend (full 4-pass)"
 	@echo "  c          : check the faust-rs C backend (full 4-pass)"
 	@echo "  all        : cpp + c + interp + cranelift"
@@ -88,6 +98,8 @@ help:
 	@echo "  FAUST_CPP=$(FAUST_CPP)   CPP_TESTS=$(CPP_TESTS)"
 	@echo "  FAUST_ARCH=$(FAUST_ARCH)"
 	@echo "  FAUST_RS=$(FAUST_RS)   RUNNER=$(RUNNER)"
+	@echo "  FAUSTBENCH=$(FAUSTBENCH)   BENCH_OPTIONS=$(BENCH_OPTIONS)"
+	@echo "  BENCH_CSV=$(BENCH_CSV)   COMPILE_BENCH_CSV=$(COMPILE_BENCH_CSV)"
 	@echo "  precision=<tol>  (filesCompare tolerance override)"
 	@echo ""
 	@echo "Run 'make reference' once before the backend targets."

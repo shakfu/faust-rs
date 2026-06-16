@@ -1342,20 +1342,18 @@ impl Compiler {
 
     /// Returns one `faustwasm` helper-info string.
     ///
-    /// Current compatibility policy is intentionally strict and explicit:
-    /// - supported now: `version`, `help`
-    /// - explicit stub: `libdir`, `includedir`, `archdir`, `dspdir`,
-    ///   `pathslist`
-    /// - invalid: any unknown key
+    /// Current compatibility policy mirrors C++ `libFaustWasm::getInfos` for
+    /// `version`, `help`, `libdir`, `includedir`, `archdir`, `dspdir`, and
+    /// `pathslist`; unknown keys remain invalid.
     pub fn get_faustwasm_info(&self, what: &str) -> Result<String, FaustwasmServiceError> {
         match what {
             "version" => Ok(Self::version().to_owned()),
             "help" => Ok(faustwasm_info_help_text()),
-            "libdir" | "includedir" | "archdir" | "dspdir" | "pathslist" => {
-                Err(FaustwasmServiceError::unsupported(format!(
-                    "getInfos({what}) is not implemented yet in the Rust faustwasm service"
-                )))
-            }
+            "libdir" => Ok(FaustInstallPaths::from_environment().render_lib_dir()),
+            "includedir" => Ok(FaustInstallPaths::from_environment().render_include_dir()),
+            "archdir" => Ok(FaustInstallPaths::from_environment().render_arch_dir()),
+            "dspdir" => Ok(FaustInstallPaths::from_environment().render_dsp_dir()),
+            "pathslist" => Ok(FaustInstallPaths::from_environment().render_paths_list()),
             _ => Err(FaustwasmServiceError::invalid_argument(format!(
                 "incorrect argument passed to getInfos: {what}"
             ))),
