@@ -324,7 +324,7 @@ fn render_directory_info_uses_cpp_precedence() {
     );
     assert_eq!(
         render_directory_info(&cli, &paths),
-        Some("/opt/faust/lib\n".to_owned())
+        Some(FaustInstallPaths::render_path(&paths.lib_dir))
     );
 }
 
