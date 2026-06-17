@@ -13,7 +13,6 @@ Workspace-level integration tests, fixtures, and differential harnesses.
 | `runtime_traces/` | Persisted runtime trace snapshots |
 | `eval_micro_fixtures/` | Focused eval/propagate differential reproducers |
 | `cpp_parity_known_gaps/` | Historical focused C++ parity reproducers |
-| `runtime_corpus_known_failures/` | Documented runtime repros excluded from default trace discovery |
 
 ## Common commands
 

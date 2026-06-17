@@ -20,6 +20,7 @@ The source of truth for the current strict validation subset is:
 - `trace_22_parallel_mix.dsp`: `impulse`
 - `trace_31_extended_primitives_typed.dsp`: `zeros`
 - `trace_38_sine_phasor.dsp`: `zeros`
+- `trace_40_int_plus_one.dsp`: `ramp`
 
 Notes:
 - `*_typed` variants force float literals in places where the current fast-lane
@@ -27,12 +28,10 @@ Notes:
   literals in the extended-primitives corpus case).
 - These files are trace-harness fixtures; the main compile/parity corpus remains
   in `tests/corpus/`.
-- Documented runtime known-failure repros live separately in
-  `tests/runtime_corpus_known_failures/` and are intentionally excluded from
-  `xtask` runtime corpus discovery.
 - Phase 2 snapshot scaffold (`interp-trace-gen` / `interp-trace-check`) only
   enables a subset for now (currently `trace_01_passthrough`,
-  `trace_09_ui_slider`, `trace_31_extended_primitives_typed`) and skips the
-  others until known fast-lane FIR typing issues are fixed.
+  `trace_09_ui_slider`, `trace_31_extended_primitives_typed`,
+  `trace_40_int_plus_one`) and skips the others until known fast-lane FIR
+  typing issues are fixed.
 - The same subset is currently the recommended starting point for runtime
   semantic validation before introducing a Faust C++ differential oracle.

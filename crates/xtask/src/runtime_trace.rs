@@ -793,6 +793,7 @@ pub(crate) fn trace_scenarios_for_runtime_case(
         "trace_22_parallel_mix" => vec![],
         "trace_31_extended_primitives_typed" => vec![TraceScenario::Zeros],
         "trace_38_sine_phasor" => vec![],
+        "trace_40_int_plus_one" => vec![TraceScenario::Ramp],
         other => {
             return Err(format!(
                 "no runtime trace scenario mapping defined for {other} (update xtask)"

@@ -95,6 +95,15 @@ fn runtime_trace_scenario_mapping_for_typed_primitives() {
 }
 
 #[test]
+fn runtime_trace_scenario_mapping_for_int_plus_one() {
+    let scenarios = trace_scenarios_for_runtime_case(Path::new(
+        "tests/runtime_corpus/trace_40_int_plus_one.dsp",
+    ))
+    .unwrap();
+    assert_eq!(scenarios, vec![TraceScenario::Ramp]);
+}
+
+#[test]
 fn runtime_trace_snapshot_path_uses_case_and_scenario() {
     let path = runtime_trace_snapshot_path("trace_01_passthrough", TraceScenario::Impulse);
     let expected = runtime_trace_snapshot_root()
