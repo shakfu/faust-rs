@@ -393,6 +393,14 @@ fn prepare_signals_for_fir_unverified(
     let symbolic_list = canonicalize_unary_rec_projections(&mut arena, symbolic_list)?;
     let outputs = list_to_vec(&arena, symbolic_list)
         .expect("prepare_signals_for_fir rebuilds a proper cons list");
+    // Inter-pass contract (W4): `de_bruijn_to_sym` establishes the symbolic
+    // recursion form. Checking it in debug builds turns the otherwise implicit
+    // staging order into a testable postcondition, localized to this pass rather
+    // than surfacing later at the `verify` boundary.
+    debug_assert!(
+        !forest_has_de_bruijn(&arena, &outputs),
+        "de_bruijn_to_sym must eliminate every de Bruijn recursion form before typing"
+    );
     let sig_types_before = infer_full_types(&arena, &outputs, ui)?;
     let outputs = promote_signals_fastlane(&mut arena, &sig_types_before, &outputs)
         .map_err(SignalPrepareError::Promotion)?;
@@ -403,9 +411,27 @@ fn prepare_signals_for_fir_unverified(
     let sig_types_after_merge = infer_full_types(&arena, &outputs, ui)?;
     let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_merge, &outputs);
     let outputs = canonicalize_one_sample_delays(&mut arena, &outputs)?;
+    // Inter-pass contract (W4): `canonicalize_one_sample_delays` establishes D1.
+    debug_assert!(
+        !forest_has_delay_of_one(&arena, &outputs),
+        "canonicalize_one_sample_delays must rewrite every Delay(_, 1) to Delay1"
+    );
     let sig_types_after_canonicalize = infer_full_types(&arena, &outputs, ui)?;
     let outputs = promote_signals_fastlane(&mut arena, &sig_types_after_canonicalize, &outputs)
         .map_err(SignalPrepareError::Promotion)?;
+    // Inter-pass contract (W4): the tail of the pipeline (typing / promotion /
+    // simplification / merge) must preserve the structural invariants the prepared
+    // forest hands to lowering. `P` itself is enforced for the final forest by
+    // `verify`; these debug checks pin the two structural forms (`Sym`, `D1`) at
+    // the point promotion #2 hands them off, so a regression is attributed here.
+    debug_assert!(
+        !forest_has_de_bruijn(&arena, &outputs),
+        "the staging pipeline must preserve the symbolic-recursion form (Sym)"
+    );
+    debug_assert!(
+        !forest_has_delay_of_one(&arena, &outputs),
+        "promotion must preserve the one-sample-delay canonical form (D1)"
+    );
     let sig_types = infer_full_types(&arena, &outputs, ui)?;
     let types = derive_simple_types(&arena, &sig_types);
     Ok(PreparedSignals {
@@ -414,6 +440,71 @@ fn prepare_signals_for_fir_unverified(
         types,
         sig_types,
     })
+}
+
+/// Returns `true` if any node reachable from `outputs` satisfies `pred`.
+///
+/// A small structural DAG scan (memoized via `visited`, list children expanded)
+/// backing the debug-only inter-pass contract assertions in
+/// [`prepare_signals_for_fir_unverified`]. Malformed structures are ignored
+/// here; the explicit [`PreparedSignals::verify`] boundary reports them with
+/// precise diagnostics.
+fn forest_any_node<P>(arena: &TreeArena, outputs: &[SigId], pred: P) -> bool
+where
+    P: Fn(&TreeArena, SigId) -> bool,
+{
+    fn walk<P: Fn(&TreeArena, SigId) -> bool>(
+        arena: &TreeArena,
+        sig: SigId,
+        pred: &P,
+        visited: &mut HashSet<SigId>,
+    ) -> bool {
+        if !visited.insert(sig) {
+            return false;
+        }
+        if pred(arena, sig) {
+            return true;
+        }
+        if arena.is_nil(sig) {
+            return false;
+        }
+        let Some(node) = arena.node(sig) else {
+            return false;
+        };
+        for &child in node.children.as_slice() {
+            if arena.is_list(child) {
+                if let Some(items) = list_to_vec(arena, child)
+                    && items.iter().any(|&item| walk(arena, item, pred, visited))
+                {
+                    return true;
+                }
+            } else if walk(arena, child, pred, visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut visited = HashSet::new();
+    outputs
+        .iter()
+        .any(|&sig| walk(arena, sig, &pred, &mut visited))
+}
+
+/// Debug-contract predicate: any residual de Bruijn recursion form (`Sym` broken).
+fn forest_has_de_bruijn(arena: &TreeArena, outputs: &[SigId]) -> bool {
+    forest_any_node(arena, outputs, |a, s| {
+        tlib::match_de_bruijn_rec(a, s).is_some() || tlib::match_de_bruijn_ref(a, s).is_some()
+    })
+}
+
+/// Debug-contract predicate: any non-canonical one-sample delay `Delay(_, 1)` (`D1` broken).
+fn forest_has_delay_of_one(arena: &TreeArena, outputs: &[SigId]) -> bool {
+    forest_any_node(
+        arena,
+        outputs,
+        |a, s| matches!(match_sig(a, s), SigMatch::Delay(_, amount) if matches!(match_sig(a, amount), SigMatch::Int(1))),
+    )
 }
 
 fn verify_prepared_output_arity(expected: usize, actual: usize) -> Result<(), SignalPrepareError> {

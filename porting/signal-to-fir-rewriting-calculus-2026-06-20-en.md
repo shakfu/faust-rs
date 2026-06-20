@@ -755,7 +755,9 @@ None of these require a proof assistant; each is a test or a guard:
 5. **Emit a guard or carry the bound** for the BRA `count` precondition (§8.5). *(Landed
    2026-06-20: tape index masked to bound the access.)*
 6. **Encode phase pre/post as `debug_assert!` gates** between passes, turning the implicit ordering
-   of `prepare_signals_for_fir_unverified` into explicit, testable contracts (§8.6).
+   of `prepare_signals_for_fir_unverified` into explicit, testable contracts (§8.6). *(Landed
+   2026-06-20: `Sym` after `de_bruijn_to_sym`, `D1` after `canonicalize_one_sample_delays`, and both
+   preserved after promotion #2.)*
 
 In short: framing the transform as typed rewriting does not by itself prove anything, but it
 *relocates* correctness questions to a small set of named obligations (gate ⊒ precondition,
