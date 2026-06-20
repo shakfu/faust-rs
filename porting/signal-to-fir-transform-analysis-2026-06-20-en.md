@@ -6,6 +6,10 @@
 **Companion docs:** `faust-rust-fir-architecture-en.md`, `factorization-god-files-plan-2026-05-25-en.md`,
 `fir-cse-runtime-optimizations-plan-2026-04-03-en.md`, `delay-manager-design-2026-04-06-en.md`,
 `rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`.
+**Formal companion:** [`signal-to-fir-rewriting-calculus-2026-06-20-en.md`](signal-to-fir-rewriting-calculus-2026-06-20-en.md)
+— the same pipeline framed as typed rewriting between refinement sorts, deriving the `W#` findings
+below as type/coverage/soundness obligations (and surfacing one new gap: `verify` enforces a
+predicate weaker than the lowering precondition, omitting `P` and `D1`).
 
 ---
 
