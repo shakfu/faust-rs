@@ -495,6 +495,12 @@ second simplify. It works for the current corpus but is brittle to add new rewri
 A host calling `compute(count > 8192)` with a `BlockReverseAD` carrier overflows the tape with no
 runtime guard and no compile-time rejection — "the host must not" is the only protection.
 
+**Update (2026-06-20):** the tape index is now masked (`i0 & (MAX_BRA_TAPE_BLOCK_SIZE - 1)`, a
+power-of-two no-op for the supported block size), so an over-long block wraps *within* the array —
+approximate gradients for the tail — instead of writing out of bounds. The UB is gone; the
+`count ≤ MAX` precondition still governs *exact* gradient correctness, and arbitrary-length support
+remains a larger change (chunked TBPTT or a dynamically sized tape).
+
 **W6 — Dead/unused analysis surface.**
 - `DelayManager::rec_group_max_delay` is **write-only**: populated by `try_record_rec_delay`
   ([`delay.rs:1531`](../crates/transform/src/signal_fir/delay.rs)) but never read (recursion sizing uses

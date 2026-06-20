@@ -186,13 +186,24 @@ impl SamplePhases {
 /// Maximum number of samples that can be stored in a BRA forward tape array.
 ///
 /// Tape arrays are declared as `fBraTapeN: Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)`.
-/// The host must not call `compute()` with a frame count larger than this value
-/// when using a `SigBlockReverseAD` carrier; doing so would overflow the tape.
+/// For correct gradients the host should call `compute()` with a frame count no
+/// larger than this value when using a `SigBlockReverseAD` carrier.
+///
+/// The tape index is masked (`i0 & (MAX_BRA_TAPE_BLOCK_SIZE - 1)`, see
+/// [`SignalToFirLower::bra_tape_index`]), so an over-long block now **wraps
+/// safely within the array** (aliased/approximate gradients for the tail)
+/// instead of writing out of bounds. The exact fix for arbitrarily long blocks
+/// is chunked TBPTT or a dynamically sized tape (analysis W5). The masking
+/// relies on this constant being a power of two — enforced just below.
 ///
 /// 8 192 samples is the default upper bound chosen to stay within typical L1/L2
 /// cache pressure while leaving room for the usual block sizes used in practice
 /// (64, 128, 256, 512, 1024 samples).
 const MAX_BRA_TAPE_BLOCK_SIZE: usize = 8192;
+
+// The tape-index mask `i0 & (MAX_BRA_TAPE_BLOCK_SIZE - 1)` is only equivalent to
+// a bounds check when the size is a power of two.
+const _: () = assert!(MAX_BRA_TAPE_BLOCK_SIZE.is_power_of_two());
 
 /// Deterministic prototype emission order for math helper functions.
 ///

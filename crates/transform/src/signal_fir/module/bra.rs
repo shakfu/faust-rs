@@ -826,13 +826,12 @@ impl<'a> SignalToFirLower<'a> {
             // BEFORE `post_output` updates delay/state variables.  Placing them
             // in `sample_end` would re-read post-update state (e.g. the updated
             // Delay1 register) and produce the wrong tape entry.
-            let i0 = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.load_var("i0", AccessType::Loop, FirType::Int32)
-            };
+            // Bounded tape index: a no-op for the supported block size, and a
+            // safe wrap (never an out-of-bounds write) if the host exceeds it.
+            let idx = self.bra_tape_index();
             let store_stmt = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.store_table(tape_name.clone(), AccessType::Struct, i0, v_fir)
+                b.store_table(tape_name.clone(), AccessType::Struct, idx, v_fir)
             };
             self.sample_phases.immediate.push(store_stmt);
             self.bra_tape_store_var.insert(v, tape_name);
@@ -855,18 +854,38 @@ impl<'a> SignalToFirLower<'a> {
     pub(super) fn load_bra_fwd_value(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
         if let Some(tape_name) = self.bra_tape_store_var.get(&sig).cloned() {
             let real_ty = self.real_ty();
-            let i0 = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.load_var("i0", AccessType::Loop, FirType::Int32)
-            };
+            let idx = self.bra_tape_index();
             let load = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.load_table(tape_name, AccessType::Struct, i0, real_ty)
+                b.load_table(tape_name, AccessType::Struct, idx, real_ty)
             };
             Ok(load)
         } else {
             self.lower_signal(sig)
         }
+    }
+
+    /// Builds the bounded BRA tape index `i0 & (MAX_BRA_TAPE_BLOCK_SIZE - 1)`.
+    ///
+    /// `MAX_BRA_TAPE_BLOCK_SIZE` is a power of two, so the mask is a **no-op** for
+    /// the supported block size (`count ≤ MAX_BRA_TAPE_BLOCK_SIZE`): there,
+    /// `i0 < MAX` and `i0 & (MAX - 1) == i0`. For an over-long block it keeps the
+    /// access in bounds — the forward store and the reverse load use the same
+    /// wrapped slot — instead of reading/writing past the tape array. The
+    /// out-of-range tail then carries aliased (approximate) gradients rather than
+    /// triggering undefined behaviour; the exact fix is chunked TBPTT or a
+    /// dynamically sized tape (analysis W5 / rewriting-calculus §8.5).
+    fn bra_tape_index(&mut self) -> FirId {
+        let i0 = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.load_var("i0", AccessType::Loop, FirType::Int32)
+        };
+        let mask = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(MAX_BRA_TAPE_BLOCK_SIZE - 1).unwrap_or(i32::MAX))
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        b.binop(FirBinOp::And, i0, mask, FirType::Int32)
     }
 
     /// Accumulates `new_term` into the adjoint of `sig`, building an `Add`

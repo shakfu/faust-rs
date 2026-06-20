@@ -681,9 +681,12 @@ stream denotation is unchanged across the rewrite).
 The produced FIR module has an implicit refinement on its entry point:
 `compute(count, …)` is only correct for `count ≤ MAX_BRA_TAPE_BLOCK_SIZE` when a `BlockReverseAD`
 carrier is present (analysis **W5**). In a dependent/refinement reading of the FIR signature this is
-a precondition on `count` that is currently *unwritten* and *unchecked* — the tape silently
-overflows above the bound. Even without dependent types, naming the obligation says: emit a guard,
-or carry the bound in the module's type.
+a precondition on `count` that was *unwritten* and *unchecked* — the tape silently overflowed above
+the bound. Even without dependent types, naming the obligation says: emit a guard, or carry the
+bound in the module's type. *(Resolved 2026-06-20: the tape index is now masked
+`i0 & (MAX − 1)`, bounding the access so an over-long block aliases within the tape instead of
+overflowing. The `count ≤ MAX` precondition still governs exact gradient correctness, but exceeding
+it is no longer undefined behaviour.)*
 
 ### 8.6 Preservation lemmas formalise the "pseudo-fixpoint" worry → finding W4
 
@@ -702,7 +705,7 @@ relevant to golden-test stability.
 | `L_prep ⊑ dom(⇝) ∪ Deferred` (coverage) | W8 (intentional prepare-superset; drift-guarded), W13 (late generic error) |
 | `α` homomorphic (decoration soundness) | W3 (reduced-type override) |
 | `⟦phase(t)⟧ = ⟦t⟧` (semantic preservation) | unsound float simplifications |
-| output-type refinement | W5 (BRA tape bound) |
+| output-type refinement | W5 (BRA tape bound — now mask-guarded) |
 | invariant preservation across phases | W4 (fixpoint/ordering brittleness) |
 
 ---
@@ -742,7 +745,8 @@ None of these require a proof assistant; each is a test or a guard:
    with a dedicated test (§8.3).
 4. **Property-test value preservation** of each `simplify`/CSE rule on random typed signals; add
    finiteness side conditions where it fails (§8.4).
-5. **Emit a guard or carry the bound** for the BRA `count` precondition (§8.5).
+5. **Emit a guard or carry the bound** for the BRA `count` precondition (§8.5). *(Landed
+   2026-06-20: tape index masked to bound the access.)*
 6. **Encode phase pre/post as `debug_assert!` gates** between passes, turning the implicit ordering
    of `prepare_signals_for_fir_unverified` into explicit, testable contracts (§8.6).
 
