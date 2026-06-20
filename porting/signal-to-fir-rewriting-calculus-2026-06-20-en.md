@@ -626,16 +626,36 @@ assumption into a checked one — a cheap, high-value fix.
 
 ### 8.2 Lowering coverage as a subset obligation → finding W8
 
-Because `⇝` is partial, `L_prep ⊑ dom(⇝)` is a real obligation. It **fails**: the analysis's
-**W8** (verifier accepts `OnDemand`/`Upsampling`/`Downsampling`/`Clocked`/`ZeroPad`/`Fir`/`Iir`/
-`AssertBounds`, but `lower_signal` has no rule for them) is exactly `L_verify ⊄ dom(⇝)`. The
-formalism not only names the bug, it suggests the *mechanical* check: enumerate the constructors
-accepted by `verify` and the constructors matched by `lower_signal`, and assert set equality. That
-test would catch this class of drift automatically and forever.
+Because `⇝` is partial, `L_prep ⊑ dom(⇝)` is a real obligation, and it does **not** hold:
+`verify` accepts `OnDemand`/`Upsampling`/`Downsampling`/`Clocked`/`ZeroPad`/`Fir`/`Iir`/
+`AssertBounds`/`TempVar`/`PermVar`/`Seq` while `lower_signal` has no rule for them (`L_verify ⊄
+dom(⇝)`). The formalism makes the mechanical check obvious — enumerate what each side handles — and
+that check is now executable as the wildcard-free `lowering_coverage` classifier in
+`signal_fir/tests.rs`.
 
-It also reframes **W13** (coarse errors): the "stuck" cases are not classified by *which*
-precondition failed (outside-domain vs. `P`-violation vs. delay-too-large), so one error code
-`UnsupportedSignalNode` covers semantically different failures.
+But — and this is the important correction to the first draft of this section — the obligation is
+violated **by design**, not by accident. `signal_prepare` is a deliberate *superset* of the current
+fast-lane lowerer: it types, promotes, and *keeps* these carriers in anticipation of future lowering
+(and for other consumers). This is enforced by explicit tests:
+`prepare_signals_for_fir_accepts_filter_carrier_children` and
+`prepare_signals_for_fir_recovers_shared_zero_pad_amount_from_float_context` assert that preparation
+returns a forest still containing `Fir`/`ZeroPad`. An attempt (2026-06-20) to "close the gap" by
+rejecting these families in `verify` broke exactly those tests — empirically confirming the superset
+is intentional.
+
+So the honest obligation is `L_prep ⊑ dom(⇝) ∪ Deferred`, where `Deferred` is the set prepare
+accepts but the fast-lane does not yet lower. The right resolution of **W8** is therefore **not** to
+reject (that regresses the contract) but to either (a) *implement* lowering for a family when a DSP
+needs it — shrinking `Deferred` — or (b) leave it deferred and rely on the classifier as a **drift
+guard**: it documents the current `Deferred` set and fails to compile when a new `SigMatch` variant
+is added without a conscious classification. Asserting `{verify-accepted} == {lower-handled}` would
+itself be wrong, because the two are intentionally unequal.
+
+One genuine defect survives *inside* `Deferred`: such a program passes the staged contract and then
+fails **late**, deep in lowering, with the generic `UnsupportedSignalNode` code — reframing **W13**
+(the "stuck" cases are not classified by *which* precondition failed: outside-domain vs.
+`P`-violation vs. delay-too-large). That late, coarse failure is the part worth improving,
+independently of the coverage question.
 
 ### 8.3 Decorations must be *sound abstractions* → finding W3
 
@@ -679,7 +699,7 @@ relevant to golden-test stability.
 | Property the model exposes | Bug class / finding |
 |----------------------------|---------------------|
 | `L_verify ⊑ L_prep` (gate ⊒ precondition) | `verify` omits `P`, `D1` (new) |
-| `L_prep ⊑ dom(⇝)` (coverage) | W8 (clock/filter families), W13 (error granularity) |
+| `L_prep ⊑ dom(⇝) ∪ Deferred` (coverage) | W8 (intentional prepare-superset; drift-guarded), W13 (late generic error) |
 | `α` homomorphic (decoration soundness) | W3 (reduced-type override) |
 | `⟦phase(t)⟧ = ⟦t⟧` (semantic preservation) | unsound float simplifications |
 | output-type refinement | W5 (BRA tape bound) |
@@ -713,9 +733,11 @@ The typed-rewriting view is a *modelling discipline*, not a free proof. Its limi
 None of these require a proof assistant; each is a test or a guard:
 
 1. **Make `verify` enforce the full `L_prep`** — add `P` and `D1` checks so the boundary gate
-   matches the lowering precondition (§8.1).
-2. **Add a domain-coverage test** asserting `{constructors accepted by verify} == {constructors
-   handled by lower_signal}` (kills W8 and future drift; §8.2).
+   matches the lowering precondition (§8.1). *(Landed 2026-06-20.)*
+2. **Add a domain-coverage classifier** — a wildcard-free `match` over `SigMatch` that documents the
+   `Deferred` set and fails to compile when a new variant is added unclassified. This is a *drift
+   guard*, not an equality assertion: `{verify-accepted} == {lower-handled}` is intentionally false,
+   because prepare is a deliberate superset (§8.2). *(Landed 2026-06-20.)*
 3. **Make `α` total and homomorphic, or pin the exception** for `is_unresolved_recursive_projection`
    with a dedicated test (§8.3).
 4. **Property-test value preservation** of each `simplify`/CSE rule on random typed signals; add

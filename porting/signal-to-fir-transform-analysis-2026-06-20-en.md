@@ -518,6 +518,13 @@ A program using those families passes the staged contract and then fails late wi
 message instead of being rejected (or supported) at a clear boundary. (The clock-domain gap is
 also tracked in `project_ondemand_clock_domains`.)
 
+**Update (2026-06-20):** this acceptance is *by design* — preparation is a deliberate superset of
+the fast-lane lowerer, enforced by `prepare_signals_for_fir_accepts_filter_carrier_children` and
+`prepare_signals_for_fir_recovers_shared_zero_pad_amount_from_float_context` (an attempt to reject
+these families in `verify` broke both). So the resolution is to *lower* a family when a DSP needs it,
+not to reject it; the genuine residual defect is only the *late, generic* failure. See the formal
+companion's §8.2 and the `lowering_coverage` drift-guard test.
+
 **W9 — `SignalToFirLower` is a god object.**
 ~45 fields spanning delay, recursion, BRA, UI, CSE counters, placement, and statement buckets,
 with behavior spread over eight `impl` submodules. The split-borrow `*Ctx` bundles
