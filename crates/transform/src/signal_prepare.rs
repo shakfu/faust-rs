@@ -74,7 +74,7 @@ use std::error::Error;
 use std::fmt;
 
 use normalize::normalform::{NormalFormError, promote_signals_fastlane, simplify_signals_fastlane};
-use signals::{SigBuilder, SigId, SigMatch, match_sig};
+use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::{Nature, SigType, TypeAnnotator};
 use tlib::{
     RecursionError, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, vec_to_list,
@@ -216,6 +216,7 @@ impl PreparedSignals {
                     sig.as_u32()
                 )));
             }
+            verify_promotion_invariant(&self.arena, &self.types, sig)?;
         }
 
         Ok(())
@@ -957,6 +958,138 @@ fn verify_control_exists(
         sig.as_u32(),
         control
     )))
+}
+
+/// Verifies the promotion invariant `P` and the one-sample-delay canonical form
+/// `D1` for one prepared node, using the reduced type map.
+///
+/// `P` is the precondition the FIR lowering rules are documented against (see
+/// `transform::signal_fir::module::build_module`): every operator already
+/// receives operands in the domain it needs, so the lowerer never inserts
+/// implicit casts. Until this check, the staging verifier enforced a predicate
+/// strictly weaker than that precondition — `P` was caught only lazily inside
+/// `lower_binop`, and `D1` was never re-guarded after canonicalization. See
+/// `porting/signal-to-fir-rewriting-calculus-2026-06-20-en.md` §8.1.
+///
+/// The checks compare the reduced `SimpleSigType` domains, which map 1:1 onto the
+/// FIR operand types used by lowering. A violation means a previous staging pass
+/// regressed the contract, so it is reported close to the boundary rather than
+/// deep inside FIR emission.
+fn verify_promotion_invariant(
+    arena: &TreeArena,
+    types: &HashMap<SigId, SimpleSigType>,
+    sig: SigId,
+) -> Result<(), SignalPrepareError> {
+    let dom = |s: SigId| types.get(&s).copied();
+    let int = Some(SimpleSigType::Int);
+
+    match match_sig(arena, sig) {
+        // D1: one-sample delays must be canonicalized to `Delay1`.
+        SigMatch::Delay(_, amount) => {
+            if matches!(match_sig(arena, amount), SigMatch::Int(1)) {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared signal {} is a non-canonical one-sample delay Delay(_, 1); expected Delay1",
+                    sig.as_u32()
+                )));
+            }
+            if dom(amount) != int {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared Delay {} has non-integer amount domain {:?}",
+                    sig.as_u32(),
+                    dom(amount)
+                )));
+            }
+        }
+        SigMatch::Prefix(init, value) => {
+            if dom(init) != dom(value) {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared Prefix {} has mismatched init/value domains {:?} vs {:?}",
+                    sig.as_u32(),
+                    dom(init),
+                    dom(value)
+                )));
+            }
+        }
+        SigMatch::RdTbl(_, index) => {
+            if dom(index) != int {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared RdTbl {} has non-integer index domain {:?}",
+                    sig.as_u32(),
+                    dom(index)
+                )));
+            }
+        }
+        SigMatch::WrTbl(_, _, write_index, _) => {
+            if !arena.is_nil(write_index) && dom(write_index) != int {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared WrTbl {} has non-integer write-index domain {:?}",
+                    sig.as_u32(),
+                    dom(write_index)
+                )));
+            }
+        }
+        SigMatch::Select2(selector, then_value, else_value) => {
+            if dom(selector) != int {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared Select2 {} has non-integer selector domain {:?}",
+                    sig.as_u32(),
+                    dom(selector)
+                )));
+            }
+            if dom(then_value) != dom(else_value) {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared Select2 {} has mismatched branch domains {:?} vs {:?}",
+                    sig.as_u32(),
+                    dom(then_value),
+                    dom(else_value)
+                )));
+            }
+        }
+        SigMatch::Enable(_, gate) => {
+            if dom(gate) != int {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared Enable {} has non-integer gate domain {:?}",
+                    sig.as_u32(),
+                    dom(gate)
+                )));
+            }
+        }
+        SigMatch::BinOp(op, lhs, rhs) => {
+            let is_comparison = matches!(
+                op,
+                BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne
+            );
+            if is_comparison {
+                // Comparisons keep same-typed numeric operands; the result is Int.
+                if dom(lhs) != dom(rhs)
+                    || !matches!(dom(lhs), Some(SimpleSigType::Int | SimpleSigType::Real))
+                {
+                    return Err(SignalPrepareError::Validation(format!(
+                        "prepared comparison {} has inconsistent operand domains {:?} vs {:?}",
+                        sig.as_u32(),
+                        dom(lhs),
+                        dom(rhs)
+                    )));
+                }
+            } else {
+                // Arithmetic / Div / Rem / bitwise / shift: both operands must
+                // already share the node's result domain (no implicit cast at
+                // lowering).
+                let node = dom(sig);
+                if dom(lhs) != node || dom(rhs) != node {
+                    return Err(SignalPrepareError::Validation(format!(
+                        "prepared BinOp {} operands {:?}, {:?} do not match result domain {:?}",
+                        sig.as_u32(),
+                        dom(lhs),
+                        dom(rhs),
+                        node
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Rewrites symbolic recursion projections so unary groups always use slot `0`.

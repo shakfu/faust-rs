@@ -1046,3 +1046,73 @@ fn prepared_signals_verify_rejects_missing_ui_control_reference() {
     };
     assert!(message.contains("missing UI control id 0"));
 }
+
+// ── Promotion-invariant / one-sample-delay boundary checks (§8.1) ─────────────
+//
+// These exercise `verify_promotion_invariant` directly: the public `prepare`
+// path always establishes `P`/`D1`, so a violation can only be constructed by
+// handing the checker a deliberately inconsistent (arena, reduced-type) pair.
+
+#[test]
+fn verify_promotion_invariant_rejects_non_canonical_one_sample_delay() {
+    use std::collections::HashMap;
+    let mut arena = tlib::TreeArena::new();
+    let (delay, value, one) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let v = b.input(0);
+        let one = b.int(1);
+        let d = b.delay(v, one);
+        (d, v, one)
+    };
+    let mut types = HashMap::new();
+    types.insert(value, SimpleSigType::Real);
+    types.insert(one, SimpleSigType::Int);
+    types.insert(delay, SimpleSigType::Real);
+
+    let err = super::verify_promotion_invariant(&arena, &types, delay)
+        .expect_err("Delay(_, 1) must be rejected as a non-canonical one-sample delay (D1)");
+    assert!(matches!(err, SignalPrepareError::Validation(_)));
+}
+
+#[test]
+fn verify_promotion_invariant_rejects_mixed_domain_arithmetic() {
+    use std::collections::HashMap;
+    let mut arena = tlib::TreeArena::new();
+    let (node, lhs, rhs) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let l = b.real(1.0);
+        let r = b.int(2);
+        let n = b.binop(BinOp::Add, l, r);
+        (n, l, r)
+    };
+    // A real-result Add whose right operand is still Int with no FloatCast —
+    // exactly the unpromoted shape `P` forbids.
+    let mut types = HashMap::new();
+    types.insert(lhs, SimpleSigType::Real);
+    types.insert(rhs, SimpleSigType::Int);
+    types.insert(node, SimpleSigType::Real);
+
+    let err = super::verify_promotion_invariant(&arena, &types, node)
+        .expect_err("arithmetic BinOp with a non-promoted Int operand must be rejected (P)");
+    assert!(matches!(err, SignalPrepareError::Validation(_)));
+}
+
+#[test]
+fn verify_promotion_invariant_accepts_consistent_arithmetic() {
+    use std::collections::HashMap;
+    let mut arena = tlib::TreeArena::new();
+    let (node, lhs, rhs) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let l = b.real(1.0);
+        let r = b.real(2.0);
+        let n = b.binop(BinOp::Add, l, r);
+        (n, l, r)
+    };
+    let mut types = HashMap::new();
+    types.insert(lhs, SimpleSigType::Real);
+    types.insert(rhs, SimpleSigType::Real);
+    types.insert(node, SimpleSigType::Real);
+
+    super::verify_promotion_invariant(&arena, &types, node)
+        .expect("a domain-consistent real Add must satisfy the promotion invariant");
+}
