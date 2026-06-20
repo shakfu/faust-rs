@@ -119,11 +119,6 @@ impl RealType {
 pub struct SignalFirOptions {
     /// FIR module name to emit.
     pub module_name: String,
-    /// Reserved for Step 2+ strictness/profile toggles.
-    ///
-    /// The current implementation keeps this field for forward-compatible CLI
-    /// plumbing even though the active slices still use one conservative policy.
-    pub strict_mode: bool,
     /// Internal DSP computation precision (default: [`RealType::Float32`]).
     ///
     /// Controls the FIR type used for internal arithmetic, state variables,
@@ -160,7 +155,6 @@ impl Default for SignalFirOptions {
     fn default() -> Self {
         Self {
             module_name: "mydsp".to_owned(),
-            strict_mode: true,
             real_type: RealType::Float32,
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,

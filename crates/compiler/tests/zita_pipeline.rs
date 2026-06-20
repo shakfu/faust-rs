@@ -99,7 +99,6 @@ fn zita_min_fastlane_fir_lowering_completes() {
             &UiProgram::empty(),
             &SignalFirOptions {
                 module_name: "mydsp".to_owned(),
-                strict_mode: true,
                 real_type: RealType::Float32,
                 ..SignalFirOptions::default()
             },

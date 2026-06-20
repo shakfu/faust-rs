@@ -366,7 +366,6 @@ fn invalid_options_return_typed_error_code() {
         1,
         &SignalFirOptions {
             module_name: "".to_owned(),
-            strict_mode: true,
             real_type: RealType::Float32,
             ..SignalFirOptions::default()
         },

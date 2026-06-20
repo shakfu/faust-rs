@@ -252,7 +252,6 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
 ) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
         module_name,
-        strict_mode: true,
         real_type,
         max_copy_delay,
         delay_line_threshold,

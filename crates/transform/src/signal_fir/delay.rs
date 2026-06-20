@@ -1148,22 +1148,20 @@ fn bump_if_wrapping_counter(store: &mut FirStore, counter_name: &str, size: usiz
 
 /// Owns all delay-line exclusive state and provides scan + allocation entry points.
 ///
-/// Five fields form the delay manager's state:
+/// Four fields form the delay manager's state:
 ///
 /// | Field | Type | Role |
 /// |-------|------|------|
 /// | `options` | [`DelayOptions`] | `-mcd` / `-dlt` strategy thresholds |
 /// | `delay_lines` | `HashMap<SigId, DelayLineInfo>` | Allocated buffers, keyed by carried signal |
-/// | `delay_analysis` | `HashMap<SigId, DelayAnalysisEntry>` | Read-only accumulated delay metadata per reachable signal |
 /// | `rec_output_analysis` | `HashMap<(u32, usize), DelayAnalysisEntry>` | Read-only accumulated delay metadata per recursion output |
-/// | `rec_group_max_delay` | `HashMap<(u32, usize), i32>` | Legacy direct merge cache used during delay-line scan |
 /// | `scheduled_delay_writes` | `HashSet<SigId>` | Dedup guard for per-sample delay writes |
 ///
 /// # Scan / allocation flow
 ///
 /// 1. `SignalToFirLower::prepare_delay_lines` first calls
 ///    [`Self::analyze_signals`] to collect read-only accumulated delay metadata
-///    for ordinary carriers and recursion outputs.
+///    for recursion outputs.
 /// 2. `prepare_delay_lines` then calls [`Self::scan_signals`], which returns a
 ///    `max_delays` map of carried signals → their maximum observed owned delay.
 /// 3. `prepare_delay_lines` allocates each owned delay line through
@@ -1179,13 +1177,8 @@ pub(super) struct DelayManager {
     options: DelayOptions,
     /// Allocated delay buffers, keyed by carried-signal id.
     delay_lines: HashMap<SigId, DelayLineInfo>,
-    /// Read-only accumulated delay metadata keyed by reachable signal node.
-    delay_analysis: HashMap<SigId, DelayAnalysisEntry>,
     /// Read-only accumulated delay metadata keyed by `(rec_var_id, proj_index)`.
     rec_output_analysis: HashMap<(u32, usize), DelayAnalysisEntry>,
-    /// Maximum total delay for each recursion output that uses the merged pattern
-    /// `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)`.
-    rec_group_max_delay: HashMap<(u32, usize), i32>,
     /// Dedup guard: ensures the delay-write store for a given carried signal is
     /// emitted at most once per sample, even when the same signal is used by
     /// multiple `SIGDELAY` reads.
@@ -1198,9 +1191,7 @@ impl DelayManager {
         Self {
             options,
             delay_lines: HashMap::new(),
-            delay_analysis: HashMap::new(),
             rec_output_analysis: HashMap::new(),
-            rec_group_max_delay: HashMap::new(),
             scheduled_delay_writes: HashSet::new(),
         }
     }
@@ -1225,16 +1216,15 @@ impl DelayManager {
     /// - `SIGPREFIX(init, value)` adds `1` on the carried state edge only
     /// - non-delay computation nodes reset the accumulator to `0`
     ///
-    /// Recursion outputs are tracked both by raw `SigId` and by their canonical
-    /// `(var_id, proj_index)` identity so later planning steps can size the
-    /// owning recursion carrier directly.
+    /// Recursion outputs are tracked by their canonical `(var_id, proj_index)`
+    /// identity so later planning steps can size the owning recursion carrier
+    /// directly.
     pub(super) fn analyze_signals(
         &mut self,
         arena: &TreeArena,
         sig_types: &HashMap<SigId, SigType>,
         signals: &[SigId],
     ) -> Result<(), SignalFirError> {
-        self.delay_analysis.clear();
         self.rec_output_analysis.clear();
         let mut best_seen_delay = HashMap::new();
         for &sig in signals {
@@ -1258,7 +1248,7 @@ impl DelayManager {
     /// accumulated delay analysis).
     ///
     /// This method has no FIR side-effects — it only reads `arena` and `sig_types`
-    /// and writes to `self.rec_group_max_delay`.
+    /// and returns the discovered per-carrier maximum delays.
     pub(super) fn scan_signals(
         &mut self,
         arena: &TreeArena,
@@ -1289,7 +1279,6 @@ impl DelayManager {
         best_seen_delay.insert(sig, accumulated_delay);
 
         if accumulated_delay > 0 {
-            self.record_delay_analysis(sig, accumulated_delay);
             self.record_rec_output_delay_analysis(arena, sig, accumulated_delay);
         }
 
@@ -1391,12 +1380,6 @@ impl DelayManager {
         }
     }
 
-    fn record_delay_analysis(&mut self, sig: SigId, accumulated_delay: i32) {
-        let entry = self.delay_analysis.entry(sig).or_default();
-        entry.max_delay = entry.max_delay.max(accumulated_delay);
-        entry.delay_count = entry.delay_count.saturating_add(1);
-    }
-
     fn record_rec_output_delay_analysis(
         &mut self,
         arena: &TreeArena,
@@ -1439,7 +1422,7 @@ impl DelayManager {
             match delay_size_for_amount(arena, sig_types, amount)? {
                 Some(0) => {}
                 Some(delay) => {
-                    let merged = self.try_record_rec_delay(arena, value, delay);
+                    let merged = self.is_recursion_delay_chain(arena, value);
                     if !merged {
                         let entry = max_delays.entry(value).or_insert(0);
                         if delay > *entry {
@@ -1505,34 +1488,6 @@ impl DelayManager {
         } else {
             self.scan_node(child, arena, sig_types, seen, max_delays)
         }
-    }
-
-    /// Detects `SIGDELAY(Delay1^k(Proj(i, SYMREF(var))), N)` and records the
-    /// total delay `N + k` on `rec_group_max_delay`.
-    ///
-    /// Returns `true` if the pattern matched (caller should skip `fVec` allocation
-    /// for this carried signal); `false` otherwise.
-    fn try_record_rec_delay(&mut self, arena: &TreeArena, value: SigId, delay: i32) -> bool {
-        let Some((proj, implicit_delay)) = self.unwrap_recursion_delay_chain(arena, value) else {
-            return false;
-        };
-        let SigMatch::Proj(proj_index, group) = match_sig(arena, proj) else {
-            return false;
-        };
-        let rec_var = match match_sym_ref(arena, group) {
-            Some(var) => Some(var),
-            None => match_sym_rec(arena, group).map(|(var, _)| var),
-        };
-        let Some(var) = rec_var else {
-            return false;
-        };
-        let total = delay + implicit_delay;
-        let key = (var.as_u32(), proj_index as usize);
-        let entry = self.rec_group_max_delay.entry(key).or_insert(0);
-        if total > *entry {
-            *entry = total;
-        }
-        true
     }
 
     fn is_recursion_delay_chain(&self, arena: &TreeArena, value: SigId) -> bool {
@@ -1700,19 +1655,11 @@ impl DelayManager {
     }
 
     /// Returns the allocated delay line for `carried`, if any.
-    #[allow(dead_code)]
     pub(super) fn get_delay_line(&self, carried: SigId) -> Option<&DelayLineInfo> {
         self.delay_lines.get(&carried)
     }
 
-    /// Returns read-only delay-analysis metadata for one reachable signal node.
-    #[allow(dead_code)]
-    pub(super) fn delay_analysis(&self, sig: SigId) -> Option<&DelayAnalysisEntry> {
-        self.delay_analysis.get(&sig)
-    }
-
     /// Returns read-only delay-analysis metadata for one recursion output.
-    #[allow(dead_code)]
     pub(super) fn rec_output_analysis(
         &self,
         var_id: u32,

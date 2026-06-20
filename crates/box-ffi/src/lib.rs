@@ -225,7 +225,6 @@ fn lower_signal_roots_to_fir(
         &ui,
         &SignalFirOptions {
             module_name: module_name.to_owned(),
-            strict_mode: true,
             real_type: RealType::Float32,
             ..SignalFirOptions::default()
         },
@@ -303,7 +302,6 @@ pub unsafe fn export_fir_from_box_handle(
             &propagated.ui,
             &SignalFirOptions {
                 module_name: module_name.to_owned(),
-                strict_mode: true,
                 real_type: RealType::Float32,
                 ..SignalFirOptions::default()
             },
