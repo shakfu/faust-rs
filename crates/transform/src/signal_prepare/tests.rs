@@ -169,7 +169,11 @@ fn prepare_signals_for_fir_accepts_filter_carrier_children() {
 }
 
 #[test]
-fn prepare_signals_for_fir_closes_unresolved_recursive_types_to_real() {
+fn prepare_signals_for_fir_closes_unconstrained_recursion_to_int() {
+    // A fully unconstrained self-recursion `x = x` carries no operation to widen
+    // its type. The C++ `TREC` seed is `Int` (interval {0}) and the fixpoint
+    // converges to it, so the reduced type must be `Int` — matching the canonical
+    // typer, not the old fast-lane `Real` override (which has been removed).
     let mut arena = tlib::TreeArena::new();
     let self_ref = de_bruijn_ref(&mut arena, 1);
     let body = {
@@ -186,7 +190,7 @@ fn prepare_signals_for_fir_closes_unresolved_recursive_types_to_real() {
     let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
         .expect("recursive typing should converge");
 
-    assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+    assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 }
 
 fn subtree_contains_fconst(arena: &tlib::TreeArena, sig: signals::SigId) -> bool {

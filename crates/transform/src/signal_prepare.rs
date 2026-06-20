@@ -1355,8 +1355,11 @@ fn infer_full_types(
 ///
 /// `normalize`/`sigtype` are the single source of truth for recursion and
 /// arithmetic typing. The fast-lane still keeps a smaller `Int / Real / Sound`
-/// view for FIR type selection and assertions, which is derived directly from
-/// the canonical map rather than recomputed by a second fixpoint engine.
+/// view for FIR type selection and assertions, derived directly and
+/// homomorphically from the canonical map: no second fixpoint and no per-node
+/// override, so the reduced type never contradicts the canonical nature. In
+/// particular, a fully unconstrained self-recursion (`x = x`) closes to `Int`,
+/// matching the C++ `TREC` result — the fast-lane no longer forces it to `Real`.
 fn derive_simple_types(
     arena: &TreeArena,
     sig_types: &HashMap<SigId, SigType>,
@@ -1364,9 +1367,7 @@ fn derive_simple_types(
     sig_types
         .iter()
         .map(|(sig, ty)| {
-            let reduced = if is_unresolved_recursive_projection(arena, *sig) {
-                SimpleSigType::Real
-            } else if matches!(match_sig(arena, *sig), SigMatch::Soundfile(_)) {
+            let reduced = if matches!(match_sig(arena, *sig), SigMatch::Soundfile(_)) {
                 SimpleSigType::Sound
             } else {
                 match ty.nature() {
@@ -1377,31 +1378,6 @@ fn derive_simple_types(
             (*sig, reduced)
         })
         .collect()
-}
-
-/// Fast-lane compatibility fallback for recursion groups with no constraining body.
-///
-/// The canonical `sigtype` recursion port now starts from the C++ `TREC`
-/// approximation, which keeps integer-preserving feedback groups such as
-/// `min`/`abs` in `Int`. For the FIR fast-lane we still keep the historical
-/// fallback that a completely unconstrained self-recursion closes to `Real`.
-///
-/// This is intentionally a fast-lane-specific adaptation layered on top of the
-/// canonical `sigtype` result, not part of the shared normalization/type system.
-fn is_unresolved_recursive_projection(arena: &TreeArena, sig: SigId) -> bool {
-    let SigMatch::Proj(_, group) = match_sig(arena, sig) else {
-        return false;
-    };
-    let Some((var, body_list)) = match_sym_rec(arena, group) else {
-        return false;
-    };
-    let Some(body) = arena.hd(body_list) else {
-        return false;
-    };
-    if !arena.is_nil(arena.tl(body_list).unwrap_or_else(|| arena.nil())) {
-        return false;
-    }
-    matches!(match_sig(arena, body), SigMatch::Proj(_, target) if match_sym_ref(arena, target) == Some(var))
 }
 
 #[cfg(test)]

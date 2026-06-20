@@ -481,8 +481,14 @@ rejects.
 ([`signal_prepare.rs:1258`](../crates/transform/src/signal_prepare.rs)) forces a fully unconstrained self-loop to
 `Real` by structural pattern match, *overriding* the canonical `sigtype` result (which, following
 the C++ `TREC` approximation, keeps integer-preserving feedback in `Int`). This is a hand-tuned
-compatibility hack with no test pinning the intended divergence; an edge case could silently get
-the wrong reduced type.
+compatibility hack; an edge case could silently get the wrong reduced type.
+
+**Update (2026-06-20): removed.** The C++ `TREC` seed types a recursive component as `Int`,
+interval `{0}` (see `sigtype::rules::initial_rec_type`), and an unconstrained `x = x` fixpoint
+converges to exactly that — so the canonical typer already yields `Int`, matching C++. The fast-lane
+override to `Real` was therefore a *divergence from C++*, not a clarification. It has been deleted:
+`derive_simple_types` (α) is now a pure homomorphism of the canonical map, and the pinning test
+asserts `Int`. No regression across `transform`, `compiler`, or `box-ffi`.
 
 **W4 — The preparation sequence is a hand-ordered pseudo-fixpoint, not a proven one.**
 The order promote→type→simplify→merge→type→simplify→canonicalize→type→promote→type is tuned by

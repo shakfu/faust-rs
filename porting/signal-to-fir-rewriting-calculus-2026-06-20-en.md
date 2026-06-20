@@ -664,8 +664,14 @@ must be a homomorphic abstraction of the canonical typing (`α ∘ Γ` must agre
 typing everywhere). The `is_unresolved_recursive_projection` override (analysis **W3**) forces an
 unconstrained self-loop to `Real`, *contradicting* the canonical `sigtype` result. In the formal
 view this is an **abstraction function that does not commute with the concrete typing** — a
-soundness hole in `α`, not a term bug. That diagnosis tells you the fix shape: either push the rule
-into the canonical typing, or document it as an explicit, tested exception to the homomorphism.
+soundness hole in `α`, not a term bug.
+
+*(Resolved 2026-06-20.)* Checking what the C++ typer actually does settled the fix: the `TREC` seed
+(`sigtype::rules::initial_rec_type`) types a recursive component as `Int` (interval `{0}`), so an
+unconstrained `x = x` converges to `Int` — the override to `Real` *diverged* from C++. Neither
+"push the rule into the canonical typing" (would break C++ parity) nor "document the exception" was
+right; the override was simply **deleted**, so `α` is now a pure homomorphism of the canonical map
+and agrees with the C++ `Int` close. The pinning test asserts `Int`; no corpus regression.
 
 ### 8.4 Semantic-preservation obligations catch unsound rewrites
 
@@ -703,7 +709,7 @@ relevant to golden-test stability.
 |----------------------------|---------------------|
 | `L_verify ⊑ L_prep` (gate ⊒ precondition) | `verify` omits `P`, `D1` (new) |
 | `L_prep ⊑ dom(⇝) ∪ Deferred` (coverage) | W8 (intentional prepare-superset; drift-guarded), W13 (late generic error) |
-| `α` homomorphic (decoration soundness) | W3 (reduced-type override) |
+| `α` homomorphic (decoration soundness) | W3 (reduced-type override — removed, now homomorphic) |
 | `⟦phase(t)⟧ = ⟦t⟧` (semantic preservation) | unsound float simplifications |
 | output-type refinement | W5 (BRA tape bound — now mask-guarded) |
 | invariant preservation across phases | W4 (fixpoint/ordering brittleness) |
@@ -742,7 +748,8 @@ None of these require a proof assistant; each is a test or a guard:
    guard*, not an equality assertion: `{verify-accepted} == {lower-handled}` is intentionally false,
    because prepare is a deliberate superset (§8.2). *(Landed 2026-06-20.)*
 3. **Make `α` total and homomorphic, or pin the exception** for `is_unresolved_recursive_projection`
-   with a dedicated test (§8.3).
+   with a dedicated test (§8.3). *(Landed 2026-06-20: the override was removed — the C++ `TREC` close
+   is already `Int`, so `α` needs no exception.)*
 4. **Property-test value preservation** of each `simplify`/CSE rule on random typed signals; add
    finiteness side conditions where it fails (§8.4).
 5. **Emit a guard or carry the bound** for the BRA `count` precondition (§8.5). *(Landed
