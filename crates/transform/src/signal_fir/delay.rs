@@ -984,14 +984,45 @@ fn emit_if_wrapping_advance(store: &mut FirStore, counter_name: &str, size: usiz
 
 // ─── FIR emission helpers shared with strategy emitters ─────────────────────
 
+/// Thin arithmetic layer so index-formula functions read like the doc-comments.
+///
+/// Each method creates one FIR node via `FirBuilder` and returns its `FirId`.
+/// The emitted nodes are byte-for-byte identical to what raw `FirBuilder` calls
+/// produce — this is a legibility-only wrapper, not an optimization.
+struct DelayArith<'a>(&'a mut FirStore);
+
+impl<'a> DelayArith<'a> {
+    fn i32c(&mut self, v: i32) -> FirId {
+        FirBuilder::new(self.0).int32(v)
+    }
+    fn load_counter(&mut self, name: &str) -> FirId {
+        FirBuilder::new(self.0).load_var(name, AccessType::Struct, FirType::Int32)
+    }
+    fn add(&mut self, a: FirId, b: FirId) -> FirId {
+        FirBuilder::new(self.0).binop(FirBinOp::Add, a, b, FirType::Int32)
+    }
+    fn sub(&mut self, a: FirId, b: FirId) -> FirId {
+        FirBuilder::new(self.0).binop(FirBinOp::Sub, a, b, FirType::Int32)
+    }
+    fn ge(&mut self, a: FirId, b: FirId) -> FirId {
+        FirBuilder::new(self.0).binop(FirBinOp::Ge, a, b, FirType::Int32)
+    }
+    fn and_mask(&mut self, idx: FirId, mask: FirId) -> FirId {
+        FirBuilder::new(self.0).binop(FirBinOp::And, idx, mask, FirType::Int32)
+    }
+    fn select2(&mut self, cond: FirId, then_: FirId, else_: FirId) -> FirId {
+        FirBuilder::new(self.0).select2(cond, then_, else_, FirType::Int32)
+    }
+    fn store_counter(&mut self, name: &str, val: FirId) -> FirId {
+        FirBuilder::new(self.0).store_var(name, AccessType::Struct, val)
+    }
+}
+
 /// Applies the power-of-two ring-buffer mask: `index & (size - 1)`.
 pub(super) fn masked_delay_index(store: &mut FirStore, index: FirId, size: usize) -> FirId {
-    let mask = {
-        let mut b = FirBuilder::new(store);
-        b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
-    };
-    let mut b = FirBuilder::new(store);
-    b.binop(FirBinOp::And, index, mask, FirType::Int32)
+    let mut e = DelayArith(store);
+    let mask = e.i32c(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
+    e.and_mask(index, mask)
 }
 
 /// Emits `buf[0] = new_value` — the immediate write for the Shift strategy.
@@ -1072,76 +1103,31 @@ fn if_wrapping_read_index(
     size: usize,
 ) -> FirId {
     let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
-    let counter = {
-        let mut b = FirBuilder::new(store);
-        b.load_var(counter_name, AccessType::Struct, FirType::Int32)
-    };
-    let size_fir = {
-        let mut b = FirBuilder::new(store);
-        b.int32(size_i32)
-    };
-    let plus_size = {
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Add, counter, size_fir, FirType::Int32)
-    };
-    let raw = {
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Sub, plus_size, amount, FirType::Int32)
-    };
-    let cond = {
-        let sf = {
-            let mut b = FirBuilder::new(store);
-            b.int32(size_i32)
-        };
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Ge, raw, sf, FirType::Int32)
-    };
-    let adjusted = {
-        let sf = {
-            let mut b = FirBuilder::new(store);
-            b.int32(size_i32)
-        };
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Sub, raw, sf, FirType::Int32)
-    };
-    let mut b = FirBuilder::new(store);
-    b.select2(cond, adjusted, raw, FirType::Int32)
+    let mut e = DelayArith(store);
+    let counter = e.load_counter(counter_name);
+    let size_fir = e.i32c(size_i32);
+    let plus_size = e.add(counter, size_fir);
+    let raw = e.sub(plus_size, amount);
+    let size_fir2 = e.i32c(size_i32);
+    let cond = e.ge(raw, size_fir2);
+    let size_fir3 = e.i32c(size_i32);
+    let adjusted = e.sub(raw, size_fir3);
+    e.select2(cond, adjusted, raw)
 }
 
 /// Emits `counter = (counter + 1 >= size) ? 0 : counter + 1` for an
 /// `IfWrapping` delay line counter advance.
 fn bump_if_wrapping_counter(store: &mut FirStore, counter_name: &str, size: usize) -> FirId {
     let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
-    let counter = {
-        let mut b = FirBuilder::new(store);
-        b.load_var(counter_name, AccessType::Struct, FirType::Int32)
-    };
-    let one = {
-        let mut b = FirBuilder::new(store);
-        b.int32(1)
-    };
-    let next = {
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Add, counter, one, FirType::Int32)
-    };
-    let cond = {
-        let sf = {
-            let mut b = FirBuilder::new(store);
-            b.int32(size_i32)
-        };
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Ge, next, sf, FirType::Int32)
-    };
-    let zero = {
-        let mut b = FirBuilder::new(store);
-        b.int32(0)
-    };
-    let wrapped = {
-        let mut b = FirBuilder::new(store);
-        b.select2(cond, zero, next, FirType::Int32)
-    };
-    let mut b = FirBuilder::new(store);
-    b.store_var(counter_name, AccessType::Struct, wrapped)
+    let mut e = DelayArith(store);
+    let counter = e.load_counter(counter_name);
+    let one = e.i32c(1);
+    let next = e.add(counter, one);
+    let size_fir = e.i32c(size_i32);
+    let cond = e.ge(next, size_fir);
+    let zero = e.i32c(0);
+    let wrapped = e.select2(cond, zero, next);
+    e.store_counter(counter_name, wrapped)
 }
 
 // ─── DelayManager ─────────────────────────────────────────────────────────────
