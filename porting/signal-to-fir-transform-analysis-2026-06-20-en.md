@@ -516,6 +516,12 @@ remains a larger change (chunked TBPTT or a dynamically sized tape).
 - `SignalFirOptions::strict_mode` is never read in logic (set in defaults/tests only).
 - `get_delay_line` still carries `#[allow(dead_code)]` although it now has a caller (stale allow).
 
+**Update (2026-06-21): all four items resolved.** `rec_group_max_delay` and the per-signal
+`delay_analysis` map were removed; `SignalFirOptions::strict_mode` was dropped; the stale
+`#[allow(dead_code)]` on `get_delay_line` was cleaned up and the function now has a live caller
+(`delay_line_info` in `state.rs`). The only remaining `#[allow(dead_code)]` in transform is in
+`block_reverse_ad.rs`, unrelated to this item. See also I12 (resolved).
+
 **W7 — Two overlapping delay-analysis passes.**
 `prepare_delay_lines` walks the DAG twice: `analyze_signals` (accumulated-delay analysis,
 recursion-output sizing) and `scan_signals` (standalone-line ownership + legacy merge bookkeeping).
@@ -543,6 +549,14 @@ with behavior spread over eight `impl` submodules. The split-borrow `*Ctx` bundl
 (`DelayFirCtx`, `RecursionLoweringCtx`, `RecursionAllocCtx`, `DelayLoweringCtx`) are manual
 struct-literal workarounds for borrowing disjoint fields — explicitly documented as
 "do not construct via `&mut self`". This is recognized in `factorization-god-files-plan`.
+
+**Update (2026-06-21): resolved** by plan
+`signal-to-fir-lower-struct-decomposition-plan-2026-06-20-en.md` (7 commits).
+`SignalToFirLower` went from ~51 fields to 14 by extracting 7 cohesive sub-state structs:
+`ModuleSections` (`state.rs`), `UiLoweringState` (`ui_lowering.rs`), `UsedPrototypes`
+(`arithmetic.rs`), `NameGen` + `PlacementInfo` (`setup.rs`), `RadReverseState` (`build.rs`),
+`BraState` (`bra.rs`). The `*Ctx` split-borrow bundles remain (inherent to `store + sub-manager`
+disjointness) but are now documented as such. See I4 (resolved).
 
 **W10 — Structural-string identity for reverse-loop primal replay.**
 `forward_output_by_sig_key` is keyed by `dump_sig_readable(...)` strings to survive "equivalent but
@@ -599,6 +613,9 @@ delays and recursion-output analysis; drop `rec_group_max_delay` and the per-sig
 `delay_analysis` map (or wire the latter to a real consumer); turn `try_record_rec_delay` into a
 pure predicate. Removes one full traversal and a write-only map.
 
+*W6 part resolved (2026-06-21)*: the dead state (`rec_group_max_delay`, `delay_analysis` map,
+`strict_mode`) has been deleted. Remaining work: merging the two traversals (W7 still open).
+
 **I3 — Make the tape size safe (addresses W5).**
 Either size `fBraTape*` from an explicit max-block-size option, emit a compile-time rejection /
 runtime guard when `count` can exceed the cap, or switch to a dynamically-sized scratch buffer.
@@ -610,6 +627,8 @@ Group fields into sub-managers — `BraState` (the six `bra_*` fields + caches),
 joining the existing `DelayManager`/`RecursionState`. The manual `*Ctx` split-borrow bundles then
 become ordinary methods on those sub-managers, removing the "do not construct via `&mut self`"
 footgun. (Already scoped in `factorization-god-files-plan`.)
+
+**Resolved (2026-06-21).** See W9 update.
 
 **I5 — Unify placement (Phase 1) and CSE (Phase 2) into one section-aware materializer
 (addresses W11, and the `konst_escapes` over-conservatism).**
@@ -648,6 +667,8 @@ the unreachable drop branch and assert `signal_index < num_outputs`.
 **I12 — Remove stale annotations and dead config (addresses W6).**
 Drop `SignalFirOptions::strict_mode` (or wire it), and clean stale `#[allow(dead_code)]` on
 `get_delay_line`.
+
+**Resolved (2026-06-21).** See W6 update.
 
 ---
 
