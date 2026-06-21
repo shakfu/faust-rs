@@ -8,9 +8,26 @@
 //!   `buildUserInterface(ui)` body from the [`UiProgram`] tree.
 //!
 //! All methods operate on the shared [`SignalToFirLower`] state and write
-//! directly into `self.ui_statements` for final assembly by `build_module`.
+//! directly into `self.ui.ui_statements` for final assembly by `build_module`.
 
 use super::*;
+
+/// UI and table lowering accumulators.
+#[derive(Default)]
+pub(super) struct UiLoweringState {
+    /// Maps each `ControlId` to its generated `FaustFloat` zone variable name.
+    pub(super) ui_controls: HashMap<ControlId, String>,
+    /// Maps each soundfile `ControlId` to its generated opaque zone variable name.
+    pub(super) soundfiles: HashMap<ControlId, String>,
+    /// Maps each waveform/table signal to its generated table variable name.
+    pub(super) waveform_tables: HashMap<SigId, String>,
+    /// Maps each waveform/table signal to its element count.
+    pub(super) waveform_table_len: HashMap<SigId, usize>,
+    /// Maps each waveform/table signal to the FIR storage class used for access.
+    pub(super) table_access_by_sig: HashMap<SigId, AccessType>,
+    /// `buildUserInterface` body: open/close box and add-control calls.
+    pub(super) ui_statements: Vec<FirId>,
+}
 
 impl<'a> SignalToFirLower<'a> {
     /// Declares the `FaustFloat` struct zone variable for a button or checkbox, idempotent.
@@ -19,7 +36,7 @@ impl<'a> SignalToFirLower<'a> {
         control: ControlId,
         typ: ButtonType,
     ) -> Result<String, SignalFirError> {
-        if let Some(var) = self.ui_controls.get(&control).cloned() {
+        if let Some(var) = self.ui.ui_controls.get(&control).cloned() {
             return Ok(var);
         }
         let spec = self.control_spec(control)?;
@@ -45,7 +62,7 @@ impl<'a> SignalToFirLower<'a> {
         );
         let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
-        self.ui_controls.insert(control, var.clone());
+        self.ui.ui_controls.insert(control, var.clone());
         Ok(var)
     }
 
@@ -56,7 +73,7 @@ impl<'a> SignalToFirLower<'a> {
         typ: ButtonType,
     ) -> Result<FirId, SignalFirError> {
         let var = self.ensure_button_zone(control, typ)?;
-        if self.ui_controls.contains_key(&control) {
+        if self.ui.ui_controls.contains_key(&control) {
             // UI zone variable is FaustFloat (external); cast to real_ty for computation.
             let real_ty = self.real_ty();
             let mut b = FirBuilder::new(&mut self.store);
@@ -74,7 +91,7 @@ impl<'a> SignalToFirLower<'a> {
         typ: SliderType,
     ) -> Result<FirId, SignalFirError> {
         let var = self.ensure_slider_zone(control, typ)?;
-        if self.ui_controls.contains_key(&control) {
+        if self.ui.ui_controls.contains_key(&control) {
             // UI zone variable is FaustFloat (external); cast to real_ty for computation.
             let real_ty = self.real_ty();
             let mut b = FirBuilder::new(&mut self.store);
@@ -97,6 +114,7 @@ impl<'a> SignalToFirLower<'a> {
         // it to FaustFloat before writing to the external zone variable.
         let value = self.lower_signal(value)?;
         let var = self
+            .ui
             .ui_controls
             .get(&control)
             .cloned()
@@ -113,7 +131,7 @@ impl<'a> SignalToFirLower<'a> {
     /// struct-backed runtime handle.
     pub(super) fn lower_soundfile(&mut self, control: ControlId) -> Result<FirId, SignalFirError> {
         let var = self.ensure_soundfile_zone(control)?;
-        if self.soundfiles.contains_key(&control) {
+        if self.ui.soundfiles.contains_key(&control) {
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_var(var, AccessType::Struct, FirType::Sound));
         }
@@ -229,7 +247,8 @@ impl<'a> SignalToFirLower<'a> {
     pub(super) fn emit_ui_metadata_for_target(&mut self, var: &str, metadata: &[(String, String)]) {
         for (key, value) in metadata {
             let mut b = FirBuilder::new(&mut self.store);
-            self.ui_statements
+            self.ui
+                .ui_statements
                 .push(b.add_meta_declare(var, key.clone(), value.clone()));
         }
     }
@@ -264,7 +283,7 @@ impl<'a> SignalToFirLower<'a> {
         control: ControlId,
         typ: SliderType,
     ) -> Result<String, SignalFirError> {
-        if let Some(var) = self.ui_controls.get(&control).cloned() {
+        if let Some(var) = self.ui.ui_controls.get(&control).cloned() {
             return Ok(var);
         }
         let spec = self.control_spec(control)?;
@@ -300,7 +319,7 @@ impl<'a> SignalToFirLower<'a> {
         )?;
         let init = self.float_const(range.init);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
-        self.ui_controls.insert(control, var.clone());
+        self.ui.ui_controls.insert(control, var.clone());
         Ok(var)
     }
 
@@ -310,7 +329,7 @@ impl<'a> SignalToFirLower<'a> {
         control: ControlId,
         typ: BargraphType,
     ) -> Result<String, SignalFirError> {
-        if let Some(var) = self.ui_controls.get(&control).cloned() {
+        if let Some(var) = self.ui.ui_controls.get(&control).cloned() {
             return Ok(var);
         }
         let spec = self.control_spec(control)?;
@@ -336,7 +355,7 @@ impl<'a> SignalToFirLower<'a> {
         );
         let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
-        self.ui_controls.insert(control, var.clone());
+        self.ui.ui_controls.insert(control, var.clone());
         Ok(var)
     }
 
@@ -345,7 +364,7 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         control: ControlId,
     ) -> Result<String, SignalFirError> {
-        if let Some(var) = self.soundfiles.get(&control).cloned() {
+        if let Some(var) = self.ui.soundfiles.get(&control).cloned() {
             return Ok(var);
         }
         let spec = self.control_spec(control)?;
@@ -361,7 +380,7 @@ impl<'a> SignalToFirLower<'a> {
         }
         let var = format!("fSound{control}");
         self.ensure_named_struct_var(&var, FirType::Sound, None);
-        self.soundfiles.insert(control, var.clone());
+        self.ui.soundfiles.insert(control, var.clone());
         Ok(var)
     }
 
@@ -370,10 +389,10 @@ impl<'a> SignalToFirLower<'a> {
     /// Clears any previous `ui_statements` accumulator before walking the tree.
     pub(super) fn emit_ui_program(&mut self) -> Result<(), SignalFirError> {
         if self.ui_program.is_empty() {
-            self.ui_statements.clear();
+            self.ui.ui_statements.clear();
             return Ok(());
         }
-        self.ui_statements.clear();
+        self.ui.ui_statements.clear();
         self.emit_ui_node(self.ui_program.root)
     }
 
@@ -397,12 +416,12 @@ impl<'a> SignalToFirLower<'a> {
                 };
                 self.emit_ui_metadata_for_target("0", &metadata);
                 let mut b = FirBuilder::new(&mut self.store);
-                self.ui_statements.push(b.open_box(typ, label));
+                self.ui.ui_statements.push(b.open_box(typ, label));
                 for child in children {
                     self.emit_ui_node(child)?;
                 }
                 let mut b = FirBuilder::new(&mut self.store);
-                self.ui_statements.push(b.close_box());
+                self.ui.ui_statements.push(b.close_box());
                 Ok(())
             }
             UiMatch::InputControl(control) => {
@@ -414,14 +433,16 @@ impl<'a> SignalToFirLower<'a> {
                         let var = self.ensure_button_zone(control, ButtonType::Button)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements
+                        self.ui
+                            .ui_statements
                             .push(b.add_button(ButtonType::Button, label, var));
                     }
                     ControlKind::Checkbox => {
                         let var = self.ensure_button_zone(control, ButtonType::Checkbox)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements
+                        self.ui
+                            .ui_statements
                             .push(b.add_button(ButtonType::Checkbox, label, var));
                     }
                     ControlKind::VSlider => {
@@ -429,7 +450,7 @@ impl<'a> SignalToFirLower<'a> {
                         let var = self.ensure_slider_zone(control, SliderType::Vertical)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements.push(b.add_slider(
+                        self.ui.ui_statements.push(b.add_slider(
                             SliderType::Vertical,
                             label,
                             var,
@@ -446,7 +467,7 @@ impl<'a> SignalToFirLower<'a> {
                         let var = self.ensure_slider_zone(control, SliderType::Horizontal)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements.push(b.add_slider(
+                        self.ui.ui_statements.push(b.add_slider(
                             SliderType::Horizontal,
                             label,
                             var,
@@ -463,7 +484,7 @@ impl<'a> SignalToFirLower<'a> {
                         let var = self.ensure_slider_zone(control, SliderType::NumEntry)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements.push(b.add_slider(
+                        self.ui.ui_statements.push(b.add_slider(
                             SliderType::NumEntry,
                             label,
                             var,
@@ -494,7 +515,7 @@ impl<'a> SignalToFirLower<'a> {
                         let var = self.ensure_bargraph_zone(control, BargraphType::Vertical)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements.push(b.add_bargraph(
+                        self.ui.ui_statements.push(b.add_bargraph(
                             BargraphType::Vertical,
                             label,
                             var,
@@ -507,7 +528,7 @@ impl<'a> SignalToFirLower<'a> {
                         let var = self.ensure_bargraph_zone(control, BargraphType::Horizontal)?;
                         self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
-                        self.ui_statements.push(b.add_bargraph(
+                        self.ui.ui_statements.push(b.add_bargraph(
                             BargraphType::Horizontal,
                             label,
                             var,
@@ -531,7 +552,8 @@ impl<'a> SignalToFirLower<'a> {
                     .unwrap_or_default();
                 let var = self.ensure_soundfile_zone(control)?;
                 let mut b = FirBuilder::new(&mut self.store);
-                self.ui_statements
+                self.ui
+                    .ui_statements
                     .push(b.add_soundfile_with_url(label, url, var));
                 Ok(())
             }

@@ -361,7 +361,7 @@ pub(crate) fn build_module(
     };
 
     lower.emit_ui_program()?;
-    let ui_statements = lower.ui_statements.clone();
+    let ui_statements = lower.ui.ui_statements.clone();
     let ui_body = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&ui_statements)

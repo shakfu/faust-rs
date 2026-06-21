@@ -381,18 +381,8 @@ struct SignalToFirLower<'a> {
     /// declared; prevents duplicate declarations across delay and recursion
     /// lowering paths.
     uses_iota: bool,
-    /// Maps each `ControlId` to its generated `FaustFloat` zone variable name.
-    ui_controls: HashMap<ControlId, String>,
-    /// Maps each soundfile `ControlId` to its generated opaque zone variable name.
-    soundfiles: HashMap<ControlId, String>,
-    /// Maps each waveform/table signal to its generated table variable name.
-    waveform_tables: HashMap<SigId, String>,
-    /// Maps each waveform/table signal to its element count.
-    waveform_table_len: HashMap<SigId, usize>,
-    /// Maps each waveform/table signal to the FIR storage class used for access.
-    table_access_by_sig: HashMap<SigId, AccessType>,
-    /// `buildUserInterface` body: open/close box and add-control calls.
-    ui_statements: Vec<FirId>,
+    /// UI control zones, table registries, and `buildUserInterface` body.
+    ui: ui_lowering::UiLoweringState,
     /// Dedup guard for named struct-var declarations (prevents double-emit).
     named_struct_vars: HashSet<String>,
     /// Dedup guard for `instanceResetUserInterface` assignments.

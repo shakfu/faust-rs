@@ -135,9 +135,10 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         sig: SigId,
     ) -> Result<(String, usize, AccessType), SignalFirError> {
-        if let Some(name) = self.waveform_tables.get(&sig).cloned() {
-            let len = self.waveform_table_len.get(&sig).copied().unwrap_or(0);
+        if let Some(name) = self.ui.waveform_tables.get(&sig).cloned() {
+            let len = self.ui.waveform_table_len.get(&sig).copied().unwrap_or(0);
             let access = self
+                .ui
                 .table_access_by_sig
                 .get(&sig)
                 .copied()
@@ -171,7 +172,7 @@ impl<'a> SignalToFirLower<'a> {
         sig: SigId,
         values: &[SigId],
     ) -> Result<String, SignalFirError> {
-        if let Some(name) = self.waveform_tables.get(&sig).cloned() {
+        if let Some(name) = self.ui.waveform_tables.get(&sig).cloned() {
             return Ok(name);
         }
         let mut lowered_values = Vec::with_capacity(values.len());
@@ -188,9 +189,9 @@ impl<'a> SignalToFirLower<'a> {
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Static, elem_ty, &lowered_values);
         self.static_declarations.push(decl);
-        self.waveform_tables.insert(sig, name.clone());
-        self.waveform_table_len.insert(sig, values.len());
-        self.table_access_by_sig.insert(sig, AccessType::Static);
+        self.ui.waveform_tables.insert(sig, name.clone());
+        self.ui.waveform_table_len.insert(sig, values.len());
+        self.ui.table_access_by_sig.insert(sig, AccessType::Static);
         Ok(name)
     }
 
@@ -217,9 +218,9 @@ impl<'a> SignalToFirLower<'a> {
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Static, elem_ty, &generated);
         self.static_declarations.push(decl);
-        self.waveform_tables.insert(sig, name.clone());
-        self.waveform_table_len.insert(sig, size);
-        self.table_access_by_sig.insert(sig, AccessType::Static);
+        self.ui.waveform_tables.insert(sig, name.clone());
+        self.ui.waveform_table_len.insert(sig, size);
+        self.ui.table_access_by_sig.insert(sig, AccessType::Static);
         Ok((name, size))
     }
 
@@ -254,9 +255,9 @@ impl<'a> SignalToFirLower<'a> {
         );
         self.struct_declarations.push(decl);
         self.register_constant_table_init(name.clone(), AccessType::Struct, &generated);
-        self.waveform_tables.insert(sig, name.clone());
-        self.waveform_table_len.insert(sig, size);
-        self.table_access_by_sig.insert(sig, AccessType::Struct);
+        self.ui.waveform_tables.insert(sig, name.clone());
+        self.ui.waveform_table_len.insert(sig, size);
+        self.ui.table_access_by_sig.insert(sig, AccessType::Struct);
         Ok((name, size))
     }
 
