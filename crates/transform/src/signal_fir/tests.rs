@@ -19,7 +19,7 @@
 
 use super::{
     RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
-    delay::{DelayManager, DelayOptions},
+    delay::{DelayManager, DelayOptions, plan_delays},
     siggen::interpret_generator_for_test,
 };
 use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
@@ -152,13 +152,14 @@ fn compile_fastlane_without_ui(
 
 fn analyze_delays_for_prepared(prepared: &crate::signal_prepare::PreparedSignals) -> DelayManager {
     let mut delay = DelayManager::new(DelayOptions::default());
-    delay
-        .analyze_signals(
-            prepared.arena(),
-            prepared.sig_types_map(),
-            prepared.outputs(),
-        )
-        .expect("delay analysis should succeed on prepared signals");
+    let plan = plan_delays(
+        prepared.arena(),
+        prepared.sig_types_map(),
+        prepared.outputs(),
+        &delay.options(),
+    )
+    .expect("delay planning should succeed on prepared signals");
+    delay.set_rec_output_analysis(plan.rec_outputs);
     delay
 }
 
