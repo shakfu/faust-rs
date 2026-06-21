@@ -125,6 +125,7 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 
 // ─── Sub-modules ──────────────────────────────────────────────────────────────
 
+mod arith;
 mod circular_pow2;
 mod if_wrapping;
 mod options;
@@ -233,66 +234,21 @@ impl DelayKind {
         schedule_write: bool,
     ) -> FirId {
         match self {
-            // ── Shift ──────────────────────────────────────────────────────
             DelayKind::Shift => {
-                if schedule_write {
-                    let store_0 = shift::emit_store_at_zero(ctx.store, &line.name, current);
-                    ctx.immediate_statements.push(store_0);
-                    let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
-                    if delay_n <= 2 {
-                        let copies = shift::emit_unrolled_shift_copies(
-                            ctx.store,
-                            &line.name,
-                            delay_n,
-                            read_ty.clone(),
-                        );
-                        ctx.post_output_statements.extend(copies);
-                    } else {
-                        let s = shift::emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
-                        ctx.post_output_statements.push(s);
-                    }
-                }
-                let mut b = FirBuilder::new(ctx.store);
-                b.load_table(line.name.clone(), AccessType::Struct, amount, read_ty)
+                shift::emit_fixed_delay(ctx, line, current, amount, read_ty, schedule_write)
             }
-
-            // ── CircularPow2 ───────────────────────────────────────────────
             DelayKind::CircularPow2 => {
-                if schedule_write {
-                    let write_index = GlobalCircularCursor.current_index(ctx.store, line.size);
-                    let mut b = FirBuilder::new(ctx.store);
-                    ctx.immediate_statements.push(b.store_table(
-                        line.name.clone(),
-                        AccessType::Struct,
-                        write_index,
-                        current,
-                    ));
-                }
-                let read_index = GlobalCircularCursor.delayed_index(ctx.store, amount, line.size);
-                let mut b = FirBuilder::new(ctx.store);
-                b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty)
+                circular_pow2::emit_fixed_delay(ctx, line, current, amount, read_ty, schedule_write)
             }
-
-            // ── IfWrapping ─────────────────────────────────────────────────
-            DelayKind::IfWrapping { counter_name } => {
-                if schedule_write {
-                    let write_index = {
-                        let mut b = FirBuilder::new(ctx.store);
-                        b.load_var(counter_name, AccessType::Struct, FirType::Int32)
-                    };
-                    let mut b = FirBuilder::new(ctx.store);
-                    ctx.immediate_statements.push(b.store_table(
-                        line.name.clone(),
-                        AccessType::Struct,
-                        write_index,
-                        current,
-                    ));
-                }
-                let read_index =
-                    if_wrapping::if_wrapping_read_index(ctx.store, counter_name, amount, line.size);
-                let mut b = FirBuilder::new(ctx.store);
-                b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty)
-            }
+            DelayKind::IfWrapping { counter_name } => if_wrapping::emit_fixed_delay(
+                ctx,
+                line,
+                current,
+                amount,
+                read_ty,
+                schedule_write,
+                counter_name,
+            ),
         }
     }
 
@@ -306,39 +262,12 @@ impl DelayKind {
         schedule_write: bool,
     ) -> FirId {
         match self {
-            // Shift: read from index 1 (same write path as fixed delay).
-            DelayKind::Shift => {
-                if schedule_write {
-                    let store_0 = shift::emit_store_at_zero(ctx.store, &line.name, current);
-                    ctx.immediate_statements.push(store_0);
-                    let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
-                    if delay_n <= 2 {
-                        let copies = shift::emit_unrolled_shift_copies(
-                            ctx.store,
-                            &line.name,
-                            delay_n,
-                            read_ty.clone(),
-                        );
-                        ctx.post_output_statements.extend(copies);
-                    } else {
-                        let s = shift::emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
-                        ctx.post_output_statements.push(s);
-                    }
-                }
-                let one = {
-                    let mut b = FirBuilder::new(ctx.store);
-                    b.int32(1)
-                };
-                let mut b = FirBuilder::new(ctx.store);
-                b.load_table(line.name.clone(), AccessType::Struct, one, read_ty)
+            DelayKind::Shift => shift::emit_delay1(ctx, line, current, read_ty, schedule_write),
+            DelayKind::CircularPow2 => {
+                circular_pow2::emit_delay1(ctx, line, current, read_ty, schedule_write)
             }
-            // Ring strategies: Delay1 is fixed_delay with amount = 1.
-            DelayKind::CircularPow2 | DelayKind::IfWrapping { .. } => {
-                let one = {
-                    let mut b = FirBuilder::new(ctx.store);
-                    b.int32(1)
-                };
-                self.emit_fixed_delay(ctx, line, current, one, read_ty, schedule_write)
+            DelayKind::IfWrapping { counter_name } => {
+                if_wrapping::emit_delay1(ctx, line, current, read_ty, schedule_write, counter_name)
             }
         }
     }
@@ -915,15 +844,7 @@ impl DelayManager {
         }
         // Select strategy based on delay amount and options.
         let delay_u = delay as u32;
-        let strategy = if delay_u < self.options.max_copy_delay {
-            DelayKind::Shift
-        } else if delay_u < self.options.delay_line_threshold {
-            DelayKind::CircularPow2
-        } else {
-            DelayKind::IfWrapping {
-                counter_name: format!("fIdx{}", carried.as_u32()),
-            }
-        };
+        let strategy = options::select_delay_kind(delay_u, &self.options, carried);
 
         // Compute required buffer size via the unified DelayKind method.
         let required_size = strategy.buffer_size(delay)?;

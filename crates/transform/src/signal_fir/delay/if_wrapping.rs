@@ -11,11 +11,12 @@
 //! end-of-sample: idx = (idx + 1 >= size) ? 0 : idx + 1;
 //! ```
 
-use fir::{FirId, FirStore};
+use fir::{AccessType, FirBuilder, FirId, FirStore, FirType};
 
 use super::SignalFirError;
 use super::SignalFirErrorCode;
-use super::circular_pow2::DelayArith;
+use super::arith::DelayArith;
+use super::{DelayLineInfo, DelayLoweringCtx};
 
 // ─── buffer_size ─────────────────────────────────────────────────────────────
 
@@ -78,4 +79,60 @@ pub(super) fn emit_if_wrapping_advance(
     size: usize,
 ) -> FirId {
     bump_if_wrapping_counter(store, counter_name, size)
+}
+
+// ─── Strategy emit functions ─────────────────────────────────────────────────
+
+/// Emits one `SIGDELAY(value, amount)` read/write sequence for the IfWrapping strategy.
+pub(super) fn emit_fixed_delay(
+    ctx: &mut DelayLoweringCtx<'_>,
+    line: &DelayLineInfo,
+    current: FirId,
+    amount: FirId,
+    read_ty: FirType,
+    schedule_write: bool,
+    counter_name: &str,
+) -> FirId {
+    if schedule_write {
+        let write_index = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.load_var(counter_name, AccessType::Struct, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(ctx.store);
+        ctx.immediate_statements.push(b.store_table(
+            line.name.clone(),
+            AccessType::Struct,
+            write_index,
+            current,
+        ));
+    }
+    let read_index = if_wrapping_read_index(ctx.store, counter_name, amount, line.size);
+    let mut b = FirBuilder::new(ctx.store);
+    b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty)
+}
+
+/// Emits one `Delay1(value)` read/write sequence for the IfWrapping strategy.
+///
+/// Delay1 is fixed_delay with amount = 1.
+pub(super) fn emit_delay1(
+    ctx: &mut DelayLoweringCtx<'_>,
+    line: &DelayLineInfo,
+    current: FirId,
+    read_ty: FirType,
+    schedule_write: bool,
+    counter_name: &str,
+) -> FirId {
+    let one = {
+        let mut b = FirBuilder::new(ctx.store);
+        b.int32(1)
+    };
+    emit_fixed_delay(
+        ctx,
+        line,
+        current,
+        one,
+        read_ty,
+        schedule_write,
+        counter_name,
+    )
 }

@@ -13,7 +13,7 @@
 use fir::helpers::emit_reverse_array_shift_loop;
 use fir::{AccessType, FirBuilder, FirId, FirStore, FirType};
 
-use super::DelayLoweringCtx;
+use super::{DelayLineInfo, DelayLoweringCtx};
 
 // ─── buffer_size ─────────────────────────────────────────────────────────────
 
@@ -96,4 +96,63 @@ pub(super) fn emit_shift_loop(
         elem_ty,
         AccessType::Struct,
     )
+}
+
+// ─── Strategy emit functions ─────────────────────────────────────────────────
+
+/// Emits one `SIGDELAY(value, amount)` read/write sequence for the Shift strategy.
+pub(super) fn emit_fixed_delay(
+    ctx: &mut DelayLoweringCtx<'_>,
+    line: &DelayLineInfo,
+    current: FirId,
+    amount: FirId,
+    read_ty: FirType,
+    schedule_write: bool,
+) -> FirId {
+    if schedule_write {
+        let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
+        ctx.immediate_statements.push(store_0);
+        let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+        if delay_n <= 2 {
+            let copies =
+                emit_unrolled_shift_copies(ctx.store, &line.name, delay_n, read_ty.clone());
+            ctx.post_output_statements.extend(copies);
+        } else {
+            let s = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
+            ctx.post_output_statements.push(s);
+        }
+    }
+    let mut b = FirBuilder::new(ctx.store);
+    b.load_table(line.name.clone(), AccessType::Struct, amount, read_ty)
+}
+
+/// Emits one `Delay1(value)` read/write sequence for the Shift strategy.
+///
+/// Reads from index 1 (one sample behind index 0).
+pub(super) fn emit_delay1(
+    ctx: &mut DelayLoweringCtx<'_>,
+    line: &DelayLineInfo,
+    current: FirId,
+    read_ty: FirType,
+    schedule_write: bool,
+) -> FirId {
+    if schedule_write {
+        let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
+        ctx.immediate_statements.push(store_0);
+        let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+        if delay_n <= 2 {
+            let copies =
+                emit_unrolled_shift_copies(ctx.store, &line.name, delay_n, read_ty.clone());
+            ctx.post_output_statements.extend(copies);
+        } else {
+            let s = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
+            ctx.post_output_statements.push(s);
+        }
+    }
+    let one = {
+        let mut b = FirBuilder::new(ctx.store);
+        b.int32(1)
+    };
+    let mut b = FirBuilder::new(ctx.store);
+    b.load_table(line.name.clone(), AccessType::Struct, one, read_ty)
 }

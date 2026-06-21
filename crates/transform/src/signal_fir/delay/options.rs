@@ -3,6 +3,10 @@
 //! [`DelayOptions`] mirrors the Faust `-mcd` / `-dlt` compiler options and
 //! drives the strategy selector inside [`super::DelayManager::ensure_delay_line`].
 
+use signals::SigId;
+
+use super::DelayKind;
+
 // ─── DelayOptions ─────────────────────────────────────────────────────────────
 
 /// Delay-line strategy selection thresholds.
@@ -28,6 +32,26 @@ impl Default for DelayOptions {
         Self {
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,
+        }
+    }
+}
+
+// ─── Strategy selector ────────────────────────────────────────────────────────
+
+/// Selects the [`DelayKind`] strategy for a delay amount `delay_u` based on
+/// the configured thresholds and the carried signal id.
+///
+/// - `delay_u < max_copy_delay` → [`DelayKind::Shift`]
+/// - `max_copy_delay ≤ delay_u < delay_line_threshold` → [`DelayKind::CircularPow2`]
+/// - `delay_u ≥ delay_line_threshold` → [`DelayKind::IfWrapping`]
+pub(super) fn select_delay_kind(delay_u: u32, options: &DelayOptions, carried: SigId) -> DelayKind {
+    if delay_u < options.max_copy_delay {
+        DelayKind::Shift
+    } else if delay_u < options.delay_line_threshold {
+        DelayKind::CircularPow2
+    } else {
+        DelayKind::IfWrapping {
+            counter_name: format!("fIdx{}", carried.as_u32()),
         }
     }
 }
