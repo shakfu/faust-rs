@@ -173,8 +173,14 @@ impl<'a> SignalToFirLower<'a> {
         //   reference Samp-rate state (e.g. `iWave*` cycling counters).
         //   Hoisting would place `LoadVar("iWave*")` inside
         //   `instanceConstants`, before `instanceClear` has initialized it.
-        let sig_shared = self.sig_ref_counts.get(&sig).copied().unwrap_or(0) >= 2;
-        let at_boundary = self.sig_at_boundary.contains(&sig);
+        let sig_shared = self
+            .placement
+            .sig_ref_counts
+            .get(&sig)
+            .copied()
+            .unwrap_or(0)
+            >= 2;
+        let at_boundary = self.placement.sig_at_boundary.contains(&sig);
         let lowered = if !is_trivial_fir(&self.store, lowered)
             && !self.is_recursive_projection(sig)
             && !matches!(match_sig(self.arena, sig), SigMatch::WrTbl(..))

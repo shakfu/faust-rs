@@ -7,6 +7,39 @@
 
 use super::*;
 
+/// Read-only placement analysis results, computed once before lowering begins.
+pub(super) struct PlacementInfo {
+    /// Signal-level reference counts: how many parent nodes reference each `SigId`.
+    ///
+    /// Used by Phase 1 variability-driven placement to gate materialization:
+    /// only nodes with `ref_count >= 2` are hoisted into a named variable.
+    /// Single-use nodes stay inline, avoiding unnecessary temporaries.
+    pub(super) sig_ref_counts: HashMap<SigId, usize>,
+    /// Signal nodes that sit at a variability boundary (at least one parent has
+    /// strictly higher variability).  These must be materialized even if
+    /// single-use, to ensure they execute in the correct bucket.
+    pub(super) sig_at_boundary: HashSet<SigId>,
+    /// `Konst` signal nodes whose value is consumed outside `instanceConstants`.
+    ///
+    /// These hoists need persistent `Struct` storage; init-only `Konst` hoists
+    /// can stay stack-local inside `instanceConstants()`.
+    pub(super) konst_escapes: HashSet<SigId>,
+}
+
+impl PlacementInfo {
+    pub(super) fn new(
+        sig_ref_counts: HashMap<SigId, usize>,
+        sig_at_boundary: HashSet<SigId>,
+        konst_escapes: HashSet<SigId>,
+    ) -> Self {
+        Self {
+            sig_ref_counts,
+            sig_at_boundary,
+            konst_escapes,
+        }
+    }
+}
+
 impl<'a> SignalToFirLower<'a> {
     /// Creates a fresh lowering state for one [`build_module`] call.
     #[allow(clippy::too_many_arguments)]
@@ -17,9 +50,7 @@ impl<'a> SignalToFirLower<'a> {
         sig_types: &'a HashMap<SigId, SigType>,
         num_inputs: usize,
         real_ty: FirType,
-        sig_ref_counts: HashMap<SigId, usize>,
-        sig_at_boundary: HashSet<SigId>,
-        konst_escapes: HashSet<SigId>,
+        placement: PlacementInfo,
         delay_opts: DelayOptions,
     ) -> Self {
         Self {
@@ -63,9 +94,7 @@ impl<'a> SignalToFirLower<'a> {
             iconst_counter: 0,
             fslow_counter: 0,
             islow_counter: 0,
-            sig_ref_counts,
-            sig_at_boundary,
-            konst_escapes,
+            placement,
             forward_output_by_sig: HashMap::new(),
             forward_output_by_sig_key: HashMap::new(),
             lowering_reverse_loop: false,
@@ -211,7 +240,7 @@ impl<'a> SignalToFirLower<'a> {
     /// Returns `true` when a hoisted `Konst` value must remain persistent
     /// beyond `instanceConstants()`.
     pub(super) fn konst_escapes(&self, sig: SigId) -> bool {
-        self.konst_escapes.contains(&sig)
+        self.placement.konst_escapes.contains(&sig)
     }
 
     /// Returns the typed prefix used for one materialized scalar value.

@@ -419,21 +419,8 @@ struct SignalToFirLower<'a> {
     fslow_counter: u32,
     /// Monotonic counter for `iSlow*` block-rate integer variable names.
     islow_counter: u32,
-    /// Signal-level reference counts: how many parent nodes reference each `SigId`.
-    ///
-    /// Used by Phase 1 variability-driven placement to gate materialization:
-    /// only nodes with `ref_count >= 2` are hoisted into a named variable.
-    /// Single-use nodes stay inline, avoiding unnecessary temporaries.
-    sig_ref_counts: HashMap<SigId, usize>,
-    /// Signal nodes that sit at a variability boundary (at least one parent has
-    /// strictly higher variability).  These must be materialized even if
-    /// single-use, to ensure they execute in the correct bucket.
-    sig_at_boundary: HashSet<SigId>,
-    /// `Konst` signal nodes whose value is consumed outside `instanceConstants`.
-    ///
-    /// These hoists need persistent `Struct` storage; init-only `Konst` hoists
-    /// can stay stack-local inside `instanceConstants()`.
-    konst_escapes: HashSet<SigId>,
+    /// Read-only placement analysis results (ref counts, boundary set, konst escapes).
+    placement: setup::PlacementInfo,
     /// Forward output lanes already computed before the reverse-time loop.
     ///
     /// Phase-E1 RAD uses the public bundle layout `[primals..., gradients...]`.

@@ -117,6 +117,7 @@ pub(crate) fn build_module(
     };
     let (sig_ref_counts, sig_at_boundary, konst_escapes) =
         analyze_signal_sharing(arena, signals, sig_types);
+    let placement = setup::PlacementInfo::new(sig_ref_counts, sig_at_boundary, konst_escapes);
     let mut lower = SignalToFirLower::new(
         arena,
         ui,
@@ -124,9 +125,7 @@ pub(crate) fn build_module(
         sig_types,
         plan.num_inputs,
         real_ty,
-        sig_ref_counts,
-        sig_at_boundary,
-        konst_escapes,
+        placement,
         delay_opts,
     );
     lower.ensure_sample_rate_var();
