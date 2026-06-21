@@ -92,8 +92,11 @@ impl<'a> SignalToFirLower<'a> {
             };
             if info.size == 1 {
                 let mut b = FirBuilder::new(&mut self.store);
-                self.control_statements
-                    .push(b.store_var(info.name, AccessType::Struct, init));
+                self.sections.control_statements.push(b.store_var(
+                    info.name,
+                    AccessType::Struct,
+                    init,
+                ));
             } else {
                 let loop_var = self.fresh_loop_var("lRevRec");
                 let upper = {
@@ -113,7 +116,8 @@ impl<'a> SignalToFirLower<'a> {
                     b.block(&[store])
                 };
                 let mut b = FirBuilder::new(&mut self.store);
-                self.control_statements
+                self.sections
+                    .control_statements
                     .push(b.simple_for_loop(loop_var, upper, body, false));
             }
         }
@@ -136,7 +140,8 @@ impl<'a> SignalToFirLower<'a> {
         for name in names {
             let zero = self.float_const(0.0);
             let mut b = FirBuilder::new(&mut self.store);
-            self.control_statements
+            self.sections
+                .control_statements
                 .push(b.store_var(name, AccessType::Struct, zero));
         }
         // Array Delay(c) carry resets: zero c elements via a small for-loop.
@@ -163,7 +168,8 @@ impl<'a> SignalToFirLower<'a> {
                 b.block(&[store])
             };
             let mut b = FirBuilder::new(&mut self.store);
-            self.control_statements
+            self.sections
+                .control_statements
                 .push(b.simple_for_loop(loop_var, upper, body, false));
         }
     }

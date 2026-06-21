@@ -32,10 +32,10 @@ impl<'a> SignalToFirLower<'a> {
         }
         let n = i32::try_from(values.len()).unwrap_or(i32::MAX);
         let idx_name = format!("iWave{}", node.as_u32());
-        if self.named_struct_vars.insert(idx_name.clone()) {
+        if self.sections.named_struct_vars.insert(idx_name.clone()) {
             let mut b = FirBuilder::new(&mut self.store);
             let dec = b.declare_var(idx_name.clone(), FirType::Int32, AccessType::Struct, None);
-            self.struct_declarations.push(dec);
+            self.sections.struct_declarations.push(dec);
             let zero = self.lower_int32_const(0);
             self.register_clear_init(idx_name.clone(), zero);
             // Compute update: iWave = (iWave + 1) % N
@@ -188,7 +188,7 @@ impl<'a> SignalToFirLower<'a> {
         let name = format!("{prefix}{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Static, elem_ty, &lowered_values);
-        self.static_declarations.push(decl);
+        self.sections.static_declarations.push(decl);
         self.ui.waveform_tables.insert(sig, name.clone());
         self.ui.waveform_table_len.insert(sig, values.len());
         self.ui.table_access_by_sig.insert(sig, AccessType::Static);
@@ -217,7 +217,7 @@ impl<'a> SignalToFirLower<'a> {
         let name = format!("{prefix}{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Static, elem_ty, &generated);
-        self.static_declarations.push(decl);
+        self.sections.static_declarations.push(decl);
         self.ui.waveform_tables.insert(sig, name.clone());
         self.ui.waveform_table_len.insert(sig, size);
         self.ui.table_access_by_sig.insert(sig, AccessType::Static);
@@ -253,7 +253,7 @@ impl<'a> SignalToFirLower<'a> {
             elem_ty.clone(),
             &generated,
         );
-        self.struct_declarations.push(decl);
+        self.sections.struct_declarations.push(decl);
         self.register_constant_table_init(name.clone(), AccessType::Struct, &generated);
         self.ui.waveform_tables.insert(sig, name.clone());
         self.ui.waveform_table_len.insert(sig, size);

@@ -317,7 +317,7 @@ impl<'a> SignalToFirLower<'a> {
 
         if !self.used_protos.foreign_vars.contains_key(&name) {
             let decl = b.declare_var(name.to_owned(), typ.clone(), AccessType::Global, None);
-            self.global_declarations.push(decl);
+            self.sections.global_declarations.push(decl);
             self.used_protos
                 .foreign_vars
                 .insert(name.to_owned(), typ.clone());
@@ -463,7 +463,7 @@ impl<'a> SignalToFirLower<'a> {
             let chan = b.int32(i32::try_from(index).expect("validated input index fits i32"));
             let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
             let load_chan_ptr = b.load_table("inputs", AccessType::FunArgs, chan, ptr_ty.clone());
-            self.control_statements.push(b.declare_var(
+            self.sections.control_statements.push(b.declare_var(
                 alias.clone(),
                 ptr_ty,
                 AccessType::Stack,

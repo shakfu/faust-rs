@@ -77,13 +77,7 @@ impl<'a> SignalToFirLower<'a> {
             real_ty,
             store: FirStore::new(),
             cache: HashMap::new(),
-            struct_declarations: Vec::new(),
-            static_declarations: Vec::new(),
-            global_declarations: Vec::new(),
-            constants_statements: Vec::new(),
-            reset_statements: Vec::new(),
-            clear_statements: Vec::new(),
-            control_statements: Vec::new(),
+            sections: state::ModuleSections::default(),
             sample_phases: SamplePhases::default(),
             state_name_by_node: HashMap::new(),
             recursion: RecursionState::default(),
@@ -91,9 +85,6 @@ impl<'a> SignalToFirLower<'a> {
             delay: DelayManager::new(delay_opts),
             uses_iota: false,
             ui: ui_lowering::UiLoweringState::default(),
-            named_struct_vars: HashSet::new(),
-            reset_init_seen: HashSet::new(),
-            clear_init_seen: HashSet::new(),
             input_ptr_aliases: HashMap::new(),
             used_protos: arithmetic::UsedPrototypes::default(),
             name_gen: NameGen::default(),
@@ -339,12 +330,15 @@ impl<'a> SignalToFirLower<'a> {
             Bucket::Constants if access == AccessType::Struct => {
                 self.ensure_named_struct_var(&name, typ.clone(), None);
                 let mut b = FirBuilder::new(&mut self.store);
-                self.constants_statements
-                    .push(b.store_var(&name, AccessType::Struct, value));
+                self.sections.constants_statements.push(b.store_var(
+                    &name,
+                    AccessType::Struct,
+                    value,
+                ));
             }
             Bucket::Constants => {
                 let mut b = FirBuilder::new(&mut self.store);
-                self.constants_statements.push(b.declare_var(
+                self.sections.constants_statements.push(b.declare_var(
                     &name,
                     typ.clone(),
                     AccessType::Stack,
@@ -353,7 +347,7 @@ impl<'a> SignalToFirLower<'a> {
             }
             Bucket::Control => {
                 let mut b = FirBuilder::new(&mut self.store);
-                self.control_statements.push(b.declare_var(
+                self.sections.control_statements.push(b.declare_var(
                     &name,
                     typ.clone(),
                     AccessType::Stack,

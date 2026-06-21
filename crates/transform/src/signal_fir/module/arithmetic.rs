@@ -383,9 +383,9 @@ impl<'a> SignalToFirLower<'a> {
                 arena: self.arena,
                 delay: &self.delay,
                 store: &mut self.store,
-                struct_declarations: &mut self.struct_declarations,
-                clear_statements: &mut self.clear_statements,
-                clear_init_seen: &mut self.clear_init_seen,
+                struct_declarations: &mut self.sections.struct_declarations,
+                clear_statements: &mut self.sections.clear_statements,
+                clear_init_seen: &mut self.sections.clear_init_seen,
                 next_loop_var_id: &mut self.name_gen.next_loop_var_id,
                 recursion: &mut self.recursion,
             };

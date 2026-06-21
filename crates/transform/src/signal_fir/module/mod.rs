@@ -345,23 +345,8 @@ struct SignalToFirLower<'a> {
     store: FirStore,
     /// Memoization cache: maps a `SigId` to its already-lowered `FirId` for DAG sharing.
     cache: HashMap<SigId, FirId>,
-    /// DSP struct field declarations (arrays, scalars, UI zones).
-    struct_declarations: Vec<FirId>,
-    /// Constant waveform table declarations emitted at file scope (`const static`
-    /// in C++/C) rather than inside the DSP struct.  These are tables whose
-    /// content is fully determined at compile time (waveform literals) and is
-    /// shared across all DSP instances.
-    static_declarations: Vec<FirId>,
-    /// Extern global variable declarations requested by `SIGFVAR` lowering.
-    global_declarations: Vec<FirId>,
-    /// `instanceConstants` body: table initializations and compile-time constants.
-    constants_statements: Vec<FirId>,
-    /// `instanceResetUserInterface` body: UI zone reset assignments.
-    reset_statements: Vec<FirId>,
-    /// `instanceClear` body: delay-line and recursion-state zero-init loops.
-    clear_statements: Vec<FirId>,
-    /// `compute` preamble: channel-pointer aliases and diagnostic labels.
-    control_statements: Vec<FirId>,
+    /// FIR statement buckets for each Faust lifecycle section.
+    sections: state::ModuleSections,
     /// Explicit per-sample execution phases for the `compute` sample loop.
     sample_phases: SamplePhases,
     /// Maps each signal node to its generated state-variable name.
@@ -383,12 +368,6 @@ struct SignalToFirLower<'a> {
     uses_iota: bool,
     /// UI control zones, table registries, and `buildUserInterface` body.
     ui: ui_lowering::UiLoweringState,
-    /// Dedup guard for named struct-var declarations (prevents double-emit).
-    named_struct_vars: HashSet<String>,
-    /// Dedup guard for `instanceResetUserInterface` assignments.
-    reset_init_seen: HashSet<String>,
-    /// Dedup guard for `instanceClear` assignments and loops.
-    clear_init_seen: HashSet<String>,
     /// Maps input channel index to its generated stack pointer-alias name.
     input_ptr_aliases: HashMap<usize, String>,
     /// Prototype registration state (math helpers and extern symbols used).

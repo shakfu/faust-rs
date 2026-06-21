@@ -162,13 +162,15 @@ pub(crate) fn build_module(
     {
         let mut b = FirBuilder::new(&mut lower.store);
         lower
+            .sections
             .control_statements
             .push(b.label("signal_fir_fastlane_step2a: executable base slice"));
-        lower.control_statements.push(b.label(format!(
+        lower.sections.control_statements.push(b.label(format!(
             "io: inputs={} outputs={}",
             plan.num_inputs, plan.num_outputs
         )));
         lower
+            .sections
             .control_statements
             .push(b.label(format!("signals: {}", plan.signal_count)));
     }
@@ -238,7 +240,7 @@ pub(crate) fn build_module(
         let chan = b.int32(i32::try_from(index).expect("validated output index fits i32"));
         let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
         let load_chan_ptr = b.load_table("outputs", AccessType::FunArgs, chan, ptr_ty.clone());
-        lower.control_statements.push(b.declare_var(
+        lower.sections.control_statements.push(b.declare_var(
             format!("output{index}"),
             ptr_ty,
             AccessType::Stack,
@@ -268,10 +270,10 @@ pub(crate) fn build_module(
     {
         use crate::signal_fir::cse;
 
-        let rc = cse::count_fir_value_uses(&lower.store, &lower.constants_statements);
+        let rc = cse::count_fir_value_uses(&lower.store, &lower.sections.constants_statements);
         cse::materialize_shared_values(
             &mut lower.store,
-            &mut lower.constants_statements,
+            &mut lower.sections.constants_statements,
             &rc,
             "fConst",
             lower.name_gen.fconst_counter,
@@ -279,10 +281,10 @@ pub(crate) fn build_module(
             lower.name_gen.iconst_counter,
         );
 
-        let rc = cse::count_fir_value_uses(&lower.store, &lower.control_statements);
+        let rc = cse::count_fir_value_uses(&lower.store, &lower.sections.control_statements);
         cse::materialize_shared_values(
             &mut lower.store,
-            &mut lower.control_statements,
+            &mut lower.sections.control_statements,
             &rc,
             "fSlow",
             lower.name_gen.fslow_counter,
@@ -335,9 +337,12 @@ pub(crate) fn build_module(
             let sample_rate = b.load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
             b.store_var("fSampleRate", AccessType::Struct, sample_rate)
         };
-        lower.constants_statements.insert(0, sample_rate_store);
+        lower
+            .sections
+            .constants_statements
+            .insert(0, sample_rate_store);
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&lower.constants_statements)
+        b.block(&lower.sections.constants_statements)
     };
     let constants_args = [
         dsp_arg.clone(),
@@ -389,7 +394,7 @@ pub(crate) fn build_module(
 
     let reset_body = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&lower.reset_statements)
+        b.block(&lower.sections.reset_statements)
     };
     let instance_reset_ui = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -407,7 +412,7 @@ pub(crate) fn build_module(
 
     let clear_body = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&lower.clear_statements)
+        b.block(&lower.sections.clear_statements)
     };
     let instance_clear = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -425,7 +430,7 @@ pub(crate) fn build_module(
 
     let compute_statements = {
         let mut all = Vec::new();
-        all.extend(lower.control_statements.iter().copied());
+        all.extend(lower.sections.control_statements.iter().copied());
         for (is_reverse, sample_loop_statements) in &sample_loops {
             if sample_loop_statements.is_empty() {
                 continue;
@@ -567,7 +572,7 @@ pub(crate) fn build_module(
         };
         math_prototypes.push(decl);
     }
-    math_prototypes.extend(lower.global_declarations.iter().copied());
+    math_prototypes.extend(lower.sections.global_declarations.iter().copied());
     let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
         let function_items = [
@@ -582,7 +587,7 @@ pub(crate) fn build_module(
     };
     let dsp_struct = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&lower.struct_declarations)
+        b.block(&lower.sections.struct_declarations)
     };
     let globals = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -590,7 +595,7 @@ pub(crate) fn build_module(
     };
     let static_decls_block = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&lower.static_declarations)
+        b.block(&lower.sections.static_declarations)
     };
     let module: FirId = {
         let mut b = FirBuilder::new(&mut lower.store);

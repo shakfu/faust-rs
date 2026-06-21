@@ -8,6 +8,34 @@
 
 use super::*;
 
+/// The FIR statement buckets for each Faust lifecycle section.
+#[derive(Default)]
+pub(super) struct ModuleSections {
+    /// DSP struct field declarations (arrays, scalars, UI zones).
+    pub(super) struct_declarations: Vec<FirId>,
+    /// Constant waveform table declarations emitted at file scope (`const static`
+    /// in C++/C) rather than inside the DSP struct.  These are tables whose
+    /// content is fully determined at compile time (waveform literals) and is
+    /// shared across all DSP instances.
+    pub(super) static_declarations: Vec<FirId>,
+    /// Extern global variable declarations requested by `SIGFVAR` lowering.
+    pub(super) global_declarations: Vec<FirId>,
+    /// `instanceConstants` body: table initializations and compile-time constants.
+    pub(super) constants_statements: Vec<FirId>,
+    /// `instanceResetUserInterface` body: UI zone reset assignments.
+    pub(super) reset_statements: Vec<FirId>,
+    /// `instanceClear` body: delay-line and recursion-state zero-init loops.
+    pub(super) clear_statements: Vec<FirId>,
+    /// `compute` preamble: channel-pointer aliases and diagnostic labels.
+    pub(super) control_statements: Vec<FirId>,
+    /// Dedup guard for named struct-var declarations (prevents double-emit).
+    pub(super) named_struct_vars: HashSet<String>,
+    /// Dedup guard for `instanceResetUserInterface` assignments.
+    pub(super) reset_init_seen: HashSet<String>,
+    /// Dedup guard for `instanceClear` assignments and loops.
+    pub(super) clear_init_seen: HashSet<String>,
+}
+
 impl<'a> SignalToFirLower<'a> {
     /// Returns the resolved recursion-delay reference for `value`.
     ///
@@ -155,7 +183,7 @@ impl<'a> SignalToFirLower<'a> {
         let array_ty = FirType::Array(Box::new(typ), 2);
         let mut b = FirBuilder::new(&mut self.store);
         let dec = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
-        self.struct_declarations.push(dec);
+        self.sections.struct_declarations.push(dec);
         self.register_clear_recursion_array(name.clone(), init, 2);
         self.state_name_by_node.insert(node, name.clone());
         name
@@ -177,9 +205,9 @@ impl<'a> SignalToFirLower<'a> {
             store: &mut self.store,
             real_ty: self.real_ty.clone(),
             types: self.types,
-            struct_declarations: &mut self.struct_declarations,
-            clear_statements: &mut self.clear_statements,
-            clear_init_seen: &mut self.clear_init_seen,
+            struct_declarations: &mut self.sections.struct_declarations,
+            clear_statements: &mut self.sections.clear_statements,
+            clear_init_seen: &mut self.sections.clear_init_seen,
             next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             uses_iota: &mut self.uses_iota,
         };
@@ -209,9 +237,9 @@ impl<'a> SignalToFirLower<'a> {
             store: &mut self.store,
             real_ty: self.real_ty.clone(),
             types: self.types,
-            struct_declarations: &mut self.struct_declarations,
-            clear_statements: &mut self.clear_statements,
-            clear_init_seen: &mut self.clear_init_seen,
+            struct_declarations: &mut self.sections.struct_declarations,
+            clear_statements: &mut self.sections.clear_statements,
+            clear_init_seen: &mut self.sections.clear_init_seen,
             next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             uses_iota: &mut self.uses_iota,
         };
@@ -256,7 +284,7 @@ impl<'a> SignalToFirLower<'a> {
         init: FirId,
         size: usize,
     ) {
-        if !self.clear_init_seen.insert(name.clone()) {
+        if !self.sections.clear_init_seen.insert(name.clone()) {
             return;
         }
         let loop_var = self.fresh_loop_var("lRec");
@@ -277,7 +305,8 @@ impl<'a> SignalToFirLower<'a> {
             b.block(&[store])
         };
         let mut b = FirBuilder::new(&mut self.store);
-        self.clear_statements
+        self.sections
+            .clear_statements
             .push(b.simple_for_loop(loop_var, upper, body, false));
     }
 
@@ -295,13 +324,13 @@ impl<'a> SignalToFirLower<'a> {
         typ: FirType,
         init: Option<FirId>,
     ) {
-        if self.named_struct_vars.contains(name) {
+        if self.sections.named_struct_vars.contains(name) {
             return;
         }
         let mut b = FirBuilder::new(&mut self.store);
         let dec = b.declare_var(name.to_owned(), typ, AccessType::Struct, None);
-        self.struct_declarations.push(dec);
-        self.named_struct_vars.insert(name.to_owned());
+        self.sections.struct_declarations.push(dec);
+        self.sections.named_struct_vars.insert(name.to_owned());
         if let Some(init) = init {
             self.register_reset_init(name.to_owned(), init);
         }
@@ -309,21 +338,23 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Registers one reset-time assignment for UI controls (`instanceResetUserInterface`).
     pub(super) fn register_reset_init(&mut self, name: String, init: FirId) {
-        if !self.reset_init_seen.insert(name.clone()) {
+        if !self.sections.reset_init_seen.insert(name.clone()) {
             return;
         }
         let mut b = FirBuilder::new(&mut self.store);
-        self.reset_statements
+        self.sections
+            .reset_statements
             .push(b.store_var(name, AccessType::Struct, init));
     }
 
     /// Registers one clear-time assignment for runtime state (`instanceClear`).
     pub(super) fn register_clear_init(&mut self, name: String, init: FirId) {
-        if !self.clear_init_seen.insert(name.clone()) {
+        if !self.sections.clear_init_seen.insert(name.clone()) {
             return;
         }
         let mut b = FirBuilder::new(&mut self.store);
-        self.clear_statements
+        self.sections
+            .clear_statements
             .push(b.store_var(name, AccessType::Struct, init));
     }
 
@@ -351,6 +382,6 @@ impl<'a> SignalToFirLower<'a> {
             stores.push(store);
         }
         let mut b = FirBuilder::new(&mut self.store);
-        self.constants_statements.push(b.block(&stores));
+        self.sections.constants_statements.push(b.block(&stores));
     }
 }
