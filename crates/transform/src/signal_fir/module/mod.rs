@@ -401,14 +401,8 @@ struct SignalToFirLower<'a> {
     clear_init_seen: HashSet<String>,
     /// Maps input channel index to its generated stack pointer-alias name.
     input_ptr_aliases: HashMap<usize, String>,
-    /// Set of math operations used; drives prototype emission order.
-    used_math_ops: HashSet<FirMathOp>,
-    /// Set of integer helper function names used (`abs`, `min_i`, `max_i`).
-    used_int_fun_names: HashSet<&'static str>,
-    /// Extern prototypes requested by `SIGFFUN` lowering, keyed by callee name.
-    used_foreign_fun_protos: BTreeMap<String, ForeignFunProto>,
-    /// Extern globals requested by `SIGFVAR` lowering, keyed by symbol name.
-    used_foreign_vars: BTreeMap<String, FirType>,
+    /// Prototype registration state (math helpers and extern symbols used).
+    used_protos: arithmetic::UsedPrototypes,
     /// Monotonic counter for generating unique loop-variable names.
     next_loop_var_id: usize,
     /// Monotonic counter for `fConst*` init-time float constant variable names.

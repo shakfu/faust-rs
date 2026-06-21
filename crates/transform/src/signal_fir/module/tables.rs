@@ -411,15 +411,15 @@ impl<'a> SignalToFirLower<'a> {
                 if lo_i >= 0 {
                     // Non-negative but hi may exceed N-1 — upper clamp only.
                     let upper = self.lower_int32_const(n - 1);
-                    self.used_int_fun_names.insert("min_i");
+                    self.used_protos.int_fun_names.insert("min_i");
                     let mut b = FirBuilder::new(&mut self.store);
                     return b.fun_call("min_i", &[index_fir, upper], FirType::Int32);
                 }
                 // Signed bounds — full clamp max(0, min(N-1, x)).
                 let zero = self.lower_int32_const(0);
                 let upper = self.lower_int32_const(n - 1);
-                self.used_int_fun_names.insert("min_i");
-                self.used_int_fun_names.insert("max_i");
+                self.used_protos.int_fun_names.insert("min_i");
+                self.used_protos.int_fun_names.insert("max_i");
                 let clamped = {
                     let mut b = FirBuilder::new(&mut self.store);
                     b.fun_call("min_i", &[upper, index_fir], FirType::Int32)

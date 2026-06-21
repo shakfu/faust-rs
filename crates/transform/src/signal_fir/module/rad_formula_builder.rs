@@ -34,7 +34,7 @@ impl<'lower, 'arena> FirRadFormulaBuilder<'lower, 'arena> {
     /// Emits a FIR math call, registering `op` in `used_math_ops` so the backend
     /// knows to provide the corresponding math helper.
     fn math_call(&mut self, op: FirMathOp, args: &[FirId]) -> FirId {
-        self.lower.used_math_ops.insert(op);
+        self.lower.used_protos.math_ops.insert(op);
         FirBuilder::new(&mut self.lower.store).math_call(op, args, self.real_ty.clone())
     }
 }

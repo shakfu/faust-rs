@@ -315,10 +315,12 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(b.load_var(name, AccessType::FunArgs, typ));
         }
 
-        if !self.used_foreign_vars.contains_key(&name) {
+        if !self.used_protos.foreign_vars.contains_key(&name) {
             let decl = b.declare_var(name.to_owned(), typ.clone(), AccessType::Global, None);
             self.global_declarations.push(decl);
-            self.used_foreign_vars.insert(name.to_owned(), typ.clone());
+            self.used_protos
+                .foreign_vars
+                .insert(name.to_owned(), typ.clone());
         }
 
         Ok(b.load_var(name, AccessType::Global, typ))
@@ -361,7 +363,8 @@ impl<'a> SignalToFirLower<'a> {
         for arg in args {
             lowered_args.push(self.lower_signal(arg)?);
         }
-        self.used_foreign_fun_protos
+        self.used_protos
+            .foreign_fun_protos
             .entry(proto.name.clone())
             .or_insert_with(|| proto.clone());
 

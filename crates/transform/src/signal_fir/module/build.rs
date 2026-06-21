@@ -483,7 +483,7 @@ pub(crate) fn build_module(
     let math_real_ty = lower.real_ty();
     let mut math_prototypes = Vec::new();
     for op in MATH_PROTO_ORDER {
-        if !lower.used_math_ops.contains(op) {
+        if !lower.used_protos.math_ops.contains(op) {
             continue;
         }
         let arity = match op {
@@ -517,7 +517,7 @@ pub(crate) fn build_module(
         math_prototypes.push(proto);
     }
     for name in INT_FUN_PROTO_ORDER {
-        if !lower.used_int_fun_names.contains(name) {
+        if !lower.used_protos.int_fun_names.contains(name) {
             continue;
         }
         let arity = if *name == "abs" { 1 } else { 2 };
@@ -542,7 +542,7 @@ pub(crate) fn build_module(
         };
         math_prototypes.push(proto);
     }
-    for proto in lower.used_foreign_fun_protos.values() {
+    for proto in lower.used_protos.foreign_fun_protos.values() {
         let proto_args: Vec<NamedType> = proto
             .args
             .iter()

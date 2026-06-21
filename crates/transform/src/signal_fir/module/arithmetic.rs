@@ -14,6 +14,21 @@
 
 use super::*;
 
+/// Prototype registration state — tracks which math helpers and extern symbols
+/// have been referenced, so the module assembler can emit exactly the needed
+/// declarations.
+#[derive(Default)]
+pub(super) struct UsedPrototypes {
+    /// Set of math operations used; drives prototype emission order.
+    pub(super) math_ops: HashSet<FirMathOp>,
+    /// Set of integer helper function names used (`abs`, `min_i`, `max_i`).
+    pub(super) int_fun_names: HashSet<&'static str>,
+    /// Extern prototypes requested by `SIGFFUN` lowering, keyed by callee name.
+    pub(super) foreign_fun_protos: BTreeMap<String, ForeignFunProto>,
+    /// Extern globals requested by `SIGFVAR` lowering, keyed by symbol name.
+    pub(super) foreign_vars: BTreeMap<String, FirType>,
+}
+
 impl<'a> SignalToFirLower<'a> {
     /// Lowers one binary signal operator to FIR binop.
     ///
@@ -89,7 +104,7 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
     ) -> Result<FirId, SignalFirError> {
         let value = self.lower_signal(value)?;
-        self.used_math_ops.insert(op);
+        self.used_protos.math_ops.insert(op);
         // Math calls operate on and return the internal real type.
         let real_ty = self.real_ty();
         let mut b = FirBuilder::new(&mut self.store);
@@ -105,7 +120,7 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
-        self.used_math_ops.insert(op);
+        self.used_protos.math_ops.insert(op);
         // Math calls operate on and return the internal real type.
         let real_ty = self.real_ty();
         let mut b = FirBuilder::new(&mut self.store);
@@ -133,7 +148,8 @@ impl<'a> SignalToFirLower<'a> {
         if result_ty == FirType::Int32 {
             let lhs = self.lower_signal(lhs_sig)?;
             let rhs = self.lower_signal(rhs_sig)?;
-            self.used_int_fun_names
+            self.used_protos
+                .int_fun_names
                 .insert(if is_min { "min_i" } else { "max_i" });
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.fun_call(
@@ -169,7 +185,7 @@ impl<'a> SignalToFirLower<'a> {
         let result_ty = self.signal_fir_type(node)?;
         if result_ty == FirType::Int32 {
             let value = self.lower_signal(value_sig)?;
-            self.used_int_fun_names.insert("abs");
+            self.used_protos.int_fun_names.insert("abs");
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.fun_call("abs", &[value], FirType::Int32));
         }
