@@ -1,7 +1,7 @@
 # Plan — Decomposing the `SignalToFirLower` god struct (W9)
 
 Date: 2026-06-20
-Status: actionable plan (not started)
+Status: complete (2026-06-21, all 7 clusters landed)
 Scope: `crates/transform/src/signal_fir/module/` (the `SignalToFirLower` struct and its `impl`s)
 Drivers: `signal-to-fir-transform-analysis-2026-06-20-en.md` **W9 / I4**;
 `faust-rs-code-quality-assessment-2026-05-25-en.md` §5.1
