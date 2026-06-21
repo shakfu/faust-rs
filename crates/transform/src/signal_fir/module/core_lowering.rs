@@ -603,7 +603,7 @@ impl<'a> SignalToFirLower<'a> {
             store: &mut self.store,
             immediate_statements: &mut self.sample_phases.immediate,
             post_output_statements: &mut self.sample_phases.post_output,
-            next_loop_var_id: &mut self.next_loop_var_id,
+            next_loop_var_id: &mut self.name_gen.next_loop_var_id,
         };
         Ok(emit_fixed_delay_for_line(
             &mut delay_ctx,
@@ -807,7 +807,7 @@ impl<'a> SignalToFirLower<'a> {
             store: &mut self.store,
             immediate_statements: &mut self.sample_phases.immediate,
             post_output_statements: &mut self.sample_phases.post_output,
-            next_loop_var_id: &mut self.next_loop_var_id,
+            next_loop_var_id: &mut self.name_gen.next_loop_var_id,
         };
         Ok(emit_delay1_for_line(
             &mut delay_ctx,

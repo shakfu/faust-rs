@@ -274,9 +274,9 @@ pub(crate) fn build_module(
             &mut lower.constants_statements,
             &rc,
             "fConst",
-            lower.fconst_counter,
+            lower.name_gen.fconst_counter,
             "iConst",
-            lower.iconst_counter,
+            lower.name_gen.iconst_counter,
         );
 
         let rc = cse::count_fir_value_uses(&lower.store, &lower.control_statements);
@@ -285,9 +285,9 @@ pub(crate) fn build_module(
             &mut lower.control_statements,
             &rc,
             "fSlow",
-            lower.fslow_counter,
+            lower.name_gen.fslow_counter,
             "iSlow",
-            lower.islow_counter,
+            lower.name_gen.islow_counter,
         );
 
         for (_, sample_loop_statements) in &mut sample_loops {

@@ -7,6 +7,21 @@
 
 use super::*;
 
+/// Monotonic counters for all generated variable names.
+#[derive(Default)]
+pub(super) struct NameGen {
+    /// Monotonic counter for generating unique loop-variable names.
+    pub(super) next_loop_var_id: usize,
+    /// Monotonic counter for `fConst*` init-time float constant variable names.
+    pub(super) fconst_counter: u32,
+    /// Monotonic counter for `iConst*` init-time integer constant variable names.
+    pub(super) iconst_counter: u32,
+    /// Monotonic counter for `fSlow*` block-rate float variable names.
+    pub(super) fslow_counter: u32,
+    /// Monotonic counter for `iSlow*` block-rate integer variable names.
+    pub(super) islow_counter: u32,
+}
+
 /// Read-only placement analysis results, computed once before lowering begins.
 pub(super) struct PlacementInfo {
     /// Signal-level reference counts: how many parent nodes reference each `SigId`.
@@ -86,11 +101,7 @@ impl<'a> SignalToFirLower<'a> {
             clear_init_seen: HashSet::new(),
             input_ptr_aliases: HashMap::new(),
             used_protos: arithmetic::UsedPrototypes::default(),
-            next_loop_var_id: 0,
-            fconst_counter: 0,
-            iconst_counter: 0,
-            fslow_counter: 0,
-            islow_counter: 0,
+            name_gen: NameGen::default(),
             placement,
             rad_reverse: build::RadReverseState::default(),
             bra: bra::BraState::default(),
@@ -253,23 +264,23 @@ impl<'a> SignalToFirLower<'a> {
     pub(super) fn next_materialized_counter(&mut self, prefix: &str) -> u32 {
         match prefix {
             "fConst" => {
-                let n = self.fconst_counter;
-                self.fconst_counter += 1;
+                let n = self.name_gen.fconst_counter;
+                self.name_gen.fconst_counter += 1;
                 n
             }
             "iConst" => {
-                let n = self.iconst_counter;
-                self.iconst_counter += 1;
+                let n = self.name_gen.iconst_counter;
+                self.name_gen.iconst_counter += 1;
                 n
             }
             "fSlow" => {
-                let n = self.fslow_counter;
-                self.fslow_counter += 1;
+                let n = self.name_gen.fslow_counter;
+                self.name_gen.fslow_counter += 1;
                 n
             }
             "iSlow" => {
-                let n = self.islow_counter;
-                self.islow_counter += 1;
+                let n = self.name_gen.islow_counter;
+                self.name_gen.islow_counter += 1;
                 n
             }
             other => panic!("unsupported materialized prefix `{other}`"),

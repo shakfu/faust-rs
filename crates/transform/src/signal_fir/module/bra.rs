@@ -705,8 +705,8 @@ impl<'a> SignalToFirLower<'a> {
         if let Some(name) = self.bra.delay1_carry_vars.get(&delay1_node) {
             return Ok(name.clone());
         }
-        let name = format!("fBraCarry{}", self.next_loop_var_id);
-        self.next_loop_var_id += 1;
+        let name = format!("fBraCarry{}", self.name_gen.next_loop_var_id);
+        self.name_gen.next_loop_var_id += 1;
         let real_ty = self.real_ty.clone();
         // Declare the struct field without a reset-time init: BRA carry variables
         // are internal DSP state, not UI-controlled parameters, and must NOT appear
@@ -738,8 +738,8 @@ impl<'a> SignalToFirLower<'a> {
         if let Some((name, _)) = self.bra.delay_array_carry_vars.get(&delay_node) {
             return Ok(name.clone());
         }
-        let name = format!("fBraDelayCarry{}", self.next_loop_var_id);
-        self.next_loop_var_id += 1;
+        let name = format!("fBraDelayCarry{}", self.name_gen.next_loop_var_id);
+        self.name_gen.next_loop_var_id += 1;
         let real_ty = self.real_ty.clone();
         let arr_ty = FirType::Array(Box::new(real_ty), c);
         self.ensure_named_struct_var(&name, arr_ty, None);
@@ -848,8 +848,8 @@ impl<'a> SignalToFirLower<'a> {
                 // silently casting and hiding a missing Signal-level promotion.
                 continue;
             }
-            let tape_name = format!("fBraTape{}", self.next_loop_var_id);
-            self.next_loop_var_id += 1;
+            let tape_name = format!("fBraTape{}", self.name_gen.next_loop_var_id);
+            self.name_gen.next_loop_var_id += 1;
             // Declare as a fixed-size array struct field.
             let tape_ty = FirType::Array(Box::new(real_ty.clone()), MAX_BRA_TAPE_BLOCK_SIZE);
             self.ensure_named_struct_var(&tape_name, tape_ty, None);

@@ -180,7 +180,7 @@ impl<'a> SignalToFirLower<'a> {
             struct_declarations: &mut self.struct_declarations,
             clear_statements: &mut self.clear_statements,
             clear_init_seen: &mut self.clear_init_seen,
-            next_loop_var_id: &mut self.next_loop_var_id,
+            next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             uses_iota: &mut self.uses_iota,
         };
         self.delay.ensure_delay_line(carried, delay, &mut ctx)
@@ -212,7 +212,7 @@ impl<'a> SignalToFirLower<'a> {
             struct_declarations: &mut self.struct_declarations,
             clear_statements: &mut self.clear_statements,
             clear_init_seen: &mut self.clear_init_seen,
-            next_loop_var_id: &mut self.next_loop_var_id,
+            next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             uses_iota: &mut self.uses_iota,
         };
         GlobalCircularCursor.ensure_state(&mut ctx);
@@ -283,8 +283,8 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Generates a unique loop variable name using a monotonic counter.
     pub(super) fn fresh_loop_var(&mut self, prefix: &str) -> String {
-        let name = format!("{prefix}{}", self.next_loop_var_id);
-        self.next_loop_var_id += 1;
+        let name = format!("{prefix}{}", self.name_gen.next_loop_var_id);
+        self.name_gen.next_loop_var_id += 1;
         name
     }
 

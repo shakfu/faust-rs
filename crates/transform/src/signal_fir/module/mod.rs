@@ -403,16 +403,8 @@ struct SignalToFirLower<'a> {
     input_ptr_aliases: HashMap<usize, String>,
     /// Prototype registration state (math helpers and extern symbols used).
     used_protos: arithmetic::UsedPrototypes,
-    /// Monotonic counter for generating unique loop-variable names.
-    next_loop_var_id: usize,
-    /// Monotonic counter for `fConst*` init-time float constant variable names.
-    fconst_counter: u32,
-    /// Monotonic counter for `iConst*` init-time integer constant variable names.
-    iconst_counter: u32,
-    /// Monotonic counter for `fSlow*` block-rate float variable names.
-    fslow_counter: u32,
-    /// Monotonic counter for `iSlow*` block-rate integer variable names.
-    islow_counter: u32,
+    /// Monotonic counters for all generated variable names.
+    name_gen: setup::NameGen,
     /// Read-only placement analysis results (ref counts, boundary set, konst escapes).
     placement: setup::PlacementInfo,
     /// RAD reverse-time scheduling state.

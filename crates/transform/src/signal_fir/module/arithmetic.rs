@@ -276,7 +276,7 @@ impl<'a> SignalToFirLower<'a> {
                 store: &mut self.store,
                 immediate_statements: &mut self.sample_phases.immediate,
                 post_output_statements: &mut self.sample_phases.post_output,
-                next_loop_var_id: &mut self.next_loop_var_id,
+                next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
         }
@@ -301,7 +301,7 @@ impl<'a> SignalToFirLower<'a> {
                 store: &mut self.store,
                 immediate_statements: &mut self.sample_phases.immediate,
                 post_output_statements: &mut self.sample_phases.post_output,
-                next_loop_var_id: &mut self.next_loop_var_id,
+                next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
         }
@@ -386,7 +386,7 @@ impl<'a> SignalToFirLower<'a> {
                 struct_declarations: &mut self.struct_declarations,
                 clear_statements: &mut self.clear_statements,
                 clear_init_seen: &mut self.clear_init_seen,
-                next_loop_var_id: &mut self.next_loop_var_id,
+                next_loop_var_id: &mut self.name_gen.next_loop_var_id,
                 recursion: &mut self.recursion,
             };
             ctx.allocate_group_arrays(group, &body_infos)?
@@ -429,8 +429,8 @@ impl<'a> SignalToFirLower<'a> {
                         } else {
                             "fRecBody"
                         };
-                        let name = format!("{prefix}{}", this.next_loop_var_id);
-                        this.next_loop_var_id += 1;
+                        let name = format!("{prefix}{}", this.name_gen.next_loop_var_id);
+                        this.name_gen.next_loop_var_id += 1;
                         let declare = {
                             let mut b = FirBuilder::new(&mut this.store);
                             b.declare_var(
@@ -451,7 +451,7 @@ impl<'a> SignalToFirLower<'a> {
                     store: &mut this.store,
                     immediate_statements: &mut this.sample_phases.immediate,
                     post_output_statements: &mut this.sample_phases.post_output,
-                    next_loop_var_id: &mut this.next_loop_var_id,
+                    next_loop_var_id: &mut this.name_gen.next_loop_var_id,
                 };
                 recursion_ctx.emit_group_body_updates(
                     active_arrays,
@@ -503,7 +503,7 @@ impl<'a> SignalToFirLower<'a> {
             store: &mut self.store,
             immediate_statements: &mut self.sample_phases.immediate,
             post_output_statements: &mut self.sample_phases.post_output,
-            next_loop_var_id: &mut self.next_loop_var_id,
+            next_loop_var_id: &mut self.name_gen.next_loop_var_id,
         };
         let current_index = recursion_ctx.current_index_for_carrier(info, zero, circular_index);
         let out = recursion_ctx.load_feedback_carrier(info, current_index, info.typ.clone());
