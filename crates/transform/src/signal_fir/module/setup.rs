@@ -133,6 +133,26 @@ impl<'a> SignalToFirLower<'a> {
         let max_delays = self
             .delay
             .scan_signals(self.arena, self.sig_types, outputs)?;
+
+        // Step 2 differential check: plan_delays must produce both maps identically.
+        // Active only in debug builds (i.e. cargo test); will fire on any divergence.
+        let plan = plan_delays(
+            self.arena,
+            self.sig_types,
+            outputs,
+            &self.delay.options(),
+        )?;
+        debug_assert_eq!(
+            plan.lines,
+            max_delays,
+            "plan_delays().lines diverged from scan_signals()"
+        );
+        debug_assert_eq!(
+            &plan.rec_outputs,
+            self.delay.rec_output_analysis_map(),
+            "plan_delays().rec_outputs diverged from analyze_signals()"
+        );
+
         for (carried, delay) in max_delays {
             self.ensure_delay_line_decl(carried, delay)?;
         }

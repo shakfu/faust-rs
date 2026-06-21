@@ -127,7 +127,7 @@ use super::SignalFirOutput;
 use super::block_reverse_ad::{collect_bra_postorder, collect_tape_needed_values};
 use super::delay::{
     DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, GlobalCircularCursor,
-    delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line,
+    delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line, plan_delays,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
