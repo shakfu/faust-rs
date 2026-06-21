@@ -446,44 +446,8 @@ struct SignalToFirLower<'a> {
     forward_output_by_sig_key: HashMap<String, usize>,
     /// True while lowering the reverse-time sample-loop slice.
     lowering_reverse_loop: bool,
-    /// Guards against re-emitting the backward sweep for a `SigBlockReverseAD`
-    /// group that has already been scheduled.  Keyed by the group `SigId`.
-    bra_state_scheduled: HashSet<SigId>,
-    /// Per-seed gradient `FirId` cache for emitted `SigBlockReverseAD` sweeps.
-    ///
-    /// Key: `(group_sig, seed_index)` where `seed_index` is the position of
-    /// the seed in the carrier's seed list.  Populated by
-    /// `ensure_bra_backward_sweep` and consumed by `lower_block_reverse_ad_proj`.
-    bra_grad_cache: HashMap<(SigId, usize), FirId>,
-    /// Carry variable names for `Delay1` nodes encountered inside a
-    /// `SigBlockReverseAD` backward sweep.  Keyed by the `Delay1` node `SigId`.
-    ///
-    /// Each carry variable persists in the DSP struct and is zeroed by
-    /// `emit_bra_compute_resets` before every reverse sample loop so that
-    /// no adjoint state leaks across host `compute()` calls.
-    bra_delay1_carry_vars: HashMap<SigId, String>,
-    /// Carry array variable names and sizes for `Delay(c, x)` nodes (c > 1)
-    /// encountered inside a `SigBlockReverseAD` backward sweep.
-    ///
-    /// Key: `Delay` node `SigId`.  Value: `(name, c)` where `name` is the
-    /// struct-field name of the `Array(real_ty, c)` circular carry buffer.
-    ///
-    /// The carry implements the anti-causal adjoint: at reverse step n,
-    /// `carry[n % c]` holds `adj[y][n + c]` from the previous c-th reverse
-    /// step, contributing `adj[x][n] += carry[n % c]`.  The buffer is zeroed
-    /// by `emit_bra_compute_resets` before each reverse sample loop.
-    bra_delay_array_carry_vars: HashMap<SigId, (String, usize)>,
-    /// Tape array variable names for signals recorded during the forward loop.
-    ///
-    /// Key: signal `SigId` whose forward value must be replayed in the reverse
-    /// loop.  Value: the struct-field name of the `Array(real_ty,
-    /// MAX_BRA_TAPE_BLOCK_SIZE)` used to store/load it.
-    ///
-    /// Populated by `ensure_bra_tape_stores` and consumed by
-    /// `load_bra_fwd_value`.  Acts as a per-signal idempotency guard: a
-    /// signal is never taped twice even when `ensure_bra_tape_stores` is
-    /// called once per primal body slot.
-    bra_tape_store_var: HashMap<SigId, String>,
+    /// Grouped BRA (Block Reverse AD) lowering state.
+    bra: bra::BraState,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.

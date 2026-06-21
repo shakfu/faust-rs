@@ -12,6 +12,49 @@
 
 use super::*;
 
+/// Grouped state for Block Reverse AD lowering.
+#[derive(Default)]
+pub(super) struct BraState {
+    /// Guards against re-emitting the backward sweep for a `SigBlockReverseAD`
+    /// group that has already been scheduled.  Keyed by the group `SigId`.
+    pub(super) scheduled: HashSet<SigId>,
+    /// Per-seed gradient `FirId` cache for emitted `SigBlockReverseAD` sweeps.
+    ///
+    /// Key: `(group_sig, seed_index)` where `seed_index` is the position of
+    /// the seed in the carrier's seed list.  Populated by
+    /// `ensure_bra_backward_sweep` and consumed by `lower_block_reverse_ad_proj`.
+    pub(super) grad_cache: HashMap<(SigId, usize), FirId>,
+    /// Carry variable names for `Delay1` nodes encountered inside a
+    /// `SigBlockReverseAD` backward sweep.  Keyed by the `Delay1` node `SigId`.
+    ///
+    /// Each carry variable persists in the DSP struct and is zeroed by
+    /// `emit_bra_compute_resets` before every reverse sample loop so that
+    /// no adjoint state leaks across host `compute()` calls.
+    pub(super) delay1_carry_vars: HashMap<SigId, String>,
+    /// Carry array variable names and sizes for `Delay(c, x)` nodes (c > 1)
+    /// encountered inside a `SigBlockReverseAD` backward sweep.
+    ///
+    /// Key: `Delay` node `SigId`.  Value: `(name, c)` where `name` is the
+    /// struct-field name of the `Array(real_ty, c)` circular carry buffer.
+    ///
+    /// The carry implements the anti-causal adjoint: at reverse step n,
+    /// `carry[n % c]` holds `adj[y][n + c]` from the previous c-th reverse
+    /// step, contributing `adj[x][n] += carry[n % c]`.  The buffer is zeroed
+    /// by `emit_bra_compute_resets` before each reverse sample loop.
+    pub(super) delay_array_carry_vars: HashMap<SigId, (String, usize)>,
+    /// Tape array variable names for signals recorded during the forward loop.
+    ///
+    /// Key: signal `SigId` whose forward value must be replayed in the reverse
+    /// loop.  Value: the struct-field name of the `Array(real_ty,
+    /// MAX_BRA_TAPE_BLOCK_SIZE)` used to store/load it.
+    ///
+    /// Populated by `ensure_bra_tape_stores` and consumed by
+    /// `load_bra_fwd_value`.  Acts as a per-signal idempotency guard: a
+    /// signal is never taped twice even when `ensure_bra_tape_stores` is
+    /// called once per primal body slot.
+    pub(super) tape_store_var: HashMap<SigId, String>,
+}
+
 impl<'a> SignalToFirLower<'a> {
     /// Emits `compute()`-preamble resets for `ReverseTimeRec` (LTI adjoint)
     /// recursion carriers.
@@ -88,7 +131,7 @@ impl<'a> SignalToFirLower<'a> {
     /// calls.
     pub(super) fn emit_bra_compute_resets(&mut self) {
         // Scalar Delay1 / Prefix carry resets.
-        let mut names: Vec<String> = self.bra_delay1_carry_vars.values().cloned().collect();
+        let mut names: Vec<String> = self.bra.delay1_carry_vars.values().cloned().collect();
         names.sort();
         for name in names {
             let zero = self.float_const(0.0);
@@ -98,7 +141,7 @@ impl<'a> SignalToFirLower<'a> {
         }
         // Array Delay(c) carry resets: zero c elements via a small for-loop.
         let mut array_entries: Vec<(String, usize)> =
-            self.bra_delay_array_carry_vars.values().cloned().collect();
+            self.bra.delay_array_carry_vars.values().cloned().collect();
         array_entries.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, c) in array_entries {
             let zero = self.float_const(0.0);
@@ -168,7 +211,8 @@ impl<'a> SignalToFirLower<'a> {
         }
         let seed_index = index - primal_count;
         self.ensure_bra_backward_sweep(group, body_sigs, seed_sigs, cotangent_sigs)?;
-        self.bra_grad_cache
+        self.bra
+            .grad_cache
             .get(&(group, seed_index))
             .copied()
             .ok_or_else(|| {
@@ -220,7 +264,7 @@ impl<'a> SignalToFirLower<'a> {
         seed_sigs: &[SigId],
         cotangent_sigs: &[SigId],
     ) -> Result<(), SignalFirError> {
-        if !self.bra_state_scheduled.insert(group) {
+        if !self.bra.scheduled.insert(group) {
             return Ok(());
         }
 
@@ -329,7 +373,7 @@ impl<'a> SignalToFirLower<'a> {
                 .get(&seed)
                 .copied()
                 .unwrap_or_else(|| self.float_const(0.0));
-            self.bra_grad_cache.insert((group, j), grad);
+            self.bra.grad_cache.insert((group, j), grad);
         }
 
         Ok(())
@@ -658,7 +702,7 @@ impl<'a> SignalToFirLower<'a> {
         delay1_node: SigId,
         _group: SigId,
     ) -> Result<String, SignalFirError> {
-        if let Some(name) = self.bra_delay1_carry_vars.get(&delay1_node) {
+        if let Some(name) = self.bra.delay1_carry_vars.get(&delay1_node) {
             return Ok(name.clone());
         }
         let name = format!("fBraCarry{}", self.next_loop_var_id);
@@ -671,7 +715,7 @@ impl<'a> SignalToFirLower<'a> {
         // Register a clear-time zero init for `instanceClear`.
         let zero2 = self.float_const(0.0);
         self.register_clear_init(name.clone(), zero2);
-        self.bra_delay1_carry_vars.insert(delay1_node, name.clone());
+        self.bra.delay1_carry_vars.insert(delay1_node, name.clone());
         Ok(name)
     }
 
@@ -691,7 +735,7 @@ impl<'a> SignalToFirLower<'a> {
         delay_node: SigId,
         c: usize,
     ) -> Result<String, SignalFirError> {
-        if let Some((name, _)) = self.bra_delay_array_carry_vars.get(&delay_node) {
+        if let Some((name, _)) = self.bra.delay_array_carry_vars.get(&delay_node) {
             return Ok(name.clone());
         }
         let name = format!("fBraDelayCarry{}", self.next_loop_var_id);
@@ -699,7 +743,8 @@ impl<'a> SignalToFirLower<'a> {
         let real_ty = self.real_ty.clone();
         let arr_ty = FirType::Array(Box::new(real_ty), c);
         self.ensure_named_struct_var(&name, arr_ty, None);
-        self.bra_delay_array_carry_vars
+        self.bra
+            .delay_array_carry_vars
             .insert(delay_node, (name.clone(), c));
         Ok(name)
     }
@@ -785,7 +830,7 @@ impl<'a> SignalToFirLower<'a> {
         for v in tape_sigs {
             // Per-signal idempotency: skip signals already taped by a prior call
             // (e.g. a signal shared between two SYMREC bodies).
-            if self.bra_tape_store_var.contains_key(&v) {
+            if self.bra.tape_store_var.contains_key(&v) {
                 continue;
             }
             let real_ty = self.real_ty.clone();
@@ -834,7 +879,7 @@ impl<'a> SignalToFirLower<'a> {
                 b.store_table(tape_name.clone(), AccessType::Struct, idx, v_fir)
             };
             self.sample_phases.immediate.push(store_stmt);
-            self.bra_tape_store_var.insert(v, tape_name);
+            self.bra.tape_store_var.insert(v, tape_name);
         }
         Ok(())
     }
@@ -852,7 +897,7 @@ impl<'a> SignalToFirLower<'a> {
     /// tape[i0] during the backward sweep at step `n` retrieves the forward
     /// value stored at forward step `n`.
     pub(super) fn load_bra_fwd_value(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
-        if let Some(tape_name) = self.bra_tape_store_var.get(&sig).cloned() {
+        if let Some(tape_name) = self.bra.tape_store_var.get(&sig).cloned() {
             let real_ty = self.real_ty();
             let idx = self.bra_tape_index();
             let load = {

@@ -69,11 +69,7 @@ impl<'a> SignalToFirLower<'a> {
             forward_output_by_sig: HashMap::new(),
             forward_output_by_sig_key: HashMap::new(),
             lowering_reverse_loop: false,
-            bra_state_scheduled: HashSet::new(),
-            bra_grad_cache: HashMap::new(),
-            bra_delay1_carry_vars: HashMap::new(),
-            bra_delay_array_carry_vars: HashMap::new(),
-            bra_tape_store_var: HashMap::new(),
+            bra: bra::BraState::default(),
         }
     }
 
