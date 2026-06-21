@@ -3,7 +3,10 @@
 **Date:** 2026-06-21
 **Scope:** `crates/transform/src/signal_fir/delay.rs` (1671 lines), its call sites in
 `crates/transform/src/signal_fir/module/` and `recursion.rs`.
-**Status:** Analysis / design — no code changed yet.
+**Status:** Implemented on branch `delay_rewrite1` (2026-06-21). Proposals C, B and A landed
+FIR-identical (103 `transform` tests green throughout), followed by the per-strategy file split
+into `signal_fir/delay/` — see the journal entry for 2026-06-21. The `file:line` references below
+point at the **pre-refactor single-file `delay.rs`** and are kept as the design's "before" snapshot.
 **Goal:** Restructure the delay subsystem into steps a human can read independently,
 document in isolation, and recombine — while emitting **byte-identical FIR** (hence identical
 generated C/WASM and identical runtime performance).

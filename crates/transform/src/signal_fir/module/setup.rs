@@ -109,12 +109,10 @@ impl<'a> SignalToFirLower<'a> {
     /// Pre-scans the output signal forest and allocates all delay lines before
     /// lowering begins.
     ///
-    /// This preparation step now has two phases:
-    ///
-    /// - [`DelayManager::analyze_signals`] computes read-only accumulated delay
-    ///   metadata for reachable signals and recursion outputs
-    /// - [`DelayManager::scan_signals`] collects the concrete non-recursive
-    ///   carried signals that still need standalone delay-line allocation
+    /// This preparation step is a single pass: [`plan_delays`] walks the reachable
+    /// signal forest once and returns a `DelayPlan` holding both the per-carrier
+    /// maximum owned delays (the standalone lines to allocate) and the
+    /// recursion-output sizing metadata.
     ///
     /// Multiple `SIGDELAY(x, n)` nodes sharing the same carried signal `x`
     /// reuse one delay line sized to the largest delay seen. Standalone

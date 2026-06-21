@@ -3,7 +3,11 @@
 **Date :** 2026-06-21
 **Périmètre :** `crates/transform/src/signal_fir/delay.rs` (1671 lignes), ses sites d'appel dans
 `crates/transform/src/signal_fir/module/` et `recursion.rs`.
-**Statut :** Analyse / conception — aucun code modifié pour l'instant.
+**Statut :** Implémenté sur la branche `delay_rewrite1` (2026-06-21). Les propositions C, B et A ont
+été posées à FIR identique (103 tests `transform` verts à chaque étape), suivies du découpage par
+stratégie en fichiers dans `signal_fir/delay/` — voir l'entrée de journal du 2026-06-21. Les
+références `fichier:ligne` ci-dessous pointent vers le **`delay.rs` mono-fichier d'avant refactor** et
+sont conservées comme instantané « avant » de la conception.
 **Objectif :** restructurer le sous-système de délais en étapes qu'un humain peut lire
 indépendamment, documenter isolément et recombiner — tout en émettant un **FIR identique au
 bit près** (donc un C/WASM généré identique et des performances d'exécution identiques).

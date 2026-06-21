@@ -25,6 +25,15 @@
 //!    two public thin wrappers [`emit_fixed_delay_for_line`] /
 //!    [`emit_delay1_for_line`] delegate to `DelayKind` methods.
 //!
+//! # Module layout
+//!
+//! The subsystem is split across the `delay/` directory: this `mod.rs` is the hub
+//! (`DelayKind`, `DelayManager`, the `DelayFirCtx` / `DelayLoweringCtx` borrow
+//! bundles, and the `plan_delays` planner), while each strategy is self-contained
+//! in its own file — `shift.rs`, `circular_pow2.rs`, `if_wrapping.rs` — beside
+//! `sizing.rs` (pure sizing fns), `options.rs` (`DelayOptions` + strategy
+//! selector), and `arith.rs` (the shared `DelayArith` FIR-expression helper).
+//!
 //! # Strategy descriptions
 //!
 //! ## Shift/copy (`DelayKind::Shift`, delays ≤ `-mcd`, default 16)
@@ -77,11 +86,11 @@
 //! - [`plan_delays`] produces a [`DelayPlan`] with both per-carrier max delays
 //!   and recursion-output sizing metadata in one DAG walk.
 //! - `prepare_delay_lines` allocates each line through [`DelayManager::ensure_delay_line`].
-//! - `ensure_recursion_array_for_group` in `module.rs` consumes the recursion-output
+//! - `ensure_recursion_array_for_group` in `module/` consumes the recursion-output
 //!   analysis to size recursion carriers.
 //!
 //! Standalone `Delay1(x)` nodes that use the shift strategy are also recorded
-//! during the same scan so their buffer geometry is chosen once up front and
+//! during the same planning walk so their buffer geometry is chosen once up front and
 //! later reused by the lowering phase without allocation side effects.
 //!
 //! # Scope of this module
@@ -104,7 +113,7 @@
 //!
 //! The complementary **stateful orchestration** layer (`lower_fixed_delay`,
 //! `lower_delay_state`, recursion-carrier resolution, and `lower_signal`
-//! dispatch) remains in `module.rs`.
+//! dispatch) remains in `module/`.
 //!
 //! Source provenance (C++):
 //! - `compiler/transform/signalFIRCompiler.hh` — `DelayLine`, `allocateDelayLineAux`
@@ -479,45 +488,36 @@ pub(super) fn emit_delay1_for_line(
 
 /// The complete delay decision for one module, produced by a single DAG walk.
 ///
-/// `DelayPlan` is a pure-data value with no FIR side-effects.  It collects
-/// exactly the two maps that the two existing tree walks ([`DelayManager::analyze_signals`]
-/// and [`DelayManager::scan_signals`]) build independently:
+/// `DelayPlan` is a pure-data value with no FIR side-effects, collecting two maps:
 ///
-/// - `lines` — the per-carrier maximum owned delay (≡ the `max_delays` map
-///   returned by `scan_signals`).
-/// - `rec_outputs` — the recursion-output sizing metadata (≡ the
-///   `rec_output_analysis` map filled by `analyze_signals`).
+/// - `lines` — the per-carrier maximum owned delay (the standalone delay lines
+///   to allocate).
+/// - `rec_outputs` — the recursion-output sizing metadata.
 ///
 /// Produced by [`plan_delays`]; consumed by `prepare_delay_lines` and
 /// `ensure_recursion_array_for_group`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct DelayPlan {
     /// Standalone delay lines to allocate: carried signal → required max delay.
-    ///
-    /// Equivalent to `max_delays` returned by [`DelayManager::scan_signals`].
     pub(super) lines: HashMap<SigId, i32>,
     /// Recursion-output sizing metadata: `(rec_var_id, proj_index)` → entry.
     ///
-    /// Equivalent to `DelayManager::rec_output_analysis` filled by
-    /// [`DelayManager::analyze_signals`].
+    /// Stored into `DelayManager::rec_output_analysis` by `prepare_delay_lines`.
     pub(super) rec_outputs: HashMap<(u32, usize), DelayAnalysisEntry>,
 }
 
 // ─── plan_delays ──────────────────────────────────────────────────────────────
 
-/// Unified single-pass replacement for `analyze_signals` + `scan_signals`.
-///
-/// Produces a [`DelayPlan`] containing BOTH maps in one traversal of the
-/// prepared signal DAG.  Has no FIR side-effects.
+/// Unified single-pass delay planner: one traversal of the prepared signal DAG
+/// producing both [`DelayPlan`] maps, with no FIR side-effects.
 ///
 /// # Algorithm
 ///
-/// The pass runs the *accumulating* traversal from `analyze_signals` (tracking
-/// path-accumulated delay, memoised by `best_seen_delay` so a node is re-visited
-/// when reached with a strictly larger accumulated delay).  On the FIRST visit to
-/// each node (tracked by `scanned: HashSet<SigId>`), it additionally performs the
-/// *scan-style* recording of the per-carrier maximum owned delay (`plan.lines`),
-/// using the same guards as `scan_signals`:
+/// An *accumulating* traversal tracks path-accumulated delay (memoised by
+/// `best_seen_delay`, so a node is re-visited when reached with a strictly larger
+/// accumulated delay) to fill `rec_outputs`.  On the FIRST visit to each node
+/// (tracked by `scanned: HashSet<SigId>`), it also records the per-carrier maximum
+/// owned delay into `lines`, under these guards:
 ///
 /// - zero-delay nodes are skipped,
 /// - `!is_recursion_delay_chain` guard for both `Delay` and `Delay1`,
@@ -765,21 +765,17 @@ impl<'a> DelayPlanner<'a> {
 /// | `rec_output_analysis` | `HashMap<(u32, usize), DelayAnalysisEntry>` | Read-only accumulated delay metadata per recursion output |
 /// | `scheduled_delay_writes` | `HashSet<SigId>` | Dedup guard for per-sample delay writes |
 ///
-/// # Scan / allocation flow
+/// # Planning / allocation flow
 ///
-/// 1. `SignalToFirLower::prepare_delay_lines` first calls
-///    [`Self::analyze_signals`] to collect read-only accumulated delay metadata
-///    for recursion outputs.
-/// 2. `prepare_delay_lines` then calls [`Self::scan_signals`], which returns a
-///    `max_delays` map of carried signals → their maximum observed owned delay.
-/// 3. `prepare_delay_lines` allocates each owned delay line through
-///    [`Self::ensure_delay_line`] using a [`DelayFirCtx`].
-/// 4. During lowering, `module.rs` keeps orchestration and recursion-specific
-///    cases, but delegates strategy-local FIR emission to
-///    [`emit_fixed_delay_for_line`] / [`emit_delay1_for_line`].
-/// 5. `ensure_recursion_array_for_group` consumes the read-only accumulated
-///    recursion-output analysis to size recursion arrays that also serve as
-///    merged delay buffers.
+/// 1. `SignalToFirLower::prepare_delay_lines` calls [`plan_delays`] once to build
+///    a [`DelayPlan`] (per-carrier max delays + recursion-output sizing metadata),
+///    then stores the recursion-output map via [`Self::set_rec_output_analysis`].
+/// 2. `prepare_delay_lines` allocates each owned delay line from `plan.lines`
+///    through [`Self::ensure_delay_line`] using a [`DelayFirCtx`].
+/// 3. During lowering, the orchestration in `module/` delegates strategy-local
+///    FIR emission to [`emit_fixed_delay_for_line`] / [`emit_delay1_for_line`].
+/// 4. `ensure_recursion_array_for_group` consumes the recursion-output analysis
+///    to size recursion arrays that also serve as merged delay buffers.
 pub(super) struct DelayManager {
     /// Strategy selection thresholds (`-mcd` / `-dlt` options).
     options: DelayOptions,
