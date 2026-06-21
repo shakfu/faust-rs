@@ -1,5 +1,8 @@
 //! UI control lowering, metadata emission, and `buildUserInterface` assembly.
 //!
+//! Defines [`UiLoweringState`], the sub-state struct that holds UI zone
+//! registries, waveform table maps, and the `buildUserInterface` statement list.
+//!
 //! Manages the UI side of the Faust lifecycle:
 //! - zone variable declaration for buttons, checkboxes, sliders, bargraphs,
 //!   and soundfile controls;

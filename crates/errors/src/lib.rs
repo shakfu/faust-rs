@@ -209,7 +209,6 @@ impl Diagnostic {
 }
 
 /// Aggregated diagnostics for one stage/session outcome.
-/// Aggregated diagnostics for one stage/session outcome.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiagnosticBundle {
     diagnostics: Vec<Diagnostic>,

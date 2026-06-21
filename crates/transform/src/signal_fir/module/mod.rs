@@ -94,9 +94,9 @@
 //!   at `compute()` entry, because each host call is one independent TBPTT
 //!   block.
 //! - `Konst` values below a `BlockReverseAD` carrier are forced to persistent
-//!   struct storage by `placement.rs`, since the synthesized sweep can create
-//!   compute-time uses that are not visible as parent edges in the original
-//!   signal DAG.
+//!   struct storage by `PlacementInfo` (see `setup.rs`), since the synthesized
+//!   sweep can create compute-time uses that are not visible as parent edges in
+//!   the original signal DAG.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -324,6 +324,22 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
 /// `IntCast`/`FloatCast` signal-tree nodes inserted by
 /// `promote_signals_for_fir`.  The lowering methods therefore never insert
 /// implicit casts themselves.
+///
+/// # Sub-struct organisation
+///
+/// To keep the top-level field list manageable, cohesive groups of fields have
+/// been extracted into typed sub-state structs defined in the owning concern's
+/// module:
+///
+/// | Field | Type | Defined in |
+/// |---|---|---|
+/// | `sections` | [`state::ModuleSections`] | `state.rs` |
+/// | `ui` | [`ui_lowering::UiLoweringState`] | `ui_lowering.rs` |
+/// | `used_protos` | [`arithmetic::UsedPrototypes`] | `arithmetic.rs` |
+/// | `name_gen` | [`setup::NameGen`] | `setup.rs` |
+/// | `placement` | [`setup::PlacementInfo`] | `setup.rs` |
+/// | `rad_reverse` | [`build::RadReverseState`] | `build.rs` |
+/// | `bra` | [`bra::BraState`] | `bra.rs` |
 struct SignalToFirLower<'a> {
     /// Read-only signal tree arena shared with the caller.
     arena: &'a TreeArena,

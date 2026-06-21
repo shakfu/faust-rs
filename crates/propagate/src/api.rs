@@ -18,8 +18,8 @@ use super::*;
 ///   `primal outputs + one tangent bundle per enabled control`,
 /// - enabled controls come from the canonical UI registry and honor
 ///   `[autodiff:false]`,
-/// - `rad(expr)` still returns [`PropagateError::UnsupportedBox`] in this
-///   phase.
+/// - `rad(expr)` returns [`PropagateError::RadUnsupportedNode`] for unsupported
+///   signal shapes.
 pub fn propagate_typed_with_ui(
     arena: &mut TreeArena,
     box_tree: FlatBoxId,

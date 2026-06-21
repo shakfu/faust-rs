@@ -4,17 +4,17 @@
 //! trait (used by shared differentiation-rule helpers) and the FIR store owned
 //! by [`SignalToFirLower`].  It maps arithmetic operations and math calls to
 //! typed FIR instructions while registering required math helpers through
-//! `used_math_ops`, and preserves the active internal real type.
+//! `used_protos.math_ops`, and preserves the active internal real type.
 
 use super::*;
 
 /// FIR adapter for backend-neutral local RAD formulas.
 ///
 /// This wrapper is deliberately small: it maps arithmetic and math calls into
-/// FIR, registers required math helpers through `used_math_ops`, and preserves
-/// the active internal real type. It does not know which Signal node is being
-/// differentiated and must not load BRA tapes; callers pass already prepared
-/// `FirId` values into the shared formula helpers.
+/// FIR, registers required math helpers through `used_protos.math_ops`, and
+/// preserves the active internal real type. It does not know which Signal node
+/// is being differentiated and must not load BRA tapes; callers pass already
+/// prepared `FirId` values into the shared formula helpers.
 pub(super) struct FirRadFormulaBuilder<'lower, 'arena> {
     lower: &'lower mut SignalToFirLower<'arena>,
     real_ty: FirType,
@@ -31,8 +31,8 @@ impl<'lower, 'arena> FirRadFormulaBuilder<'lower, 'arena> {
         FirBuilder::new(&mut self.lower.store).binop(op, x, y, typ)
     }
 
-    /// Emits a FIR math call, registering `op` in `used_math_ops` so the backend
-    /// knows to provide the corresponding math helper.
+    /// Emits a FIR math call, registering `op` in `used_protos.math_ops` so the
+    /// backend knows to provide the corresponding math helper.
     fn math_call(&mut self, op: FirMathOp, args: &[FirId]) -> FirId {
         self.lower.used_protos.math_ops.insert(op);
         FirBuilder::new(&mut self.lower.store).math_call(op, args, self.real_ty.clone())

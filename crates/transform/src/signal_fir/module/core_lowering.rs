@@ -17,7 +17,7 @@ impl<'a> SignalToFirLower<'a> {
     /// effect, successful lowering may append declarations and assignments to
     /// lifecycle section accumulators (e.g. sample-loop phase statements,
     /// state declarations to
-    /// [`Self::struct_declarations`]).
+    /// [`Self::sections`]).
     ///
     /// Returns a typed `FRS-SFIR-*` error for unsupported signal families.
     pub(super) fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {

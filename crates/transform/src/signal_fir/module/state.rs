@@ -1,5 +1,11 @@
 //! Delay and recursion state helpers, and register-init logic.
 //!
+//! Defines [`ModuleSections`], the sub-state struct that holds the FIR
+//! statement buckets for each Faust lifecycle section (`struct_declarations`,
+//! `static_declarations`, `global_declarations`, `constants_statements`,
+//! `reset_statements`, `clear_statements`, `control_statements`, and their
+//! dedup guards).
+//!
 //! Provides the methods that manage persistent DSP state across the Faust
 //! lifecycle: recursion-carrier resolution and allocation, delay-state slot
 //! lowering (shift strategy and ring-buffer strategy), and the helpers that

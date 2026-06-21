@@ -1,5 +1,8 @@
 //! Binary operator, math function, cast, select, and projection lowering.
 //!
+//! Defines [`UsedPrototypes`], the sub-state struct that tracks which math
+//! helpers and extern symbols the generated module depends on.
+//!
 //! Covers the arithmetic spine of the signal-to-FIR lowering:
 //! - `lower_binop` — maps Faust `BinOp` nodes to typed FIR binop instructions;
 //! - `lower_math1` / `lower_math2` — unary and binary math intrinsics;

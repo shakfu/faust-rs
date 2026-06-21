@@ -1,5 +1,9 @@
 //! Constructor and shared lowering utilities for [`SignalToFirLower`].
 //!
+//! Defines [`NameGen`] (monotonic counters for generated variable names) and
+//! [`PlacementInfo`] (read-only placement analysis results: ref counts,
+//! boundary set, konst escapes).
+//!
 //! Contains `SignalToFirLower::new` together with the helper methods that are
 //! used across multiple lowering concerns: sample-rate variable creation,
 //! delay-line preparation, type resolution, signal variability analysis,

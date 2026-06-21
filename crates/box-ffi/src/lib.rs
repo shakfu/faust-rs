@@ -99,7 +99,6 @@ fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize
     max_input.map_or(0, |idx| idx.saturating_add(1))
 }
 
-/// Lowers a propagated signal root list to a standalone FIR module for FFI callers.
 fn control_label_and_metadata(
     ctx: &BoxContext,
     control: &FfiSignalControl,
@@ -206,6 +205,7 @@ pub fn signal_only_root_ui(ctx: &BoxContext, module_name: &str) -> UiProgram {
     }
 }
 
+/// Lowers a propagated signal root list to a standalone FIR module for FFI callers.
 fn lower_signal_roots_to_fir(
     ctx: &BoxContext,
     signal_roots: &[TreeId],

@@ -1,5 +1,8 @@
 //! Block Reverse AD (BRA) lowering — backward sweep, adjoint accumulation, tapes.
 //!
+//! Defines [`BraState`], the sub-state struct that groups all BRA-specific
+//! fields previously scattered across `SignalToFirLower`.
+//!
 //! Implements the `impl SignalToFirLower` methods that lower `ReverseTimeRec`
 //! recursion groups and their associated BRA tape stores, backward-sweep
 //! loops, adjoint variables, and carry propagation.  The BRA pattern is the
