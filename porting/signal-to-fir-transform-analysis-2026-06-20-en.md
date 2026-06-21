@@ -11,6 +11,16 @@
 below as type/coverage/soundness obligations (and surfacing one new gap: `verify` enforces a
 predicate weaker than the lowering precondition, omitting `P` and `D1`).
 
+> **Update (2026-06-21, branch `delay_rewrite1`):** the **delay subsystem** described below has since
+> been restructured. The two delay-analysis walks (`analyze_signals` + `scan_signals`) were unified
+> into one `plan_delays` pass returning a `DelayPlan` (**resolving W7** and the still-open part of
+> I2), the five strategy abstractions were collapsed into a single `DelayKind` enum, and `delay.rs`
+> was split into a `signal_fir/delay/` module. The delay-specific sections, their `file:line`
+> references, and the `DelayStrategyEmitter` description below predate that work — see
+> [`delay-rs-simplification-experiment-2026-06-21-en.md`](delay-rs-simplification-experiment-2026-06-21-en.md)
+> and the 2026-06-21 journal entry. The rest of this document (staging, RAD/BRA, placement) is
+> unaffected.
+
 ---
 
 ## 0. Position in the compiler pipeline
@@ -528,6 +538,10 @@ recursion-output sizing) and `scan_signals` (standalone-line ownership + legacy 
 Their responsibilities overlap (both detect recursion-feedback-through-delay), and the legacy half
 feeds the dead `rec_group_max_delay` (W6). This is two traversals doing one job's worth of useful work.
 
+*Resolved (2026-06-21, `delay_rewrite1`)*: the two walks were folded into one `plan_delays` pass
+returning a `DelayPlan` (a `DelayPlanner` visitor); equivalence with the old walks was proven by a
+differential `debug_assert_eq!` across the full test suite before they were deleted.
+
 **W8 — Lowering-vs-verification boundary mismatch.**
 `prepare`'s verifier explicitly accepts `OnDemand`, `Upsampling`, `Downsampling`, `Clocked`,
 `ZeroPad`, `Fir`, `Iir`, and `AssertBounds` nodes, but `lower_signal`'s dispatch has **no arm**
@@ -613,8 +627,9 @@ delays and recursion-output analysis; drop `rec_group_max_delay` and the per-sig
 `delay_analysis` map (or wire the latter to a real consumer); turn `try_record_rec_delay` into a
 pure predicate. Removes one full traversal and a write-only map.
 
-*W6 part resolved (2026-06-21)*: the dead state (`rec_group_max_delay`, `delay_analysis` map,
-`strict_mode`) has been deleted. Remaining work: merging the two traversals (W7 still open).
+*Resolved (2026-06-21, `delay_rewrite1`)*: the dead state (`rec_group_max_delay`, `delay_analysis`
+map, `strict_mode`) was deleted, and `analyze_signals` + `scan_signals` were folded into one
+`plan_delays` pass (a `DelayPlanner` visitor) — W7 closed. I2 fully resolved.
 
 **I3 — Make the tape size safe (addresses W5).**
 Either size `fBraTape*` from an explicit max-block-size option, emit a compile-time rejection /

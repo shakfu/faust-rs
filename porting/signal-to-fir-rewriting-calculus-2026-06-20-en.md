@@ -6,6 +6,12 @@
 **Concrete companion:** [`signal-to-fir-transform-analysis-2026-06-20-en.md`](signal-to-fir-transform-analysis-2026-06-20-en.md)
 (step-by-step implementation review; `W#` findings referenced below come from it)
 
+> **Update (2026-06-21, branch `delay_rewrite1`):** the delay-planning model below (the accumulating
+> `A⟦·⟧` walk plus the second `scan_signals` walk) was unified into a single `plan_delays` pass in the
+> implementation, **resolving finding W7** from the companion doc. The mental model still holds — the
+> two walks were always one job — but the code now has one traversal (a `DelayPlanner` visitor). See
+> [`delay-rs-simplification-experiment-2026-06-21-en.md`](delay-rs-simplification-experiment-2026-06-21-en.md).
+
 ---
 
 ## 1. Why a formal view
