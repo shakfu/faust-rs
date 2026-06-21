@@ -128,32 +128,9 @@ impl<'a> SignalToFirLower<'a> {
     /// This pre-pass ensures all resource-sizing decisions are registered
     /// before reads are emitted during lowering.
     pub(super) fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
-        self.delay
-            .analyze_signals(self.arena, self.sig_types, outputs)?;
-        let max_delays = self
-            .delay
-            .scan_signals(self.arena, self.sig_types, outputs)?;
-
-        // Step 2 differential check: plan_delays must produce both maps identically.
-        // Active only in debug builds (i.e. cargo test); will fire on any divergence.
-        let plan = plan_delays(
-            self.arena,
-            self.sig_types,
-            outputs,
-            &self.delay.options(),
-        )?;
-        debug_assert_eq!(
-            plan.lines,
-            max_delays,
-            "plan_delays().lines diverged from scan_signals()"
-        );
-        debug_assert_eq!(
-            &plan.rec_outputs,
-            self.delay.rec_output_analysis_map(),
-            "plan_delays().rec_outputs diverged from analyze_signals()"
-        );
-
-        for (carried, delay) in max_delays {
+        let plan = plan_delays(self.arena, self.sig_types, outputs, &self.delay.options())?;
+        self.delay.set_rec_output_analysis(plan.rec_outputs);
+        for (carried, delay) in plan.lines {
             self.ensure_delay_line_decl(carried, delay)?;
         }
         Ok(())

@@ -1259,8 +1259,7 @@ fn is_recursion_delay_chain_static(arena: &TreeArena, value: SigId) -> bool {
     let SigMatch::Proj(_, group) = match_sig(arena, current) else {
         return false;
     };
-    match_sym_ref(arena, group).is_some()
-        || match_sym_rec(arena, group).map(|_| ()).is_some()
+    match_sym_ref(arena, group).is_some() || match_sym_rec(arena, group).map(|_| ()).is_some()
 }
 
 /// Records recursion-output delay analysis for `sig` at `accumulated_delay`,
@@ -1284,10 +1283,7 @@ fn plan_record_rec_output(
     let Ok(index) = usize::try_from(index) else {
         return;
     };
-    let entry = plan
-        .rec_outputs
-        .entry((var.as_u32(), index))
-        .or_default();
+    let entry = plan.rec_outputs.entry((var.as_u32(), index)).or_default();
     entry.max_delay = entry.max_delay.max(accumulated_delay);
     entry.delay_count = entry.delay_count.saturating_add(1);
 }
@@ -1343,7 +1339,16 @@ fn plan_node(
                 best_seen_delay,
                 scanned,
             )?;
-            plan_node(amount, 0, arena, sig_types, options, plan, best_seen_delay, scanned)?;
+            plan_node(
+                amount,
+                0,
+                arena,
+                sig_types,
+                options,
+                plan,
+                best_seen_delay,
+                scanned,
+            )?;
             return Ok(());
         }
         SigMatch::Delay1(value) => {
@@ -1370,7 +1375,16 @@ fn plan_node(
                 best_seen_delay,
                 scanned,
             )?;
-            plan_node(init, 0, arena, sig_types, options, plan, best_seen_delay, scanned)?;
+            plan_node(
+                init,
+                0,
+                arena,
+                sig_types,
+                options,
+                plan,
+                best_seen_delay,
+                scanned,
+            )?;
             return Ok(());
         }
         SigMatch::Proj(_, group) => {
@@ -1382,7 +1396,16 @@ fn plan_node(
                     )
                 })?;
                 for body in bodies {
-                    plan_node(body, 0, arena, sig_types, options, plan, best_seen_delay, scanned)?;
+                    plan_node(
+                        body,
+                        0,
+                        arena,
+                        sig_types,
+                        options,
+                        plan,
+                        best_seen_delay,
+                        scanned,
+                    )?;
                 }
                 return Ok(());
             }
@@ -1397,7 +1420,15 @@ fn plan_node(
         )
     })?;
     for child in node.children.as_slice() {
-        plan_child(*child, arena, sig_types, options, plan, best_seen_delay, scanned)?;
+        plan_child(
+            *child,
+            arena,
+            sig_types,
+            options,
+            plan,
+            best_seen_delay,
+            scanned,
+        )?;
     }
     Ok(())
 }
@@ -1423,7 +1454,16 @@ fn plan_child(
                     "malformed prepared signal list during delay planning",
                 )
             })?;
-            plan_node(head, 0, arena, sig_types, options, plan, best_seen_delay, scanned)?;
+            plan_node(
+                head,
+                0,
+                arena,
+                sig_types,
+                options,
+                plan,
+                best_seen_delay,
+                scanned,
+            )?;
             list = arena.tl(list).ok_or_else(|| {
                 SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -1433,7 +1473,16 @@ fn plan_child(
         }
         Ok(())
     } else {
-        plan_node(child, 0, arena, sig_types, options, plan, best_seen_delay, scanned)
+        plan_node(
+            child,
+            0,
+            arena,
+            sig_types,
+            options,
+            plan,
+            best_seen_delay,
+            scanned,
+        )
     }
 }
 
@@ -1494,322 +1543,27 @@ impl DelayManager {
         self.options.max_copy_delay
     }
 
-    /// Returns a clone of the delay options (used for differential testing).
+    /// Returns a clone of the delay options.
     pub(super) fn options(&self) -> DelayOptions {
         self.options.clone()
     }
 
-    // ── Scan pass ────────────────────────────────────────────────────────────
-
-    /// Computes read-only accumulated delay metadata for the reachable signal forest.
+    /// Computes and stores the rec-output analysis for the reachable signal forest.
     ///
-    /// This is the first Rust-side equivalent of the C++ delay-analysis pass:
-    /// it walks the prepared signal DAG with an accumulated delay counter and
-    /// records the maximum delayed access observed on each reachable carrier.
-    ///
-    /// The traversal rules are intentionally narrow:
-    ///
-    /// - `SIGDELAY(value, amount)` adds the proven upper bound of `amount`
-    /// - `SIGDELAY1(value)` adds `1`
-    /// - `SIGPREFIX(init, value)` adds `1` on the carried state edge only
-    /// - non-delay computation nodes reset the accumulator to `0`
-    ///
-    /// Recursion outputs are tracked by their canonical `(var_id, proj_index)`
-    /// identity so later planning steps can size the owning recursion carrier
-    /// directly.
+    /// Delegates to [`plan_delays`] and stores the `rec_outputs` map internally.
+    /// Retained for use by tests that call this method directly; not called in
+    /// production code (production path uses `prepare_delay_lines` via [`plan_delays`]
+    /// directly).
+    #[cfg(test)]
     pub(super) fn analyze_signals(
         &mut self,
         arena: &TreeArena,
         sig_types: &HashMap<SigId, SigType>,
         signals: &[SigId],
     ) -> Result<(), SignalFirError> {
-        self.rec_output_analysis.clear();
-        let mut best_seen_delay = HashMap::new();
-        for &sig in signals {
-            self.analyze_node(sig, 0, arena, sig_types, &mut best_seen_delay)?;
-        }
+        let plan = plan_delays(arena, sig_types, signals, &self.options.clone())?;
+        self.rec_output_analysis = plan.rec_outputs;
         Ok(())
-    }
-
-    /// Pre-scans `signals` to collect the maximum delay per carried signal and
-    /// record recursion-feedback-through-delay1 merge patterns.
-    ///
-    /// Returns a map `carried_signal → max_delay` for all delay buffers that must
-    /// be pre-allocated before lowering:
-    ///
-    /// - general `SIGDELAY(value, amount)` lines keyed by `value`,
-    /// - standalone `Delay1(value)` lines keyed by `value` when the shift
-    ///   strategy is enabled (`max_copy_delay >= 1`).
-    ///
-    /// Entries where the pattern was merged into a recursion array are NOT
-    /// included (the recursion array is now sized from the read-only
-    /// accumulated delay analysis).
-    ///
-    /// This method has no FIR side-effects — it only reads `arena` and `sig_types`
-    /// and returns the discovered per-carrier maximum delays.
-    pub(super) fn scan_signals(
-        &mut self,
-        arena: &TreeArena,
-        sig_types: &HashMap<SigId, SigType>,
-        signals: &[SigId],
-    ) -> Result<HashMap<SigId, i32>, SignalFirError> {
-        let mut max_delays: HashMap<SigId, i32> = HashMap::new();
-        let mut seen: HashSet<SigId> = HashSet::new();
-        for sig in signals {
-            self.scan_node(*sig, arena, sig_types, &mut seen, &mut max_delays)?;
-        }
-        Ok(max_delays)
-    }
-
-    fn analyze_node(
-        &mut self,
-        sig: SigId,
-        accumulated_delay: i32,
-        arena: &TreeArena,
-        sig_types: &HashMap<SigId, SigType>,
-        best_seen_delay: &mut HashMap<SigId, i32>,
-    ) -> Result<(), SignalFirError> {
-        if let Some(prev) = best_seen_delay.get(&sig)
-            && *prev >= accumulated_delay
-        {
-            return Ok(());
-        }
-        best_seen_delay.insert(sig, accumulated_delay);
-
-        if accumulated_delay > 0 {
-            self.record_rec_output_delay_analysis(arena, sig, accumulated_delay);
-        }
-
-        match match_sig(arena, sig) {
-            SigMatch::Delay(value, amount) => {
-                let Some(delay) = delay_size_for_amount(arena, sig_types, amount)? else {
-                    return Err(SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
-                    ));
-                };
-                self.analyze_node(
-                    value,
-                    accumulated_delay.saturating_add(delay),
-                    arena,
-                    sig_types,
-                    best_seen_delay,
-                )?;
-                self.analyze_node(amount, 0, arena, sig_types, best_seen_delay)?;
-                return Ok(());
-            }
-            SigMatch::Delay1(value) => {
-                self.analyze_node(
-                    value,
-                    accumulated_delay.saturating_add(1),
-                    arena,
-                    sig_types,
-                    best_seen_delay,
-                )?;
-                return Ok(());
-            }
-            SigMatch::Prefix(init, value) => {
-                self.analyze_node(
-                    value,
-                    accumulated_delay.saturating_add(1),
-                    arena,
-                    sig_types,
-                    best_seen_delay,
-                )?;
-                self.analyze_node(init, 0, arena, sig_types, best_seen_delay)?;
-                return Ok(());
-            }
-            SigMatch::Proj(_, group) => {
-                if let Some((_var, body_list)) = match_sym_rec(arena, group) {
-                    let bodies = list_to_vec(arena, body_list).ok_or_else(|| {
-                        SignalFirError::new(
-                            SignalFirErrorCode::UnsupportedSignalNode,
-                            "malformed symbolic recursion body list during delay analysis",
-                        )
-                    })?;
-                    for body in bodies {
-                        self.analyze_node(body, 0, arena, sig_types, best_seen_delay)?;
-                    }
-                    return Ok(());
-                }
-            }
-            _ => {}
-        }
-
-        let node = arena.node(sig).ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!("missing prepared signal node {}", sig.as_u32()),
-            )
-        })?;
-        for child in node.children.as_slice() {
-            self.analyze_child(*child, arena, sig_types, best_seen_delay)?;
-        }
-        Ok(())
-    }
-
-    fn analyze_child(
-        &mut self,
-        child: SigId,
-        arena: &TreeArena,
-        sig_types: &HashMap<SigId, SigType>,
-        best_seen_delay: &mut HashMap<SigId, i32>,
-    ) -> Result<(), SignalFirError> {
-        if arena.is_list(child) {
-            let mut list = child;
-            while !arena.is_nil(list) {
-                let head = arena.hd(list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed prepared signal list during delay analysis",
-                    )
-                })?;
-                self.analyze_node(head, 0, arena, sig_types, best_seen_delay)?;
-                list = arena.tl(list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed prepared signal list during delay analysis",
-                    )
-                })?;
-            }
-            Ok(())
-        } else {
-            self.analyze_node(child, 0, arena, sig_types, best_seen_delay)
-        }
-    }
-
-    fn record_rec_output_delay_analysis(
-        &mut self,
-        arena: &TreeArena,
-        sig: SigId,
-        accumulated_delay: i32,
-    ) {
-        let SigMatch::Proj(index, group) = match_sig(arena, sig) else {
-            return;
-        };
-        let rec_var = match match_sym_ref(arena, group) {
-            Some(var) => Some(var),
-            None => match_sym_rec(arena, group).map(|(var, _)| var),
-        };
-        let Some(var) = rec_var else {
-            return;
-        };
-        let Ok(index) = usize::try_from(index) else {
-            return;
-        };
-        let entry = self
-            .rec_output_analysis
-            .entry((var.as_u32(), index))
-            .or_default();
-        entry.max_delay = entry.max_delay.max(accumulated_delay);
-        entry.delay_count = entry.delay_count.saturating_add(1);
-    }
-
-    fn scan_node(
-        &mut self,
-        sig: SigId,
-        arena: &TreeArena,
-        sig_types: &HashMap<SigId, SigType>,
-        seen: &mut HashSet<SigId>,
-        max_delays: &mut HashMap<SigId, i32>,
-    ) -> Result<(), SignalFirError> {
-        if !seen.insert(sig) {
-            return Ok(());
-        }
-        if let SigMatch::Delay(value, amount) = match_sig(arena, sig) {
-            match delay_size_for_amount(arena, sig_types, amount)? {
-                Some(0) => {}
-                Some(delay) => {
-                    let merged = self.is_recursion_delay_chain(arena, value);
-                    if !merged {
-                        let entry = max_delays.entry(value).or_insert(0);
-                        if delay > *entry {
-                            *entry = delay;
-                        }
-                    }
-                }
-                None => {
-                    return Err(SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
-                    ));
-                }
-            }
-        }
-        if let SigMatch::Delay1(value) = match_sig(arena, sig)
-            && self.options.max_copy_delay >= 1
-            && !self.is_recursion_delay_chain(arena, value)
-        {
-            let entry = max_delays.entry(value).or_insert(0);
-            if 1 > *entry {
-                *entry = 1;
-            }
-        }
-        let node = arena.node(sig).ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!("missing prepared signal node {}", sig.as_u32()),
-            )
-        })?;
-        for child in node.children.as_slice() {
-            self.scan_child(*child, arena, sig_types, seen, max_delays)?;
-        }
-        Ok(())
-    }
-
-    fn scan_child(
-        &mut self,
-        child: SigId,
-        arena: &TreeArena,
-        sig_types: &HashMap<SigId, SigType>,
-        seen: &mut HashSet<SigId>,
-        max_delays: &mut HashMap<SigId, i32>,
-    ) -> Result<(), SignalFirError> {
-        if arena.is_list(child) {
-            let mut list = child;
-            while !arena.is_nil(list) {
-                let head = arena.hd(list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed prepared signal list while scanning delay lines",
-                    )
-                })?;
-                self.scan_node(head, arena, sig_types, seen, max_delays)?;
-                list = arena.tl(list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed prepared signal list while scanning delay lines",
-                    )
-                })?;
-            }
-            Ok(())
-        } else {
-            self.scan_node(child, arena, sig_types, seen, max_delays)
-        }
-    }
-
-    fn is_recursion_delay_chain(&self, arena: &TreeArena, value: SigId) -> bool {
-        self.unwrap_recursion_delay_chain(arena, value).is_some()
-    }
-
-    fn unwrap_recursion_delay_chain(
-        &self,
-        arena: &TreeArena,
-        value: SigId,
-    ) -> Option<(SigId, i32)> {
-        let mut current = value;
-        let mut implicit_delay = 0i32;
-        while let SigMatch::Delay1(inner) = match_sig(arena, current) {
-            implicit_delay = implicit_delay.saturating_add(1);
-            current = inner;
-        }
-        let SigMatch::Proj(_, group) = match_sig(arena, current) else {
-            return None;
-        };
-        match match_sym_ref(arena, group) {
-            Some(_) => Some((current, implicit_delay)),
-            None => match_sym_rec(arena, group).map(|_| (current, implicit_delay)),
-        }
     }
 
     // ── Allocation ───────────────────────────────────────────────────────────
@@ -1966,8 +1720,13 @@ impl DelayManager {
         self.rec_output_analysis.get(&(var_id, index))
     }
 
-    /// Returns the full rec-output analysis map (used for differential testing).
-    pub(super) fn rec_output_analysis_map(&self) -> &HashMap<(u32, usize), DelayAnalysisEntry> {
-        &self.rec_output_analysis
+    /// Replaces the internal rec-output analysis map with the one from a [`DelayPlan`].
+    ///
+    /// Called by `prepare_delay_lines` after switching to the unified [`plan_delays`] walk.
+    pub(super) fn set_rec_output_analysis(
+        &mut self,
+        rec_outputs: HashMap<(u32, usize), DelayAnalysisEntry>,
+    ) {
+        self.rec_output_analysis = rec_outputs;
     }
 }
