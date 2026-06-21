@@ -113,44 +113,27 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fir::helpers::{emit_reverse_array_shift_loop, fresh_loop_var};
-use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
+use fir::helpers::fresh_loop_var;
+use fir::{AccessType, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
-use sigtype::{SigType, check_delay_interval};
+use sigtype::SigType;
 use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
 use crate::signal_prepare::SimpleSigType;
 
 use super::error::{SignalFirError, SignalFirErrorCode};
 
-// ─── DelayOptions ─────────────────────────────────────────────────────────────
+// ─── Sub-modules ──────────────────────────────────────────────────────────────
 
-/// Delay-line strategy selection thresholds.
-///
-/// Mirror of the Faust `-mcd` / `-dlt` compiler options:
-///
-/// - `-mcd N` (max-copy-delay, default 16): delays ≤ N use the shift/copy
-///   strategy (no `fIOTA`).
-/// - `-dlt N` (delay-line threshold, default `u32::MAX`): delays > N use the
-///   if-based wrapping strategy; delays in `(mcd, dlt]` use the default
-///   power-of-two circular strategy.
-#[derive(Clone, Debug)]
-pub(super) struct DelayOptions {
-    /// Shift/copy model upper bound (inclusive).  Default: 16.
-    pub(super) max_copy_delay: u32,
-    /// If-based wrapping model lower bound (exclusive).  Default: `u32::MAX`
-    /// (disabled; all non-copy delays use the circular-pow2 model).
-    pub(super) delay_line_threshold: u32,
-}
+mod circular_pow2;
+mod if_wrapping;
+mod options;
+mod shift;
+mod sizing;
 
-impl Default for DelayOptions {
-    fn default() -> Self {
-        Self {
-            max_copy_delay: 16,
-            delay_line_threshold: u32::MAX,
-        }
-    }
-}
+pub(super) use circular_pow2::GlobalCircularCursor;
+pub(super) use options::DelayOptions;
+pub(super) use sizing::{delay_size_for_amount, pow2limit_for_delay};
 
 // ─── DelayLineInfo ────────────────────────────────────────────────────────────
 
@@ -191,227 +174,6 @@ pub(super) struct DelayAnalysisEntry {
     pub(super) delay_count: u32,
 }
 
-// ─── pow2limit_for_delay ─────────────────────────────────────────────────────
-
-/// Computes `next_power_of_two(delay + 1)` — the circular buffer size for
-/// a given maximum delay in samples.
-///
-/// A delay of `N` samples requires reading `N` positions behind the write
-/// pointer.  With a power-of-two size `S`, the mask `S - 1` covers all valid
-/// offsets `0..=N`, so the minimum `S` is `next_power_of_two(N + 1)`.
-///
-/// # Errors
-///
-/// Returns [`SignalFirErrorCode::UnsupportedSignalNode`] if `delay` is
-/// negative, if `delay + 1` overflows `usize`, or if the result would exceed
-/// `usize::MAX` (i.e. `delay >= usize::MAX / 2`).
-///
-/// | `delay` | result |
-/// |---------|--------|
-/// | `0` | `1` (passthrough needs 1 slot) |
-/// | `1` | `2` |
-/// | `3` | `4` |
-/// | `4` | `8` |
-/// | `10` | `16` |
-pub(super) fn pow2limit_for_delay(delay: i32) -> Result<usize, SignalFirError> {
-    let delay = usize::try_from(delay).map_err(|_| {
-        SignalFirError::new(
-            SignalFirErrorCode::UnsupportedSignalNode,
-            format!("SIGDELAY amount must be >= 0, got {delay}"),
-        )
-    })?;
-    let requested = delay.checked_add(1).ok_or_else(|| {
-        SignalFirError::new(
-            SignalFirErrorCode::UnsupportedSignalNode,
-            "SIGDELAY amount overflow while sizing delay line",
-        )
-    })?;
-    requested.checked_next_power_of_two().ok_or_else(|| {
-        SignalFirError::new(
-            SignalFirErrorCode::UnsupportedSignalNode,
-            format!("SIGDELAY amount too large to size delay line: {delay}"),
-        )
-    })
-}
-
-// ─── Delay amount resolution ──────────────────────────────────────────────────
-
-/// Returns the constant integer value of `sig` if it is a `SIGINT` literal,
-/// otherwise `None`.
-///
-/// This is the fast path for compile-time constant delay amounts (e.g. `x @ 3`
-/// after constant propagation).  The returned value is the exact delay in
-/// samples; callers should pass it directly to [`pow2limit_for_delay`].
-pub(super) fn constant_delay_amount(
-    arena: &TreeArena,
-    sig: SigId,
-) -> Result<Option<i32>, SignalFirError> {
-    match match_sig(arena, sig) {
-        SigMatch::Int(value) => Ok(Some(value)),
-        _ => Ok(None),
-    }
-}
-
-/// Returns the interval upper-bound used to size the delay line for a
-/// variable delay amount, mirroring C++ `checkDelayInterval`.
-///
-/// Accepts any signal whose full type annotation has a non-empty, bounded
-/// (finite `hi`), non-negative interval.  `hi == 0` is the zero-delay
-/// passthrough case.
-///
-/// Returns `None` when:
-/// - `sig` has no type entry in `sig_types`,
-/// - the interval is empty or unbounded (infinite `hi`), or
-/// - `hi < 0` (negative delay, semantically invalid).
-///
-/// # C++ correspondence
-///
-/// Mirrors `signalFIRCompiler.cpp::checkDelayInterval`, which rejects any
-/// delay with an interval whose upper bound cannot be determined or is
-/// negative.
-pub(super) fn variable_delay_max_bound(
-    sig_types: &HashMap<SigId, SigType>,
-    sig: SigId,
-) -> Option<i32> {
-    let ty = sig_types.get(&sig)?;
-    if ty.interval().hi() < 0.0 {
-        return None;
-    }
-    check_delay_interval(ty).ok()
-}
-
-/// Returns a structural upper bound for a delay expression when interval
-/// analysis cannot determine a finite bound.
-///
-/// If `sig` is `SIGMIN(SigInt(n), _)` or `SIGMIN(_, SigInt(n))` with
-/// `n >= 0`, returns `n` as a conservative upper bound.  This covers the
-/// standard `de.delay(n, d, x) = x @ min(n, max(0, d))` pattern, where
-/// the first argument to `min` is an explicit compile-time ceiling.
-///
-/// # When this fires
-///
-/// With correct `FConst` typing (`Interval::new_default()` rather than
-/// `empty()`), `fSamplingFreq`-based expressions (e.g. `ma.SR`) produce a
-/// finite bounded interval through standard interval algebra and do not reach
-/// this fallback.  This method acts as defence-in-depth for any remaining
-/// case where interval analysis yields an empty or unbounded result.
-pub(super) fn min_const_upper_bound(arena: &TreeArena, sig: SigId) -> Option<i32> {
-    let SigMatch::Min(lhs, rhs) = match_sig(arena, sig) else {
-        return None;
-    };
-    let as_nonneg_int = |id: SigId| -> Option<i32> {
-        if let SigMatch::Int(n) = match_sig(arena, id)
-            && n >= 0
-        {
-            return Some(n);
-        }
-        None
-    };
-    as_nonneg_int(lhs).or_else(|| as_nonneg_int(rhs))
-}
-
-/// Resolves the delay line allocation size for a delay `amount` signal.
-///
-/// Tries three strategies in order of specificity:
-///
-/// 1. **Literal `SIGINT`** — exact compile-time constant via
-///    [`constant_delay_amount`].
-/// 2. **Bounded interval** — interval upper bound from the type annotator
-///    via [`variable_delay_max_bound`].  Covers slider-driven and
-///    `fSamplingFreq`-derived amounts after type propagation.
-/// 3. **Structural `SIGMIN` fallback** — conservative upper bound from
-///    `SIGMIN(SigInt(n), _)` patterns via [`min_const_upper_bound`].
-///    Defence-in-depth for cases where interval analysis still yields empty.
-///
-/// Returns `None` when no bound can be determined; the caller should report
-/// an `UnsupportedSignalNode` error.
-///
-/// Returns `Some(0)` for a zero-delay (passthrough) amount.
-pub(super) fn delay_size_for_amount(
-    arena: &TreeArena,
-    sig_types: &HashMap<SigId, SigType>,
-    amount: SigId,
-) -> Result<Option<i32>, SignalFirError> {
-    if let Some(c) = constant_delay_amount(arena, amount)? {
-        return Ok(Some(c));
-    }
-    if let Some(b) = variable_delay_max_bound(sig_types, amount) {
-        return Ok(Some(b));
-    }
-    Ok(min_const_upper_bound(arena, amount))
-}
-
-// ─── GlobalCircularCursor ────────────────────────────────────────────────────
-
-/// Shared runtime cursor used by all global masked circular-storage paths.
-///
-/// Today this is materialized as the persistent struct field `fIOTA`. It is
-/// shared by `CircularPow2` delay lines and by circular recursion carriers
-/// lowered from `module.rs`.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct GlobalCircularCursor;
-
-impl GlobalCircularCursor {
-    /// Declares and clears the shared `fIOTA` state, idempotent.
-    pub(super) fn ensure_state(self, ctx: &mut DelayFirCtx<'_>) {
-        if *ctx.uses_iota {
-            return;
-        }
-        *ctx.uses_iota = true;
-        let zero = {
-            let mut b = FirBuilder::new(ctx.store);
-            b.int32(0)
-        };
-        let decl = {
-            let mut b = FirBuilder::new(ctx.store);
-            b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, None)
-        };
-        ctx.struct_declarations.push(decl);
-        if ctx.clear_init_seen.insert("fIOTA".to_owned()) {
-            let mut b = FirBuilder::new(ctx.store);
-            ctx.clear_statements
-                .push(b.store_var("fIOTA", AccessType::Struct, zero));
-        }
-    }
-
-    /// Loads the current cursor value from the DSP struct.
-    pub(super) fn load(self, store: &mut FirStore) -> FirId {
-        let mut b = FirBuilder::new(store);
-        b.load_var("fIOTA", AccessType::Struct, FirType::Int32)
-    }
-
-    /// Computes the masked current write index `fIOTA & (size - 1)`.
-    pub(super) fn current_index(self, store: &mut FirStore, size: usize) -> FirId {
-        let iota = self.load(store);
-        masked_delay_index(store, iota, size)
-    }
-
-    /// Computes the masked delayed read index `(fIOTA - amount) & (size - 1)`.
-    pub(super) fn delayed_index(self, store: &mut FirStore, amount: FirId, size: usize) -> FirId {
-        let iota = self.load(store);
-        let raw = {
-            let mut b = FirBuilder::new(store);
-            b.binop(FirBinOp::Sub, iota, amount, FirType::Int32)
-        };
-        masked_delay_index(store, raw, size)
-    }
-
-    /// Emits `fIOTA = fIOTA + 1` to advance the cursor by one sample.
-    pub(super) fn emit_advance(self, store: &mut FirStore) -> FirId {
-        let next = {
-            let iota = self.load(store);
-            let one = {
-                let mut b = FirBuilder::new(store);
-                b.int32(1)
-            };
-            let mut b = FirBuilder::new(store);
-            b.binop(FirBinOp::Add, iota, one, FirType::Int32)
-        };
-        let mut b = FirBuilder::new(store);
-        b.store_var("fIOTA", AccessType::Struct, next)
-    }
-}
-
 // ─── DelayKind ────────────────────────────────────────────────────────────────
 
 /// Buffer-geometry strategy for a single allocated delay line, with all
@@ -449,21 +211,9 @@ impl DelayKind {
     /// Minimum buffer size for a maximum delay of `max_delay` samples.
     pub(super) fn buffer_size(&self, max_delay: i32) -> Result<usize, SignalFirError> {
         match self {
-            DelayKind::Shift => usize::try_from(max_delay).map(|d| d + 1).map_err(|_| {
-                SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("SIGDELAY amount overflow: {max_delay}"),
-                )
-            }),
+            DelayKind::Shift => shift::buffer_size(max_delay),
             DelayKind::CircularPow2 => pow2limit_for_delay(max_delay),
-            DelayKind::IfWrapping { .. } => {
-                usize::try_from(max_delay).map(|d| d + 1).map_err(|_| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        format!("SIGDELAY amount overflow: {max_delay}"),
-                    )
-                })
-            }
+            DelayKind::IfWrapping { .. } => if_wrapping::buffer_size(max_delay),
         }
     }
 
@@ -486,11 +236,11 @@ impl DelayKind {
             // ── Shift ──────────────────────────────────────────────────────
             DelayKind::Shift => {
                 if schedule_write {
-                    let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
+                    let store_0 = shift::emit_store_at_zero(ctx.store, &line.name, current);
                     ctx.immediate_statements.push(store_0);
                     let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
                     if delay_n <= 2 {
-                        let copies = emit_unrolled_shift_copies(
+                        let copies = shift::emit_unrolled_shift_copies(
                             ctx.store,
                             &line.name,
                             delay_n,
@@ -498,8 +248,8 @@ impl DelayKind {
                         );
                         ctx.post_output_statements.extend(copies);
                     } else {
-                        let shift = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
-                        ctx.post_output_statements.push(shift);
+                        let s = shift::emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
+                        ctx.post_output_statements.push(s);
                     }
                 }
                 let mut b = FirBuilder::new(ctx.store);
@@ -538,7 +288,8 @@ impl DelayKind {
                         current,
                     ));
                 }
-                let read_index = if_wrapping_read_index(ctx.store, counter_name, amount, line.size);
+                let read_index =
+                    if_wrapping::if_wrapping_read_index(ctx.store, counter_name, amount, line.size);
                 let mut b = FirBuilder::new(ctx.store);
                 b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty)
             }
@@ -558,11 +309,11 @@ impl DelayKind {
             // Shift: read from index 1 (same write path as fixed delay).
             DelayKind::Shift => {
                 if schedule_write {
-                    let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
+                    let store_0 = shift::emit_store_at_zero(ctx.store, &line.name, current);
                     ctx.immediate_statements.push(store_0);
                     let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
                     if delay_n <= 2 {
-                        let copies = emit_unrolled_shift_copies(
+                        let copies = shift::emit_unrolled_shift_copies(
                             ctx.store,
                             &line.name,
                             delay_n,
@@ -570,8 +321,8 @@ impl DelayKind {
                         );
                         ctx.post_output_statements.extend(copies);
                     } else {
-                        let shift = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
-                        ctx.post_output_statements.push(shift);
+                        let s = shift::emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
+                        ctx.post_output_statements.push(s);
                     }
                 }
                 let one = {
@@ -793,159 +544,6 @@ pub(super) fn emit_delay1_for_line(
 ) -> FirId {
     line.strategy
         .emit_delay1(ctx, line, current, read_ty, schedule_write)
-}
-
-/// Emits the end-of-sample counter advance for one `IfWrapping` delay line.
-fn emit_if_wrapping_advance(store: &mut FirStore, counter_name: &str, size: usize) -> FirId {
-    bump_if_wrapping_counter(store, counter_name, size)
-}
-
-// ─── FIR emission helpers shared with strategy emitters ─────────────────────
-
-/// Thin arithmetic layer so index-formula functions read like the doc-comments.
-///
-/// Each method creates one FIR node via `FirBuilder` and returns its `FirId`.
-/// The emitted nodes are byte-for-byte identical to what raw `FirBuilder` calls
-/// produce — this is a legibility-only wrapper, not an optimization.
-struct DelayArith<'a>(&'a mut FirStore);
-
-impl<'a> DelayArith<'a> {
-    fn i32c(&mut self, v: i32) -> FirId {
-        FirBuilder::new(self.0).int32(v)
-    }
-    fn load_counter(&mut self, name: &str) -> FirId {
-        FirBuilder::new(self.0).load_var(name, AccessType::Struct, FirType::Int32)
-    }
-    fn add(&mut self, a: FirId, b: FirId) -> FirId {
-        FirBuilder::new(self.0).binop(FirBinOp::Add, a, b, FirType::Int32)
-    }
-    fn sub(&mut self, a: FirId, b: FirId) -> FirId {
-        FirBuilder::new(self.0).binop(FirBinOp::Sub, a, b, FirType::Int32)
-    }
-    fn ge(&mut self, a: FirId, b: FirId) -> FirId {
-        FirBuilder::new(self.0).binop(FirBinOp::Ge, a, b, FirType::Int32)
-    }
-    fn and_mask(&mut self, idx: FirId, mask: FirId) -> FirId {
-        FirBuilder::new(self.0).binop(FirBinOp::And, idx, mask, FirType::Int32)
-    }
-    fn select2(&mut self, cond: FirId, then_: FirId, else_: FirId) -> FirId {
-        FirBuilder::new(self.0).select2(cond, then_, else_, FirType::Int32)
-    }
-    fn store_counter(&mut self, name: &str, val: FirId) -> FirId {
-        FirBuilder::new(self.0).store_var(name, AccessType::Struct, val)
-    }
-}
-
-/// Applies the power-of-two ring-buffer mask: `index & (size - 1)`.
-pub(super) fn masked_delay_index(store: &mut FirStore, index: FirId, size: usize) -> FirId {
-    let mut e = DelayArith(store);
-    let mask = e.i32c(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
-    e.and_mask(index, mask)
-}
-
-/// Emits `buf[0] = new_value` — the immediate write for the Shift strategy.
-fn emit_store_at_zero(store: &mut FirStore, name: &str, new_value: FirId) -> FirId {
-    let zero = {
-        let mut b = FirBuilder::new(store);
-        b.int32(0)
-    };
-    let mut b = FirBuilder::new(store);
-    b.store_table(name, AccessType::Struct, zero, new_value)
-}
-
-/// Emits unrolled shift copies for a Shift delay line with `delay ≤ 2`.
-///
-/// Returns individual store instructions in high-to-low order:
-/// - delay=1: `[buf[1] = buf[0]]`
-/// - delay=2: `[buf[2] = buf[1], buf[1] = buf[0]]`
-fn emit_unrolled_shift_copies(
-    store: &mut FirStore,
-    name: &str,
-    delay: i32,
-    elem_ty: FirType,
-) -> Vec<FirId> {
-    let delay_usize = usize::try_from(delay).unwrap_or(0);
-    let mut copies = Vec::with_capacity(delay_usize);
-    for j in (1..=delay_usize).rev() {
-        let j_idx = {
-            let mut b = FirBuilder::new(store);
-            b.int32(i32::try_from(j).unwrap_or(i32::MAX))
-        };
-        let j_minus_1_idx = {
-            let mut b = FirBuilder::new(store);
-            b.int32(i32::try_from(j - 1).unwrap_or(i32::MAX))
-        };
-        let loaded = {
-            let mut b = FirBuilder::new(store);
-            b.load_table(name, AccessType::Struct, j_minus_1_idx, elem_ty.clone())
-        };
-        let stored = {
-            let mut b = FirBuilder::new(store);
-            b.store_table(name, AccessType::Struct, j_idx, loaded)
-        };
-        copies.push(stored);
-    }
-    copies
-}
-
-/// Emits a reverse `ForLoop` shift for a Shift delay line with `delay ≥ 3`.
-///
-/// Generates:
-/// ```text
-/// for (int j = delay; j > 0; j = j + -1)
-///     buf[j] = buf[j - 1];
-/// ```
-fn emit_shift_loop(
-    ctx: &mut DelayLoweringCtx<'_>,
-    name: &str,
-    delay: i32,
-    elem_ty: FirType,
-) -> FirId {
-    emit_reverse_array_shift_loop(
-        ctx.store,
-        ctx.next_loop_var_id,
-        "j",
-        name,
-        delay,
-        elem_ty,
-        AccessType::Struct,
-    )
-}
-
-/// Computes the read index for an `IfWrapping` delay line:
-/// `(counter + size - amount)` with if-based wrap when `≥ size`.
-fn if_wrapping_read_index(
-    store: &mut FirStore,
-    counter_name: &str,
-    amount: FirId,
-    size: usize,
-) -> FirId {
-    let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
-    let mut e = DelayArith(store);
-    let counter = e.load_counter(counter_name);
-    let size_fir = e.i32c(size_i32);
-    let plus_size = e.add(counter, size_fir);
-    let raw = e.sub(plus_size, amount);
-    let size_fir2 = e.i32c(size_i32);
-    let cond = e.ge(raw, size_fir2);
-    let size_fir3 = e.i32c(size_i32);
-    let adjusted = e.sub(raw, size_fir3);
-    e.select2(cond, adjusted, raw)
-}
-
-/// Emits `counter = (counter + 1 >= size) ? 0 : counter + 1` for an
-/// `IfWrapping` delay line counter advance.
-fn bump_if_wrapping_counter(store: &mut FirStore, counter_name: &str, size: usize) -> FirId {
-    let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
-    let mut e = DelayArith(store);
-    let counter = e.load_counter(counter_name);
-    let one = e.i32c(1);
-    let next = e.add(counter, one);
-    let size_fir = e.i32c(size_i32);
-    let cond = e.ge(next, size_fir);
-    let zero = e.i32c(0);
-    let wrapped = e.select2(cond, zero, next);
-    e.store_counter(counter_name, wrapped)
 }
 
 // ─── DelayPlan ────────────────────────────────────────────────────────────────
@@ -1397,7 +995,11 @@ impl DelayManager {
         }
         updates.extend(self.delay_lines.values().filter_map(|info| {
             if let DelayKind::IfWrapping { counter_name } = &info.strategy {
-                Some(emit_if_wrapping_advance(store, counter_name, info.size))
+                Some(if_wrapping::emit_if_wrapping_advance(
+                    store,
+                    counter_name,
+                    info.size,
+                ))
             } else {
                 None
             }
