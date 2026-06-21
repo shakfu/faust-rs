@@ -633,7 +633,7 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         init: FirId,
     ) -> Result<FirId, SignalFirError> {
-        if self.lowering_reverse_loop
+        if self.rad_reverse.lowering_reverse_loop
             && let Some(replayed) =
                 self.lower_forward_output_delay1_for_reverse_loop(node, value)?
         {
@@ -725,11 +725,17 @@ impl<'a> SignalToFirLower<'a> {
         node: SigId,
         value: SigId,
     ) -> Result<Option<FirId>, SignalFirError> {
-        let output_index = self.forward_output_by_sig.get(&value).copied().or_else(|| {
-            self.forward_output_by_sig_key
-                .get(&dump_sig_readable(self.arena, value))
-                .copied()
-        });
+        let output_index = self
+            .rad_reverse
+            .forward_output_by_sig
+            .get(&value)
+            .copied()
+            .or_else(|| {
+                self.rad_reverse
+                    .forward_output_by_sig_key
+                    .get(&dump_sig_readable(self.arena, value))
+                    .copied()
+            });
         let Some(output_index) = output_index else {
             return Ok(None);
         };

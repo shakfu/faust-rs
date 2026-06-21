@@ -12,6 +12,23 @@
 
 use super::*;
 
+/// RAD reverse-time scheduling state, populated post-construction in `build_module`.
+#[derive(Default)]
+pub(super) struct RadReverseState {
+    /// Forward output lanes already computed before the reverse-time loop.
+    ///
+    /// Phase-E1 RAD uses the public bundle layout `[primals..., gradients...]`.
+    /// This map lets coefficient-gradient terms in the reverse loop replay
+    /// `Delay1(primal)` from the primal output buffer instead of reading the
+    /// recursion carrier in reverse-time order.
+    pub(super) forward_output_by_sig: HashMap<SigId, usize>,
+    /// Same map as [`Self::forward_output_by_sig`], keyed by the prepared
+    /// readable signal shape to survive equivalent but non-identical `SigId`s.
+    pub(super) forward_output_by_sig_key: HashMap<String, usize>,
+    /// True while lowering the reverse-time sample-loop slice.
+    pub(super) lowering_reverse_loop: bool,
+}
+
 /// Lowers a prepared signal forest into a complete FIR module.
 ///
 /// Entry point for the fast-lane Step 2A–2G boundary: accepts pre-validated
@@ -131,7 +148,7 @@ pub(crate) fn build_module(
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
-    lower.forward_output_by_sig = signals
+    lower.rad_reverse.forward_output_by_sig = signals
         .iter()
         .enumerate()
         .filter_map(|(index, &sig)| (!reverse_time_outputs[index]).then_some((sig, index)))
@@ -161,7 +178,7 @@ pub(crate) fn build_module(
     if has_reverse_outputs {
         // Readable structural fallback keys are only needed when the RAD
         // reverse-time loop must reconnect a delayed value to a forward output.
-        lower.forward_output_by_sig_key = signals
+        lower.rad_reverse.forward_output_by_sig_key = signals
             .iter()
             .enumerate()
             .filter_map(|(index, &sig)| {
@@ -200,13 +217,13 @@ pub(crate) fn build_module(
         // entirely: their gradient projection can be internal to the forward
         // update and therefore scheduled by the forward slice above.
         lower.cache.clear();
-        lower.lowering_reverse_loop = true;
+        lower.rad_reverse.lowering_reverse_loop = true;
         for (signal_index, sig) in signals.iter().enumerate() {
             if reverse_time_outputs[signal_index] {
                 lower.lower_output_signal(signal_index, *sig, plan.num_outputs)?;
             }
         }
-        lower.lowering_reverse_loop = false;
+        lower.rad_reverse.lowering_reverse_loop = false;
         if !has_forward_outputs {
             let delay_sample_end = lower
                 .delay

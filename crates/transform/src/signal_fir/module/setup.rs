@@ -95,9 +95,7 @@ impl<'a> SignalToFirLower<'a> {
             fslow_counter: 0,
             islow_counter: 0,
             placement,
-            forward_output_by_sig: HashMap::new(),
-            forward_output_by_sig_key: HashMap::new(),
-            lowering_reverse_loop: false,
+            rad_reverse: build::RadReverseState::default(),
             bra: bra::BraState::default(),
         }
     }

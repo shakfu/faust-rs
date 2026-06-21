@@ -421,18 +421,8 @@ struct SignalToFirLower<'a> {
     islow_counter: u32,
     /// Read-only placement analysis results (ref counts, boundary set, konst escapes).
     placement: setup::PlacementInfo,
-    /// Forward output lanes already computed before the reverse-time loop.
-    ///
-    /// Phase-E1 RAD uses the public bundle layout `[primals..., gradients...]`.
-    /// This map lets coefficient-gradient terms in the reverse loop replay
-    /// `Delay1(primal)` from the primal output buffer instead of reading the
-    /// recursion carrier in reverse-time order.
-    forward_output_by_sig: HashMap<SigId, usize>,
-    /// Same map as [`Self::forward_output_by_sig`], keyed by the prepared
-    /// readable signal shape to survive equivalent but non-identical `SigId`s.
-    forward_output_by_sig_key: HashMap<String, usize>,
-    /// True while lowering the reverse-time sample-loop slice.
-    lowering_reverse_loop: bool,
+    /// RAD reverse-time scheduling state.
+    rad_reverse: build::RadReverseState,
     /// Grouped BRA (Block Reverse AD) lowering state.
     bra: bra::BraState,
 }
