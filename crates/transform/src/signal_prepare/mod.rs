@@ -6,14 +6,36 @@
 //! - `compiler/signals/sigtyperules.cpp` (reduced type inference subset)
 //!
 //! # Stage scope
-//! This module now implements the first two preparation slices:
-//! - clone the output forest into a private staging arena,
-//! - run forest-wide `de_bruijn_to_sym`,
-//! - infer one reduced `Int / Real / Sound` type for the prepared signals,
-//! - insert the reduced `SignalPromotion` cast subset needed by the fast-lane,
-//! - simplify the promoted forest,
-//! - canonicalize one-sample delays back to `Delay1`,
-//! - and re-type the final forest.
+//! The pipeline implemented here applies a **fixed linear sequence of ~16 passes**
+//! to the propagated signal forest, converting it into the staged shape expected by
+//! `signal_fir`.  The sequence is:
+//!
+//! ```text
+//! 2.1  clone forest into a fresh private TreeArena
+//! 2.2  de_bruijn_to_sym        (de Bruijn → SYMREC / SYMREF)
+//! 2.3  canon_unary_rec         (canonicalize unary projection indices)
+//!      └─ assert_sym           (W4: no de Bruijn remains)
+//! 2.4  retype #1               (sig_types fresh before promote #1)
+//! 2.5  promote #1              (insert SignalPromotion casts)
+//! 2.6  retype #2               (sig_types fresh before simplify #1)
+//! 2.7  simplify #1             (algebraic simplification)
+//! 2.8  merge_iso_rec           (merge isomorphic SYMREC groups)
+//! 2.9  retype #3               (sig_types fresh before simplify #2)
+//! 2.10 simplify #2             (algebraic simplification)
+//! 2.11 canon_one_sample_delays (Delay(x,1) → Delay1(x))
+//!      └─ assert_d1            (W4: no Delay(_, 1) remains)
+//! 2.12 retype #4               (sig_types fresh before promote #2)
+//! 2.13 promote #2              (second promotion pass)
+//!      └─ assert_sym_d1        (W4: Sym + D1 preserved)
+//! 2.14 retype #5               (final sig_types for PreparedSignals)
+//! 2.15 derive_simple_types     (SigType → SimpleSigType)
+//! 2.16 verify                  (postconditions; _verified entry only)
+//! ```
+//!
+//! The five re-types (steps 2.4 / 2.6 / 2.9 / 2.12 / 2.14) are driven by the
+//! private `Staging` driver, which owns `sig_types` and guarantees it is fresh
+//! before every typed pass.  No `sig_types_*` snapshot locals are threaded by
+//! hand — the schedule is structural.
 //!
 //! Reduced typing deliberately stops short of the full C++ type lattice. The
 //! goal is only to support the upcoming promotion pass and to feed `signal_fir`
@@ -309,65 +331,175 @@ pub fn prepare_signals_for_fir_verified(
     prepared.into_verified(ui)
 }
 
+/// Mutable staging value that owns the private arena, the current output roots,
+/// and the current full-type snapshot throughout the preparation pipeline.
+///
+/// The driver guarantees `sig_types` is fresh before every typed pass and
+/// re-infers after each structural change, reproducing the exact 5-infer schedule
+/// (steps 2.4 / 2.6 / 2.9 / 2.12 / 2.14 in the module-level pipeline table).
+/// No `sig_types_*` snapshot locals are threaded by hand — `retype` is the one
+/// place that advances the snapshot, and it is called explicitly at those five
+/// points in [`prepare_signals_for_fir_unverified`].
+struct Staging<'ui> {
+    arena: TreeArena,
+    outputs: Vec<SigId>,
+    /// Always "fresh for `outputs`" after each [`Self::retype`] call.
+    sig_types: HashMap<SigId, SigType>,
+    ui: &'ui UiProgram,
+}
+
+impl<'ui> Staging<'ui> {
+    /// Initializes staging from a freshly cloned forest.
+    fn new(arena: TreeArena, outputs: Vec<SigId>, ui: &'ui UiProgram) -> Self {
+        Self {
+            arena,
+            outputs,
+            sig_types: HashMap::new(),
+            ui,
+        }
+    }
+
+    /// Refreshes `sig_types` via a full `TypeAnnotator` pass over `outputs`.
+    ///
+    /// Must be called at each of the five schedule points (2.4/2.6/2.9/2.12/2.14)
+    /// so the next typed pass (promote / simplify) sees a consistent snapshot.
+    fn retype(&mut self) -> Result<(), SignalPrepareError> {
+        self.sig_types = infer_full_types(&self.arena, &self.outputs, self.ui)?;
+        Ok(())
+    }
+
+    /// Pass 2.2: converts de Bruijn recursion to symbolic `SYMREC` / `SYMREF`.
+    fn de_bruijn_to_sym(&mut self) -> Result<(), SignalPrepareError> {
+        let list = vec_to_list(&mut self.arena, &self.outputs);
+        let symbolic_list = tlib::de_bruijn_to_sym(&mut self.arena, list)?;
+        self.outputs = list_to_vec(&self.arena, symbolic_list)
+            .expect("de_bruijn_to_sym rebuilds a proper cons list");
+        Ok(())
+    }
+
+    /// Pass 2.3: canonicalizes unary symbolic recursion projection indices to `0`.
+    fn canon_unary_rec(&mut self) -> Result<(), SignalPrepareError> {
+        let list = vec_to_list(&mut self.arena, &self.outputs);
+        let canonical_list = rewrites::canonicalize_unary_rec_projections(&mut self.arena, list)?;
+        self.outputs = list_to_vec(&self.arena, canonical_list)
+            .expect("canonicalize_unary_rec_projections rebuilds a proper cons list");
+        Ok(())
+    }
+
+    /// W4 contract: no de Bruijn recursion form remains after `de_bruijn_to_sym`.
+    fn assert_sym(&self) {
+        debug_assert!(
+            !forest_has_de_bruijn(&self.arena, &self.outputs),
+            "de_bruijn_to_sym must eliminate every de Bruijn recursion form before typing"
+        );
+    }
+
+    /// Pass 2.5: first promotion pass — inserts `SignalPromotion` casts.
+    fn promote(&mut self) -> Result<(), SignalPrepareError> {
+        self.outputs = promote_signals_fastlane(&mut self.arena, &self.sig_types, &self.outputs)
+            .map_err(SignalPrepareError::Promotion)?;
+        Ok(())
+    }
+
+    /// Pass 2.7 / 2.10: algebraic simplification of the promoted / merged forest.
+    fn simplify(&mut self) {
+        self.outputs = simplify_signals_fastlane(&mut self.arena, &self.sig_types, &self.outputs);
+    }
+
+    /// Pass 2.8: merges isomorphic symbolic recursion groups.
+    fn merge_iso_rec(&mut self) {
+        self.outputs = normalize::merge_isomorphic_symrec_groups(&mut self.arena, &self.outputs);
+    }
+
+    /// Pass 2.11: rewrites every `Delay(x, 1)` to the canonical `Delay1(x)` form.
+    fn canon_one_sample_delays(&mut self) -> Result<(), SignalPrepareError> {
+        self.outputs = rewrites::canonicalize_one_sample_delays(&mut self.arena, &self.outputs)?;
+        Ok(())
+    }
+
+    /// W4 contract: no non-canonical one-sample delay `Delay(_, 1)` remains.
+    fn assert_d1(&self) {
+        debug_assert!(
+            !forest_has_delay_of_one(&self.arena, &self.outputs),
+            "canonicalize_one_sample_delays must rewrite every Delay(_, 1) to Delay1"
+        );
+    }
+
+    /// W4 contract: both `Sym` and `D1` invariants are preserved after promote #2.
+    fn assert_sym_d1(&self) {
+        debug_assert!(
+            !forest_has_de_bruijn(&self.arena, &self.outputs),
+            "the staging pipeline must preserve the symbolic-recursion form (Sym)"
+        );
+        debug_assert!(
+            !forest_has_delay_of_one(&self.arena, &self.outputs),
+            "promotion must preserve the one-sample-delay canonical form (D1)"
+        );
+    }
+
+    /// Consumes the staging value and returns the finished `PreparedSignals`.
+    ///
+    /// Must be called after the final `retype` (step 2.14) so `sig_types` is
+    /// already the final snapshot.
+    fn finish(self) -> PreparedSignals {
+        let types = derive_simple_types(&self.arena, &self.sig_types);
+        PreparedSignals {
+            arena: self.arena,
+            outputs: self.outputs,
+            types,
+            sig_types: self.sig_types,
+        }
+    }
+}
+
 fn prepare_signals_for_fir_unverified(
     src_arena: &TreeArena,
     outputs: &[SigId],
     ui: &UiProgram,
 ) -> Result<PreparedSignals, SignalPrepareError> {
+    // Step 2.1 — clone forest into a fresh private arena.
     let mut arena = TreeArena::new();
     let cloned_outputs = arena.clone_forest_from(src_arena, outputs);
-    let cloned_list = vec_to_list(&mut arena, &cloned_outputs);
-    let symbolic_list = tlib::de_bruijn_to_sym(&mut arena, cloned_list)?;
-    let symbolic_list = rewrites::canonicalize_unary_rec_projections(&mut arena, symbolic_list)?;
-    let outputs = list_to_vec(&arena, symbolic_list)
-        .expect("prepare_signals_for_fir rebuilds a proper cons list");
-    // Inter-pass contract (W4): `de_bruijn_to_sym` establishes the symbolic
-    // recursion form. Checking it in debug builds turns the otherwise implicit
-    // staging order into a testable postcondition, localized to this pass rather
-    // than surfacing later at the `verify` boundary.
-    debug_assert!(
-        !forest_has_de_bruijn(&arena, &outputs),
-        "de_bruijn_to_sym must eliminate every de Bruijn recursion form before typing"
-    );
-    let sig_types_before = infer_full_types(&arena, &outputs, ui)?;
-    let outputs = promote_signals_fastlane(&mut arena, &sig_types_before, &outputs)
-        .map_err(SignalPrepareError::Promotion)?;
-    let sig_types_after_promotion = infer_full_types(&arena, &outputs, ui)?;
-    let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_promotion, &outputs);
+    let mut s = Staging::new(arena, cloned_outputs, ui);
 
-    let outputs = normalize::merge_isomorphic_symrec_groups(&mut arena, &outputs);
-    let sig_types_after_merge = infer_full_types(&arena, &outputs, ui)?;
-    let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_merge, &outputs);
-    let outputs = rewrites::canonicalize_one_sample_delays(&mut arena, &outputs)?;
-    // Inter-pass contract (W4): `canonicalize_one_sample_delays` establishes D1.
-    debug_assert!(
-        !forest_has_delay_of_one(&arena, &outputs),
-        "canonicalize_one_sample_delays must rewrite every Delay(_, 1) to Delay1"
-    );
-    let sig_types_after_canonicalize = infer_full_types(&arena, &outputs, ui)?;
-    let outputs = promote_signals_fastlane(&mut arena, &sig_types_after_canonicalize, &outputs)
-        .map_err(SignalPrepareError::Promotion)?;
-    // Inter-pass contract (W4): the tail of the pipeline (typing / promotion /
-    // simplification / merge) must preserve the structural invariants the prepared
-    // forest hands to lowering. `P` itself is enforced for the final forest by
-    // `verify`; these debug checks pin the two structural forms (`Sym`, `D1`) at
-    // the point promotion #2 hands them off, so a regression is attributed here.
-    debug_assert!(
-        !forest_has_de_bruijn(&arena, &outputs),
-        "the staging pipeline must preserve the symbolic-recursion form (Sym)"
-    );
-    debug_assert!(
-        !forest_has_delay_of_one(&arena, &outputs),
-        "promotion must preserve the one-sample-delay canonical form (D1)"
-    );
-    let sig_types = infer_full_types(&arena, &outputs, ui)?;
-    let types = derive_simple_types(&arena, &sig_types);
-    Ok(PreparedSignals {
-        arena,
-        outputs,
-        types,
-        sig_types,
-    })
+    // Step 2.2 — de Bruijn → SYMREC / SYMREF.
+    s.de_bruijn_to_sym()?;
+    // Step 2.3 — canonicalize unary projection indices.
+    s.canon_unary_rec()?;
+    s.assert_sym(); // W4: no de Bruijn remains
+
+    // Step 2.4 — retype #1 (before promote #1).
+    s.retype()?;
+    // Step 2.5 — promote #1 (insert SignalPromotion casts).
+    s.promote()?;
+
+    // Step 2.6 — retype #2 (before simplify #1).
+    s.retype()?;
+    // Step 2.7 — simplify #1.
+    s.simplify();
+
+    // Step 2.8 — merge isomorphic SYMREC groups.
+    s.merge_iso_rec();
+    // Step 2.9 — retype #3 (before simplify #2).
+    s.retype()?;
+    // Step 2.10 — simplify #2.
+    s.simplify();
+
+    // Step 2.11 — Delay(x,1) → Delay1(x).
+    s.canon_one_sample_delays()?;
+    s.assert_d1(); // W4: no Delay(_, 1) remains
+
+    // Step 2.12 — retype #4 (before promote #2).
+    s.retype()?;
+    // Step 2.13 — promote #2.
+    s.promote()?;
+    s.assert_sym_d1(); // W4: Sym + D1 preserved
+
+    // Step 2.14 — retype #5 (final sig_types for PreparedSignals).
+    s.retype()?;
+
+    // Step 2.15 — derive SimpleSigType map and build PreparedSignals.
+    Ok(s.finish())
 }
 
 /// Returns `true` if any node reachable from `outputs` satisfies `pred`.
