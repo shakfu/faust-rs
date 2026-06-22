@@ -79,7 +79,7 @@ pub(super) struct RadReverseState {
 /// - recursion carrier allocation helpers
 /// - recursion-specific FIR helper emission
 ///
-/// `module.rs` remains responsible for orchestration:
+/// `module/` remains responsible for orchestration:
 ///
 /// - `lower_signal(...)` dispatch
 /// - deciding when a top-level recursion group must be materialized

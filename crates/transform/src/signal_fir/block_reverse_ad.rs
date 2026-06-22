@@ -1,9 +1,9 @@
 //! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3/B4/B5/B6).
 //!
-//! This module provides pure signal-tree utilities used by `module.rs` when
+//! This module provides pure signal-tree utilities used by `module/` when
 //! lowering `SigBlockReverseAD` carriers into FIR reverse-mode adjoint code.
 //! All functions here are `pub(super)` and are called exclusively from
-//! `module.rs`; the FIR-emitting logic itself lives there as `&mut self`
+//! `module/`; the FIR-emitting logic itself lives there as `&mut self`
 //! methods on `SignalToFirLower`.
 //!
 //! # Scope
@@ -18,7 +18,7 @@
 //! contains a node that is **not** trivially reverse-evaluable but is needed
 //! as a multiplier or divisor in a backward rule (e.g. `Delay1(x)` inside a
 //! `Mul`), [`collect_tape_needed_values`] identifies which signal values must
-//! be recorded during the forward loop.  `module.rs` then:
+//! be recorded during the forward loop.  `module/` then:
 //! 1. Declares a `fBraTapeN: Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)` struct
 //!    field for each tape-needed signal.
 //! 2. Stores each value into the tape in the `immediate` sample phase (before
@@ -38,7 +38,7 @@
 //! - **Inline adaptive schedule**: the gradient projection is consumed inside
 //!   a forward-time expression, often a recursive parameter update.  The public
 //!   output may then be only the outer primal recursion.  In that case
-//!   `module.rs` emits the BRA adjoint statements into the current forward
+//!   `module/` emits the BRA adjoint statements into the current forward
 //!   loop slice; the generated C++ may contain no separate backward loop even
 //!   though these helpers still build the same local transpose rules.
 //!   This is not the LTI/IIR `ReverseTimeRec` fast path: no linearity proof is
@@ -69,7 +69,7 @@
 //!   wrapped in a `Delay1`).
 //! - [`collect_bra_postorder`] recurses into the SYMREC body for SYMREC nodes
 //!   and stops at SYMREF nodes (cycle guard).
-//! - `module.rs` implements the TBPTT adjoint for recursive outputs:
+//! - `module/` implements the TBPTT adjoint for recursive outputs:
 //!   `adj[y[slot][n]] = cotangent[slot][n] + carry_from_step_n+1`, where the
 //!   carry is pre-loaded from the `Delay1(Proj(slot, SYMREF))` carry struct
 //!   field **before** the reverse-postorder walk (step 3a of

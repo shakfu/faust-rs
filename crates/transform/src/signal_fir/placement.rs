@@ -73,7 +73,7 @@
 //!
 //! # Placement gate (inside `lower_sig`)
 //!
-//! The actual hoisting decision lives in `module.rs` as part of the main
+//! The actual hoisting decision lives in `module/` as part of the main
 //! `lower_sig` dispatch loop (it needs mutable access to the lowering engine's
 //! internal statement lists and counters).  The gate combines the three
 //! pieces provided here:

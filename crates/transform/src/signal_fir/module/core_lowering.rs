@@ -520,7 +520,7 @@ impl<'a> SignalToFirLower<'a> {
     /// Lowers a fixed-size `SIGDELAY(value, amount)` using the canonical delay
     /// line pre-allocated by [`Self::prepare_delay_lines`].
     ///
-    /// Strategy-specific FIR emission is delegated to `delay.rs` through
+    /// Strategy-specific FIR emission is delegated to `delay/` through
     /// `emit_fixed_delay_for_line`, while this method keeps:
     ///
     /// - recursion-carrier reuse for merged `Delay1^k(Proj(...))` chains

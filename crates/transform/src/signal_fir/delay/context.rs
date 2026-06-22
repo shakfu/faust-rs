@@ -25,7 +25,7 @@ use super::{SignalFirError, SignalFirErrorCode};
 ///
 /// # Construction
 ///
-/// Construct via an explicit struct literal at each call site in `module.rs`:
+/// Construct via an explicit struct literal at each call site in `module/`:
 ///
 /// ```rust,ignore
 /// let mut ctx = DelayFirCtx {

@@ -31,7 +31,7 @@ pub(crate) fn masked_delay_index(store: &mut FirStore, index: FirId, size: usize
 ///
 /// Today this is materialized as the persistent struct field `fIOTA`. It is
 /// shared by `CircularPow2` delay lines and by circular recursion carriers
-/// lowered from `module.rs`.
+/// lowered from `module/`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct GlobalCircularCursor;
 

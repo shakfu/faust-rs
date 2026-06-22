@@ -1,6 +1,6 @@
 //! Recursive-group carrier data model for the `signal_fir` fast-lane.
 //!
-//! This module owns the explicit recursion abstractions used by `module.rs`
+//! This module owns the explicit recursion abstractions used by `module/`
 //! during recursive-group lowering:
 //!
 //! - carrier storage strategy
@@ -9,7 +9,7 @@
 //! - canonical resolved delayed recursion reads
 //!
 //! It also owns most of the recursion-specific helper logic needed by
-//! `module.rs`:
+//! `module/`:
 //!
 //! - active-vs-materialized carrier resolution
 //! - delayed recursion-chain matching (`Delay1^k(Proj(...))`)
@@ -17,7 +17,7 @@
 //! - carrier allocation and clear-loop registration
 //! - recursion-specific FIR helper emission for current writes/finalization
 //!
-//! `module.rs` still owns the final orchestration decisions:
+//! `module/` still owns the final orchestration decisions:
 //!
 //! - when a top-level recursion group must be materialized,
 //! - recursive body evaluation order,
@@ -149,7 +149,7 @@ pub(super) struct RecursionDelayKey {
 
 /// Decoded and validated recursive-group projection shape.
 ///
-/// `module.rs` uses this as the structural payload of `SIGPROJ(index, group)`
+/// `module/` uses this as the structural payload of `SIGPROJ(index, group)`
 /// after validation:
 ///
 /// - the symbolic recursion binder id,
@@ -165,7 +165,7 @@ pub(super) struct RecursionGroupProjection {
 /// Owned recursion-group state for the fast-lane lowerer.
 ///
 /// This bundles all runtime-independent recursion bookkeeping that used to be
-/// spread across `module.rs`:
+/// spread across `module/`:
 ///
 /// - allocated carriers keyed by `(group, body index)`,
 /// - the stack of currently active recursive groups while lowering bodies,
@@ -313,10 +313,10 @@ impl RecursionState {
     }
 }
 
-/// Borrow bundle for recursion-specific FIR emission used by `module.rs`.
+/// Borrow bundle for recursion-specific FIR emission used by `module/`.
 ///
 /// This keeps the recursion-specific load/store/finalize details out of
-/// `module.rs` while still letting the module-level orchestrator decide when
+/// `module/` while still letting the module-level orchestrator decide when
 /// those statements belong to the immediate or post-output sample phases.
 pub(super) struct RecursionLoweringCtx<'a> {
     pub(super) store: &'a mut FirStore,
@@ -467,7 +467,7 @@ impl RecursionLoweringCtx<'_> {
 /// registration.
 ///
 /// This isolates the mutable pieces required to declare recursion arrays and
-/// their `instanceClear` loops, so `module.rs` can request carrier allocation
+/// their `instanceClear` loops, so `module/` can request carrier allocation
 /// without owning the low-level declaration details.
 pub(super) struct RecursionAllocCtx<'a> {
     pub(super) arena: &'a TreeArena,
@@ -539,7 +539,7 @@ impl RecursionAllocCtx<'_> {
     ///   beyond the configured copy-delay threshold.
     ///
     /// This is where recursion carriers pick up delay-analysis-driven upsizing
-    /// from `delay.rs`.
+    /// from `delay/`.
     ///
     /// Naming follows the existing fast-lane convention:
     ///

@@ -11,7 +11,7 @@ use signals::SigId;
 ///
 /// Records only top-level facts that are cheap to validate and stable across
 /// lowering strategies.  Later planning slices can extend this struct without
-/// changing the basic contract consumed by `module.rs`.
+/// changing the basic contract consumed by `module/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SignalFirPlan {
     /// Number of output signals requested for compilation.
