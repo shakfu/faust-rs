@@ -3,7 +3,13 @@
 **Date:** 2026-06-22
 **Scope:** `crates/transform/src/signal_prepare.rs` (1475 lines) + its module `signal_prepare/tests.rs`,
 and the consumers in `crates/transform/src/signal_fir/`.
-**Status:** Analysis / design — no code changed yet.
+**Status:** Implemented on branch `main-dev` (2026-06-22). All three proposals landed
+behavior-preserving (103 `transform` tests green throughout, doc broken-link gate clean):
+B (verifier → `signal_prepare/verify.rs`), C (rewrites → `signal_prepare/rewrites.rs`), and A
+(the typed `Staging` driver replacing the five hand-threaded `sig_types_*` snapshots) — see the
+2026-06-22 journal entry. `signal_prepare.rs` is now `signal_prepare/mod.rs`; the `file:line`
+references below point at the **pre-refactor single-file `signal_prepare.rs`** and are kept as the
+design's "before" snapshot.
 **Goal:** Restructure the staging phase into steps a human can read independently, document in
 isolation, and recombine — while producing a **structurally identical prepared forest** (same
 arena, same output roots, same type maps), hence identical downstream FIR and identical
