@@ -152,7 +152,7 @@ Per-item status:
 
 ### 2.1 Residual items from commit cb6891ae (hash-table growth)
 
-Although the mechanism is N/A, two small follow-ups are worth considering:
+Although the mechanism is N/A, three small follow-ups are worth considering:
 
 1. **CLI parity for `-hlf/--hash-load-factor <n>`.** The faust-rs CLI
    normalizes short C++-style flags in
@@ -317,7 +317,11 @@ if de_bruijn_aperture_with_memo(arena, root, &mut memo.aperture) < threshold {
 
 `de_bruijn_aperture_with_memo` already exists in `tlib` and shares
 `PropagateMemo::aperture`, so this is a two-line change. Note the `< threshold`
-form is strictly stronger than C++'s `== 0` check.
+form is strictly stronger than C++'s `== 0` check and matches the existing
+`tlib` substitution guard (`aperture(id) < level`). Store `root` in
+`memo.liftn` on this fast path as well, so repeated `liftn(root, threshold)`
+calls hit the `liftn` table directly instead of recomputing even a memoized
+aperture query.
 
 ### Phase P3 — sweep for other compound-key or piling anti-patterns (audit only)
 
@@ -339,15 +343,23 @@ convert it to a plain-tuple `AHashMap` key and note it in `JOURNAL.md`.
 
 Per project convention every phase must be **FIR-identical** and behavior-preserving:
 
-1. `cargo test --workspace` (notably `crates/propagate/tests/core_api.rs`).
-2. Impulse-test harness: `tests/impulse-tests` via `crates/impulse-runner` —
+1. `cargo fmt --all`.
+2. `cargo clippy --workspace --all-targets -- -D warnings`.
+3. `cargo test --workspace --all-targets` (notably
+   `crates/propagate/tests/core_api.rs`).
+4. `cargo run -p xtask -- golden-check`.
+5. Impulse-test harness: `tests/impulse-tests` via `crates/impulse-runner` —
    baselines to hold: cpp 92/93, c 87/93, interp 74/93.
-3. FIR dump identity on a corpus sample before/after each phase (the memo must
+6. FIR dump identity on a corpus sample before/after each phase (the memo must
    change *time*, never *output*): include UI-heavy files (group-path
    sensitivity), `Symbolic`-producing files (slot-env correctness under P1a's
    empty-env guard), and FAD/RAD files (`fad_*.dsp` — the `suppress_fad`
    bypass and deferred-seed path).
-4. Performance: re-run the March measurement
+7. A targeted grouped-UI memo regression: reuse the same widget node under two
+   different normalized group paths and assert both propagated signals resolve
+   to their distinct `control_ids`, proving `group_path` is part of the replay
+   key.
+8. Performance: re-run the March measurement
    (`faust-rs -pn clarinetMIDI tests/demos_tests.dsp`, was 0.761 s vs C++
    0.146 s) plus one FFT-like case; report P0 profiler tables before/after in
    the journal. Expected from the March analysis: P1 ≈ 3–4×, P2 ≈ 1.3–1.5× on
