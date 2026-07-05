@@ -22,11 +22,28 @@
 
 use std::fmt::Write as _;
 
-use fir::{FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir};
+use fir::{FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir};
 
+use crate::backends::c_family::{self, CFamilySyntax, EmitMode};
 use crate::backends::faust_api;
 
 pub const BACKEND_NAME: &str = "cpp";
+
+/// C++ spellings for the shared C-family emission core.
+const SYNTAX: CFamilySyntax = CFamilySyntax {
+    bool_type: "bool",
+    ui_type: "UI*",
+    meta_type: "Meta*",
+    static_table_keywords: "const static",
+    bool_true: "true",
+    bool_false: "false",
+    null_value: "nullptr",
+    ui_glue_arg: "",
+    ui_glue_solo: "",
+    faustfloat_cast_open: "FAUSTFLOAT(",
+    faustfloat_cast_close: ")",
+    switch_default_break: false,
+};
 
 /// C++ backend options for module-first emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +107,6 @@ impl CodegenErrorCode {
     }
 }
 
-/// Typed backend error for C++ generation.
 /// Typed backend error returned by the C++ emitter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodegenError {
@@ -142,8 +158,6 @@ struct ModuleView {
 ///
 /// The emitter only needs structural information here: name, type, arguments,
 /// optional body, and whether the FIR declaration requested inline emission.
-/// Borrowed function declaration view used while stitching the C++ class body.
-///
 /// This avoids repeated FIR decoding while preserving access to borrowed names
 /// and signature components.
 struct DeclareFunView<'a> {
@@ -153,20 +167,6 @@ struct DeclareFunView<'a> {
     /// `None` when this is a prototype-only declaration (no body).
     body: Option<FirId>,
     is_inline: bool,
-}
-
-/// Rendering mode for statement/expression emission.
-///
-/// `Compute` enables the subset of formatting rules that are specific to the
-/// sample loop and output buffer writes. `Metadata` and `Ui` preserve the C++
-/// split between `m->declare(...)` in `metadata()` and
-/// `ui_interface->declare(...)` in `buildUserInterface()`.
-#[derive(Debug, Clone, Copy)]
-enum EmitMode {
-    Default,
-    Metadata,
-    Ui,
-    Compute,
 }
 
 /// Generates C++ code from a FIR module root.
@@ -496,6 +496,31 @@ fn emit_stmt(
 }
 
 /// Emits one FIR statement using the active rendering mode.
+/// Renders the increment of a non-reverse `ForLoop` in C++ style
+/// (`i += step`; the `c` backend spells this `i = i + step`).
+fn cpp_for_loop_step(var: &str, step: &str) -> String {
+    format!("{var} += {step}")
+}
+
+/// Renders the increment of a non-reverse `SimpleForLoop` in C++ style
+/// (`++i`; the `c` backend spells this `i = i + 1`).
+fn cpp_simple_loop_increment(var: &str) -> String {
+    format!("++{var}")
+}
+
+/// Emits one FIR statement into generated C++ text.
+///
+/// The arms shared with the `c` backend live in
+/// [`c_family::emit_stmt_common`]; only the C++-specific arms remain here:
+/// `DeclareFun` (methods nest inside the class body) and `AddMetaDeclare`
+/// (C++'s `Meta`/`UI` interfaces take no glue handle and omit the zone
+/// argument for module-level declares). `Label` is deliberately silent in
+/// this backend. The former `DeclareStructType`/`DeclareBufferIterators`/
+/// `ShiftArrayVar`/`IteratorForLoop` comment stubs were removed (plan §4
+/// Phase 4 single-owner decision): both backends now fail loudly on these
+/// unproduced FIR nodes, per the `backends` module contract, instead of C++
+/// silently emitting placeholder comments (`IteratorForLoop` even unrolled
+/// its body once — wrong code that compiled).
 fn emit_stmt_with_mode(
     store: &FirStore,
     out: &mut String,
@@ -505,37 +530,26 @@ fn emit_stmt_with_mode(
     indent: usize,
     mode: &mut EmitMode,
 ) -> Result<(), CodegenError> {
+    let ctx = c_family::CFamilyStmtCtx {
+        syntax: &SYNTAX,
+        var_ref: emit_var_ref,
+        for_loop_step: cpp_for_loop_step,
+        simple_loop_increment: cpp_simple_loop_increment,
+        render_named_type: &|typ, name| emit_named_type(typ, name, options),
+        render_type: &|typ| emit_type(typ, options),
+        render_value: &|value| emit_value(store, options, value),
+        emit_block: &|out, block, indent, mode| {
+            emit_block_with_mode(store, out, options, module_name, block, indent, mode)
+        },
+        emit_stmt: &|out, stmt, indent, mode| {
+            emit_stmt_with_mode(store, out, options, module_name, stmt, indent, mode)
+        },
+    };
+    if let Some(result) = c_family::emit_stmt_common(store, out, &ctx, stmt, indent, mode) {
+        return result;
+    }
     let tab = "    ".repeat(indent);
     match match_fir(store, stmt) {
-        FirMatch::DeclareVar {
-            name,
-            typ,
-            access: _,
-            init,
-        } => {
-            let _ = write!(out, "{tab}{}", emit_named_type(&typ, &name, options));
-            if let Some(init) = init {
-                let init = emit_value(store, options, init)?;
-                let _ = write!(out, " = {init}");
-            }
-            let _ = writeln!(out, ";");
-            Ok(())
-        }
-        FirMatch::DeclareTable {
-            name,
-            elem_type,
-            values,
-            ..
-        } => {
-            let _ = writeln!(
-                out,
-                "{tab}{} {}[{}];",
-                emit_type(&elem_type, options),
-                name,
-                values.len()
-            );
-            Ok(())
-        }
         FirMatch::DeclareFun {
             name,
             typ,
@@ -556,289 +570,8 @@ fn emit_stmt_with_mode(
             },
             indent,
         ),
-        FirMatch::DeclareStructType { typ } => {
-            let _ = writeln!(
-                out,
-                "{tab}// struct type declaration: {}",
-                emit_type(&typ, options)
-            );
-            Ok(())
-        }
-        FirMatch::DeclareBufferIterators {
-            name1,
-            name2,
-            channels,
-            typ,
-            mutable,
-            chunk,
-        } => {
-            let _ = writeln!(
-                out,
-                "{tab}// buffer iterators: {name1}, {name2}, channels={channels}, type={}, mutable={mutable}, chunk={chunk}",
-                emit_type(&typ, options)
-            );
-            Ok(())
-        }
-        FirMatch::StoreVar {
-            name,
-            access: _,
-            value,
-        } => {
-            let value = emit_value(store, options, value)?;
-            let _ = writeln!(out, "{tab}{name} = {value};");
-            Ok(())
-        }
-        FirMatch::StoreTable {
-            name, index, value, ..
-        } => {
-            let index = emit_value(store, options, index)?;
-            let value = emit_value(store, options, value)?;
-            let _ = writeln!(out, "{tab}{name}[{index}] = {value};");
-            Ok(())
-        }
-        FirMatch::ShiftArrayVar {
-            name,
-            access: _,
-            delay,
-        } => {
-            let _ = writeln!(out, "{tab}// shift array {name} by {delay}");
-            Ok(())
-        }
-        FirMatch::Drop(value) => {
-            let value = emit_value(store, options, value)?;
-            let _ = mode;
-            let _ = writeln!(out, "{tab}(void)({value});");
-            Ok(())
-        }
-        FirMatch::NullStatement => {
-            let _ = writeln!(out, "{tab};");
-            Ok(())
-        }
-        FirMatch::Return(value) => {
-            if let Some(value) = value {
-                let value = emit_value(store, options, value)?;
-                let _ = writeln!(out, "{tab}return {value};");
-            } else {
-                let _ = writeln!(out, "{tab}return;");
-            }
-            Ok(())
-        }
-        FirMatch::Block(_) => {
-            emit_block_with_mode(store, out, options, module_name, stmt, indent, mode)
-        }
-        FirMatch::If {
-            cond,
-            then_block,
-            else_block,
-        } => {
-            let cond = emit_value(store, options, cond)?;
-            let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_block_with_mode(
-                store,
-                out,
-                options,
-                module_name,
-                then_block,
-                indent + 1,
-                mode,
-            )?;
-            let _ = writeln!(out, "{tab}}}");
-            if let Some(else_block) = else_block {
-                let _ = writeln!(out, "{tab}else {{");
-                emit_block_with_mode(
-                    store,
-                    out,
-                    options,
-                    module_name,
-                    else_block,
-                    indent + 1,
-                    mode,
-                )?;
-                let _ = writeln!(out, "{tab}}}");
-            }
-            Ok(())
-        }
-        FirMatch::Control { cond, stmt } => {
-            let cond = emit_value(store, options, cond)?;
-            let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_stmt_with_mode(store, out, options, module_name, stmt, indent + 1, mode)?;
-            let _ = writeln!(out, "{tab}}}");
-            Ok(())
-        }
-        FirMatch::ForLoop {
-            var,
-            init,
-            end,
-            step,
-            body,
-            is_reverse,
-        } => {
-            // init is a DeclareVar(kLoop) per FIR contract; extract its value.
-            let init_val =
-                if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(store, init) {
-                    emit_value(store, options, v)?
-                } else {
-                    emit_value(store, options, init)?
-                };
-            let end = emit_value(store, options, end)?;
-            let step = emit_value(store, options, step)?;
-            if is_reverse {
-                let _ = writeln!(
-                    out,
-                    "{tab}for (int {var} = {init_val}; {var} > {end}; {var} = {var} + {step}) {{"
-                );
-            } else {
-                let _ = writeln!(
-                    out,
-                    "{tab}for (int {var} = {init_val}; {var} < {end}; {var} += {step}) {{"
-                );
-            }
-            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
-            let _ = writeln!(out, "{tab}}}");
-            Ok(())
-        }
-        FirMatch::SimpleForLoop {
-            var,
-            upper,
-            body,
-            is_reverse,
-        } => {
-            let upper = emit_value(store, options, upper)?;
-            if is_reverse {
-                let _ = writeln!(
-                    out,
-                    "{tab}for (int {var} = ({upper}) - 1; {var} >= 0; {var} = {var} - 1) {{"
-                );
-            } else {
-                let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
-            }
-            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
-            let _ = writeln!(out, "{tab}}}");
-            Ok(())
-        }
-        FirMatch::IteratorForLoop {
-            iterators,
-            is_reverse: _,
-            body,
-        } => {
-            let joined = iterators.join(", ");
-            let _ = writeln!(out, "{tab}// iterator-for over [{joined}]");
-            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
-            Ok(())
-        }
-        FirMatch::WhileLoop { cond, body } => {
-            let cond = emit_value(store, options, cond)?;
-            let _ = writeln!(out, "{tab}while ({cond}) {{");
-            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
-            let _ = writeln!(out, "{tab}}}");
-            Ok(())
-        }
-        FirMatch::Switch {
-            cond,
-            cases,
-            default,
-        } => {
-            let cond = emit_value(store, options, cond)?;
-            let _ = writeln!(out, "{tab}switch ({cond}) {{");
-            for (value, block) in cases {
-                let _ = writeln!(out, "{tab}case {value}: {{");
-                emit_block_with_mode(store, out, options, module_name, block, indent + 1, mode)?;
-                let _ = writeln!(out, "{tab}    break;");
-                let _ = writeln!(out, "{tab}}}");
-            }
-            if let Some(default) = default {
-                let _ = writeln!(out, "{tab}default: {{");
-                emit_block_with_mode(store, out, options, module_name, default, indent + 1, mode)?;
-                let _ = writeln!(out, "{tab}}}");
-            }
-            let _ = writeln!(out, "{tab}}}");
-            Ok(())
-        }
         FirMatch::Label(label) => {
             let _ = label;
-            Ok(())
-        }
-        FirMatch::OpenBox { typ, label } => {
-            let api = match typ {
-                fir::UiBoxType::Vertical => "openVerticalBox",
-                fir::UiBoxType::Horizontal => "openHorizontalBox",
-                fir::UiBoxType::Tab => "openTabBox",
-            };
-            let _ = writeln!(
-                out,
-                "{tab}ui_interface->{api}({});",
-                cpp_string_literal(&label)
-            );
-            Ok(())
-        }
-        FirMatch::CloseBox => {
-            let _ = writeln!(out, "{tab}ui_interface->closeBox();");
-            Ok(())
-        }
-        FirMatch::AddButton { typ, label, var } => {
-            let api = match typ {
-                fir::ButtonType::Button => "addButton",
-                fir::ButtonType::Checkbox => "addCheckButton",
-            };
-            let _ = writeln!(
-                out,
-                "{tab}ui_interface->{api}({}, &{var});",
-                cpp_string_literal(&label)
-            );
-            Ok(())
-        }
-        FirMatch::AddSlider {
-            typ,
-            label,
-            var,
-            init,
-            lo,
-            hi,
-            step,
-        } => {
-            let api = match typ {
-                fir::SliderType::Horizontal => "addHorizontalSlider",
-                fir::SliderType::Vertical => "addVerticalSlider",
-                fir::SliderType::NumEntry => "addNumEntry",
-            };
-            let _ = writeln!(
-                out,
-                "{tab}ui_interface->{api}({}, &{var}, {}, {}, {}, {});",
-                cpp_string_literal(&label),
-                trim_float(init),
-                trim_float(lo),
-                trim_float(hi),
-                trim_float(step)
-            );
-            Ok(())
-        }
-        FirMatch::AddBargraph {
-            typ,
-            label,
-            var,
-            lo,
-            hi,
-        } => {
-            let api = match typ {
-                fir::BargraphType::Horizontal => "addHorizontalBargraph",
-                fir::BargraphType::Vertical => "addVerticalBargraph",
-            };
-            let _ = writeln!(
-                out,
-                "{tab}ui_interface->{api}({}, &{var}, {}, {});",
-                cpp_string_literal(&label),
-                trim_float(lo),
-                trim_float(hi)
-            );
-            Ok(())
-        }
-        FirMatch::AddSoundfile { label, url, var } => {
-            let _ = writeln!(
-                out,
-                "{tab}ui_interface->addSoundfile({}, {}, &{var});",
-                cpp_string_literal(&label),
-                cpp_string_literal(&url)
-            );
             Ok(())
         }
         FirMatch::AddMetaDeclare { var, key, value } => {
@@ -1089,17 +822,37 @@ fn is_empty_block(store: &FirStore, body: FirId) -> bool {
 }
 
 /// Emits one FIR value expression into a C++ expression string.
+/// Renders a variable reference in C++ method context: bare `name`, because
+/// struct state is reachable through the implicit `this`.
+fn emit_var_ref(name: &str, _access: fir::AccessType) -> String {
+    name.to_owned()
+}
+
+/// Emits one FIR value expression into a C++ expression string.
+///
+/// The arms shared with the `c` backend live in
+/// [`c_family::emit_value_common`]; only the C++-specific arms
+/// (`Quad`/`FixedPoint`/array literals, `NewDsp`, `Bitcast`) remain here.
+/// `Bitcast` deliberately stays per-language: its current `bitcast<T>(v)`
+/// spelling matches neither the upstream C++ compiler
+/// (`*reinterpret_cast<T*>(&v)`) nor any helper this backend emits, and the
+/// upstream C version is a known-broken TODO — see the C-family plan §2.2.
 fn emit_value(
     store: &FirStore,
     options: &CppOptions,
     value: FirId,
 ) -> Result<String, CodegenError> {
+    let ctx = c_family::CFamilyValueCtx {
+        syntax: &SYNTAX,
+        var_ref: emit_var_ref,
+        fun_name: emit_cpp_fun_name,
+        render_type: &|typ| emit_type(typ, options),
+        recurse: &|nested| emit_value(store, options, nested),
+    };
+    if let Some(result) = c_family::emit_value_common(store, &ctx, value) {
+        return result;
+    }
     match match_fir(store, value) {
-        FirMatch::Int32 { value, .. } => Ok(value.to_string()),
-        FirMatch::Int64 { value, .. } => Ok(value.to_string()),
-        FirMatch::Float32 { value, .. } => Ok(format_float32(f64::from(value))),
-        FirMatch::Float64 { value, .. } => Ok(trim_float(value)),
-        FirMatch::Bool { value, .. } => Ok(if value { "true" } else { "false" }.to_owned()),
         FirMatch::Quad { value, .. } => Ok(trim_float(value)),
         FirMatch::FixedPoint { value, .. } => Ok(trim_float(value)),
         FirMatch::ValueArray { values, .. } => {
@@ -1124,90 +877,11 @@ fn emit_value(
         | FirMatch::FixedPointArray { values, .. } => {
             Ok(format_array(values.iter().map(|v| trim_float(*v))))
         }
-        FirMatch::LoadVar {
-            name, access: _, ..
-        }
-        | FirMatch::LoadVarAddress {
-            name, access: _, ..
-        } => Ok(name),
-        FirMatch::LoadTable {
-            name,
-            index,
-            access: _,
-            ..
-        } => {
-            let index = emit_value(store, options, index)?;
-            Ok(format!("{name}[{index}]"))
-        }
-        FirMatch::TeeVar {
-            name,
-            access: _,
-            value,
-            ..
-        } => {
-            let value = emit_value(store, options, value)?;
-            Ok(format!("({name} = {value})"))
-        }
-        FirMatch::BinOp { op, lhs, rhs, .. } => {
-            let lhs = emit_value(store, options, lhs)?;
-            let rhs = emit_value(store, options, rhs)?;
-            Ok(emit_binop_expr(op, &lhs, &rhs))
-        }
-        FirMatch::Neg { value, .. } => {
-            let value = emit_value(store, options, value)?;
-            Ok(format!("(-{value})"))
-        }
-        FirMatch::Cast { typ, value } => {
-            let value = emit_value(store, options, value)?;
-            Ok(format!("(({})({value}))", emit_type(&typ, options)))
-        }
         FirMatch::Bitcast { typ, value } => {
             let value = emit_value(store, options, value)?;
             Ok(format!("bitcast<{}>({value})", emit_type(&typ, options)))
         }
-        FirMatch::Select2 {
-            cond,
-            then_value,
-            else_value,
-            ..
-        } => {
-            let cond = emit_value(store, options, cond)?;
-            let then_value = emit_value(store, options, then_value)?;
-            let else_value = emit_value(store, options, else_value)?;
-            Ok(format!("({cond} ? {then_value} : {else_value})"))
-        }
-        FirMatch::FunCall { name, args, .. } => {
-            let mut rendered = Vec::with_capacity(args.len());
-            for arg in args {
-                rendered.push(emit_value(store, options, arg)?);
-            }
-            let cpp_name = emit_cpp_fun_name(&name);
-            Ok(format!("{cpp_name}({})", rendered.join(", ")))
-        }
-        FirMatch::NullValue { .. } => Ok("nullptr".to_owned()),
         FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
-        FirMatch::LoadSoundfileLength { var, part } => {
-            let part = emit_value(store, options, part)?;
-            Ok(format!("{var}->fLength[{part}]"))
-        }
-        FirMatch::LoadSoundfileRate { var, part } => {
-            let part = emit_value(store, options, part)?;
-            Ok(format!("{var}->fSR[{part}]"))
-        }
-        FirMatch::LoadSoundfileBuffer {
-            var,
-            chan,
-            part,
-            idx,
-            ..
-        } => {
-            let chan = emit_value(store, options, chan)?;
-            let part = emit_value(store, options, part)?;
-            let idx = emit_value(store, options, idx)?;
-            Ok(format!(
-                "((FAUSTFLOAT**){var}->fBuffers)[{chan}][{var}->fOffset[{part}] + {idx}]"
-            ))
-        }
         _ => Err(unsupported_node("value", value, store)),
     }
 }
@@ -1246,67 +920,18 @@ fn emit_cpp_fun_name(name: &str) -> String {
     }
 }
 
-/// Maps one FIR binary operator to its C++ token spelling.
-fn emit_binop(op: FirBinOp) -> &'static str {
-    match op {
-        FirBinOp::Add => "+",
-        FirBinOp::Sub => "-",
-        FirBinOp::Mul => "*",
-        FirBinOp::Div => "/",
-        FirBinOp::Rem => "%",
-        FirBinOp::And => "&",
-        FirBinOp::Or => "|",
-        FirBinOp::Xor => "^",
-        FirBinOp::Lsh => "<<",
-        FirBinOp::ARsh => ">>",
-        FirBinOp::LRsh => ">>",
-        FirBinOp::Eq => "==",
-        FirBinOp::Ne => "!=",
-        FirBinOp::Lt => "<",
-        FirBinOp::Le => "<=",
-        FirBinOp::Gt => ">",
-        FirBinOp::Ge => ">=",
-    }
-}
-
-fn emit_binop_expr(op: FirBinOp, lhs: &str, rhs: &str) -> String {
-    match op {
-        FirBinOp::LRsh => format!("((int32_t)(((uint32_t)({lhs})) >> ({rhs})))"),
-        _ => format!("({lhs} {} {rhs})", emit_binop(op)),
-    }
-}
-
 /// Renders a FIR type into the current C++ backend spelling.
+///
+/// Shared with the `c` backend via [`c_family::emit_type`]: the C++-specific
+/// leaves (`bool`/`UI*`/`Meta*`) come from [`SYNTAX`], the configurable
+/// `Quad`/`FixedPoint` spellings from `options`.
 fn emit_type(typ: &FirType, options: &CppOptions) -> String {
-    match typ {
-        FirType::Int32 => "int".to_owned(),
-        FirType::Int64 => "long long".to_owned(),
-        FirType::Float32 => "float".to_owned(),
-        FirType::Float64 => "double".to_owned(),
-        FirType::FaustFloat => "FAUSTFLOAT".to_owned(),
-        FirType::Quad => options.quad_type_name.clone(),
-        FirType::FixedPoint => options.fixed_type_name.clone(),
-        FirType::Bool => "bool".to_owned(),
-        FirType::Void => "void".to_owned(),
-        FirType::Obj => "void*".to_owned(),
-        // FIR handle kinds are already pointer-shaped at the type-model level.
-        // `Ptr(UI)` would therefore become `UI**`.
-        FirType::Sound => "Soundfile*".to_owned(),
-        FirType::UI => "UI*".to_owned(),
-        FirType::Meta => "Meta*".to_owned(),
-        FirType::Ptr(inner) => format!("{}*", emit_type(inner, options)),
-        FirType::Array(inner, size) => format!("{}[{size}]", emit_type(inner, options)),
-        FirType::Vector(inner, lanes) => format!("Vec<{},{lanes}>", emit_type(inner, options)),
-        FirType::Struct(name, _fields) => name.clone(),
-        FirType::Fun { args, ret } => {
-            let args = args
-                .iter()
-                .map(|arg| emit_type(arg, options))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}({args})", emit_type(ret, options))
-        }
-    }
+    c_family::emit_type(
+        typ,
+        &SYNTAX,
+        &options.quad_type_name,
+        &options.fixed_type_name,
+    )
 }
 
 /// Builds a stable unsupported-node diagnostic for the C++ emitter.
@@ -1322,29 +947,18 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
 }
 
 /// Formats a floating-point literal with stable C++ syntax.
+///
+/// Shared with the `c` backend via [`c_family::trim_float`]. Phase 2 of the
+/// C-family plan fixed the `cpp` drift here: `-0.0` now normalizes to `0.0`,
+/// matching `c`, `julia`, and the upstream C++ compiler.
 fn trim_float(value: f64) -> String {
-    if value.is_nan() {
-        return "NAN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-INFINITY".to_owned()
-        } else {
-            "INFINITY".to_owned()
-        };
-    }
-    let mut text = format!("{value}");
-    if !text.contains(['.', 'e', 'E']) {
-        text.push_str(".0");
-    }
-    text
+    c_family::trim_float(value)
 }
 
+/// Formats one single-precision literal (`{value}f`), shared via
+/// [`c_family::format_float32`].
 fn format_float32(value: f64) -> String {
-    if !value.is_finite() {
-        return trim_float(value);
-    }
-    format!("{}f", trim_float(value))
+    c_family::format_float32(value)
 }
 
 /// Renders an initializer-list literal from already-rendered elements.
@@ -1353,51 +967,35 @@ fn format_array(values: impl Iterator<Item = String>) -> String {
 }
 
 /// Escapes a Rust string into a C++ string literal.
+///
+/// Shared with the `c` backend via [`c_family::string_literal`]. Phase 2 of
+/// the C-family plan fixed the `cpp` drift here: `\r`/`\t` are now escaped
+/// instead of emitted as raw bytes, matching `c` and `julia`.
 fn cpp_string_literal(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
-    format!("\"{escaped}\"")
+    c_family::string_literal(value)
 }
 
 /// Emits `DeclareTable(AccessType::Static)` nodes as `const static` arrays
 /// with inline initializers, placed before the class definition.
+///
+/// Shared with the `c` backend via [`c_family::emit_static_tables`]; the
+/// C++-specific `const static` keyword order comes from [`SYNTAX`], element
+/// values render through this backend's [`emit_value`].
 fn emit_static_tables(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
     block: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(stmts) = match_fir(store, block) else {
-        return Ok(());
-    };
-    for stmt in stmts {
-        if let FirMatch::DeclareTable {
-            name,
-            elem_type,
-            values,
-            ..
-        } = match_fir(store, stmt)
-        {
-            let type_str = emit_type(&elem_type, options);
-            let n = values.len();
-            if n == 0 {
-                let _ = writeln!(out, "const static {type_str} {name}[0] = {{}};");
-            } else {
-                let _ = write!(out, "const static {type_str} {name}[{n}] = {{");
-                for (i, v) in values.iter().enumerate() {
-                    if i > 0 {
-                        let _ = write!(out, ", ");
-                    }
-                    let rendered = emit_value(store, options, *v)?;
-                    let _ = write!(out, "{rendered}");
-                }
-                let _ = writeln!(out, "}};");
-            }
-        }
-    }
-    Ok(())
+    c_family::emit_static_tables(
+        store,
+        out,
+        &SYNTAX,
+        &options.quad_type_name,
+        &options.fixed_type_name,
+        block,
+        |value| emit_value(store, options, value),
+    )
 }
 
 /// Decodes the FIR module header expected by the C++ emitter.
@@ -1440,7 +1038,79 @@ pub fn backend_id() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fir::FirBuilder;
+    use fir::{FirBinOp, FirBuilder};
+
+    #[test]
+    /// DRIFT 3 regression (C-family plan §2.3): a constant folded to `-0.0`
+    /// must emit `0.0`, matching the `c`/`julia` backends and the upstream
+    /// C++ compiler (which emits `0.0f` for `process = -0.0;`).
+    fn trim_float_normalizes_negative_zero_like_c_and_upstream() {
+        assert_eq!(trim_float(-0.0), "0.0");
+        assert_eq!(format_float32(-0.0), "0.0f");
+    }
+
+    #[test]
+    /// DRIFT 4 regression (C-family plan §2.4): tabs/carriage returns in
+    /// user-authored strings (UI labels, metadata) must be escaped in the
+    /// emitted C++ literal, matching the `c`/`julia` backends, instead of
+    /// being copied through as raw bytes.
+    fn string_literal_escapes_tab_and_carriage_return() {
+        assert_eq!(cpp_string_literal("a\tb"), "\"a\\tb\"");
+        assert_eq!(cpp_string_literal("a\rb"), "\"a\\rb\"");
+    }
+
+    #[test]
+    /// DRIFT 1 regression (C-family plan §2.1): a function-local
+    /// (`AccessType::Stack`) `DeclareTable` carrying literal values must emit
+    /// its initializer list — this backend previously sized the array from
+    /// `values.len()` but silently dropped the values themselves, producing
+    /// C++ that compiled but read zero-filled storage. Struct-access
+    /// declarations (class fields) stay bare, as before.
+    fn local_declare_table_emits_initializer_values() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let v0 = b.int32(3);
+        let v1 = b.int32(7);
+        let local = b.declare_table("tbl", fir::AccessType::Stack, FirType::Int32, &[v0, v1]);
+        let field = b.declare_table(
+            "fVec0",
+            fir::AccessType::Struct,
+            FirType::Float32,
+            &[v0, v1],
+        );
+
+        let options = CppOptions::default();
+        let mut out = String::new();
+        let mut mode = EmitMode::Default;
+        emit_stmt_with_mode(&store, &mut out, &options, "mydsp", local, 1, &mut mode)
+            .expect("local table emits");
+        assert_eq!(out, "    int tbl[2] = {3, 7};\n");
+
+        let mut out = String::new();
+        emit_stmt_with_mode(&store, &mut out, &options, "mydsp", field, 1, &mut mode)
+            .expect("struct field emits");
+        assert_eq!(out, "    float fVec0[2];\n");
+    }
+
+    #[test]
+    /// Plan §4 Phase 4 single-owner decision: FIR nodes with no producer
+    /// (`IteratorForLoop`, `DeclareStructType`, …) fail loudly in both
+    /// C-family backends instead of C++ emitting placeholder comments
+    /// (`IteratorForLoop` even unrolled its body once — wrong code that
+    /// compiled).
+    fn unproduced_statement_nodes_fail_loudly() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let body = b.block(&[]);
+        let loop_stmt = b.iterator_for_loop(&["it0"], false, body);
+
+        let options = CppOptions::default();
+        let mut out = String::new();
+        let mut mode = EmitMode::Default;
+        let err = emit_stmt_with_mode(&store, &mut out, &options, "mydsp", loop_stmt, 1, &mut mode)
+            .expect_err("IteratorForLoop must be rejected");
+        assert_eq!(err.code(), CodegenErrorCode::UnsupportedNode);
+    }
 
     #[test]
     /// Verifies the backend rejects non-module FIR roots with the stable error code.
@@ -1695,14 +1365,15 @@ mod tests {
         assert!(out.contains("ui_interface->openVerticalBox(\"group\");"));
         assert!(out.contains("ui_interface->addButton(\"gate\", &fGate);"));
         assert!(out.contains("ui_interface->declare(&fGain, \"unit\", \"dB\");"));
-        assert!(
-            out.contains(
-                "ui_interface->addHorizontalSlider(\"gain\", &fGain, 0.5, 0.0, 1.0, 0.01);"
-            )
-        );
-        assert!(
-            out.contains("ui_interface->addHorizontalBargraph(\"level\", &fLevel, -60.0, 6.0);")
-        );
+        // DRIFT 5 closure (C-family plan §2.5): slider/bargraph numeric
+        // arguments are wrapped in FAUSTFLOAT(...), matching the upstream C++
+        // compiler's `cast2FAUSTFLOAT` (cpp_instructions.hh:44).
+        assert!(out.contains(
+            "ui_interface->addHorizontalSlider(\"gain\", &fGain, FAUSTFLOAT(0.5), FAUSTFLOAT(0.0), FAUSTFLOAT(1.0), FAUSTFLOAT(0.01));"
+        ));
+        assert!(out.contains(
+            "ui_interface->addHorizontalBargraph(\"level\", &fLevel, FAUSTFLOAT(-60.0), FAUSTFLOAT(6.0));"
+        ));
         assert!(
             out.contains(
                 "ui_interface->addSoundfile(\"sample\", \"samples/piano.wav\", &fSample);"
