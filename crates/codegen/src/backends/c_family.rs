@@ -76,6 +76,16 @@ pub(crate) struct CFamilySyntax {
     /// C, `false` in C++ — a pre-existing cosmetic divergence preserved
     /// data-driven; see the plan document §2.8).
     pub switch_default_break: bool,
+    /// Opening token of a `Bitcast` type-punning expression, up to the target
+    /// type (`"*reinterpret_cast<"` in C++ — matching upstream `-ftz 2`
+    /// output; `"*(("` in C).
+    pub bitcast_open: &'static str,
+    /// Middle token of a `Bitcast`, between the target type and the operand
+    /// (`"*>(&"` in C++, `"*)&"` in C).
+    pub bitcast_mid: &'static str,
+    /// Closing token of a `Bitcast` (`")"` in both today, kept as a leaf for
+    /// symmetry with the other two).
+    pub bitcast_close: &'static str,
 }
 
 /// Rendering mode for statement/expression emission.
@@ -94,6 +104,91 @@ pub(crate) enum EmitMode {
     Metadata,
     Ui,
     Compute,
+}
+
+/// One scalar state-field initialization that must be replayed by the
+/// synthesized `instanceResetUserInterface` fallback when the FIR module does
+/// not supply an explicit body (shared by `c` and `cpp`; `julia` implements
+/// the same pattern independently).
+#[derive(Debug, Clone)]
+pub(crate) struct StructInit {
+    pub name: String,
+    pub typ: FirType,
+    pub init: FirId,
+}
+
+/// One table declaration plus its initializer payload, replayed element by
+/// element by the same reset fallback as [`StructInit`].
+#[derive(Clone, Debug)]
+pub(crate) struct TableInit {
+    pub name: String,
+    pub access: AccessType,
+    pub elem_type: FirType,
+    pub values: Vec<FirId>,
+}
+
+/// Collects scalar struct/global initializers used by reset lifecycle
+/// fallbacks.
+///
+/// `invalid_section` builds the caller's backend error when a state section
+/// is not a FIR block (each backend owns its stable error codes).
+pub(crate) fn collect_struct_initializers<E>(
+    store: &FirStore,
+    dsp_struct: FirId,
+    globals: FirId,
+    invalid_section: impl Fn(FirId) -> E,
+) -> Result<Vec<StructInit>, E> {
+    let mut out = Vec::new();
+    for section in [dsp_struct, globals] {
+        let FirMatch::Block(items) = match_fir(store, section) else {
+            return Err(invalid_section(section));
+        };
+        for item in items {
+            if let FirMatch::DeclareVar {
+                name,
+                typ,
+                init: Some(init),
+                ..
+            } = match_fir(store, item)
+            {
+                out.push(StructInit { name, typ, init });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Collects table initializers from FIR state declarations, for the same
+/// reset fallback as [`collect_struct_initializers`].
+pub(crate) fn collect_table_initializers<E>(
+    store: &FirStore,
+    dsp_struct: FirId,
+    globals: FirId,
+    invalid_section: impl Fn(FirId) -> E,
+) -> Result<Vec<TableInit>, E> {
+    let mut out = Vec::new();
+    for section in [dsp_struct, globals] {
+        let FirMatch::Block(items) = match_fir(store, section) else {
+            return Err(invalid_section(section));
+        };
+        for item in items {
+            if let FirMatch::DeclareTable {
+                name,
+                access,
+                elem_type,
+                values,
+            } = match_fir(store, item)
+            {
+                out.push(TableInit {
+                    name,
+                    access,
+                    elem_type,
+                    values,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Recursion seam into a caller's block/statement emitter: the caller's
@@ -365,12 +460,14 @@ pub(crate) fn emit_static_tables<E>(
 /// # Contract
 /// Returns `None` when `value` is not one of the shared arms — the caller
 /// then handles its language-only arms (C++'s `Quad`/`FixedPoint`/array
-/// literals, `NewDsp`, `Bitcast`) or produces its own unsupported-node error.
+/// literals, `NewDsp`) or produces its own unsupported-node error.
 /// This keeps each backend's error behavior and language-only surface exactly
-/// where it was: the shared core owns only the intersection, never a superset,
-/// so unifying here cannot silently grant one backend arms the other had
-/// (that is a per-drift decision with its own oracle check; see the plan
-/// document §2.2 for why `Bitcast` in particular stays per-language for now).
+/// where it was: the shared core owns only the intersection, plus the
+/// per-drift closures decided with their own oracle checks — `Bitcast`
+/// (DRIFT 2, plan §2.2) is shared here with per-language spelling leaves:
+/// `c` gains support it never had, `cpp` replaces its former `bitcast<T>(v)`
+/// spelling (which named a helper neither the backend nor upstream defines)
+/// with the upstream `-ftz 2` form.
 pub(crate) fn emit_value_common<E>(
     store: &FirStore,
     ctx: &CFamilyValueCtx<'_, E>,
@@ -418,6 +515,22 @@ pub(crate) fn emit_value_common<E>(
         },
         FirMatch::Cast { typ, value } => match (ctx.recurse)(value) {
             Ok(value) => Ok(format!("(({})({value}))", (ctx.render_type)(&typ))),
+            Err(err) => Err(err),
+        },
+        // Type punning via pointer reinterpretation, matching upstream
+        // `-ftz 2` output (`*reinterpret_cast<int*>(&v)` in C++; C uses the
+        // corrected `*((int*)&v)` spelling of the same intent — upstream C's
+        // own `BitcastInst` visitor is a known-broken TODO). Like upstream,
+        // this requires the operand to render as an addressable expression;
+        // FIR producers cache bitcast operands into named temporaries.
+        FirMatch::Bitcast { typ, value } => match (ctx.recurse)(value) {
+            Ok(value) => Ok(format!(
+                "{}{}{}{value}{}",
+                ctx.syntax.bitcast_open,
+                (ctx.render_type)(&typ),
+                ctx.syntax.bitcast_mid,
+                ctx.syntax.bitcast_close
+            )),
             Err(err) => Err(err),
         },
         FirMatch::Select2 {
@@ -892,6 +1005,9 @@ mod tests {
         faustfloat_cast_open: "FAUSTFLOAT(",
         faustfloat_cast_close: ")",
         switch_default_break: false,
+        bitcast_open: "*reinterpret_cast<",
+        bitcast_mid: "*>(&",
+        bitcast_close: ")",
     };
 
     #[test]
@@ -978,6 +1094,9 @@ mod tests {
             faustfloat_cast_open: "(FAUSTFLOAT)",
             faustfloat_cast_close: "",
             switch_default_break: true,
+            bitcast_open: "*((",
+            bitcast_mid: "*)&",
+            bitcast_close: ")",
         };
         assert_eq!(emit_type(&FirType::Bool, &TEST_SYNTAX, "q", "f"), "bool");
         assert_eq!(emit_type(&FirType::Bool, &c_like, "q", "f"), "int");

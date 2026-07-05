@@ -43,6 +43,9 @@ const SYNTAX: CFamilySyntax = CFamilySyntax {
     faustfloat_cast_open: "FAUSTFLOAT(",
     faustfloat_cast_close: ")",
     switch_default_break: false,
+    bitcast_open: "*reinterpret_cast<",
+    bitcast_mid: "*>(&",
+    bitcast_close: ")",
 };
 
 /// C++ backend options for module-first emission.
@@ -236,15 +239,33 @@ pub fn generate_cpp_module(
         1,
     )?;
     let _ = writeln!(out, "public:");
+    let struct_inits = c_family::collect_struct_initializers(
+        store,
+        module.dsp_struct,
+        module.globals,
+        |section| invalid_struct_section(store, section),
+    )?;
+    let table_inits = c_family::collect_table_initializers(
+        store,
+        module.dsp_struct,
+        module.globals,
+        |section| invalid_struct_section(store, section),
+    )?;
     emit_dsp_contract_methods(
+        store,
         &mut out,
-        module.num_inputs,
-        module.num_outputs,
-        class_name,
-        &module_name,
-        &declared_functions,
-        1,
-    );
+        DspContractEmitInput {
+            options: &effective_options,
+            num_inputs: module.num_inputs,
+            num_outputs: module.num_outputs,
+            class_name,
+            module_name: &module_name,
+            declared_functions: &declared_functions,
+            struct_inits: &struct_inits,
+            table_inits: &table_inits,
+            indent: 1,
+        },
+    )?;
     emit_section(
         store,
         &mut out,
@@ -265,6 +286,39 @@ pub fn generate_cpp_module(
     Ok(out)
 }
 
+/// Builds this backend's stable error for a malformed state section, used by
+/// the shared initializer collectors.
+fn invalid_struct_section(store: &FirStore, section: FirId) -> CodegenError {
+    CodegenError::new(
+        CodegenErrorCode::InvalidModuleSection,
+        format!(
+            "struct section must be a FIR block, got {:?} at node {}",
+            match_fir(store, section),
+            section.as_u32()
+        ),
+    )
+}
+
+/// Inputs for [`emit_dsp_contract_methods`], grouped like the C backend's
+/// `CApiEmitInput` to keep the emission signature flat.
+struct DspContractEmitInput<'a> {
+    options: &'a CppOptions,
+    num_inputs: usize,
+    num_outputs: usize,
+    class_name: &'a str,
+    module_name: &'a str,
+    declared_functions: &'a [String],
+    /// Scalar state initializers replayed by the synthesized
+    /// `instanceResetUserInterface` fallback (DRIFT 6 closure, C-family plan
+    /// §2.6 — `c` and `julia` already replayed these; `cpp` left the fallback
+    /// body empty, so UI-bound state stayed zeroed instead of taking its
+    /// declared init value).
+    struct_inits: &'a [c_family::StructInit],
+    /// Table initializers replayed by the same fallback.
+    table_inits: &'a [c_family::TableInit],
+    indent: usize,
+}
+
 /// Emits the standard Faust `dsp` API surface expected from generated C++.
 ///
 /// Methods are synthesized even when the FIR module omitted some sections so
@@ -272,14 +326,21 @@ pub fn generate_cpp_module(
 /// section is absent, the emitted method falls back to the same neutral/default
 /// behavior as the C++ backend.
 fn emit_dsp_contract_methods(
+    store: &FirStore,
     out: &mut String,
-    num_inputs: usize,
-    num_outputs: usize,
-    class_name: &str,
-    module_name: &str,
-    declared_functions: &[String],
-    indent: usize,
-) {
+    spec: DspContractEmitInput<'_>,
+) -> Result<(), CodegenError> {
+    let DspContractEmitInput {
+        options,
+        num_inputs,
+        num_outputs,
+        class_name,
+        module_name,
+        declared_functions,
+        struct_inits,
+        table_inits,
+        indent,
+    } = spec;
     let tab = "    ".repeat(indent);
     let has_build_ui = declared_functions
         .iter()
@@ -330,6 +391,30 @@ fn emit_dsp_contract_methods(
     }
     if !has_instance_reset_ui {
         let _ = writeln!(out, "{tab}virtual void instanceResetUserInterface() {{");
+        // DRIFT 6 closure (C-family plan §2.6): replay declared state
+        // initializers so UI-bound fields regain their default values on
+        // reset, matching the `c` backend's fallback shape (`dsp->` prefix
+        // aside).
+        for init in struct_inits {
+            let value = emit_value(store, options, init.init)?;
+            let _ = writeln!(
+                out,
+                "{tab}    {} = ({})({value});",
+                init.name,
+                emit_type(&init.typ, options)
+            );
+        }
+        for init in table_inits {
+            for (index, value_id) in init.values.iter().copied().enumerate() {
+                let value = emit_value(store, options, value_id)?;
+                let table_ref = emit_var_ref(&init.name, init.access);
+                let _ = writeln!(
+                    out,
+                    "{tab}    {table_ref}[{index}] = ({})({value});",
+                    emit_type(&init.elem_type, options)
+                );
+            }
+        }
         let _ = writeln!(out, "{tab}}}");
     }
     if !has_instance_clear {
@@ -382,6 +467,7 @@ fn emit_dsp_contract_methods(
         let _ = writeln!(out, "{tab}    (void)outputs;");
         let _ = writeln!(out, "{tab}}}");
     }
+    Ok(())
 }
 
 /// Collects declared function names to decide which DSP API stubs to synthesize.
@@ -831,12 +917,12 @@ fn emit_var_ref(name: &str, _access: fir::AccessType) -> String {
 /// Emits one FIR value expression into a C++ expression string.
 ///
 /// The arms shared with the `c` backend live in
-/// [`c_family::emit_value_common`]; only the C++-specific arms
-/// (`Quad`/`FixedPoint`/array literals, `NewDsp`, `Bitcast`) remain here.
-/// `Bitcast` deliberately stays per-language: its current `bitcast<T>(v)`
-/// spelling matches neither the upstream C++ compiler
-/// (`*reinterpret_cast<T*>(&v)`) nor any helper this backend emits, and the
-/// upstream C version is a known-broken TODO — see the C-family plan §2.2.
+/// [`c_family::emit_value_common`] — including `Bitcast`, which now renders
+/// as `*reinterpret_cast<T*>(&v)` from the [`SYNTAX`] leaves, matching
+/// upstream `-ftz 2` output (DRIFT 2 closure, C-family plan §2.2; the former
+/// `bitcast<T>(v)` spelling named a helper neither this backend nor upstream
+/// defines). Only the C++-specific arms (`Quad`/`FixedPoint`/array literals,
+/// `NewDsp`) remain here.
 fn emit_value(
     store: &FirStore,
     options: &CppOptions,
@@ -876,10 +962,6 @@ fn emit_value(
         | FirMatch::QuadArray { values, .. }
         | FirMatch::FixedPointArray { values, .. } => {
             Ok(format_array(values.iter().map(|v| trim_float(*v))))
-        }
-        FirMatch::Bitcast { typ, value } => {
-            let value = emit_value(store, options, value)?;
-            Ok(format!("bitcast<{}>({value})", emit_type(&typ, options)))
         }
         FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
         _ => Err(unsupported_node("value", value, store)),
@@ -1110,6 +1192,43 @@ mod tests {
         let err = emit_stmt_with_mode(&store, &mut out, &options, "mydsp", loop_stmt, 1, &mut mode)
             .expect_err("IteratorForLoop must be rejected");
         assert_eq!(err.code(), CodegenErrorCode::UnsupportedNode);
+    }
+
+    #[test]
+    /// DRIFT 6 regression (C-family plan §2.6): when the FIR module supplies
+    /// no explicit `instanceResetUserInterface`, the synthesized fallback
+    /// must replay declared state initializers — matching the `c` backend,
+    /// which emits `dsp->fFreq = (FAUSTFLOAT)(440.0);` for the same fixture —
+    /// instead of leaving the body empty (UI-bound state stuck at zero).
+    fn synthesized_reset_ui_replays_declared_state_initializers() {
+        let (store, module) = crate::fixtures::build_sine_phasor_test_module();
+        let out =
+            generate_cpp_module(&store, module, &CppOptions::default()).expect("fixture generates");
+        let reset_body = out
+            .split("virtual void instanceResetUserInterface() {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("synthesized reset method present");
+        assert!(reset_body.contains("fFreq = (FAUSTFLOAT)(440.0);"));
+        assert!(reset_body.contains("fGain = (FAUSTFLOAT)(0.2);"));
+        assert!(reset_body.contains("fPhase = (double)(0.0);"));
+    }
+
+    #[test]
+    /// DRIFT 2 regression (C-family plan §2.2): `Bitcast` renders as
+    /// `*reinterpret_cast<T*>(&v)`, byte-matching the upstream C++ compiler's
+    /// `-ftz 2` output (`*reinterpret_cast<int*>(&fTemp0SE)`); the former
+    /// `bitcast<T>(v)` spelling named a template neither this backend's
+    /// header nor upstream defines, so it could not even compile if reached.
+    fn bitcast_renders_upstream_reinterpret_cast_form() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let operand = b.load_var("fTemp0", fir::AccessType::Stack, FirType::Float32);
+        let bitcast = b.bitcast(FirType::Int32, operand);
+
+        let options = CppOptions::default();
+        let rendered = emit_value(&store, &options, bitcast).expect("Bitcast renders");
+        assert_eq!(rendered, "*reinterpret_cast<int*>(&fTemp0)");
     }
 
     #[test]

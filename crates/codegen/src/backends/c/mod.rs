@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 
 use fir::{AccessType, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
-use crate::backends::c_family::{self, CFamilySyntax, EmitMode};
+use crate::backends::c_family::{self, CFamilySyntax, EmitMode, StructInit, TableInit};
 use crate::backends::faust_api;
 
 pub const BACKEND_NAME: &str = "c";
@@ -46,6 +46,9 @@ const SYNTAX: CFamilySyntax = CFamilySyntax {
     faustfloat_cast_open: "(FAUSTFLOAT)",
     faustfloat_cast_close: "",
     switch_default_break: true,
+    bitcast_open: "*((",
+    bitcast_mid: "*)&",
+    bitcast_close: ")",
 };
 
 /// C backend options for module-first emission.
@@ -149,31 +152,6 @@ struct ModuleView {
     num_inputs: usize,
     num_outputs: usize,
     static_decls: FirId,
-}
-
-/// One state field initialization that must be replayed during DSP lifecycle
-/// emission.
-///
-/// The C backend emits declarations in the struct definition first, then uses
-/// this decoded view to synthesize `instanceConstants` / reset code with stable
-/// ordering.
-#[derive(Debug, Clone)]
-struct StructInit {
-    name: String,
-    typ: FirType,
-    init: FirId,
-}
-
-/// One table declaration plus its initializer payload.
-///
-/// Table lowering is split from scalar storage because the C backend may need
-/// dedicated helper syntax for array declarations and per-element initialization.
-#[derive(Clone, Debug)]
-struct TableInit {
-    name: String,
-    access: AccessType,
-    elem_type: FirType,
-    values: Vec<FirId>,
 }
 
 /// Normalized function declaration extracted from FIR before textual emission.
@@ -753,75 +731,45 @@ fn emit_compute_body(
     emit_block_with_mode(store, out, options, body, indent, &mut mode)
 }
 
+/// Builds this backend's stable error for a malformed state section, used by
+/// the shared initializer collectors.
+fn invalid_struct_section(store: &FirStore, section: FirId) -> CodegenError {
+    CodegenError::new(
+        CodegenErrorCode::InvalidModuleSection,
+        format!(
+            "struct section must be a FIR block, got {:?} at node {}",
+            match_fir(store, section),
+            section.as_u32()
+        ),
+    )
+}
+
 /// Collects scalar struct/global initializers used by reset lifecycle methods.
+///
+/// Shared with the `cpp` backend via
+/// [`c_family::collect_struct_initializers`].
 fn collect_struct_initializers(
     store: &FirStore,
     dsp_struct: FirId,
     globals: FirId,
 ) -> Result<Vec<StructInit>, CodegenError> {
-    let mut out = Vec::new();
-    for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidModuleSection,
-                format!(
-                    "struct section must be a FIR block, got {:?} at node {}",
-                    match_fir(store, section),
-                    section.as_u32()
-                ),
-            ));
-        };
-        for item in items {
-            if let FirMatch::DeclareVar {
-                name,
-                typ,
-                init: Some(init),
-                ..
-            } = match_fir(store, item)
-            {
-                out.push(StructInit { name, typ, init });
-            }
-        }
-    }
-    Ok(out)
+    c_family::collect_struct_initializers(store, dsp_struct, globals, |section| {
+        invalid_struct_section(store, section)
+    })
 }
 
 /// Collects table initializers from FIR state declarations.
+///
+/// Shared with the `cpp` backend via
+/// [`c_family::collect_table_initializers`].
 fn collect_table_initializers(
     store: &FirStore,
     dsp_struct: FirId,
     globals: FirId,
 ) -> Result<Vec<TableInit>, CodegenError> {
-    let mut out = Vec::new();
-    for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidModuleSection,
-                format!(
-                    "struct section must be a FIR block, got {:?} at node {}",
-                    match_fir(store, section),
-                    section.as_u32()
-                ),
-            ));
-        };
-        for item in items {
-            if let FirMatch::DeclareTable {
-                name,
-                access,
-                elem_type,
-                values,
-            } = match_fir(store, item)
-            {
-                out.push(TableInit {
-                    name,
-                    access,
-                    elem_type,
-                    values,
-                });
-            }
-        }
-    }
-    Ok(out)
+    c_family::collect_table_initializers(store, dsp_struct, globals, |section| {
+        invalid_struct_section(store, section)
+    })
 }
 
 /// Extracts all body-bearing helper/function definitions from the module.
@@ -979,11 +927,14 @@ fn emit_stmt(
 /// Emits one FIR value expression into a C expression string.
 ///
 /// All arms shared with the `cpp` backend live in
-/// [`c_family::emit_value_common`]; this backend has no language-only value
-/// arms today. `Bitcast` is deliberately still absent here (DRIFT 2 in the
-/// C-family plan §2.2): the upstream C spelling is a known-broken TODO, so
-/// gaining one is a per-drift decision with its own oracle check, not a
-/// silent side effect of unification.
+/// [`c_family::emit_value_common`] — including `Bitcast`, which this backend
+/// previously had no arm for and hard-failed on (DRIFT 2 closure, C-family
+/// plan §2.2). It renders as `*((T*)&v)` from the [`SYNTAX`] leaves: the
+/// corrected spelling of what upstream C's `BitcastInst` visitor evidently
+/// intends — upstream's own `-ftz 2` C output is garbled/uncompilable text
+/// (`*((int*(&v ...`, a known-broken TODO in `c_instructions.hh`), so the
+/// oracle here is the upstream *C++* form transposed to a C-style pointer
+/// cast. This backend has no language-only value arms today.
 fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<String, CodegenError> {
     let ctx = c_family::CFamilyValueCtx {
         syntax: &SYNTAX,
@@ -1154,6 +1105,24 @@ mod tests {
         let mut out = String::new();
         emit_stmt(&store, &mut out, &options, while_loop, 1, &mut mode).expect("WhileLoop renders");
         assert_eq!(out, "    while (1) {\n        (void)(2);\n    }\n");
+    }
+
+    #[test]
+    /// DRIFT 2 regression (C-family plan §2.2): `Bitcast` — previously a
+    /// hard error in this backend — renders as `*((T*)&v)`. Upstream C's own
+    /// `BitcastInst` visitor emits garbled, uncompilable text (a known-broken
+    /// TODO in `c_instructions.hh`), so the oracle is the upstream C++
+    /// `-ftz 2` form (`*reinterpret_cast<int*>(&v)`) transposed to a C-style
+    /// pointer cast — the spelling the upstream visitor evidently intends.
+    fn bitcast_renders_c_pointer_cast_form() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let operand = b.load_var("fTemp0", fir::AccessType::Stack, FirType::Float32);
+        let bitcast = b.bitcast(FirType::Int32, operand);
+
+        let options = COptions::default();
+        let rendered = super::emit_value(&store, &options, bitcast).expect("Bitcast renders");
+        assert_eq!(rendered, "*((int*)&fTemp0)");
     }
 
     #[test]

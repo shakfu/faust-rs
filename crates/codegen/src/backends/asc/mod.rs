@@ -1336,12 +1336,37 @@ fn escape_as_string(value: &str) -> String {
     out
 }
 
+/// Formats one `f64` as an AssemblyScript floating literal.
+///
+/// Special values use the AssemblyScript/TypeScript global spellings (`NaN`,
+/// `Infinity`, `-Infinity`); without this special-casing, Rust's `Display`
+/// output plus the `.0` suffix produced invalid literals such as `inf.0` or
+/// `NaN.0` (the same bug class fixed for c/cpp in commit `2b615948` and never
+/// ported here — see the C-family plan §5). Negative zero normalizes to
+/// `"0.0"`, matching every other textual backend and upstream constant
+/// folding. Deliberately *not* shared with `c_family::trim_float`: the
+/// special-value spellings genuinely differ (C `NAN`/`INFINITY` macros vs
+/// AssemblyScript globals).
 fn trim_float(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-Infinity".to_owned()
+        } else {
+            "Infinity".to_owned()
+        };
+    }
     let mut text = format!("{value}");
     if !text.contains(['.', 'e', 'E']) {
         text.push_str(".0");
     }
-    text
+    if text == "-0.0" {
+        "0.0".to_owned()
+    } else {
+        text
+    }
 }
 
 fn format_array(values: impl Iterator<Item = String>) -> String {
@@ -1379,6 +1404,21 @@ pub fn backend_id() -> &'static str {
 mod tests {
     use super::*;
     use fir::FirBuilder;
+
+    #[test]
+    /// Regression for the C-family plan §5 finding: special values must use
+    /// the AssemblyScript global spellings — the previous formatter emitted
+    /// invalid literals (`inf.0`, `NaN.0`) for any constant folding to
+    /// NaN/infinity, and `-0.0` for negative zero (every other textual
+    /// backend normalizes it).
+    fn trim_float_spells_assemblyscript_special_values() {
+        assert_eq!(trim_float(f64::NAN), "NaN");
+        assert_eq!(trim_float(f64::INFINITY), "Infinity");
+        assert_eq!(trim_float(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(trim_float(-0.0), "0.0");
+        assert_eq!(trim_float(0.5), "0.5");
+        assert_eq!(trim_float(3.0), "3.0");
+    }
 
     #[test]
     fn rejects_non_module_root() {
