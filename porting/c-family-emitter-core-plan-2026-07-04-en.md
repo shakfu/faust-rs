@@ -649,6 +649,81 @@ checking, as in previous phases).
 reset-replay port into cpp — can be fixed standalone first) and the standalone DRIFT 2 `Bitcast`
 fix (both backends, against the upstream `*reinterpret_cast<T*>(&v)` spelling).
 
+### Follow-ups outcome (2026-07-05, second pass)
+
+**DRIFT 2 closed — both backends, `Bitcast` is now a shared arm.** New oracle evidence gathered
+before deciding the spellings:
+
+- Upstream reachability: `InstructionsCompiler::generateBitCast`
+  (`instructions_compiler.cpp:1248`) is produced **only in `-ftz 2` mode** (bitcasting a real to
+  int to test exponent bits for flush-to-zero).
+- Upstream **cpp** `-ftz 2` output, verified live on `process = + ~ *(0.999);`:
+  `*reinterpret_cast<int*>(&fTemp0SE)` — valid, because the operand is always a cached named
+  local (an lvalue).
+- Upstream **c** `-ftz 2` output, same program: `((*((int*(&fTemp0SE) & 2139095040) ? …` —
+  **garbled, uncompilable text** (unbalanced parens; the `// TODO : does not work` above
+  `c_instructions.hh`'s `visit(BitcastInst*)` is accurate). There is no valid upstream C oracle.
+- Additionally, Rust cpp's former `bitcast<{T}>({v})` spelling named a template that neither the
+  backend's emitted header nor upstream defines — it could not have compiled if reached.
+
+Decisions:
+
+- **cpp**: `*reinterpret_cast<{T}*>(&{v})` — byte-matches upstream.
+- **c**: `*(({T}*)&{v})` — the C-style pointer-cast transposition of the upstream C++ form, i.e.
+  the spelling upstream C's broken visitor evidently *intends* (`*((type*(&` reads as a mangled
+  `*((type*)(&`). **Documented deviation**: this is technically a strict-aliasing type pun
+  (upstream C++'s `reinterpret_cast` form has the same property); the standard-blessed `memcpy`
+  alternative was rejected because it needs a statement context or an emitted helper function,
+  and matching upstream's expression-shaped, lvalue-operand contract keeps the two backends
+  symmetric. If a real `-ftz 2` port ever lands, revisiting both (upstream included) with a
+  proper helper is the right follow-up — upstream's own TODO says as much
+  ("put this code in a function").
+- **Placement**: shared arm in `emit_value_common` with three new `CFamilySyntax` leaves
+  (`bitcast_open`/`bitcast_mid`/`bitcast_close`) — the shape is identical, only tokens differ,
+  so it fits the descriptor pattern; cpp's per-language arm was deleted.
+- **Reachability in faust-rs today**: `Signals::bit_cast` (mirroring upstream `sigBitCast`) is
+  public API lowered at `signal_fir/module/core_lowering.rs:57`, but no `.dsp` pipeline path
+  produces it (faust-rs has no `-ftz 2` implementation yet) — no corpus case exists, so the
+  verification is the two backend regression tests (`bitcast_renders_upstream_reinterpret_cast_form`
+  in `cpp/mod.rs`, `bitcast_renders_c_pointer_cast_form` in `c/mod.rs`), with the upstream
+  `-ftz 2` C++ output as the shape oracle. Like upstream, the emission requires an addressable
+  operand; FIR producers cache bitcast operands into named temporaries.
+
+**DRIFT 6 closed — cpp gained the reset-fallback initializer replay.** `StructInit`/`TableInit`
+and `collect_struct_initializers`/`collect_table_initializers` moved from `c/mod.rs` into
+`c_family.rs` (generic over the backend error type via an `invalid_section` builder — each
+backend keeps its stable error codes), rather than duplicating ~70 lines into cpp. cpp's
+synthesized `instanceResetUserInterface()` fallback now replays declared state initializers
+(`fFreq = (FAUSTFLOAT)(440.0);`) exactly as c does (`dsp->fFreq = (FAUSTFLOAT)(440.0);` — the
+existing c test already asserted this on the same `sine_phasor` fixture, making the capability
+gap directly visible). Regression test:
+`synthesized_reset_ui_replays_declared_state_initializers` in `cpp/mod.rs`. The empty-module
+case still emits an empty body (unchanged), and the standard pipeline
+(`signal_fir/module/build.rs`) always supplies an explicit reset body, so no pipeline output
+changes — this is a dormant-path capability fix, as classified in §2.6.
+
+**asc `trim_float` fixed.** NaN/Infinity now render as the AssemblyScript/TypeScript globals
+(`NaN`/`Infinity`/`-Infinity`) instead of the invalid `NaN.0`/`inf.0` literals, and `-0.0`
+normalizes to `0.0` like every other textual backend. Deliberately **not** unified with
+`c_family::trim_float`: the special-value spellings genuinely differ (C `NAN`/`INFINITY` macros
+vs AssemblyScript globals), so forcing a shared function would need a spelling table for a
+backend that stays outside the C-family core. Unit test:
+`trim_float_spells_assemblyscript_special_values` in `asc/mod.rs`.
+
+**Phase 6 skipped (optional item).** The "which lifecycle stubs to synthesize" decision is six
+one-line `any()` checks in cpp and inline `find()`s interleaved with emission in c's
+`emit_c_api`; unifying the decision without the (genuinely language-specific) rendering would
+churn c's interleaved structure for almost no absorbed lines. Consistent with this plan's own
+§4 assessment ("LANG-heavy, smaller payoff per line moved"). Can be revisited if the lifecycle
+emission itself ever converges.
+
+**Guardrails after the follow-ups (all green)**: `cargo fmt --all` (applied);
+`cargo clippy --workspace --all-targets -- -D warnings` (clean);
+`cargo test -p codegen --all-targets` (277 passed, 0 failed — +4 new regression tests);
+`cargo test -p compiler --all-targets` (all suites pass, 0 failed);
+`golden-check` 190/190 OK; `cpp-backend-diff-report` 8/8 OK, 0 DIFF (report file reverted after
+checking, as in previous phases).
+
 ---
 
 ## 5. Julia and AssemblyScript — do they fit the same core?
@@ -680,6 +755,21 @@ be pulled from `c_family.rs` with Julia supplying its own `CFamilySyntax`-shaped
 *subset* that does line up (float/string formatting in particular look shareable even though
 struct/type declaration does not) — a smaller, separate follow-up, not part of this plan's Phase
 1–5.
+
+**Post-implementation note (2026-07-05)**: with the core now landed, the concrete Julia-reuse
+candidates are narrower than the pre-implementation guess. `string_literal` is the one function
+Julia could adopt verbatim today (its escape table is byte-identical to `c_family`'s).
+`trim_float` is *almost* shareable — Julia differs only in the special-value spellings
+(`NaN`/`Inf`/`-Inf` vs `NAN`/`INFINITY`) and in using `{value:?}` rather than `{value}`
+formatting — so sharing would need two spelling leaves plus a formatting flag; worth doing only
+if `trim_float` changes again (a third divergence event would tip the cost/benefit). Everything
+else confirmed non-transferable: `CFamilyValueCtx`/`CFamilyStmtCtx` assume C-family expression
+shapes (ternary `?:`, infix `^`, cast-style casts, `->` glue calls) that Julia renders
+structurally differently (`ifelse`-style selects would not even apply — Julia uses `?:` too, but
+its casts are constructor calls, xor is a function call, indexing is 1-based via
+`emit_index_expr`), and the collectors (`StructInit`/`TableInit`) match Julia's independent
+implementations in shape but feed a `mutable struct` constructor pattern, not a method body.
+No implementation planned.
 
 **AssemblyScript (`asc`)**: same conclusion, more strongly. `asc`'s `map_fun_name`
 ([`asc/mod.rs:1067`](../crates/codegen/src/backends/asc/mod.rs)) threads an entire
