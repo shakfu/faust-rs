@@ -1,8 +1,11 @@
 # Porting analysis — C++ memoization optimizations (commits cb6891ae + 2aec3bff0 + 0ef3eb314)
 
-**Date**: 2026-07-04
+**Date**: 2026-07-04 (updated 2026-07-05 with commit `688c0a478`)
 **Status**: Analysis complete, implementation plan proposed
-**Upstream range**: `cb6891ae~1..HEAD` in `/Users/letz/faust` (3 commits, all 2026-07-03, Yann Orlarey)
+**Upstream range**: `cb6891ae~1..HEAD` in `/Users/letz/faust` — initially 3 commits (2026-07-03,
+Yann Orlarey); extended on 2026-07-05 with `688c0a478` (tlib speedup, §1.3). The remaining new
+commits (`f607b2780`, `d80e2271b`, `29cda8807`) are Windows release/packaging fixes plus a
+Windows `Garbageable` cleanup follow-up to §1.3 — all N/A for faust-rs.
 
 ---
 
@@ -92,6 +95,34 @@ struct Entry { Tree fB; Tree fValue; std::map<Tree,Tree>* fInner; };
 
 Both `EvalProperty` and the pattern-matcher `PMProperty` move onto it.
 
+### 1.3 `688c0a478` — "tlib: faster version of the Tree library (array-based make, non-virtual Garbageable)" (2026-07-04)
+
+Three independent axes, continuing the same campaign:
+
+**(a) Array-based `make` — no temporary container on the interning hot path.**
+The fixed-arity constructors `tree(n, a)` … `tree(n, a, b, c, d, e)` used to
+materialize a `tvec` (heap `std::vector`) on *every* call, including cache
+hits (the overwhelming majority in a compiler that constantly re-references
+already-built subexpressions). They now build a stack array and call new
+array-based overloads — `CTree::make(n, ar, const Tree br[])`,
+`calcTreeHash(n, ar, br)`, `equiv(n, ar, br)`, `calcTreeAperture(n, ar, br)` —
+so hash, lookup, and comparison all run off the stack array; the owned
+`fBranch` vector is populated (`assign`) only when the tree is actually
+created.
+
+**(b) Non-virtual `Garbageable`.** `CTree : public Garbageable` replaces
+`public virtual Garbageable`, removing the virtual-base overhead from every
+node; the allocation registries move out of the `global` singleton into
+tlib itself with construct-on-first-use statics (`29cda8807` is a Windows
+follow-up fix to this cleanup path).
+
+**(c) tlib becomes a standalone library.** tlib no longer includes
+`global.hh`/`exception.hh`: new `tlib-error.{hh,cpp}`, `export.hh`
+(`TLIB_API`), `tlib.{hh,cpp}` session init/cleanup; the `-hlf` knob now goes
+through `CTree::setHashLoadFactor()` (the CLI option survives and calls the
+API); `nil`/`cons` symbols are lazily owned by the library; non-tlib files
+move out (`num.hh` → normalize, `shlysis` → signals, `compatibility` → utils).
+
 ---
 
 ## 2. Mapping onto faust-rs — the key observation
@@ -109,6 +140,9 @@ Per-item status:
 | Upstream change | faust-rs status |
 |---|---|
 | (0) growable CTree/Symbol hash tables | **N/A by construction.** `TreeArena`'s interners (`interner0/1/2/n`, [arena.rs:226](../crates/tlib/src/arena.rs)) and `SymbolTable::to_id` are `AHashMap`s — hashbrown SwissTables that already start small and resize by load factor automatically. The C++ commit essentially brings the hand-rolled tables up to what the Rust standard maps do by default. See §2.1 for the two residual items (`-hlf` CLI parity, capacity hints). |
+| (1.3a) array-based `make` (no temp container on intern lookups) | **Mostly N/A — one real residual.** faust-rs arities 0/1/2 already intern through tuple-keyed maps with zero allocation on hit *or* miss (better than upstream, which still `assign`s `fBranch` on creation). But the arity-≥3 path builds an `Arc<[TreeId]>` key **on every call, including cache hits** ([arena.rs:367](../crates/tlib/src/arena.rs)) — the same pathology upstream just removed. See §2.1 item 3. |
+| (1.3b) non-virtual `Garbageable` | **N/A by construction.** No inheritance, no vtables, no GC registries: nodes are plain structs owned by the arena `Vec`, freed by `Drop`. |
+| (1.3c) tlib as a standalone library | **Already achieved.** `crates/tlib` has no dependency on compiler globals, owns its own error types, and pre-interns `nil` at `TreeArena::new()`. Upstream is converging on the crate boundary faust-rs started with. |
 | (1a) propagate memo on plain-struct key | **MISSING — the main portable item.** faust-rs has *no* memoization of propagation results at all (see §3). The new C++ key design is exactly the shape a Rust port should take. |
 | (1b) memo lifetime scoping | **Already equivalent.** `PropagateMemo` is created per top-level call in `propagate_typed_with_ui_options` ([api.rs:49](../crates/propagate/src/api.rs)) — same semantics as `PropagateMemoScope` clearing at the outermost boundary. Keep it per-call (see §4.4). |
 | (1c) lazy property lists + fast slot | **N/A by construction.** No `fProperties` exists; side tables are already lazy and pay-per-use. Nothing to port. |
@@ -136,6 +170,19 @@ Although the mechanism is N/A, two small follow-ups are worth considering:
    growth on large files, seed the compiler's arena with a modest capacity
    (e.g. 64 K nodes) — the same trade-off `-hlf` explores, expressed the Rust
    way. Data-driven, not speculative.
+3. **Allocation-free arity-≥3 intern lookups** (from `688c0a478`, §1.3a).
+   `TreeArena::intern`'s `_ =>` arm does `Arc::from(children)` *before* the
+   `interner_n.get(&key)` probe, so every arity-≥3 intern — hit or miss —
+   pays a heap allocation plus refcount traffic, exactly the temporary-
+   container cost upstream just removed from `CTree::make`. Rust fix shape:
+   probe with a borrowed key first and only materialize the `Arc` on insert —
+   either via `hashbrown`'s raw-entry API (hash the `(kind, &[TreeId])` pair
+   manually, compare with a slice-aware equality closure) or an
+   `Equivalent`-style borrowed key type. Cons cells (the truly hot family)
+   are arity 2 and already allocation-free, so the win is limited to wide
+   nodes (`route`, slider parameter lists, waveform/table shapes) — measure
+   with the P0 profiler before and after on a UI-heavy and an FFT-like file.
+   Small, self-contained, byte-identical by construction.
 
 ### 2.2 What the port reduces to
 
@@ -325,6 +372,7 @@ Per project convention every phase must be **FIR-identical** and behavior-preser
 ## 7. Upstream references
 
 - `cb6891ae` — make CTree/Symbol hash tables grow instead of fixed-size (`compiler/tlib/tree.{hh,cpp}`, `compiler/tlib/symbol.{hh,cpp}`, `compiler/global.{hh,cpp}`; adds `-hlf/--hash-load-factor`).
+- `688c0a478` — tlib: faster Tree library — array-based `make` overloads, non-virtual `Garbageable`, tlib decoupled from `global`/`exception` into a standalone library (`compiler/tlib/*`; `29cda8807` is its Windows cleanup follow-up).
 - `2aec3bff0` — tlib+propagate: lazy per-node properties, fast-path slot, tuple memoization (`compiler/propagate/propagate.cpp`, `compiler/tlib/tree.{hh,cpp}`).
 - `0ef3eb314` — property2\<Tree\> binary memoization (`compiler/tlib/property.hh`, `compiler/evaluate/eval.cpp`, `compiler/global.{hh,cpp}`).
 - Prior faust-rs analysis: [propagation-performance-analysis-plan-2026-03-24-en.md](propagation-performance-analysis-plan-2026-03-24-en.md) (Phase 1a/1b deferred; superseded by this plan).
