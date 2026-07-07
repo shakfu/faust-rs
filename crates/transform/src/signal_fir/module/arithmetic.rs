@@ -275,10 +275,11 @@ impl<'a> SignalToFirLower<'a> {
             } else {
                 self.lower_int32_const(0)
             };
+            let phases = self.regions.current_phases_mut();
             let mut recursion_ctx = RecursionLoweringCtx {
                 store: &mut self.store,
-                immediate_statements: &mut self.sample_phases.immediate,
-                post_output_statements: &mut self.sample_phases.post_output,
+                immediate_statements: &mut phases.immediate,
+                post_output_statements: &mut phases.post_output,
                 next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
@@ -300,10 +301,11 @@ impl<'a> SignalToFirLower<'a> {
             } else {
                 self.global_circular_current_index(rec_ref.info.size)
             };
+            let phases = self.regions.current_phases_mut();
             let mut recursion_ctx = RecursionLoweringCtx {
                 store: &mut self.store,
-                immediate_statements: &mut self.sample_phases.immediate,
-                post_output_statements: &mut self.sample_phases.post_output,
+                immediate_statements: &mut phases.immediate,
+                post_output_statements: &mut phases.post_output,
                 next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
@@ -443,17 +445,18 @@ impl<'a> SignalToFirLower<'a> {
                                 Some(*body_value),
                             )
                         };
-                        this.sample_phases.immediate.push(declare);
+                        this.regions.current_phases_mut().immediate.push(declare);
                         *body_value = {
                             let mut b = FirBuilder::new(&mut this.store);
                             b.load_var(name, AccessType::Stack, typ)
                         };
                     }
                 }
+                let phases = this.regions.current_phases_mut();
                 let mut recursion_ctx = RecursionLoweringCtx {
                     store: &mut this.store,
-                    immediate_statements: &mut this.sample_phases.immediate,
-                    post_output_statements: &mut this.sample_phases.post_output,
+                    immediate_statements: &mut phases.immediate,
+                    post_output_statements: &mut phases.post_output,
                     next_loop_var_id: &mut this.name_gen.next_loop_var_id,
                 };
                 recursion_ctx.emit_group_body_updates(
@@ -475,7 +478,10 @@ impl<'a> SignalToFirLower<'a> {
                             let mut b = FirBuilder::new(&mut this.store);
                             b.store_var(info.name.clone(), AccessType::Struct, current_value)
                         };
-                        this.sample_phases.post_output.push(store_state);
+                        this.regions
+                            .current_phases_mut()
+                            .post_output
+                            .push(store_state);
                     }
                 }
                 Ok(())
@@ -502,10 +508,11 @@ impl<'a> SignalToFirLower<'a> {
         } else {
             self.global_circular_current_index(info.size)
         };
+        let phases = self.regions.current_phases_mut();
         let mut recursion_ctx = RecursionLoweringCtx {
             store: &mut self.store,
-            immediate_statements: &mut self.sample_phases.immediate,
-            post_output_statements: &mut self.sample_phases.post_output,
+            immediate_statements: &mut phases.immediate,
+            post_output_statements: &mut phases.post_output,
             next_loop_var_id: &mut self.name_gen.next_loop_var_id,
         };
         let current_index = recursion_ctx.current_index_for_carrier(info, zero, circular_index);

@@ -145,43 +145,13 @@ mod bra;
 mod build;
 mod core_lowering;
 mod rad_formula_builder;
+mod region;
 mod setup;
 mod state;
 mod tables;
 mod ui_lowering;
 pub(super) use build::build_module;
 use rad_formula_builder::FirRadFormulaBuilder;
-
-/// Explicit execution phases inside one sample-loop iteration.
-///
-/// The sample body is assembled in this fixed order:
-///
-/// 1. `immediate`: ordinary per-sample work and writes that must happen before
-///    outputs are finalized
-/// 2. `post_output`: updates that must observe the current sample's outputs
-///    before shifting/finalizing state
-/// 3. `sample_end`: generic subsystem maintenance such as delay counter bumps
-#[derive(Default)]
-struct SamplePhases {
-    immediate: Vec<FirId>,
-    post_output: Vec<FirId>,
-    sample_end: Vec<FirId>,
-}
-
-impl SamplePhases {
-    /// Concatenates the three lifecycle phases into a single statement list,
-    /// preserving execution order: `immediate`, then `post_output`, then
-    /// `sample_end`.
-    fn flattened(&self) -> Vec<FirId> {
-        let mut all = Vec::with_capacity(
-            self.immediate.len() + self.post_output.len() + self.sample_end.len(),
-        );
-        all.extend(self.immediate.iter().copied());
-        all.extend(self.post_output.iter().copied());
-        all.extend(self.sample_end.iter().copied());
-        all
-    }
-}
 
 /// Maximum number of samples that can be stored in a BRA forward tape array.
 ///
@@ -363,8 +333,9 @@ struct SignalToFirLower<'a> {
     cache: HashMap<SigId, FirId>,
     /// FIR statement buckets for each Faust lifecycle section.
     sections: state::ModuleSections,
-    /// Explicit per-sample execution phases for the `compute` sample loop.
-    sample_phases: SamplePhases,
+    /// Compute-region tree: per-loop regions carrying the phased statement
+    /// lists of `compute` (roadmap P2 — see `region.rs` for the design note).
+    regions: region::RegionTree,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.

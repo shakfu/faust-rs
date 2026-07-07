@@ -135,6 +135,7 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 mod arith;
 mod circular_pow2;
 mod context;
+mod domain_counters;
 mod if_wrapping;
 mod manager;
 mod options;

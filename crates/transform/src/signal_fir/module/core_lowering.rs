@@ -244,7 +244,7 @@ impl<'a> SignalToFirLower<'a> {
     /// accumulator.
     ///
     /// The caller controls which sample loop is active by clearing
-    /// [`Self::sample_phases`] between forward and reverse scheduling slices.
+    /// the current compute region between forward and reverse scheduling slices.
     /// Output signals are cast at the external FaustFloat boundary and stored
     /// into `outputN[i0]`; non-output surplus signals are evaluated and dropped.
     pub(super) fn lower_output_signal(
@@ -261,22 +261,28 @@ impl<'a> SignalToFirLower<'a> {
                 value = b.cast(FirType::FaustFloat, value);
             }
             let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
-            self.sample_phases.immediate.push(b.store_table(
-                format!("output{signal_index}"),
-                AccessType::Stack,
-                i0,
-                value,
-            ));
+            self.regions
+                .current_phases_mut()
+                .immediate
+                .push(b.store_table(
+                    format!("output{signal_index}"),
+                    AccessType::Stack,
+                    i0,
+                    value,
+                ));
         } else {
             let mut b = FirBuilder::new(&mut self.store);
-            self.sample_phases.immediate.push(b.drop_(value));
+            self.regions
+                .current_phases_mut()
+                .immediate
+                .push(b.drop_(value));
         }
         Ok(())
     }
 
     /// Clears per-loop scheduling state before building another sample loop.
-    pub(super) fn reset_sample_loop_state(&mut self) {
-        self.sample_phases = SamplePhases::default();
+    pub(super) fn reset_sample_loop_state(&mut self, next_kind: region::RegionKind) {
+        self.regions.begin_sibling(next_kind);
         self.scheduled_state_updates.clear();
         self.recursion.scheduled_groups.clear();
     }
@@ -634,10 +640,11 @@ impl<'a> SignalToFirLower<'a> {
         let read_ty = self.signal_fir_type(node)?;
         let amount_value = self.lower_signal(amount)?;
         let schedule_write = self.delay.schedule_delay_write(value);
+        let phases = self.regions.current_phases_mut();
         let mut delay_ctx = DelayLoweringCtx {
             store: &mut self.store,
-            immediate_statements: &mut self.sample_phases.immediate,
-            post_output_statements: &mut self.sample_phases.post_output,
+            immediate_statements: &mut phases.immediate,
+            post_output_statements: &mut phases.post_output,
             next_loop_var_id: &mut self.name_gen.next_loop_var_id,
         };
         Ok(emit_fixed_delay_for_line(
@@ -739,12 +746,10 @@ impl<'a> SignalToFirLower<'a> {
             let next = self.lower_signal(value)?;
             let write_index = self.global_circular_current_index(2);
             let mut b = FirBuilder::new(&mut self.store);
-            self.sample_phases.immediate.push(b.store_table(
-                name,
-                AccessType::Struct,
-                write_index,
-                next,
-            ));
+            self.regions
+                .current_phases_mut()
+                .immediate
+                .push(b.store_table(name, AccessType::Struct, write_index, next));
         }
         Ok(out)
     }
@@ -838,10 +843,11 @@ impl<'a> SignalToFirLower<'a> {
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
         let schedule_write = self.delay.schedule_delay_write(value);
+        let phases = self.regions.current_phases_mut();
         let mut delay_ctx = DelayLoweringCtx {
             store: &mut self.store,
-            immediate_statements: &mut self.sample_phases.immediate,
-            post_output_statements: &mut self.sample_phases.post_output,
+            immediate_statements: &mut phases.immediate,
+            post_output_statements: &mut phases.post_output,
             next_loop_var_id: &mut self.name_gen.next_loop_var_id,
         };
         Ok(emit_delay1_for_line(

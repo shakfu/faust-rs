@@ -124,7 +124,8 @@ impl<'a> SignalToFirLower<'a> {
             .expect("bargraph variable should exist after declaration");
         let mut b = FirBuilder::new(&mut self.store);
         let faust_value = b.cast(FirType::FaustFloat, value);
-        self.sample_phases
+        self.regions
+            .current_phases_mut()
             .immediate
             .push(b.store_var(var, AccessType::Struct, faust_value));
         Ok(value)

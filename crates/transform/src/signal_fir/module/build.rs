@@ -210,9 +210,13 @@ pub(crate) fn build_module(
         let delay_sample_end = lower
             .delay
             .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
-        lower.sample_phases.sample_end.extend(delay_sample_end);
-        sample_loops.push((false, lower.sample_phases.flattened()));
-        lower.reset_sample_loop_state();
+        lower
+            .regions
+            .current_phases_mut()
+            .sample_end
+            .extend(delay_sample_end);
+        sample_loops.push((false, lower.regions.current_flattened()));
+        lower.reset_sample_loop_state(region::RegionKind::ReverseSampleLoop);
     }
 
     if has_reverse_outputs {
@@ -233,10 +237,14 @@ pub(crate) fn build_module(
             let delay_sample_end = lower
                 .delay
                 .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
-            lower.sample_phases.sample_end.extend(delay_sample_end);
+            lower
+                .regions
+                .current_phases_mut()
+                .sample_end
+                .extend(delay_sample_end);
         }
-        sample_loops.push((true, lower.sample_phases.flattened()));
-        lower.reset_sample_loop_state();
+        sample_loops.push((true, lower.regions.current_flattened()));
+        lower.reset_sample_loop_state(region::RegionKind::SampleLoop);
     }
     for index in 0..plan.num_outputs {
         let mut b = FirBuilder::new(&mut lower.store);

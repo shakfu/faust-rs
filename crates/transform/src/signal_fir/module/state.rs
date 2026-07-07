@@ -130,12 +130,15 @@ impl<'a> SignalToFirLower<'a> {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
         let mut b = FirBuilder::new(&mut self.store);
-        self.sample_phases.immediate.push(b.declare_var(
-            name.clone(),
-            info.typ.clone(),
-            AccessType::Stack,
-            Some(value),
-        ));
+        self.regions
+            .current_phases_mut()
+            .immediate
+            .push(b.declare_var(
+                name.clone(),
+                info.typ.clone(),
+                AccessType::Stack,
+                Some(value),
+            ));
         self.recursion.set_current_value_binding(
             group,
             index,
