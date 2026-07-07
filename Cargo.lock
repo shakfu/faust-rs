@@ -1082,8 +1082,10 @@ dependencies = [
 name = "transform"
 version = "0.5.0"
 dependencies = [
+ "ahash",
  "fir",
  "normalize",
+ "propagate",
  "signals",
  "sigtype",
  "tlib",

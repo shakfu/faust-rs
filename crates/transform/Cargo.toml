@@ -9,8 +9,10 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+ahash = { version = "0.8", default-features = false, features = ["std"] }
 fir     = { path = "../fir" }
 normalize = { path = "../normalize" }
+propagate = { path = "../propagate" }
 signals = { path = "../signals" }
 sigtype = { path = "../sigtype" }
 tlib    = { path = "../tlib" }

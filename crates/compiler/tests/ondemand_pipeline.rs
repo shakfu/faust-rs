@@ -153,6 +153,48 @@ fn structurally_identical_ondemand_instances_get_distinct_domains() {
     );
 }
 
+// ── P1 — clock inference + hierarchical graph on the real pipeline ──────────
+
+#[test]
+fn clock_inference_and_hgraph_run_on_prepared_ondemand_program() {
+    use transform::clk_env::annotate;
+    use transform::hgraph::{GraphKey, audit_hgraph, build_hgraph, schedule};
+
+    let out = compile_inline(
+        "od_p1_end_to_end",
+        r#"process = (button("gate"), _) : ondemand(*(2));"#,
+    );
+    let prepared = prepare_signals_for_fir(&out.parse.state.arena, &out.signals, &out.ui)
+        .expect("P0 guarantees signal_prepare accepts the clocked graph");
+
+    // The SIGCLOCKENV token ids survive the staging-arena clone, so the
+    // propagation-owned domain table stays valid on the prepared forest.
+    let envs = annotate(prepared.arena(), &out.clock_domains, prepared.outputs())
+        .expect("prepared ondemand program must be well-clocked");
+
+    // The output (Seq) lives at the audio rate; exactly one domain exists.
+    assert_eq!(out.clock_domains.len(), 1);
+    assert_eq!(envs.env(prepared.outputs()[0]), Some(None));
+
+    let hgraph = build_hgraph(
+        prepared.arena(),
+        &out.clock_domains,
+        &envs,
+        prepared.outputs(),
+    )
+    .expect("hgraph builds on the prepared forest");
+    audit_hgraph(&hgraph).expect("partition property");
+
+    // One top graph + one wrapper subgraph, both scheduled deterministically.
+    assert_eq!(hgraph.graphs().len(), 2);
+    let sched = schedule(&hgraph).expect("per-domain graphs are acyclic");
+    let top = sched.schedule(GraphKey::Top).expect("top schedule");
+    assert!(!top.is_empty());
+    let (wrapper_key, _) = hgraph.graphs()[1];
+    let sub = sched.schedule(wrapper_key).expect("subgraph schedule");
+    assert!(!sub.is_empty(), "the block body must be scheduled");
+}
+
 // ── P0.4 — loud AD diagnostics at domain boundaries ──────────────────────────
 
 fn expect_compile_error(name: &str, source: &str) -> compiler::CompilerError {
