@@ -461,6 +461,14 @@ struct ForwardADTransform<'a> {
     diff_seed_index: AHashMap<SigId, SmallVec<[usize; 2]>>,
     cache: AHashMap<SigId, Dual>,
     debruijn_depth: i64,
+    /// First clock-boundary violation encountered during the sweep, if any.
+    ///
+    /// `transform` is infallible by design (it returns `Dual`s and relies on
+    /// the cache for cycle-breaking), so boundary violations are recorded here
+    /// and surfaced by [`generate_fad_signals_multi`] once the sweep finishes.
+    /// Roadmap P0.4: a boundary must be a loud error, never a silent zero
+    /// tangent.
+    boundary_error: Option<PropagateError>,
 }
 
 impl<'a> ForwardADTransform<'a> {
@@ -471,6 +479,7 @@ impl<'a> ForwardADTransform<'a> {
             diff_seeds: diff_seeds.to_vec(),
             cache: AHashMap::new(),
             debruijn_depth: 0,
+            boundary_error: None,
         }
     }
 
@@ -1072,6 +1081,41 @@ impl<'a> ForwardADTransform<'a> {
                 self.zero_tangent(sig)
             }
             SigMatch::FFun(ff, largs) => self.transform_ffun(sig, ff, largs),
+            // Clock-domain machinery (`ondemand` / `upsampling` /
+            // `downsampling` wrappers and their glue): differentiating across
+            // a boundary would require the Phase B dual rules (roadmap P5).
+            // Until those land, record a loud boundary error instead of
+            // falling through to `zero_tangent` — a learning loop whose
+            // gradient is silently zero compiles fine and simply never
+            // converges (roadmap P0.4, cohabitation §4).
+            SigMatch::Seq(_, _)
+            | SigMatch::Clocked(_, _)
+            | SigMatch::ClockEnvToken(_)
+            | SigMatch::TempVar(_)
+            | SigMatch::PermVar(_)
+            | SigMatch::ZeroPad(_, _)
+            | SigMatch::OnDemand(_)
+            | SigMatch::Upsampling(_)
+            | SigMatch::Downsampling(_) => {
+                let kind = match match_sig(self.arena, sig) {
+                    SigMatch::Seq(_, _) => "clocked sequencing (Seq)",
+                    SigMatch::Clocked(_, _) => "clocked wrapper",
+                    SigMatch::ClockEnvToken(_) => "clock-env token",
+                    SigMatch::TempVar(_) => "clock-boundary input (TempVar)",
+                    SigMatch::PermVar(_) => "clock-boundary output (PermVar)",
+                    SigMatch::ZeroPad(_, _) => "zero-padded upsampling input (ZeroPad)",
+                    SigMatch::OnDemand(_) => "ondemand",
+                    SigMatch::Upsampling(_) => "upsampling",
+                    _ => "downsampling",
+                };
+                if self.boundary_error.is_none() {
+                    self.boundary_error =
+                        Some(PropagateError::FadUnsupportedNode { node: sig, kind });
+                }
+                // Keep the sweep total: the placeholder Dual is never
+                // observable because the entry point fails afterwards.
+                self.zero_tangent(sig)
+            }
             _ => self.zero_tangent(sig),
         }
     }
@@ -1446,6 +1490,12 @@ pub(super) fn generate_fad_signals_multi(
         .iter()
         .map(|&sig| fad.transform(sig))
         .collect::<Vec<_>>();
+    // Roadmap P0.4: surface the first clock-boundary violation recorded by
+    // the sweep. This must happen before any dual is returned so no caller
+    // can observe the silently-zero placeholder tangents.
+    if let Some(err) = fad.boundary_error.take() {
+        return Err(err);
+    }
 
     let mut result = Vec::with_capacity(outputs.len() * (1 + seeds.len()));
     for dual in duals {

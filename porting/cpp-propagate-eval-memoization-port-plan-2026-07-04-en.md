@@ -213,7 +213,7 @@ and each field must be classified:
 |---|---|---|
 | `slot_env: &mut AHashMap<BoxId, SigId>` | = C++ `slotenv`, but a *mutable map*, not a persistent hash-consed list. Mutated in place at `Symbolic` boundaries ([engine.rs:486](../crates/propagate/src/engine.rs)) with save/restore. | Must be part of the key. Options in §4.1. |
 | `current_groups: Vec<UiGroupPathSegment>` | = C++ `path`. UI leaves resolve `control_ids[(box, group_path_hash(current_groups))]` ([engine.rs:321](../crates/propagate/src/engine.rs)), so results genuinely depend on it. | Include `group_path_hash(&ctx.current_groups)` (already computed at UI leaves; it is a stable u64 of the group path). |
-| `clock_env: TreeId` | No C++ analogue in these commits (ondemand clock domains). Nil today in the classic path but load-bearing for the ondemand port. | Include the `TreeId` in the key — cheap, future-proof. |
+| `clock_env: TreeId` | **Hard correctness requirement, not just future-proofing** (P0.3 of the ondemand roadmap, folded here per [ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md](ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md) §2.3). In C++ the propagate memo key *includes* the clockenv ([propagate.cpp:918-929]); omitting it would return the same signal for the same box propagated under two different domains — recreating the very bug P0.3 audits. Since P0.2 landed, `clock_env` is `nil` at the top rate or a per-instance-unique `SIGCLOCKENV` token, so key inclusion is sufficient *and* cheap. | Include the `TreeId` in the key — **mandatory**. Validation §5 item 9 pins it. |
 | `suppress_fad: bool` + `pending_fad_seeds: Vec<SigId>` | **No C++ analogue — this is a side channel.** Under `suppress_fad`, propagating a `ForwardAD` box *appends* seeds to `pending_fad_seeds` and returns primal-only outputs. Replaying a cached result would silently drop seeds. | Do **not** put in the key; instead **bypass the memo** when `ctx.suppress_fad` is true *or* `contains_forward_ad(arena, box_tree)?` holds. This mirrors the FAD-arity carve-outs already present in `propagate_in_slot_env`'s output checks. |
 | `cache: &mut ArityCache`, `control_ids` | Pure analysis caches / read-only per-traversal tables. | Not in key; their per-top-level-call stability is exactly why the memo must also stay per-top-level-call (§4.4). |
 | `memo: &mut PropagateMemo` | Carrier — the new table lives here next to `liftn` / `aperture`. | — |
@@ -359,7 +359,14 @@ Per project convention every phase must be **FIR-identical** and behavior-preser
    different normalized group paths and assert both propagated signals resolve
    to their distinct `control_ids`, proving `group_path` is part of the replay
    key.
-8. Performance: re-run the March measurement
+8. A targeted clock-domain memo regression (P0.3 requirement): propagate the
+   *same* box under two different clock environments (e.g. the same
+   sub-circuit used inside two distinct `ondemand` instances, and once at the
+   top-level rate) and assert the propagated signals are distinct and carry
+   the correct domain tokens — proving `clock_env` is part of the replay key.
+   Baseline shape:
+   `crates/compiler/tests/ondemand_pipeline.rs::structurally_identical_ondemand_instances_get_distinct_domains`.
+9. Performance: re-run the March measurement
    (`faust-rs -pn clarinetMIDI tests/demos_tests.dsp`, was 0.761 s vs C++
    0.146 s) plus one FFT-like case; report P0 profiler tables before/after in
    the journal. Expected from the March analysis: P1 ≈ 3–4×, P2 ≈ 1.3–1.5× on

@@ -134,6 +134,12 @@ pub struct SignalCompileOutput {
     /// box, the result `BoxId` is recorded with the definition's string name.
     /// Used by the SVG draw module to label and fold named sub-diagrams.
     pub def_names: std::collections::HashMap<boxes::BoxId, String>,
+    /// Clock-domain instances allocated by `ondemand` / `upsampling` /
+    /// `downsampling` wrappers during propagation (roadmap P0.2).
+    ///
+    /// Empty for programs without clocked wrappers. In-graph `SIGCLOCKENV`
+    /// tokens index into this table.
+    pub clock_domains: propagate::ClockDomainTable,
 }
 
 impl SignalCompileOutput {
@@ -1864,6 +1870,7 @@ impl Compiler {
             signals: propagated.signals,
             ui: propagated.ui,
             def_names: eval_stats.def_names,
+            clock_domains: propagated.clock_domains,
         })
     }
 }

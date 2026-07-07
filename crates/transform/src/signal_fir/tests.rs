@@ -631,7 +631,10 @@ fn bargraph_emits_runtime_zone_store_in_compute() {
 }
 
 #[test]
-fn unsupported_signal_family_returns_typed_error_code() {
+fn clocked_signal_family_returns_dedicated_error_code() {
+    // Roadmap P0.1: the clocked family no longer falls into the generic
+    // `FRS-SFIR-0004` bucket — it gets the dedicated `ClockedNotLowered`
+    // rejection until the clock-domain lowering (P1-P3) lands.
     let mut arena = TreeArena::new();
     let sig0 = {
         let mut b = SigBuilder::new(&mut arena);
@@ -641,8 +644,8 @@ fn unsupported_signal_family_returns_typed_error_code() {
     let err = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
         .expect_err("upsampling is outside current lowering slice");
 
-    assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
-    assert_eq!(err.code().as_str(), "FRS-SFIR-0004");
+    assert_eq!(err.code(), SignalFirErrorCode::ClockedNotLowered);
+    assert_eq!(err.code().as_str(), "FRS-SFIR-0007");
 }
 
 #[test]
@@ -4050,6 +4053,11 @@ enum LoweringCoverage {
     ViaParent,
     /// Falls through to `other => UnsupportedSignalNode`.
     Unsupported,
+    /// Has its own arm in `lower_signal` that returns the dedicated
+    /// `ClockedNotLowered` (`FRS-SFIR-0007`) rejection: clocked machinery
+    /// accepted by `signal_prepare` but awaiting the clock-domain back half
+    /// (roadmap P1–P3).
+    ClockedRejection,
 }
 
 /// Exhaustive classification of every `SigMatch` constructor against the
@@ -4061,7 +4069,7 @@ enum LoweringCoverage {
 /// `Unsupported` arm is the executable record of the W8 gap (families that
 /// `signal_prepare::verify` accepts but `lower_signal` does not handle).
 fn lowering_coverage(m: &SigMatch<'_>) -> LoweringCoverage {
-    use LoweringCoverage::{Direct, Unsupported, ViaParent};
+    use LoweringCoverage::{ClockedRejection, Direct, Unsupported, ViaParent};
     match m {
         SigMatch::Int(_)
         | SigMatch::Real(_)
@@ -4124,17 +4132,21 @@ fn lowering_coverage(m: &SigMatch<'_>) -> LoweringCoverage {
         // Reverse-mode-AD carriers: no top-level arm; lowered through `Proj`.
         SigMatch::BlockReverseAD { .. } | SigMatch::ReverseTimeRec(_) => ViaParent,
 
-        // Accepted by `verify` but with no `lower_signal` arm — the W8 gap.
-        SigMatch::Gen(_)
-        | SigMatch::AssertBounds(..)
-        | SigMatch::TempVar(_)
+        // Clocked machinery: dedicated structured rejection until the
+        // clock-domain lowering (roadmap P1-P3) lands.
+        SigMatch::TempVar(_)
         | SigMatch::PermVar(_)
         | SigMatch::Seq(..)
         | SigMatch::ZeroPad(..)
         | SigMatch::Clocked(..)
+        | SigMatch::ClockEnvToken(_)
         | SigMatch::OnDemand(_)
         | SigMatch::Upsampling(_)
-        | SigMatch::Downsampling(_)
+        | SigMatch::Downsampling(_) => ClockedRejection,
+
+        // Accepted by `verify` but with no `lower_signal` arm — the W8 gap.
+        SigMatch::Gen(_)
+        | SigMatch::AssertBounds(..)
         | SigMatch::Fir(_)
         | SigMatch::Iir(_)
         // Pre-preparation / legacy forms that `verify` itself also rejects.

@@ -126,6 +126,41 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::SoundfileBuffer(sf, chan, part, ridx) => {
                 self.lower_soundfile_buffer(sig, sf, chan, part, ridx)?
             }
+            // Clocked machinery (`ondemand` / `upsampling` / `downsampling`
+            // wrappers and their glue nodes): accepted by propagation and
+            // `signal_prepare`, but the guarded-block lowering (roadmap
+            // P1–P3) has not landed. Reject with the dedicated structured
+            // code so no clocked program falls into the generic
+            // `FRS-SFIR-0004` bucket or panics (roadmap P0.1).
+            SigMatch::OnDemand(_)
+            | SigMatch::Upsampling(_)
+            | SigMatch::Downsampling(_)
+            | SigMatch::Clocked(_, _)
+            | SigMatch::ClockEnvToken(_)
+            | SigMatch::Seq(_, _)
+            | SigMatch::TempVar(_)
+            | SigMatch::PermVar(_)
+            | SigMatch::ZeroPad(_, _) => {
+                let construct = match match_sig(self.arena, sig) {
+                    SigMatch::OnDemand(_) => "ondemand",
+                    SigMatch::Upsampling(_) => "upsampling",
+                    SigMatch::Downsampling(_) => "downsampling",
+                    SigMatch::Clocked(_, _) => "clocked wrapper",
+                    SigMatch::ClockEnvToken(_) => "clock-env token",
+                    SigMatch::Seq(_, _) => "clocked sequencing (Seq)",
+                    SigMatch::TempVar(_) => "clock-boundary input (TempVar)",
+                    SigMatch::PermVar(_) => "clock-boundary output (PermVar)",
+                    _ => "zero-padded upsampling input (ZeroPad)",
+                };
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::ClockedNotLowered,
+                    format!(
+                        "{construct} is not lowered to FIR yet: the clock-domain \
+                         back half (inference, guarded blocks, per-domain local \
+                         time — roadmap P1–P3) has not been ported"
+                    ),
+                ));
+            }
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
