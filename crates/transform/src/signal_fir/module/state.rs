@@ -256,6 +256,17 @@ impl<'a> SignalToFirLower<'a> {
         GlobalCircularCursor.ensure_state(&mut ctx);
     }
 
+    /// Declares/advances the global `fIOTA` cursor iff some planned delay
+    /// line still uses it (roadmap P3 slice 4). Run after
+    /// `assign_clocked_delay_cursors` so in-domain `CircularPow2` lines that
+    /// moved to a per-domain `fIOTA_d<i>` cursor no longer force a dead global
+    /// field + advance.
+    pub(super) fn finalize_global_cursor(&mut self) {
+        if !self.delay.global_circular_carriers().is_empty() {
+            self.ensure_global_circular_cursor();
+        }
+    }
+
     /// Returns the masked current write index for a circular structure lowered
     /// in the current append-target region.
     ///

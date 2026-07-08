@@ -153,6 +153,7 @@ pub(crate) fn build_module<'a>(
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     lower.assign_clocked_delay_cursors()?;
+    lower.finalize_global_cursor();
     let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
     lower.rad_reverse.forward_output_by_sig = signals
         .iter()

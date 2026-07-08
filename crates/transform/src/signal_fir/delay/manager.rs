@@ -130,9 +130,16 @@ impl DelayManager {
             return Ok(existing.clone());
         }
 
-        // Strategy-specific ancillary declarations.
+        // Strategy-specific ancillary declarations. The global `fIOTA`
+        // cursor is declared lazily (roadmap P3 slice 4): a `CircularPow2`
+        // line whose carrier lives in a clock domain is reassigned to a
+        // per-domain `fIOTA_d<i>` cursor before emission, so declaring the
+        // global cursor here would leave a dead field + advance. It is
+        // instead ensured by `finalize_global_cursor` for the lines that
+        // actually keep it, plus lazily by circular recursion/delay-state
+        // lowering at the top rate.
         match &strategy {
-            DelayKind::CircularPow2 => ctx.ensure_iota(),
+            DelayKind::CircularPow2 => {}
             DelayKind::IfWrapping { counter_name } => {
                 ctx.ensure_if_wrapping_counter(counter_name.clone());
             }
@@ -174,6 +181,19 @@ impl DelayManager {
         if let Some(info) = self.delay_lines.get_mut(&carried) {
             info.cursor = Some(cursor);
         }
+    }
+
+    /// Returns the carriers of every planned `CircularPow2` line still using
+    /// the shared global cursor (`cursor == None`) — i.e. the lines that
+    /// require the global `fIOTA` to be declared/advanced (roadmap P3 slice 4).
+    pub(in crate::signal_fir) fn global_circular_carriers(&self) -> Vec<SigId> {
+        self.delay_lines
+            .iter()
+            .filter(|(_, info)| {
+                info.cursor.is_none() && matches!(info.strategy, DelayKind::CircularPow2)
+            })
+            .map(|(&carried, _)| carried)
+            .collect()
     }
 
     /// Marks one planned line as living inside a clocked block: its
