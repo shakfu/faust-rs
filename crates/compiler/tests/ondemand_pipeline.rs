@@ -455,6 +455,98 @@ fn inner_circular_delay_line_advances_in_fire_time() {
     }
 }
 
+// ── P4 — FAD Phase A: fad strictly inside a clock domain ────────────────────
+
+/// Runs one single-param program at `param` (baked as the hslider init) and
+/// returns its outputs.
+fn run_od_fad_source(stem: &str, source: String, inputs: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    run_interp_with_inputs(stem, &source, inputs)
+}
+
+#[test]
+fn fad_inside_ondemand_tangent_matches_central_difference() {
+    // Phase A (cohabitation §5): differentiation strictly inside one domain
+    // needs zero new AD code. The differentiated expression reads only the
+    // control seed, so the FAD sweep never touches boundary glue; the
+    // primal/tangent pair is held by the block like any other output.
+    let frames = 8;
+    let ones = vec![1.0_f32; frames];
+    let base = 0.7_f32;
+    let eps = 1.0e-3_f32;
+
+    let fad_src = |p: f32| {
+        format!(
+            r#"g = hslider("g", {p}, -10, 10, 0.001);
+               process = ((_ != 0), (_ : !)) : ondemand(fad(sin(g) * g, g));"#
+        )
+    };
+    let primal_src = |p: f32| {
+        format!(
+            r#"g = hslider("g", {p}, -10, 10, 0.001);
+               process = ((_ != 0), (_ : !)) : ondemand(sin(g) * g);"#
+        )
+    };
+
+    let fad_out = run_od_fad_source("od_fad", fad_src(base), &[ones.clone(), ones.clone()]);
+    assert_eq!(fad_out.len(), 2, "fad bundle = [primal, tangent]");
+    let plus = run_od_fad_source(
+        "od_fad_p",
+        primal_src(base + eps),
+        &[ones.clone(), ones.clone()],
+    );
+    let minus = run_od_fad_source("od_fad_m", primal_src(base - eps), &[ones.clone(), ones]);
+
+    let expected_primal = base.sin() * base;
+    let expected_tangent = (plus[0][frames - 1] - minus[0][frames - 1]) / (2.0 * eps);
+    for (n, (&primal, &tangent)) in fad_out[0].iter().zip(fad_out[1].iter()).enumerate() {
+        assert!(
+            (primal - expected_primal).abs() < 1.0e-5,
+            "frame {n}: primal {primal} vs {expected_primal}"
+        );
+        assert!(
+            (tangent - expected_tangent).abs() < 2.0e-3,
+            "frame {n}: tangent {tangent} vs central difference {expected_tangent}"
+        );
+    }
+}
+
+#[test]
+fn fad_inside_ondemand_tangent_holds_between_fires() {
+    // Sparse clock: both held outputs (primal and tangent) are 0 before the
+    // first fire and hold their value between fires — the tangent is
+    // co-clocked with the primal by construction.
+    let frames = 6;
+    let clk = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let ones = vec![1.0_f32; frames];
+    let g = 0.5_f32;
+
+    let out = run_od_fad_source(
+        "od_fad_hold",
+        format!(
+            r#"g = hslider("g", {g}, -10, 10, 0.001);
+               process = ((_ != 0), (_ : !)) : ondemand(fad(g * g, g));"#
+        ),
+        &[clk.clone(), ones],
+    );
+    let expected_primal = g * g;
+    let expected_tangent = 2.0 * g;
+    for (n, (&primal, &tangent)) in out[0].iter().zip(out[1].iter()).enumerate() {
+        let (want_p, want_t) = if n < 2 {
+            (0.0, 0.0)
+        } else {
+            (expected_primal, expected_tangent)
+        };
+        assert!(
+            (primal - want_p).abs() < 1.0e-6,
+            "frame {n}: primal {primal} vs {want_p}"
+        );
+        assert!(
+            (tangent - want_t).abs() < 1.0e-6,
+            "frame {n}: tangent {tangent} vs {want_t}"
+        );
+    }
+}
+
 // ── P0.4 — loud AD diagnostics at domain boundaries ──────────────────────────
 
 fn expect_compile_error(name: &str, source: &str) -> compiler::CompilerError {
