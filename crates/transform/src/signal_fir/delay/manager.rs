@@ -156,6 +156,7 @@ impl DelayManager {
             name,
             size: required_size,
             strategy,
+            cursor: None,
         };
         self.delay_lines.insert(carried, info.clone());
         Ok(info)
@@ -164,6 +165,14 @@ impl DelayManager {
     /// Iterates the planned delay lines (carried signal, line info).
     pub(in crate::signal_fir) fn lines(&self) -> impl Iterator<Item = (&SigId, &DelayLineInfo)> {
         self.delay_lines.iter()
+    }
+
+    /// Overrides the circular cursor of one planned line (per-domain IOTA,
+    /// roadmap P3). Later `get_delay_line` clones observe the new cursor.
+    pub(in crate::signal_fir) fn set_line_cursor(&mut self, carried: SigId, cursor: String) {
+        if let Some(info) = self.delay_lines.get_mut(&carried) {
+            info.cursor = Some(cursor);
+        }
     }
 
     /// Emits all generic delay-subsystem end-of-sample updates.

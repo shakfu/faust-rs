@@ -241,7 +241,11 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Declares the shared global circular cursor state (`fIOTA`), idempotent.
+    ///
+    /// Also counts every use so clocked lowering can detect (and reject)
+    /// global-cursor reads from inside a guarded block (roadmap P3).
     pub(super) fn ensure_global_circular_cursor(&mut self) {
+        self.global_cursor_reads += 1;
         let mut ctx = DelayFirCtx {
             store: &mut self.store,
             real_ty: self.real_ty.clone(),

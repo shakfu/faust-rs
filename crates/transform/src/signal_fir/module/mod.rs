@@ -344,6 +344,9 @@ struct SignalToFirLower<'a> {
     clocked: Option<clocked::ClockedState<'a>>,
     /// Per-clock-domain `IOTA`/`DSCounter` field registry (roadmap P2.3).
     domain_counters: DomainCounters,
+    /// Number of global-circular-cursor uses so far (guards clocked blocks
+    /// against globally-advanced recursion state — see `clocked.rs`).
+    global_cursor_reads: usize,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.

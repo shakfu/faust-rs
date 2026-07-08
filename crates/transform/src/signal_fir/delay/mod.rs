@@ -172,6 +172,10 @@ pub(super) struct DelayLineInfo {
     pub(super) size: usize,
     /// Buffer-geometry strategy selected for this line.
     pub(super) strategy: DelayKind,
+    /// Circular-cursor override for `CircularPow2` lines whose carrier lives
+    /// inside a clock domain: the per-domain `fIOTA_d<i>` field name
+    /// (roadmap P3). `None` = the shared global `fIOTA`.
+    pub(super) cursor: Option<String>,
 }
 
 // ─── DelayKind ────────────────────────────────────────────────────────────────

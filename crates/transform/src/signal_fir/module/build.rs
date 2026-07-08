@@ -152,7 +152,7 @@ pub(crate) fn build_module<'a>(
     lower.clocked = clocked.map(clocked::ClockedState::new);
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
-    lower.reject_unsupported_clocked_delay_lines()?;
+    lower.assign_clocked_delay_cursors()?;
     let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
     lower.rad_reverse.forward_output_by_sig = signals
         .iter()

@@ -387,6 +387,74 @@ fn downsampling_fires_once_every_clock_ticks() {
     }
 }
 
+#[test]
+fn inner_circular_delay_line_matches_unclocked_when_always_firing() {
+    // @(17) > max_copy_delay forces the CircularPow2 strategy, which now
+    // uses the per-domain fIOTA_d<i> cursor inside the block. With an
+    // always-true clock the block fires every tick, so the clocked program
+    // must match the plain unclocked one sample for sample.
+    let frames = 48;
+    let ramp: Vec<f32> = (0..frames).map(|n| n as f32).collect();
+    let ones = vec![1.0_f32; frames];
+
+    let clocked = run_interp_with_inputs(
+        "od_delay_always",
+        r#"process = ((_ != 0), _) : ondemand(_ <: _, @(17) :> +);"#,
+        &[ones, ramp.clone()],
+    );
+    let unclocked = run_interp_with_inputs(
+        "delay_reference",
+        r#"process = _ <: _, @(17) :> +;"#,
+        std::slice::from_ref(&ramp),
+    );
+    for n in 0..frames {
+        assert!(
+            (clocked[0][n] - unclocked[0][n]).abs() < 1.0e-6,
+            "frame {n}: clocked {} vs unclocked {}",
+            clocked[0][n],
+            unclocked[0][n]
+        );
+    }
+}
+
+#[test]
+fn inner_circular_delay_line_advances_in_fire_time() {
+    // Sparse clock (fires on even ticks): the inner delay line must count
+    // *fires*, not samples. Reference model: on fire, append the snapshot
+    // input; the delayed tap reads the value written 17 fires ago (0 before
+    // the line fills); the output holds between fires.
+    let frames = 60;
+    let ramp: Vec<f32> = (0..frames).map(|n| n as f32).collect();
+    let clk: Vec<f32> = (0..frames)
+        .map(|n| f32::from(u8::from(n % 2 == 0)))
+        .collect();
+
+    let outputs = run_interp_with_inputs(
+        "od_delay_sparse",
+        r#"process = ((_ != 0), _) : ondemand(_ <: _, @(17) :> +);"#,
+        &[clk.clone(), ramp.clone()],
+    );
+
+    let mut fired: Vec<f32> = Vec::new();
+    let mut held = 0.0_f32;
+    for n in 0..frames {
+        if clk[n] != 0.0 {
+            fired.push(ramp[n]);
+            let delayed = if fired.len() > 17 {
+                fired[fired.len() - 1 - 17]
+            } else {
+                0.0
+            };
+            held = ramp[n] + delayed;
+        }
+        assert!(
+            (outputs[0][n] - held).abs() < 1.0e-6,
+            "frame {n}: expected {held}, got {}",
+            outputs[0][n]
+        );
+    }
+}
+
 // ── P0.4 — loud AD diagnostics at domain boundaries ──────────────────────────
 
 fn expect_compile_error(name: &str, source: &str) -> compiler::CompilerError {
