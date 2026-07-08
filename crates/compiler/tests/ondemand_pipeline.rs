@@ -616,3 +616,128 @@ fn rad_around_ondemand_names_the_construct() {
         "RAD rejection must name the clocked construct, got: {message}"
     );
 }
+
+// ── S1–S2 — the `interleave` spectral primitive (frame-rate serialization) ──
+//
+// `interleave(N, FX) = serialize_in(N) : periodic_od(FX) : serialize_out(N)`
+// with a boolean periodic clock of period N and phase N-1 (fires at
+// t ≡ N-1 mod N). Built entirely on top of the P3 boolean-ondemand block —
+// no new compiler primitive (option A: `up0(H, y) = y * (H != 0)`).
+// See `porting/interleave-spectral-primitive-2026-07-07-en.md`.
+//
+// The prelude below is the hermetic (library-free) copy of `interleave.lib`;
+// the two must stay in sync.
+
+/// The generic `interleave` prelude, parameterized by `N` and the frame
+/// operator `FX` through Faust's `par`. Self-contained (no `stdfaust.lib`).
+const INTERLEAVE_PRELUDE: &str = r#"
+frame_clock(N) = ((+(1) : %(N)) ~ _) == 0;
+bus(N) = par(i, N, _);
+serialize_in(N) = _ <: par(i, N, @(N-1-i));
+interleave(N, FX) = serialize_in(N) : od : serialize_out
+with {
+    od = (frame_clock(N), bus(N)) : ondemand(FX);
+    up0(y) = y * (frame_clock(N) != 0);
+    serialize_out = par(j, N, up0 : @(j)) :> _;
+};
+"#;
+
+fn interleave_source(process: &str) -> String {
+    format!("{INTERLEAVE_PRELUDE}\nprocess = {process};")
+}
+
+/// Runs a ramp `x[n] = n` through `process` and returns the single output.
+fn run_ramp(stem: &str, process: &str, frames: usize) -> Vec<f32> {
+    let ramp: Vec<f32> = (0..frames).map(|n| n as f32).collect();
+    let out = run_interp_with_inputs(
+        stem,
+        &interleave_source(process),
+        std::slice::from_ref(&ramp),
+    );
+    assert_eq!(out.len(), 1, "{stem}: expected a single output channel");
+    out.into_iter().next().expect("one output")
+}
+
+#[test]
+fn interleave_identity_is_a_constant_delay_n_minus_1() {
+    // S1 locking milestone: interleave(N, id) == @(N-1) — constant latency
+    // N-1, identity up to that delay. For N=2 this is exactly `mem`.
+    for n in [2usize, 4, 8] {
+        let frames = 6 * n;
+        let got = run_ramp(
+            &format!("interleave_id_{n}"),
+            &format!("interleave({n}, bus({n}))"),
+            frames,
+        );
+        for (t, &value) in got.iter().enumerate() {
+            let expected = t.checked_sub(n - 1).map_or(0.0, |k| k as f32);
+            assert!(
+                (value - expected).abs() < 1.0e-6,
+                "N={n} frame {t}: interleave(id) = {value}, expected @(N-1) = {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn interleave_matches_a_plain_mem_for_n_2() {
+    // The N=2 unrolled-table anchor of the design note: interleave(2, id)
+    // is sample-for-sample identical to `mem`.
+    let frames = 16;
+    let ramp: Vec<f32> = (0..frames).map(|n| n as f32).collect();
+    let both = run_interp_with_inputs(
+        "interleave2_vs_mem",
+        &format!("{INTERLEAVE_PRELUDE}\nprocess = _ <: interleave(2, bus(2)), mem;"),
+        std::slice::from_ref(&ramp),
+    );
+    for (t, (&il, &m)) in both[0].iter().zip(both[1].iter()).enumerate() {
+        assert!(
+            (il - m).abs() < 1.0e-6,
+            "frame {t}: interleave(2,id) = {il} vs mem = {m}"
+        );
+    }
+}
+
+#[test]
+fn interleave_with_a_framewise_gain_scales_the_delayed_stream() {
+    // A stateless frame operator (scale every lane by 2) commutes with the
+    // serialization: interleave(N, 2*id) == 2 * @(N-1).
+    let n = 4usize;
+    let frames = 6 * n;
+    let got = run_ramp(
+        "interleave_gain",
+        &format!("interleave({n}, par(i, {n}, *(2.0)))"),
+        frames,
+    );
+    for (t, &value) in got.iter().enumerate() {
+        let expected = t.checked_sub(n - 1).map_or(0.0, |k| 2.0 * k as f32);
+        assert!(
+            (value - expected).abs() < 1.0e-6,
+            "frame {t}: interleave(2*id) = {value}, expected 2*@(N-1) = {expected}"
+        );
+    }
+}
+
+#[test]
+fn interleave_with_an_internal_frame_delay_adds_one_frame_of_latency() {
+    // S2 fixture: a delay inside the frame operator is measured in *frames*.
+    // The boolean clock fires once every N samples, so `@(1)` inside the
+    // block advances on the per-domain time (P3 slice 3): delaying every
+    // lane by one frame shifts the whole reconstructed stream by N samples.
+    // interleave(N, frame_delay_1) == @(N-1) then @(N) == @(2N-1).
+    for n in [2usize, 4] {
+        let frames = 6 * n;
+        let got = run_ramp(
+            &format!("interleave_framedelay_{n}"),
+            &format!("interleave({n}, par(i, {n}, @(1)))"),
+            frames,
+        );
+        for (t, &value) in got.iter().enumerate() {
+            let expected = t.checked_sub(2 * n - 1).map_or(0.0, |k| k as f32);
+            assert!(
+                (value - expected).abs() < 1.0e-6,
+                "N={n} frame {t}: interleave(frame_delay) = {value}, expected @(2N-1) = {expected}"
+            );
+        }
+    }
+}
