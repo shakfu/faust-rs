@@ -204,6 +204,35 @@ fn run_cpp_reference(env: &RefEnv, stem: &str, source: &str, nframes: usize) -> 
     cols
 }
 
+fn cpp_codegen_stderr(env: &RefEnv, stem: &str, source: &str) -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!(
+        "faust-rs-oddiff-codegen-{stem}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    let dsp_path = dir.join("prog.dsp");
+    let arch_path = dir.join("arch.cpp");
+    let cpp_path = dir.join("prog.cpp");
+    std::fs::write(&dsp_path, source).expect("write dsp");
+    std::fs::write(&arch_path, DIFF_ARCH).expect("write arch");
+
+    let gen_out = Command::new(&env.faust)
+        .args(["-lang", "cpp", "-i", "-a"])
+        .arg(&arch_path)
+        .arg("-I")
+        .arg(&env.arch_include)
+        .arg(&dsp_path)
+        .arg("-o")
+        .arg(&cpp_path)
+        .output()
+        .expect("run faust");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        gen_out.status.success(),
+        String::from_utf8_lossy(&gen_out.stderr).into_owned(),
+    )
+}
+
 /// Runs `source` through the faust-rs interpreter fast lane on the same
 /// deterministic input.
 fn run_faust_rs(stem: &str, source: &str, num_inputs: usize, nframes: usize) -> Vec<Vec<f32>> {
@@ -314,6 +343,32 @@ fn ondemand_domain_free_circular_recursion_matches_cpp_reference() {
         "od_domain_free_circular_rec",
         r#"process = (((_ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ @(20)));"#,
         2,
+    );
+}
+
+#[test]
+fn unparenthesized_independent_ondemand_domains_reject_like_cpp() {
+    let source = r#"process =
+            (((_ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ _)),
+            (((_ % 3) == 0), (_ : !)) : ondemand(10 : (+ ~ _));"#;
+
+    if let Some(env) = reference_env() {
+        let (ok, stderr) = cpp_codegen_stderr(&env, "od_unparenthesized_reject", source);
+        assert!(
+            !ok && stderr.contains("sequential composition"),
+            "C++ reference should reject the unparenthesized form as sequential composition, stderr:\n{stderr}"
+        );
+    } else {
+        eprintln!("Skipping C++ half of unparenthesized OD rejection: reference unavailable");
+    }
+
+    let err = Compiler::new()
+        .compile_source_to_signals("od_unparenthesized_reject.dsp", source)
+        .expect_err("faust-rs must reject the unparenthesized form like C++");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("sequential composition"),
+        "faust-rs rejection should name sequential composition, got:\n{rendered}"
     );
 }
 
