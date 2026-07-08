@@ -323,9 +323,9 @@ fn independent_ondemand_domains_match_cpp_reference() {
     // hold fields, and fire-time state.
     assert_differential(
         "od_two_independent_domains",
-        r#"process =
-            (((( _ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ _))),
-            (((( _ % 3) == 0), (_ : !)) : ondemand(10 : (+ ~ _)));"#,
+        r#"od2 = (((_ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ _));
+           od3 = (((_ % 3) == 0), (_ : !)) : ondemand(10 : (+ ~ _));
+           process = od2, od3;"#,
         4,
     );
 }
