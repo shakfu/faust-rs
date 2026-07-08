@@ -82,6 +82,34 @@ fn ondemand_with_circular_delay_emits_per_domain_cursor() {
 }
 
 #[test]
+fn held_domain_free_payload_state_is_inside_guarded_block() {
+    // The recursion does not read a domain-internal input, so clock-env
+    // inference can assign it an ancestor environment. C++ still emits the
+    // whole held `Clocked(env, payload)` body in the guarded block and only
+    // reads the hold field outside.
+    let cpp = compile_cpp(
+        "struct_od_domain_free",
+        r#"process = (((_ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ _));"#,
+    );
+    let body = compute_body(&cpp);
+    let guard = body
+        .find("if (")
+        .unwrap_or_else(|| panic!("guarded block expected:\n{body}"));
+    let rec_update = body[guard..]
+        .find("iRec")
+        .map(|offset| guard + offset)
+        .unwrap_or_else(|| panic!("recursive state update must be inside the guard:\n{body}"));
+    let output_store = body[rec_update..]
+        .find("output0")
+        .map(|offset| rec_update + offset)
+        .unwrap_or_else(|| panic!("output store expected after guarded payload:\n{body}"));
+    assert!(
+        rec_update < output_store,
+        "recursive payload state must update inside the guard before the held output read:\n{body}"
+    );
+}
+
+#[test]
 fn upsampling_emits_counted_inner_loop() {
     let cpp = compile_cpp("struct_us", r#"process = (2, _) : upsampling(+ ~ _);"#);
     let body = compute_body(&cpp);

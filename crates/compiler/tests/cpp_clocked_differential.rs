@@ -284,13 +284,83 @@ fn ondemand_with_inner_delay_matches_cpp_reference() {
 }
 
 #[test]
+fn ondemand_domain_free_payload_matches_cpp_reference() {
+    // Regression for held payloads whose state does not read a domain-internal
+    // input. The state still belongs to the held Clocked payload and advances
+    // only when the OD guard fires.
+    assert_differential(
+        "od_domain_free_payload",
+        r#"process = (((_ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ _));"#,
+        2,
+    );
+}
+
+#[test]
+fn integer_ondemand_domain_free_payload_matches_cpp_reference() {
+    // Integer OD repeats the held payload in fire time. A domain-free payload
+    // must not be hoisted to the outer sample loop.
+    assert_differential(
+        "int_od_domain_free_payload",
+        r#"process = (3, (_ : !)) : ondemand(1 : (+ ~ _));"#,
+        1,
+    );
+}
+
+#[test]
+fn ondemand_domain_free_circular_recursion_matches_cpp_reference() {
+    // Long feedback delay forces circular recursion storage. The per-domain
+    // cursor must advance on OD fires, not at the outer sample rate.
+    assert_differential(
+        "od_domain_free_circular_rec",
+        r#"process = (((_ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ @(20)));"#,
+        2,
+    );
+}
+
+#[test]
+fn independent_ondemand_domains_match_cpp_reference() {
+    // Two held payloads with different clocks must keep independent domains,
+    // hold fields, and fire-time state.
+    assert_differential(
+        "od_two_independent_domains",
+        r#"process =
+            (((( _ % 2) == 0), (_ : !)) : ondemand(1 : (+ ~ _))),
+            (((( _ % 3) == 0), (_ : !)) : ondemand(10 : (+ ~ _)));"#,
+        4,
+    );
+}
+
+#[test]
 fn upsampling_matches_cpp_reference() {
     // Integer-clocked upsampling (counted inner loop + zero-padded input).
     assert_differential("us_accum", r#"process = (2, _) : upsampling(+ ~ _);"#, 1);
 }
 
 #[test]
+fn upsampling_domain_free_payload_matches_cpp_reference() {
+    // Counted-loop version of the held-payload rule: the payload recursion
+    // advances once per inner fire even though it does not consume the outer
+    // input value.
+    assert_differential(
+        "us_domain_free_payload",
+        r#"process = (2, (_ : !)) : upsampling(1 : (+ ~ _));"#,
+        1,
+    );
+}
+
+#[test]
 fn downsampling_matches_cpp_reference() {
     // Integer-clocked downsampling (modulo firing guard).
     assert_differential("ds_accum", r#"process = (2, _) : downsampling(+ ~ _);"#, 1);
+}
+
+#[test]
+fn downsampling_domain_free_payload_matches_cpp_reference() {
+    // Downsampling fires once every N outer ticks. The held payload's state is
+    // still in the downsampled domain even when it ignores the outer input.
+    assert_differential(
+        "ds_domain_free_payload",
+        r#"process = (3, (_ : !)) : downsampling(1 : (+ ~ _));"#,
+        1,
+    );
 }

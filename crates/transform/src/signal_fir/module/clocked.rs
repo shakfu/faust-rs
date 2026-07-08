@@ -34,14 +34,15 @@
 //! block closes). `Hgraph`/`Hsched` (P1.2) are still built by the clocked
 //! entry point as a pre-lowering validation pass (partition + causality).
 //!
-//! **Redirection exception — fire-gated stateful generators.** A node with
-//! internal state that must tick once per fire is lowered *in the block that
-//! consumes it*, never redirected to an ancestor, even when clock-env
-//! inference gives it an ancestor rate. The concrete case is `Waveform`: its
-//! `iWave*` read-index counter reads no clocked input, so inference assigns it
-//! the audio rate, but redirecting its lowering would emit the index advance
-//! at the top rate and race the index ahead every sample (the `gamme.dsp`
-//! scale regression). See [`SignalToFirLower::clocked_redirect_target`].
+//! **Redirection exception — held payloads.** The payload of
+//! `PermVar(Clocked(env, value))` is lowered *in the guarded block that writes
+//! the hold field*, never redirected to an ancestor just because clock-env
+//! inference gives `value` or one of its stateful children an ancestor rate.
+//! This matches C++ `generateOD`/`generatePermVar`: only `TempVar` boundary
+//! reads re-enable redirection for true outer-domain sources. This general rule
+//! covers the original `Waveform` regression, where redirecting the `iWave*`
+//! read-index update to the top rate made the scale advance every sample
+//! instead of once per fire.
 //!
 //! # Node generators (plan §3.8)
 //! - `Seq(od, y)` → `CS(od); return CS(y)`;
