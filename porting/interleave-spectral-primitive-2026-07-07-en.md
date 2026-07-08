@@ -103,15 +103,42 @@ zero-stuffed lines adds the overlapping frames. The COLA condition on the
 analysis window stays the user's responsibility (a provable theorem, out of
 compiler scope).
 
-## 6. What comes next (S3+)
+## 6. S3 — the framed FFT milestone (done)
 
-- **S3** — FFT milestone: `fft_framed(N) = interleave(N, an.rtocv(N) :
-  an.fftb(N))`, validated against the sliding FFT of `analyzers.lib` at the
-  alignment ticks (the library is its own oracle). Analysis-only use
-  (spectral loss) needs no `serialize_out`: the bins held by the `PermVar`s at
-  frame rate are directly consumable.
+`crates/compiler/tests/interleave_fft.rs` (skips gracefully without
+`analyzers.lib`). The **analysis-only** framed FFT — a frame-rate FFT whose
+O(N log N) butterflies run once per hop, held between frames:
+
+```faust
+serialize_in(N) = _ <: par(i, N, @(N-1-i));
+fftFX(N) = par(i, N, (_, 0))            // complexify the N real window taps
+         : an.c_bit_reverse_shuffle(N)  // reused spatial core, unchanged
+         : an.fftb(N);
+fft_framed(N) = serialize_in(N) : (frame_clock(N), si.bus(N)) : ondemand(fftFX(N));
+```
+
+- **Only `an.fftb`/`an.c_bit_reverse_shuffle` are reused — nothing in the DSP
+  core changes.** The "one single brick" claim (§4.5) holds: `ondemand` +
+  `serialize_in` are the entire delta. The block exposes **2N held bin reals**
+  (`[re₀, im₀, re₁, im₁, …]`) at frame rate.
+- **Oracle**: a direct DFT of the known window computed in Rust; at each frame
+  tick (`t ≡ N−1 mod N`) the held bins equal `Σᵢ wᵢ·e^(−2πi·m·i/N)` for the
+  window `{x[t−N+1 … t]}`. Verified for N ∈ {4, 8}; the O(N log N) butterflies
+  scale through the pattern matcher unchanged.
+- **Analysis-only mode** (no `serialize_out`): for a spectral *loss* you
+  consume the held bins directly — resynthesis (phase vocoder) is the only use
+  that needs `serialize_out` + OLA. This is also the surface a differentiable
+  spectral loss attaches to (S4).
+- **Compile-time note** (§4.6 risk): FFT butterfly lowering recurses deeply;
+  the test compiles on a 64 MiB worker stack. N=1024–4096 will genuinely
+  stress the pattern matcher and code size — stage with measurements before
+  claiming it.
+
+## 7. What comes next (S4+)
+
 - **S4** — differentiable STFT: requires FAD Phase B (P5), since a realistic
   spectral loss crosses the boundary (parameters enter through
-  `serialize_in`). Magnitude needs the epsilon `sqrt(R²+I²+ε)`.
+  `serialize_in`). Magnitude needs the epsilon `sqrt(R²+I²+ε)`. The
+  analysis-only framed FFT above is its infrastructure.
 - **S5** — performance: the STFT `ondemand` is a scalar island under `-vec`
   (D1) and the ideal D2 candidate (literal factor, stateless `fftb`).
