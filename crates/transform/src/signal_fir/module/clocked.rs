@@ -1,4 +1,4 @@
-//! Guarded-block lowering for clocked wrappers (roadmap P3.1, first slice).
+//! Guarded-block lowering for clocked wrappers (roadmap P3, complete).
 //!
 //! # Source provenance (C++)
 //! - `compiler/generator/compile_scal.cpp` (`generateOD`, `generateTempVar`,
@@ -13,15 +13,16 @@
 //! All reuse the generic FIR `If` / `SimpleForLoop` / `Block` statements per
 //! the P2.1 vocabulary decision.
 //!
-//! **State inside a block advances in fire time.** Every delay/recursion
-//! strategy whose carrier lives in the domain has its end-of-sample
-//! maintenance routed into the guarded region (roadmap P3 slice 4): shift
-//! delays and scalar recursion emit their updates inline; `CircularPow2`
-//! lines and delay-states use the domain's per-domain `fIOTA_d<i>` cursor
-//! (advanced once per fire); inner `IfWrapping` lines advance their per-line
-//! counter in the block. The remaining `FRS-SFIR-0007` rejections are
-//! genuinely-unsupported shapes only (non-boolean real OD clocks, non-integer
-//! US/DS clocks).
+//! **State inside a block advances in fire time.** Every stateful shape whose
+//! state lives in the domain has its end-of-sample maintenance routed into the
+//! guarded region (roadmap P3 slices 3-4): shift delays and scalar recursion
+//! emit their updates inline; `CircularPow2` lines and delay-states use the
+//! domain's per-domain `fIOTA_d<i>` cursor (advanced once per fire); inner
+//! `IfWrapping` lines advance their per-line counter in the block; a
+//! `Waveform`'s read-index counter (`iWave*`) advances inside the block (see
+//! the redirection exception below). The remaining `FRS-SFIR-0007` rejections
+//! are genuinely-unsupported shapes only (non-boolean real OD clocks,
+//! non-integer US/DS clocks).
 //!
 //! # Emission model (adaptation note)
 //! C++ drives emission from the `Hsched` schedule. This port keeps the
@@ -32,6 +33,15 @@
 //! (statements land *before* the guard statement, which is appended when the
 //! block closes). `Hgraph`/`Hsched` (P1.2) are still built by the clocked
 //! entry point as a pre-lowering validation pass (partition + causality).
+//!
+//! **Redirection exception — fire-gated stateful generators.** A node with
+//! internal state that must tick once per fire is lowered *in the block that
+//! consumes it*, never redirected to an ancestor, even when clock-env
+//! inference gives it an ancestor rate. The concrete case is `Waveform`: its
+//! `iWave*` read-index counter reads no clocked input, so inference assigns it
+//! the audio rate, but redirecting its lowering would emit the index advance
+//! at the top rate and race the index ahead every sample (the `gamme.dsp`
+//! scale regression). See [`SignalToFirLower::clocked_redirect_target`].
 //!
 //! # Node generators (plan §3.8)
 //! - `Seq(od, y)` → `CS(od); return CS(y)`;
