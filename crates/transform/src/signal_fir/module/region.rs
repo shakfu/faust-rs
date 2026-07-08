@@ -94,9 +94,25 @@ struct Region {
 ///
 /// Regions at the top level are the sibling per-loop slices (forward sample
 /// loop, reverse-time loop) emitted in creation order by `build_module`.
+/// Guarded clocked blocks (P3) nest as a stack of **open child frames** under
+/// the current top-level region; the innermost open frame is the default
+/// append target.
+///
+/// # Redirection
+/// Clocked lowering must place a signal computed in an *ancestor* domain in
+/// the ancestor's region even when a descendant block is currently open (the
+/// visibility rule of the P2.1 design note, applied in the emission
+/// direction). [`Self::set_redirect`] retargets the append surface to an
+/// outer depth: `0` = the current top-level region, `k > 0` = the `k`-th open
+/// child frame. Non-clocked lowering never opens children nor redirects, so
+/// the P2.2 behavior is unchanged.
 pub(super) struct RegionTree {
     regions: Vec<Region>,
     current: usize,
+    /// Open nested guarded-block frames, innermost last.
+    open_children: Vec<RegionPhases>,
+    /// Append redirection depth (see type docs); `None` = innermost.
+    redirect: Option<usize>,
 }
 
 impl RegionTree {
@@ -108,27 +124,73 @@ impl RegionTree {
                 phases: RegionPhases::default(),
             }],
             current: 0,
+            open_children: Vec::new(),
+            redirect: None,
         }
     }
 
-    /// Phased statement lists of the current region — the single append
-    /// surface for all lowering code.
+    /// Phased statement lists of the append-target region — the single
+    /// append surface for all lowering code.
     pub(super) fn current_phases_mut(&mut self) -> &mut RegionPhases {
-        &mut self.regions[self.current].phases
+        let depth = self.redirect.unwrap_or(self.open_children.len());
+        if depth == 0 {
+            &mut self.regions[self.current].phases
+        } else {
+            &mut self.open_children[depth - 1]
+        }
     }
 
-    /// Flattens the current region's phases into one ordered statement list.
+    /// Flattens the current top-level region's phases into one ordered
+    /// statement list.
     pub(super) fn current_flattened(&self) -> Vec<FirId> {
+        debug_assert!(
+            self.open_children.is_empty(),
+            "flattening a loop slice with unclosed guarded blocks"
+        );
         self.regions[self.current].phases.flattened()
     }
 
     /// Closes the current region and opens a fresh sibling of `kind`,
     /// pointing the cursor at it.
     pub(super) fn begin_sibling(&mut self, kind: RegionKind) {
+        debug_assert!(
+            self.open_children.is_empty(),
+            "starting a new loop slice with unclosed guarded blocks"
+        );
         self.regions.push(Region {
             kind,
             phases: RegionPhases::default(),
         });
         self.current = self.regions.len() - 1;
+    }
+
+    /// Number of open guarded-block frames.
+    pub(super) fn child_depth(&self) -> usize {
+        self.open_children.len()
+    }
+
+    /// Opens a nested guarded-block frame; it becomes the append target
+    /// (unless a redirection is active).
+    pub(super) fn open_child(&mut self) {
+        self.open_children.push(RegionPhases::default());
+    }
+
+    /// Closes the innermost guarded-block frame and returns its phases so
+    /// the caller can wrap them in the guard statement.
+    pub(super) fn close_child(&mut self) -> RegionPhases {
+        self.open_children
+            .pop()
+            .expect("close_child requires an open guarded-block frame")
+    }
+
+    /// Retargets the append surface to `depth` (see type docs); returns the
+    /// previous redirection so callers can restore it.
+    pub(super) fn set_redirect(&mut self, depth: Option<usize>) -> Option<usize> {
+        std::mem::replace(&mut self.redirect, depth)
+    }
+
+    /// Current redirection depth, if a redirection is active.
+    pub(super) fn redirect_depth(&self) -> Option<usize> {
+        self.redirect
     }
 }

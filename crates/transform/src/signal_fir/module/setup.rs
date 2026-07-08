@@ -83,6 +83,7 @@ impl<'a> SignalToFirLower<'a> {
             cache: HashMap::new(),
             sections: state::ModuleSections::default(),
             regions: region::RegionTree::new(region::RegionKind::SampleLoop),
+            clocked: None,
             state_name_by_node: HashMap::new(),
             recursion: RecursionState::default(),
             scheduled_state_updates: HashSet::new(),

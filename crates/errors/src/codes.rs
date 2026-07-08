@@ -69,6 +69,8 @@ pub const SFIR_INPUT_INDEX_OUT_OF_RANGE: DiagnosticCode = DiagnosticCode("FRS-SF
 /// Clocked node (`ondemand`/`upsampling`/`downsampling` machinery) reached
 /// signal->FIR lowering before the clock-domain back half is ported.
 pub const SFIR_CLOCKED_NOT_LOWERED: DiagnosticCode = DiagnosticCode("FRS-SFIR-0007");
+/// Clock-environment inference / hierarchical-graph validation failed.
+pub const SFIR_CLOCK_ANALYSIS: DiagnosticCode = DiagnosticCode("FRS-SFIR-0008");
 
 /// FIR verifier error diagnostic (details in notes: `fir_code=...`).
 pub const FIR_VERIFY_ERROR: DiagnosticCode = DiagnosticCode("FRS-FIR-0001");
@@ -114,6 +116,7 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         SFIR_UNSUPPORTED_BINOP,
         SFIR_INPUT_INDEX_OUT_OF_RANGE,
         SFIR_CLOCKED_NOT_LOWERED,
+        SFIR_CLOCK_ANALYSIS,
         FIR_VERIFY_ERROR,
         FIR_VERIFY_WARNING,
         COMP_PARSE_FAILED,

@@ -210,13 +210,85 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
     ui: &UiProgram,
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
+    compile_fastlane_inner(_arena, signals, num_inputs, num_outputs, ui, options, None)
+}
+
+/// Clock-domain-aware variant of [`compile_signals_to_fir_fastlane_with_ui`].
+///
+/// `clock_domains` is the propagation-owned side table
+/// ([`propagate::ClockDomainTable`], roadmap P0.2). When the program contains
+/// clocked wrappers, this entry runs the clock-environment inference
+/// ([`crate::clk_env`]) and the hierarchical-graph validation
+/// ([`crate::hgraph`]) on the prepared forest, then lowers boolean `ondemand`
+/// blocks as guarded regions (roadmap P3, first slice). Programs without
+/// clocked wrappers behave exactly like the plain entry point.
+pub fn compile_signals_to_fir_fastlane_clocked(
+    arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    ui: &UiProgram,
+    clock_domains: &propagate::ClockDomainTable,
+    options: &SignalFirOptions,
+) -> Result<SignalFirOutput, SignalFirError> {
+    compile_fastlane_inner(
+        arena,
+        signals,
+        num_inputs,
+        num_outputs,
+        ui,
+        options,
+        Some(clock_domains),
+    )
+}
+
+fn compile_fastlane_inner(
+    arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    ui: &UiProgram,
+    options: &SignalFirOptions,
+    clock_domains: Option<&propagate::ClockDomainTable>,
+) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
-    let prepared = prepare_signals_for_fir_verified(_arena, signals, ui).map_err(|err| {
+    let prepared = prepare_signals_for_fir_verified(arena, signals, ui).map_err(|err| {
         SignalFirError::new(
             SignalFirErrorCode::UnsupportedSignalNode,
             format!("signal preparation failed: {err}"),
         )
     })?;
+
+    // Clocked programs: infer domains and validate the hierarchical graph
+    // before lowering (roadmap P1 analyses as the pre-lowering gate).
+    let clocked = match clock_domains {
+        Some(domains) if !domains.is_empty() => {
+            let envs = crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs())
+                .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("clock-environment inference failed: {err}"),
+                    )
+                })?;
+            let hgraph =
+                crate::hgraph::build_hgraph(prepared.arena(), domains, &envs, prepared.outputs())
+                    .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("hierarchical dependency graph failed: {err}"),
+                    )
+                })?;
+            crate::hgraph::schedule(&hgraph).map_err(|err| {
+                SignalFirError::new(
+                    SignalFirErrorCode::ClockAnalysis,
+                    format!("clock-domain scheduling failed: {err}"),
+                )
+            })?;
+            Some(module::ClockedPlan { domains, envs })
+        }
+        _ => None,
+    };
+
     module::build_module(
         &plan,
         options.module_name.as_str(),
@@ -228,6 +300,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
         options.real_type.as_fir_type(),
         options.max_copy_delay,
         options.delay_line_threshold,
+        clocked,
     )
 }
 

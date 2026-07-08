@@ -256,12 +256,13 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         max_copy_delay,
         delay_line_threshold,
     };
-    let lowered = compile_signals_to_fir_fastlane_with_ui(
+    let lowered = transform::signal_fir::compile_signals_to_fir_fastlane_clocked(
         &output.parse.state.arena,
         &output.signals,
         output.process_arity.inputs,
         output.propagated_output_count(),
         &output.ui,
+        &output.clock_domains,
         &signal_fir_options,
     )?;
     Ok(FirCompileOutput {

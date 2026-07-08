@@ -195,6 +195,137 @@ fn clock_inference_and_hgraph_run_on_prepared_ondemand_program() {
     assert!(!sub.is_empty(), "the block body must be scheduled");
 }
 
+// ── P3 (slice 1) — boolean ondemand guarded-block lowering ──────────────────
+
+/// Compiles a temp DSP source through the interpreter fast lane and runs it
+/// with explicit per-channel inputs.
+fn run_interp_with_inputs(stem: &str, source: &str, inputs: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    use std::io::Cursor;
+
+    use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
+    use compiler::SignalFirLane;
+
+    let path =
+        std::env::temp_dir().join(format!("faust-rs-odp3-{stem}-{}.dsp", std::process::id()));
+    std::fs::write(&path, source)
+        .unwrap_or_else(|e| panic!("failed to write temporary DSP {}: {e}", path.display()));
+    let fbc = Compiler::new()
+        .compile_file_default_to_interp_with_lane(
+            &path,
+            &InterpOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("{stem}: interp compilation failed: {e}"));
+    let _ = std::fs::remove_file(&path);
+
+    let frame_count = inputs.first().map_or(0, Vec::len);
+    let mut reader = Cursor::new(fbc);
+    let mut factory =
+        read_fbc::<f32>(&mut reader).unwrap_or_else(|e| panic!("{stem}: fbc parse failed: {e}"));
+    let mut instance = FbcDspInstance::new(&mut factory);
+    instance.init(48_000);
+
+    let num_outputs = usize::try_from(instance.get_num_outputs()).expect("non-negative outputs");
+    let input_slices: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
+    let mut outputs = vec![vec![0.0_f32; frame_count]; num_outputs];
+    let mut output_slices: Vec<&mut [f32]> = outputs.iter_mut().map(Vec::as_mut_slice).collect();
+    instance
+        .try_compute(frame_count as i32, &input_slices, &mut output_slices)
+        .unwrap_or_else(|e| panic!("{stem}: interp execution failed: {e}"));
+    outputs
+}
+
+#[test]
+fn boolean_ondemand_compiles_to_fir_through_clocked_entry() {
+    use transform::signal_fir::compile_signals_to_fir_fastlane_clocked;
+
+    let out = compile_inline(
+        "od_bool_fir",
+        r#"process = ((_ != 0), _) : ondemand(*(2));"#,
+    );
+    compile_signals_to_fir_fastlane_clocked(
+        &out.parse.state.arena,
+        &out.signals,
+        out.process_arity.inputs,
+        out.process_arity.outputs,
+        &out.ui,
+        &out.clock_domains,
+        &SignalFirOptions::default(),
+    )
+    .expect("boolean ondemand must lower through the clocked entry (P3 slice 1)");
+}
+
+#[test]
+fn boolean_ondemand_holds_and_fires_at_runtime() {
+    // y[n] = 2*x[n] when clk[n] != 0, else hold y[n-1]; holds start at 0.
+    let clk = vec![0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    let x = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    let outputs = run_interp_with_inputs(
+        "hold_fire",
+        r#"process = ((_ != 0), _) : ondemand(*(2));"#,
+        &[clk.clone(), x.clone()],
+    );
+    assert_eq!(outputs.len(), 1);
+    let mut held = 0.0_f32;
+    for n in 0..clk.len() {
+        if clk[n] != 0.0 {
+            held = 2.0 * x[n];
+        }
+        assert!(
+            (outputs[0][n] - held).abs() < 1.0e-6,
+            "frame {n}: expected {held}, got {}",
+            outputs[0][n]
+        );
+    }
+}
+
+#[test]
+fn boolean_ondemand_with_recursive_state_accumulates_on_fire_only() {
+    // Inside the block: acc = acc' + x, advanced only when the clock fires.
+    let clk = vec![1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let outputs = run_interp_with_inputs(
+        "acc_on_fire",
+        r#"process = ((_ != 0), _) : ondemand(+ ~ _);"#,
+        &[clk.clone(), x.clone()],
+    );
+    let mut acc = 0.0_f32;
+    let mut held = 0.0_f32;
+    for n in 0..clk.len() {
+        if clk[n] != 0.0 {
+            acc += x[n];
+            held = acc;
+        }
+        assert!(
+            (outputs[0][n] - held).abs() < 1.0e-6,
+            "frame {n}: expected {held}, got {}",
+            outputs[0][n]
+        );
+    }
+}
+
+#[test]
+fn upsampling_keeps_named_rejection_through_clocked_entry() {
+    use transform::signal_fir::compile_signals_to_fir_fastlane_clocked;
+
+    let out = compile_inline(
+        "us_still_rejected",
+        r#"process = ((_ != 0), _) : upsampling(*(2));"#,
+    );
+    let err = compile_signals_to_fir_fastlane_clocked(
+        &out.parse.state.arena,
+        &out.signals,
+        out.process_arity.inputs,
+        out.process_arity.outputs,
+        &out.ui,
+        &out.clock_domains,
+        &SignalFirOptions::default(),
+    )
+    .expect_err("upsampling is outside the boolean-ondemand slice");
+    assert_eq!(err.code().as_str(), "FRS-SFIR-0007", "got: {err}");
+    assert!(err.message().contains("upsampling"), "got: {err}");
+}
+
 // ── P0.4 — loud AD diagnostics at domain boundaries ──────────────────────────
 
 fn expect_compile_error(name: &str, source: &str) -> compiler::CompilerError {

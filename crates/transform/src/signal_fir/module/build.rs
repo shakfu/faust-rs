@@ -119,17 +119,18 @@ pub(super) struct RadReverseState {
 ///   variable delay sizing via [`sigtype::check_delay_interval`].
 /// - `real_ty` – internal computation type (`Float32` or `Float64`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_module(
+pub(crate) fn build_module<'a>(
     plan: &SignalFirPlan,
     module_name: &str,
-    arena: &TreeArena,
+    arena: &'a TreeArena,
     signals: &[SigId],
-    ui: &UiProgram,
-    types: &HashMap<SigId, SimpleSigType>,
-    sig_types: &HashMap<SigId, SigType>,
+    ui: &'a UiProgram,
+    types: &'a HashMap<SigId, SimpleSigType>,
+    sig_types: &'a HashMap<SigId, SigType>,
     real_ty: FirType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
+    clocked: Option<clocked::ClockedPlan<'a>>,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let delay_opts = DelayOptions {
         max_copy_delay,
@@ -148,8 +149,10 @@ pub(crate) fn build_module(
         placement,
         delay_opts,
     );
+    lower.clocked = clocked.map(clocked::ClockedState::new);
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
+    lower.reject_unsupported_clocked_delay_lines()?;
     let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
     lower.rad_reverse.forward_output_by_sig = signals
         .iter()

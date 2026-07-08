@@ -143,6 +143,7 @@ use super::siggen::interpret_generator;
 mod arithmetic;
 mod bra;
 mod build;
+mod clocked;
 mod core_lowering;
 mod rad_formula_builder;
 mod region;
@@ -151,6 +152,7 @@ mod state;
 mod tables;
 mod ui_lowering;
 pub(super) use build::build_module;
+pub(super) use clocked::ClockedPlan;
 use rad_formula_builder::FirRadFormulaBuilder;
 
 /// Maximum number of samples that can be stored in a BRA forward tape array.
@@ -336,6 +338,9 @@ struct SignalToFirLower<'a> {
     /// Compute-region tree: per-loop regions carrying the phased statement
     /// lists of `compute` (roadmap P2 — see `region.rs` for the design note).
     regions: region::RegionTree,
+    /// Clocked-lowering state, present only for programs with clocked
+    /// wrappers (roadmap P3 — see `clocked.rs`).
+    clocked: Option<clocked::ClockedState<'a>>,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.

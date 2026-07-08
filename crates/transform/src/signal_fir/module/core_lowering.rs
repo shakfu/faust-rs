@@ -25,6 +25,18 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(id);
         }
 
+        // P3 clocked emission: a signal computed in a strict-ancestor clock
+        // domain must have its statements placed in the ancestor's region,
+        // even while a guarded block is open (see `clocked.rs`). The
+        // recursive re-entry cannot loop: with the redirection installed,
+        // the effective domain equals the signal's domain.
+        if let Some(depth) = self.clocked_redirect_target(sig) {
+            let previous = self.regions.set_redirect(Some(depth));
+            let result = self.lower_signal(sig);
+            self.regions.set_redirect(previous);
+            return result;
+        }
+
         let lowered = match match_sig(self.arena, sig) {
             SigMatch::Int(value) => self.lower_int32_const(value),
             // Real constant: emitted at internal precision (Float32 or Float64).
@@ -125,6 +137,24 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::SoundfileRate(sf, part) => self.lower_soundfile_rate(sf, part)?,
             SigMatch::SoundfileBuffer(sf, chan, part, ridx) => {
                 self.lower_soundfile_buffer(sig, sf, chan, part, ridx)?
+            }
+            // Clocked machinery under an active clocked-lowering state
+            // (roadmap P3, boolean-ondemand slice — see `clocked.rs`):
+            // `Seq(od, y)` compiles the block then reads the hold;
+            // `Clocked`/`TempVar` are annotations/snapshots (passthrough);
+            // `PermVar` reads its registered hold field; `OnDemand` emits
+            // the guarded block.
+            SigMatch::Seq(x, y) if self.clocked.is_some() => {
+                let _ = self.lower_signal(x)?;
+                self.lower_signal(y)?
+            }
+            SigMatch::Clocked(_, inner) if self.clocked.is_some() => self.lower_signal(inner)?,
+            SigMatch::TempVar(inner) if self.clocked.is_some() => self.lower_signal(inner)?,
+            SigMatch::PermVar(_) if self.clocked.is_some() => self.lower_perm_var_read(sig)?,
+            SigMatch::OnDemand(_) | SigMatch::Upsampling(_) | SigMatch::Downsampling(_)
+                if self.clocked.is_some() =>
+            {
+                self.ensure_guarded_block(sig)?
             }
             // Clocked machinery (`ondemand` / `upsampling` / `downsampling`
             // wrappers and their glue nodes): accepted by propagation and

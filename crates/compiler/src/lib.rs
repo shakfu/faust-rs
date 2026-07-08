@@ -85,9 +85,7 @@ use signals::SigId;
 use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::signal_fir::RealType;
-use transform::signal_fir::{
-    SignalFirError, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
-};
+use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
 use ui::UiProgram;
 
 /// Parse + eval + propagate output package.

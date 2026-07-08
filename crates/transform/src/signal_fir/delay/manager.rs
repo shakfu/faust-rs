@@ -161,6 +161,11 @@ impl DelayManager {
         Ok(info)
     }
 
+    /// Iterates the planned delay lines (carried signal, line info).
+    pub(in crate::signal_fir) fn lines(&self) -> impl Iterator<Item = (&SigId, &DelayLineInfo)> {
+        self.delay_lines.iter()
+    }
+
     /// Emits all generic delay-subsystem end-of-sample updates.
     ///
     /// This centralizes the runtime maintenance required by delay strategies

@@ -30,6 +30,10 @@ pub enum SignalFirErrorCode {
     /// [`Self::UnsupportedSignalNode`] so callers and tests can tell "not
     /// ported yet by design" apart from "unexpected node".
     ClockedNotLowered,
+    /// Clock-environment inference or hierarchical-graph validation failed
+    /// on a clocked program (ill-clocked graph: incomparable domains,
+    /// annotation violations, instantaneous cycles inside a domain, …).
+    ClockAnalysis,
 }
 
 impl SignalFirErrorCode {
@@ -44,6 +48,7 @@ impl SignalFirErrorCode {
             Self::UnsupportedBinOp => "FRS-SFIR-0005",
             Self::InputIndexOutOfRange => "FRS-SFIR-0006",
             Self::ClockedNotLowered => "FRS-SFIR-0007",
+            Self::ClockAnalysis => "FRS-SFIR-0008",
         }
     }
 }
