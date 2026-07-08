@@ -835,3 +835,28 @@ fn inner_ifwrapping_delay_lowers_through_clocked_entry() {
     )
     .expect("inner IfWrapping delay must lower (P3 slice 4), not be rejected");
 }
+
+#[test]
+fn ui_slider_inside_block_is_read_on_fire() {
+    // SR/UI-in-block policy: a control (block-rate value) read inside a
+    // clocked block is sampled on fire and held between fires — no special
+    // handling needed, it flows through the block like any other value.
+    // hslider default 3 => gain 3 applied to the snapshot input on fire.
+    let clk = vec![1.0, 0.0, 1.0, 0.0, 0.0];
+    let x = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+    let out = run_interp_with_inputs(
+        "ui_slider_block",
+        r#"process = ((_ != 0), _) : ondemand(_ * hslider("g", 3, 0, 10, 0.01));"#,
+        &[clk.clone(), x.clone()],
+    );
+    let mut held = 0.0_f32;
+    for (t, &value) in out[0].iter().enumerate() {
+        if clk[t] != 0.0 {
+            held = 3.0 * x[t];
+        }
+        assert!(
+            (value - held).abs() < 1.0e-4,
+            "frame {t}: expected {held}, got {value}"
+        );
+    }
+}
