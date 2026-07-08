@@ -7,8 +7,9 @@
 //! delay/IOTA counters); emitting its advance at the top rate makes the index
 //! race ahead ~20000× between fires and plays a garbled sequence instead of a
 //! C-major scale. The C++ reference (`8eebea429`) emits the index advance
-//! inside the guarded `if`. Fixed by not redirecting `Waveform` lowering out
-//! of the consuming block.
+//! inside the guarded `if`. This is covered by the general rule that a held
+//! `Clocked` payload lowers in the consuming guarded block, even when clock
+//! inference gives the payload an ancestor environment.
 //!
 //! Needs `analyzers`/`basics`/`stdfaust` from faustlibraries; skips gracefully
 //! when unavailable (`FAUST_RS_FAUSTLIBRARIES_ROOT`, else the default path).

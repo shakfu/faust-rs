@@ -106,3 +106,5 @@ Files are listed chronologically (oldest day first). Inside each file, entries a
 - [2026-06-21](./2026-06-21.md) (6 entries)
 - [2026-06-22](./2026-06-22.md) (2 entries)
 - [2026-07-05](./2026-07-05.md) (5 entries)
+- [2026-07-07](./2026-07-07.md) (13 entries)
+- [2026-07-08](./2026-07-08.md) (1 entry)

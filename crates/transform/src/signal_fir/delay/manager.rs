@@ -205,6 +205,12 @@ impl DelayManager {
         }
     }
 
+    pub(in crate::signal_fir) fn is_line_inner(&self, carried: SigId) -> bool {
+        self.delay_lines
+            .get(&carried)
+            .is_some_and(|info| info.inner_clocked)
+    }
+
     /// Emits all generic delay-subsystem end-of-sample updates.
     ///
     /// This centralizes the runtime maintenance required by delay strategies

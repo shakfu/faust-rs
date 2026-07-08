@@ -139,18 +139,6 @@ impl<'a> SignalToFirLower<'a> {
     pub(super) fn clocked_redirect_target(&self, sig: SigId) -> Option<usize> {
         let clocked = self.clocked.as_ref()?;
 
-        // Fire-gated stateful generators must be lowered *in the block that
-        // consumes them*, never redirected to an ancestor. A `Waveform`
-        // carries an internal read-index counter (`iWave*`) whose advance must
-        // tick once per fire — clock-env inference assigns it the audio rate
-        // (it reads no clocked input), but its state-update statement belongs
-        // in the guarded region so the index does not race ahead every sample
-        // (C++ `8eebea429` emits the index advance inside the `if`). See the
-        // gamme.dsp scale regression.
-        if matches!(match_sig(self.arena, sig), SigMatch::Waveform(_)) {
-            return None;
-        }
-
         let sig_env = self.clocked_env_of(sig)?;
 
         let effective_env = self.effective_domain();
@@ -168,6 +156,72 @@ impl<'a> SignalToFirLower<'a> {
                 .position(|&d| d == id)
                 .map(|index| index + 1),
         }
+    }
+
+    /// Lowers the payload of a held `PermVar(Clocked(env, value))` in the
+    /// current guarded region.
+    ///
+    /// Clock inference may give `value` or some of its children an ancestor
+    /// domain when they do not read a clocked input. That does not make the
+    /// payload external: C++ `generateOD`/`generatePermVar` emits the whole
+    /// held value inside the guarded block and only the resulting `PermVar` is
+    /// read outside.
+    pub(super) fn lower_clocked_payload(&mut self, inner: SigId) -> Result<FirId, SignalFirError> {
+        let previous = self.suppress_clocked_redirect;
+        self.suppress_clocked_redirect = true;
+        let result = self.lower_signal(inner);
+        self.suppress_clocked_redirect = previous;
+        result
+    }
+
+    /// Lowers a `TempVar` source referenced from a clocked payload.
+    ///
+    /// `TempVar` is the boundary read: the use is inside the guarded block,
+    /// but the source expression belongs to its inferred clock environment.
+    /// Re-enable redirection while lowering the source so full-rate delay
+    /// chains such as `serialize_in` stay outside the block.
+    pub(super) fn lower_clocked_temp_var(&mut self, inner: SigId) -> Result<FirId, SignalFirError> {
+        let previous = self.suppress_clocked_redirect;
+        self.suppress_clocked_redirect = false;
+        let result = self.lower_signal(inner);
+        self.suppress_clocked_redirect = previous;
+        result
+    }
+
+    pub(super) fn delay_line_info_for_current_region(
+        &mut self,
+        carried: SigId,
+    ) -> Result<DelayLineInfo, SignalFirError> {
+        let mut line = self.delay_line_info(carried)?;
+        let Some(domain) = self.effective_domain() else {
+            return Ok(line);
+        };
+        if !self.suppress_clocked_redirect {
+            return Ok(line);
+        }
+
+        let was_inner = self.delay.is_line_inner(carried);
+        self.delay.mark_line_inner(carried);
+        match line.strategy.clone() {
+            super::super::delay::DelayKind::Shift => {}
+            super::super::delay::DelayKind::CircularPow2 => {
+                let cursor = self.active_circular_cursor_name();
+                self.delay.set_line_cursor(carried, cursor.clone());
+                line.cursor = Some(cursor);
+            }
+            super::super::delay::DelayKind::IfWrapping { counter_name } => {
+                if !was_inner {
+                    self.clocked
+                        .as_mut()
+                        .expect("effective_domain returned Some only for clocked programs")
+                        .domain_ifwrap
+                        .entry(domain)
+                        .or_default()
+                        .push((counter_name, line.size));
+                }
+            }
+        }
+        Ok(line)
     }
 
     /// Clock environment of the current append-target region: `None` at the
@@ -525,8 +579,13 @@ impl<'a> SignalToFirLower<'a> {
         let mut body_result: Result<(), SignalFirError> = Ok(());
         for (value, field) in &hold_stores {
             // Propagation wraps every held value as Clocked(env, v); the
-            // Clocked arm strips the annotation.
-            let lowered = match self.lower_signal(*value) {
+            // payload must be emitted in this guarded block, even when the
+            // payload itself is inferred at an ancestor clock environment.
+            let lowered = match match_sig(self.arena, *value) {
+                SigMatch::Clocked(_, payload) => self.lower_clocked_payload(payload),
+                _ => self.lower_signal(*value),
+            };
+            let lowered = match lowered {
                 Ok(id) => id,
                 Err(err) => {
                     body_result = Err(err);

@@ -326,12 +326,11 @@ fn integer_ondemand_repeats_body_clock_times() {
 }
 
 #[test]
-fn domain_free_body_state_advances_at_outer_rate() {
-    // Clock-calculus least-fixed-point semantics (plan §4.1): a recursion
-    // group whose definitions touch no domain-internal signal stays at the
-    // audio rate — it advances once per outer tick even under an
-    // upsampling wrapper, and only its *value* is annotated into the
-    // domain. Held output after tick n is therefore n + 1, not 2(n + 1).
+fn domain_free_body_state_advances_in_fire_time() {
+    // Faust C++ emits the payload of `Clocked(env, value)` in the guarded
+    // block. Even when clock-env inference gives a recursion group the
+    // audio-rate least fixed point, state syntactically inside a clocked body
+    // advances in fire time.
     let x = vec![0.0; 4];
     let outputs = run_interp_with_inputs(
         "hoisted_counter",
@@ -339,10 +338,35 @@ fn domain_free_body_state_advances_at_outer_rate() {
         &[x],
     );
     for (n, &value) in outputs[0].iter().enumerate() {
-        let expected = n as f32 + 1.0;
+        let expected = 2.0 * (n as f32 + 1.0);
         assert!(
             (value - expected).abs() < 1.0e-6,
             "frame {n}: expected {expected}, got {value}"
+        );
+    }
+}
+
+#[test]
+fn boolean_ondemand_domain_free_state_advances_on_fire_only() {
+    // Regression for `ondemand(os.osc(...))`: the oscillator phase recursion
+    // does not read a domain-internal input, but it is still the payload of a
+    // `Clocked` held value and must stay inside the guarded `if`.
+    let clk = vec![0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    let muted = vec![0.0; clk.len()];
+    let outputs = run_interp_with_inputs(
+        "od_domain_free_acc_on_fire",
+        r#"process = ((_ != 0), (_ : !)) : ondemand(1 : (+ ~ _));"#,
+        &[clk.clone(), muted],
+    );
+    let mut held = 0.0_f32;
+    for (n, &clock) in clk.iter().enumerate() {
+        if clock != 0.0 {
+            held += 1.0;
+        }
+        assert!(
+            (outputs[0][n] - held).abs() < 1.0e-6,
+            "frame {n}: expected {held}, got {}",
+            outputs[0][n]
         );
     }
 }

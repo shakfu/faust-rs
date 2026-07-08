@@ -153,7 +153,6 @@ pub(crate) fn build_module<'a>(
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     lower.assign_clocked_delay_cursors()?;
-    lower.finalize_global_cursor();
     let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
     lower.rad_reverse.forward_output_by_sig = signals
         .iter()
@@ -211,6 +210,7 @@ pub(crate) fn build_module<'a>(
                 lower.lower_output_signal(signal_index, *sig, plan.num_outputs)?;
             }
         }
+        lower.finalize_global_cursor();
         let delay_sample_end = lower
             .delay
             .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
@@ -238,6 +238,7 @@ pub(crate) fn build_module<'a>(
         }
         lower.rad_reverse.lowering_reverse_loop = false;
         if !has_forward_outputs {
+            lower.finalize_global_cursor();
             let delay_sample_end = lower
                 .delay
                 .emit_sample_end_updates(&mut lower.store, lower.uses_iota);

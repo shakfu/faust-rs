@@ -30,7 +30,9 @@ impl<'a> SignalToFirLower<'a> {
         // even while a guarded block is open (see `clocked.rs`). The
         // recursive re-entry cannot loop: with the redirection installed,
         // the effective domain equals the signal's domain.
-        if let Some(depth) = self.clocked_redirect_target(sig) {
+        if !self.suppress_clocked_redirect
+            && let Some(depth) = self.clocked_redirect_target(sig)
+        {
             let previous = self.regions.set_redirect(Some(depth));
             let result = self.lower_signal(sig);
             self.regions.set_redirect(previous);
@@ -149,7 +151,13 @@ impl<'a> SignalToFirLower<'a> {
                 self.lower_signal(y)?
             }
             SigMatch::Clocked(_, inner) if self.clocked.is_some() => self.lower_signal(inner)?,
-            SigMatch::TempVar(inner) if self.clocked.is_some() => self.lower_signal(inner)?,
+            SigMatch::TempVar(inner) if self.clocked.is_some() => {
+                if self.suppress_clocked_redirect {
+                    self.lower_clocked_temp_var(inner)?
+                } else {
+                    self.lower_signal(inner)?
+                }
+            }
             SigMatch::PermVar(_) if self.clocked.is_some() => self.lower_perm_var_read(sig)?,
             SigMatch::ZeroPad(value, _) if self.clocked.is_some() => {
                 self.lower_zero_pad_clocked(sig, value)?
@@ -668,7 +676,7 @@ impl<'a> SignalToFirLower<'a> {
             }
         }
 
-        let line = self.delay_line_info(value)?;
+        let line = self.delay_line_info_for_current_region(value)?;
         let current = self.lower_signal(value)?;
         let read_ty = self.signal_fir_type(node)?;
         let amount_value = self.lower_signal(amount)?;
@@ -872,7 +880,7 @@ impl<'a> SignalToFirLower<'a> {
         node: SigId,
         value: SigId,
     ) -> Result<FirId, SignalFirError> {
-        let line = self.delay_line_info(value)?;
+        let line = self.delay_line_info_for_current_region(value)?;
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
         let schedule_write = self.delay.schedule_delay_write(value);

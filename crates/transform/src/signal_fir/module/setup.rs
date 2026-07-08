@@ -84,6 +84,7 @@ impl<'a> SignalToFirLower<'a> {
             sections: state::ModuleSections::default(),
             regions: region::RegionTree::new(region::RegionKind::SampleLoop),
             clocked: None,
+            suppress_clocked_redirect: false,
             domain_counters: DomainCounters::default(),
             state_name_by_node: HashMap::new(),
             recursion: RecursionState::default(),

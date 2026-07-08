@@ -342,6 +342,10 @@ struct SignalToFirLower<'a> {
     /// Clocked-lowering state, present only for programs with clocked
     /// wrappers (roadmap P3 — see `clocked.rs`).
     clocked: Option<clocked::ClockedState<'a>>,
+    /// Temporarily disables ancestor-domain redirection while lowering the
+    /// payload of a `Clocked(env, value)` annotation. C++ emits that payload
+    /// in the guarded block that consumes it.
+    suppress_clocked_redirect: bool,
     /// Per-clock-domain `IOTA`/`DSCounter` field registry (roadmap P2.3).
     domain_counters: DomainCounters,
     /// Maps each signal node to its generated state-variable name.
