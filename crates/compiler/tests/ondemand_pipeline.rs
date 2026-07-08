@@ -305,25 +305,86 @@ fn boolean_ondemand_with_recursive_state_accumulates_on_fire_only() {
 }
 
 #[test]
-fn upsampling_keeps_named_rejection_through_clocked_entry() {
-    use transform::signal_fir::compile_signals_to_fir_fastlane_clocked;
-
-    let out = compile_inline(
-        "us_still_rejected",
-        r#"process = ((_ != 0), _) : upsampling(*(2));"#,
+fn integer_ondemand_repeats_body_clock_times() {
+    // Counted-loop OD: the body runs `clock` times per tick, and OD inputs
+    // are *not* zero-padded (unlike US) — the accumulator adds the snapshot
+    // input on every inner iteration: with x ≡ 1 and clock 3, the held
+    // value after tick n is 3 * (n + 1).
+    let ones = vec![1.0; 5];
+    let outputs = run_interp_with_inputs(
+        "int_od_accumulator",
+        r#"process = (3, _) : ondemand(+ ~ _);"#,
+        &[ones],
     );
-    let err = compile_signals_to_fir_fastlane_clocked(
-        &out.parse.state.arena,
-        &out.signals,
-        out.process_arity.inputs,
-        out.process_arity.outputs,
-        &out.ui,
-        &out.clock_domains,
-        &SignalFirOptions::default(),
-    )
-    .expect_err("upsampling is outside the boolean-ondemand slice");
-    assert_eq!(err.code().as_str(), "FRS-SFIR-0007", "got: {err}");
-    assert!(err.message().contains("upsampling"), "got: {err}");
+    for (n, &value) in outputs[0].iter().enumerate() {
+        let expected = 3.0 * (n as f32 + 1.0);
+        assert!(
+            (value - expected).abs() < 1.0e-6,
+            "frame {n}: expected {expected}, got {value}"
+        );
+    }
+}
+
+#[test]
+fn domain_free_body_state_advances_at_outer_rate() {
+    // Clock-calculus least-fixed-point semantics (plan §4.1): a recursion
+    // group whose definitions touch no domain-internal signal stays at the
+    // audio rate — it advances once per outer tick even under an
+    // upsampling wrapper, and only its *value* is annotated into the
+    // domain. Held output after tick n is therefore n + 1, not 2(n + 1).
+    let x = vec![0.0; 4];
+    let outputs = run_interp_with_inputs(
+        "hoisted_counter",
+        r#"process = (2, (_ : !)) : upsampling(1 : (+ ~ _));"#,
+        &[x],
+    );
+    for (n, &value) in outputs[0].iter().enumerate() {
+        let expected = n as f32 + 1.0;
+        assert!(
+            (value - expected).abs() < 1.0e-6,
+            "frame {n}: expected {expected}, got {value}"
+        );
+    }
+}
+
+#[test]
+fn upsampling_zero_pads_inputs_to_the_last_inner_iteration() {
+    // US factor 2 around an accumulator: per tick the body runs twice, the
+    // zero-padded input contributes only on the last inner iteration, so the
+    // held output is the plain running sum of x (not 2x).
+    let x = vec![1.0, 2.0, 3.0, 4.0];
+    let outputs = run_interp_with_inputs(
+        "us_running_sum",
+        r#"process = (2, _) : upsampling(+ ~ _);"#,
+        std::slice::from_ref(&x),
+    );
+    let mut acc = 0.0_f32;
+    for (n, &value) in outputs[0].iter().enumerate() {
+        acc += x[n];
+        assert!(
+            (value - acc).abs() < 1.0e-6,
+            "frame {n}: expected {acc}, got {value}"
+        );
+    }
+}
+
+#[test]
+fn downsampling_fires_once_every_clock_ticks() {
+    // DS factor 2 around an accumulator fed with ones: fires at ticks
+    // 0, 2, 4, … → held output 1, 1, 2, 2, 3, 3.
+    let ones = vec![1.0; 6];
+    let outputs = run_interp_with_inputs(
+        "ds_accumulator",
+        r#"process = (2, _) : downsampling(+ ~ _);"#,
+        &[ones],
+    );
+    let expected = [1.0, 1.0, 2.0, 2.0, 3.0, 3.0];
+    for (n, (&value, &want)) in outputs[0].iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (value - want).abs() < 1.0e-6,
+            "frame {n}: expected {want}, got {value}"
+        );
+    }
 }
 
 // ── P0.4 — loud AD diagnostics at domain boundaries ──────────────────────────

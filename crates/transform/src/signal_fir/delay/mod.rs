@@ -145,6 +145,7 @@ mod sizing;
 
 pub(super) use circular_pow2::GlobalCircularCursor;
 pub(super) use context::{DelayFirCtx, DelayLoweringCtx};
+pub(super) use domain_counters::DomainCounters;
 pub(super) use manager::DelayManager;
 pub(super) use options::DelayOptions;
 pub(super) use plan::plan_delays;

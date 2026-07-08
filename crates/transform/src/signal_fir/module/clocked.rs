@@ -49,6 +49,9 @@ pub(super) struct ClockedState<'a> {
     /// Domains of the open guarded blocks, innermost last (parallel to
     /// `RegionTree::child_depth`).
     pub(super) open_domains: Vec<propagate::ClockDomainId>,
+    /// Counted-loop context per open block (parallel to `open_domains`):
+    /// `Some` for integer-OD/US blocks, `None` for If-shaped blocks.
+    pub(super) open_loops: Vec<Option<LoopCtx>>,
     /// `PermVar` node → hold-field name (registered by the wrapper emission).
     pub(super) perm_fields: HashMap<SigId, String>,
     /// Wrapper nodes whose guarded block has been emitted.
@@ -69,11 +72,32 @@ impl<'a> ClockedState<'a> {
             domains: plan.domains,
             envs: plan.envs,
             open_domains: Vec::new(),
+            open_loops: Vec::new(),
             perm_fields: HashMap::new(),
             emitted_blocks: HashSet::new(),
             next_perm_id: 0,
         }
     }
+}
+
+/// Counted-loop context of one open guarded block (integer OD / US).
+#[derive(Clone)]
+pub(super) struct LoopCtx {
+    /// Inner loop variable name (`lOd<i>`), readable by `ZeroPad` lowering.
+    pub(super) var: String,
+    /// Lowered loop bound (the integer clock value at this tick).
+    pub(super) bound: FirId,
+}
+
+/// Guard statement shape selected from the wrapper kind and clock type
+/// (plan §3.8: boolean OD `if`, integer OD / US counted loop, DS modulo).
+enum GuardShape {
+    /// `if (clock != 0) { body }`
+    BoolIf,
+    /// `for (l = 0; l < clock; l++) { body }`
+    CountedLoop,
+    /// `if (fDSCounter_d<i> == 0) { body }` + post `counter = (counter+1) % clock`
+    DsModulo,
 }
 
 fn clocked_not_lowered(message: impl Into<String>) -> SignalFirError {
@@ -149,6 +173,48 @@ impl<'a> SignalToFirLower<'a> {
         Ok(())
     }
 
+    /// Lowers `ZeroPad(x, h)` inside a counted upsampling block:
+    /// `((loop_idx == bound - 1) ? x : 0)` — the input value is exposed on
+    /// the **last** inner iteration only (plan §3.8 `generateZeroPad`).
+    pub(super) fn lower_zero_pad_clocked(
+        &mut self,
+        sig: SigId,
+        value: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let effective_depth = self
+            .regions
+            .redirect_depth()
+            .unwrap_or_else(|| self.regions.child_depth());
+        let loop_ctx = self
+            .clocked
+            .as_ref()
+            .and_then(|c| {
+                effective_depth
+                    .checked_sub(1)
+                    .and_then(|index| c.open_loops.get(index))
+            })
+            .and_then(Clone::clone);
+        let Some(loop_ctx) = loop_ctx else {
+            return Err(clocked_not_lowered(
+                "ZeroPad outside a counted upsampling block (zero-stuffed inputs \
+                 are only legal inside integer-clock blocks)",
+            ));
+        };
+        let value_fir = self.lower_signal(value)?;
+        let ty = self.signal_fir_type(sig)?;
+        let zero = if matches!(ty, FirType::Int32) {
+            self.lower_int32_const(0)
+        } else {
+            self.float_const(0.0)
+        };
+        let one = self.lower_int32_const(1);
+        let mut b = FirBuilder::new(&mut self.store);
+        let idx = b.load_var(loop_ctx.var.clone(), AccessType::Stack, FirType::Int32);
+        let last = b.binop(FirBinOp::Sub, loop_ctx.bound, one, FirType::Int32);
+        let is_last = b.binop(FirBinOp::Eq, idx, last, FirType::Int32);
+        Ok(b.select2(is_last, value_fir, zero, ty))
+    }
+
     /// Reads one registered hold field (`PermVar` outside its block).
     pub(super) fn lower_perm_var_read(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
         let Some(name) = self
@@ -181,26 +247,23 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         // ── Decode the wrapper payload ───────────────────────────────────
-        let children: Vec<SigId> = match match_sig(self.arena, wrapper) {
-            SigMatch::OnDemand(children) => children.to_vec(),
-            SigMatch::Upsampling(_) => {
-                return Err(clocked_not_lowered(
-                    "upsampling (counted inner loop) is not lowered yet — this slice \
-                     covers boolean ondemand only (roadmap P3 follow-up)",
-                ));
-            }
-            SigMatch::Downsampling(_) => {
-                return Err(clocked_not_lowered(
-                    "downsampling (modulo firing guard) is not lowered yet — this slice \
-                     covers boolean ondemand only (roadmap P3 follow-up)",
-                ));
-            }
-            _ => {
-                return Err(clocked_not_lowered(
-                    "ensure_guarded_block called on a non-wrapper signal",
-                ));
-            }
-        };
+        let (children, kind): (Vec<SigId>, propagate::ClockDomainKind) =
+            match match_sig(self.arena, wrapper) {
+                SigMatch::OnDemand(children) => {
+                    (children.to_vec(), propagate::ClockDomainKind::OnDemand)
+                }
+                SigMatch::Upsampling(children) => {
+                    (children.to_vec(), propagate::ClockDomainKind::Upsampling)
+                }
+                SigMatch::Downsampling(children) => {
+                    (children.to_vec(), propagate::ClockDomainKind::Downsampling)
+                }
+                _ => {
+                    return Err(clocked_not_lowered(
+                        "ensure_guarded_block called on a non-wrapper signal",
+                    ));
+                }
+            };
         let Some((&first, holds)) = children.split_first() else {
             return Err(clocked_not_lowered("clocked wrapper without children"));
         };
@@ -216,33 +279,89 @@ impl<'a> SignalToFirLower<'a> {
         };
         let domain = propagate::ClockDomainId::from_u32(domain_id);
 
-        // ── Boolean-clock requirement (this slice) ───────────────────────
-        let clock_interval = self
-            .sig_types
-            .get(&clock)
-            .map(sigtype::SigType::interval)
-            .ok_or_else(|| clocked_not_lowered("clock signal has no type annotation"))?;
-        if !(clock_interval.is_valid() && clock_interval.lo() >= 0.0 && clock_interval.hi() <= 1.0)
-        {
-            return Err(clocked_not_lowered(format!(
-                "integer ondemand (clock interval [{}, {}]) needs the counted-loop \
-                 OD block — not lowered yet, this slice covers boolean clocks only",
-                clock_interval.lo(),
-                clock_interval.hi()
-            )));
-        }
-
-        // ── Clock and guard condition (outer region) ─────────────────────
-        let clock_fir = self.lower_signal(clock)?;
+        // ── Guard shape selection (plan §3.8) ────────────────────────────
         let clock_is_int = matches!(self.types.get(&clock), Some(SimpleSigType::Int));
-        let zero = if clock_is_int {
-            self.lower_int32_const(0)
-        } else {
-            self.float_const(0.0)
+        let shape = match kind {
+            propagate::ClockDomainKind::OnDemand => {
+                let clock_interval = self
+                    .sig_types
+                    .get(&clock)
+                    .map(sigtype::SigType::interval)
+                    .ok_or_else(|| clocked_not_lowered("clock signal has no type annotation"))?;
+                let boolean = clock_interval.is_valid()
+                    && clock_interval.lo() >= 0.0
+                    && clock_interval.hi() <= 1.0;
+                if boolean {
+                    GuardShape::BoolIf
+                } else if clock_is_int {
+                    GuardShape::CountedLoop
+                } else {
+                    return Err(clocked_not_lowered(
+                        "ondemand with a real-valued non-boolean clock is not supported \
+                         (use a boolean gate or an integer repetition count)",
+                    ));
+                }
+            }
+            propagate::ClockDomainKind::Upsampling => {
+                if !clock_is_int {
+                    return Err(clocked_not_lowered(
+                        "upsampling requires an integer clock (inner iteration count)",
+                    ));
+                }
+                GuardShape::CountedLoop
+            }
+            propagate::ClockDomainKind::Downsampling => {
+                if !clock_is_int {
+                    return Err(clocked_not_lowered(
+                        "downsampling requires an integer clock (decimation factor)",
+                    ));
+                }
+                GuardShape::DsModulo
+            }
         };
-        let cond = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.binop(FirBinOp::Ne, clock_fir, zero, FirType::Int32)
+
+        // ── Clock and guard precondition (outer region) ──────────────────
+        let clock_fir = self.lower_signal(clock)?;
+        let guard_cond = match shape {
+            GuardShape::BoolIf => {
+                let zero = if clock_is_int {
+                    self.lower_int32_const(0)
+                } else {
+                    self.float_const(0.0)
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                Some(b.binop(FirBinOp::Ne, clock_fir, zero, FirType::Int32))
+            }
+            GuardShape::CountedLoop => None,
+            GuardShape::DsModulo => {
+                // C++ declareRetrieveDSName: per-domain modulo counter,
+                // fires when the counter is 0.
+                let counter = {
+                    let mut ctx = DelayFirCtx {
+                        store: &mut self.store,
+                        real_ty: self.real_ty.clone(),
+                        types: self.types,
+                        struct_declarations: &mut self.sections.struct_declarations,
+                        clear_statements: &mut self.sections.clear_statements,
+                        clear_init_seen: &mut self.sections.clear_init_seen,
+                        next_loop_var_id: &mut self.name_gen.next_loop_var_id,
+                        uses_iota: &mut self.uses_iota,
+                    };
+                    self.domain_counters
+                        .declare_retrieve_ds_counter(domain, &mut ctx)
+                };
+                let zero = self.lower_int32_const(0);
+                let mut b = FirBuilder::new(&mut self.store);
+                let counter_value = b.load_var(counter, AccessType::Struct, FirType::Int32);
+                Some(b.binop(FirBinOp::Eq, counter_value, zero, FirType::Int32))
+            }
+        };
+        let loop_ctx = match shape {
+            GuardShape::CountedLoop => Some(LoopCtx {
+                var: self.fresh_loop_var("lOd"),
+                bound: clock_fir,
+            }),
+            GuardShape::BoolIf | GuardShape::DsModulo => None,
         };
 
         // ── Hold fields: persistent struct fields cleared to 0 ───────────
@@ -283,11 +402,11 @@ impl<'a> SignalToFirLower<'a> {
         // ── Body: lower the held values inside the child region ──────────
         let uses_iota_before = self.uses_iota;
         self.regions.open_child();
-        self.clocked
-            .as_mut()
-            .expect("clocked state present")
-            .open_domains
-            .push(domain);
+        {
+            let clocked_state = self.clocked.as_mut().expect("clocked state present");
+            clocked_state.open_domains.push(domain);
+            clocked_state.open_loops.push(loop_ctx.clone());
+        }
         let prev_redirect = self.regions.set_redirect(None);
 
         let mut body_result: Result<(), SignalFirError> = Ok(());
@@ -308,11 +427,11 @@ impl<'a> SignalToFirLower<'a> {
             self.regions.current_phases_mut().immediate.push(store_stmt);
         }
 
-        self.clocked
-            .as_mut()
-            .expect("clocked state present")
-            .open_domains
-            .pop();
+        {
+            let clocked_state = self.clocked.as_mut().expect("clocked state present");
+            clocked_state.open_domains.pop();
+            clocked_state.open_loops.pop();
+        }
         let body_phases = self.regions.close_child();
         self.regions.set_redirect(prev_redirect);
         body_result?;
@@ -334,9 +453,28 @@ impl<'a> SignalToFirLower<'a> {
         let guard = {
             let mut b = FirBuilder::new(&mut self.store);
             let block = b.block(&body_stmts);
-            b.if_(cond, block, None)
+            match (&shape, guard_cond, &loop_ctx) {
+                (GuardShape::BoolIf | GuardShape::DsModulo, Some(cond), _) => {
+                    b.if_(cond, block, None)
+                }
+                (GuardShape::CountedLoop, _, Some(ctx)) => {
+                    b.simple_for_loop(ctx.var.clone(), ctx.bound, block, false)
+                }
+                _ => unreachable!("guard shape and condition are built together"),
+            }
         };
         self.regions.current_phases_mut().immediate.push(guard);
+        if matches!(shape, GuardShape::DsModulo) {
+            // Post-code, every outer tick: counter = (counter + 1) % clock.
+            let counter = self
+                .domain_counters
+                .ds_counter_name(domain)
+                .expect("DS counter declared above")
+                .to_owned();
+            let bump =
+                DomainCounters::emit_wrapping_increment(&mut self.store, &counter, clock_fir);
+            self.regions.current_phases_mut().immediate.push(bump);
+        }
 
         self.clocked
             .as_mut()

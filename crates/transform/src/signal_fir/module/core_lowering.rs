@@ -151,6 +151,9 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Clocked(_, inner) if self.clocked.is_some() => self.lower_signal(inner)?,
             SigMatch::TempVar(inner) if self.clocked.is_some() => self.lower_signal(inner)?,
             SigMatch::PermVar(_) if self.clocked.is_some() => self.lower_perm_var_read(sig)?,
+            SigMatch::ZeroPad(value, _) if self.clocked.is_some() => {
+                self.lower_zero_pad_clocked(sig, value)?
+            }
             SigMatch::OnDemand(_) | SigMatch::Upsampling(_) | SigMatch::Downsampling(_)
                 if self.clocked.is_some() =>
             {

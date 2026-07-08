@@ -126,8 +126,9 @@ use crate::signal_prepare::SimpleSigType;
 use super::SignalFirOutput;
 use super::block_reverse_ad::{collect_bra_postorder, collect_tape_needed_values};
 use super::delay::{
-    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, GlobalCircularCursor,
-    delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line, plan_delays,
+    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, DomainCounters,
+    GlobalCircularCursor, delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line,
+    plan_delays,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -341,6 +342,8 @@ struct SignalToFirLower<'a> {
     /// Clocked-lowering state, present only for programs with clocked
     /// wrappers (roadmap P3 — see `clocked.rs`).
     clocked: Option<clocked::ClockedState<'a>>,
+    /// Per-clock-domain `IOTA`/`DSCounter` field registry (roadmap P2.3).
+    domain_counters: DomainCounters,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.
