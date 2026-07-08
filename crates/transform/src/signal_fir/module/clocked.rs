@@ -128,6 +128,19 @@ impl<'a> SignalToFirLower<'a> {
     /// own arms).
     pub(super) fn clocked_redirect_target(&self, sig: SigId) -> Option<usize> {
         let clocked = self.clocked.as_ref()?;
+
+        // Fire-gated stateful generators must be lowered *in the block that
+        // consumes them*, never redirected to an ancestor. A `Waveform`
+        // carries an internal read-index counter (`iWave*`) whose advance must
+        // tick once per fire — clock-env inference assigns it the audio rate
+        // (it reads no clocked input), but its state-update statement belongs
+        // in the guarded region so the index does not race ahead every sample
+        // (C++ `8eebea429` emits the index advance inside the `if`). See the
+        // gamme.dsp scale regression.
+        if matches!(match_sig(self.arena, sig), SigMatch::Waveform(_)) {
+            return None;
+        }
+
         let sig_env = self.clocked_env_of(sig)?;
 
         let effective_env = self.effective_domain();
