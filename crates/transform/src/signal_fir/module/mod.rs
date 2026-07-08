@@ -127,8 +127,8 @@ use super::SignalFirOutput;
 use super::block_reverse_ad::{collect_bra_postorder, collect_tape_needed_values};
 use super::delay::{
     DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, DomainCounters,
-    GlobalCircularCursor, delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line,
-    plan_delays,
+    GlobalCircularCursor, cursor_current_index, cursor_delayed_index, delay_size_for_amount,
+    emit_delay1_for_line, emit_fixed_delay_for_line, plan_delays,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -344,9 +344,6 @@ struct SignalToFirLower<'a> {
     clocked: Option<clocked::ClockedState<'a>>,
     /// Per-clock-domain `IOTA`/`DSCounter` field registry (roadmap P2.3).
     domain_counters: DomainCounters,
-    /// Number of global-circular-cursor uses so far (guards clocked blocks
-    /// against globally-advanced recursion state — see `clocked.rs`).
-    global_cursor_reads: usize,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.

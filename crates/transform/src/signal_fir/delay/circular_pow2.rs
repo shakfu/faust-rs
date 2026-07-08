@@ -58,16 +58,6 @@ impl GlobalCircularCursor {
         }
     }
 
-    /// Computes the masked current write index `fIOTA & (size - 1)`.
-    pub(crate) fn current_index(self, store: &mut FirStore, size: usize) -> FirId {
-        cursor_current_index(store, "fIOTA", size)
-    }
-
-    /// Computes the masked delayed read index `(fIOTA - amount) & (size - 1)`.
-    pub(crate) fn delayed_index(self, store: &mut FirStore, amount: FirId, size: usize) -> FirId {
-        cursor_delayed_index(store, "fIOTA", amount, size)
-    }
-
     /// Emits `fIOTA = fIOTA + 1` to advance the cursor by one sample.
     pub(crate) fn emit_advance(self, store: &mut FirStore) -> FirId {
         cursor_advance(store, "fIOTA")
@@ -77,19 +67,19 @@ impl GlobalCircularCursor {
 // ─── Name-parametrized cursor primitives (roadmap P3: per-domain IOTA) ───────
 
 /// Loads one circular cursor field.
-pub(super) fn cursor_load(store: &mut FirStore, name: &str) -> FirId {
+pub(crate) fn cursor_load(store: &mut FirStore, name: &str) -> FirId {
     let mut b = FirBuilder::new(store);
     b.load_var(name, AccessType::Struct, FirType::Int32)
 }
 
 /// Masked current write index `cursor & (size - 1)`.
-pub(super) fn cursor_current_index(store: &mut FirStore, name: &str, size: usize) -> FirId {
+pub(crate) fn cursor_current_index(store: &mut FirStore, name: &str, size: usize) -> FirId {
     let cursor = cursor_load(store, name);
     masked_delay_index(store, cursor, size)
 }
 
 /// Masked delayed read index `(cursor - amount) & (size - 1)`.
-pub(super) fn cursor_delayed_index(
+pub(crate) fn cursor_delayed_index(
     store: &mut FirStore,
     name: &str,
     amount: FirId,
@@ -104,7 +94,7 @@ pub(super) fn cursor_delayed_index(
 }
 
 /// Emits `cursor = cursor + 1`.
-pub(super) fn cursor_advance(store: &mut FirStore, name: &str) -> FirId {
+pub(crate) fn cursor_advance(store: &mut FirStore, name: &str) -> FirId {
     let next = {
         let cursor = cursor_load(store, name);
         let one = {

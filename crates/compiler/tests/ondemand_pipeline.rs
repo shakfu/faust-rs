@@ -741,3 +741,97 @@ fn interleave_with_an_internal_frame_delay_adds_one_frame_of_latency() {
         }
     }
 }
+
+// ── P3 slice 4 — circular recursion carriers & IfWrapping delays in blocks ──
+
+#[test]
+fn inner_circular_recursion_carrier_matches_unclocked_when_always_firing() {
+    // A recursive feedback with a large delay (`+ ~ @(20)`, total lag 21 →
+    // CircularPow2 storage) inside a block now advances on the per-domain
+    // cursor `fIOTA_d<i>` (roadmap P3 slice 4). With an always-true clock it
+    // must match the plain unclocked recursion sample for sample.
+    let frames = 64;
+    let ramp: Vec<f32> = (0..frames).map(|n| (n % 7) as f32).collect();
+    let ones = vec![1.0_f32; frames];
+
+    let clocked = run_interp_with_inputs(
+        "od_rec_always",
+        r#"process = ((_ != 0), _) : ondemand(+ ~ @(20));"#,
+        &[ones, ramp.clone()],
+    );
+    let unclocked = run_interp_with_inputs(
+        "rec_reference",
+        r#"process = + ~ @(20);"#,
+        std::slice::from_ref(&ramp),
+    );
+    for (t, (&c, &u)) in clocked[0].iter().zip(unclocked[0].iter()).enumerate() {
+        assert!(
+            (c - u).abs() < 1.0e-4,
+            "frame {t}: clocked {c} vs unclocked {u}"
+        );
+    }
+}
+
+#[test]
+fn inner_circular_recursion_carrier_advances_in_fire_time() {
+    // Sparse clock (fires on even ticks): the frame-indexed recurrence
+    // y_frame[k] = x[fire k] + y_frame[k-21], held between fires.
+    let frames = 90;
+    let ramp: Vec<f32> = (0..frames).map(|n| (n % 5) as f32).collect();
+    let clk: Vec<f32> = (0..frames)
+        .map(|n| f32::from(u8::from(n % 2 == 0)))
+        .collect();
+
+    let out = run_interp_with_inputs(
+        "od_rec_sparse",
+        r#"process = ((_ != 0), _) : ondemand(+ ~ @(20));"#,
+        &[clk.clone(), ramp.clone()],
+    );
+
+    let mut frame_hist: Vec<f32> = Vec::new();
+    let mut held = 0.0_f32;
+    for (t, &value) in out[0].iter().enumerate() {
+        if clk[t] != 0.0 {
+            let prev = frame_hist
+                .len()
+                .checked_sub(21)
+                .map_or(0.0, |i| frame_hist[i]);
+            let y = ramp[t] + prev;
+            frame_hist.push(y);
+            held = y;
+        }
+        assert!(
+            (value - held).abs() < 1.0e-4,
+            "frame {t}: expected {held}, got {value}"
+        );
+    }
+}
+
+#[test]
+fn inner_ifwrapping_delay_lowers_through_clocked_entry() {
+    // With `delay_line_threshold` (`-dlt`) below the delay, the inner delay
+    // line uses the IfWrapping strategy; its per-line counter advance now
+    // moves inside the guarded block (roadmap P3 slice 4) instead of being
+    // rejected. The FIR must build (and pass the backend verifier via the
+    // C++ path exercised elsewhere).
+    use transform::signal_fir::compile_signals_to_fir_fastlane_clocked;
+
+    let out = compile_inline(
+        "od_ifwrap",
+        r#"process = ((_ != 0), _) : ondemand(_ <: _, @(20) :> +);"#,
+    );
+    let options = SignalFirOptions {
+        delay_line_threshold: 8,
+        ..SignalFirOptions::default()
+    };
+    compile_signals_to_fir_fastlane_clocked(
+        &out.parse.state.arena,
+        &out.signals,
+        out.process_arity.inputs,
+        out.process_arity.outputs,
+        &out.ui,
+        &out.clock_domains,
+        &options,
+    )
+    .expect("inner IfWrapping delay must lower (P3 slice 4), not be rejected");
+}

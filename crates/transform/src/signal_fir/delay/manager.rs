@@ -157,6 +157,7 @@ impl DelayManager {
             size: required_size,
             strategy,
             cursor: None,
+            inner_clocked: false,
         };
         self.delay_lines.insert(carried, info.clone());
         Ok(info)
@@ -172,6 +173,15 @@ impl DelayManager {
     pub(in crate::signal_fir) fn set_line_cursor(&mut self, carried: SigId, cursor: String) {
         if let Some(info) = self.delay_lines.get_mut(&carried) {
             info.cursor = Some(cursor);
+        }
+    }
+
+    /// Marks one planned line as living inside a clocked block: its
+    /// end-of-sample maintenance moves into the guarded region (roadmap P3
+    /// slice 4), so `emit_sample_end_updates` skips it at the top level.
+    pub(in crate::signal_fir) fn mark_line_inner(&mut self, carried: SigId) {
+        if let Some(info) = self.delay_lines.get_mut(&carried) {
+            info.inner_clocked = true;
         }
     }
 
@@ -192,6 +202,11 @@ impl DelayManager {
             updates.push(GlobalCircularCursor.emit_advance(store));
         }
         updates.extend(self.delay_lines.values().filter_map(|info| {
+            // Inner (in-block) IfWrapping counters advance inside the guarded
+            // region, not at the top sample end (roadmap P3 slice 4).
+            if info.inner_clocked {
+                return None;
+            }
             if let DelayKind::IfWrapping { counter_name } = &info.strategy {
                 Some(if_wrapping::emit_if_wrapping_advance(
                     store,

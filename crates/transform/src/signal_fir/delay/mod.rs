@@ -144,8 +144,10 @@ mod shift;
 mod sizing;
 
 pub(super) use circular_pow2::GlobalCircularCursor;
+pub(crate) use circular_pow2::{cursor_current_index, cursor_delayed_index};
 pub(super) use context::{DelayFirCtx, DelayLoweringCtx};
 pub(super) use domain_counters::DomainCounters;
+pub(crate) use if_wrapping::emit_if_wrapping_advance;
 pub(super) use manager::DelayManager;
 pub(super) use options::DelayOptions;
 pub(super) use plan::plan_delays;
@@ -176,6 +178,10 @@ pub(super) struct DelayLineInfo {
     /// inside a clock domain: the per-domain `fIOTA_d<i>` field name
     /// (roadmap P3). `None` = the shared global `fIOTA`.
     pub(super) cursor: Option<String>,
+    /// `true` when the carrier lives inside a clocked block: the line's
+    /// end-of-sample maintenance is emitted inside the guarded region
+    /// (fire-gated), not at the top sample end (roadmap P3 slice 4).
+    pub(super) inner_clocked: bool,
 }
 
 // ─── DelayKind ────────────────────────────────────────────────────────────────

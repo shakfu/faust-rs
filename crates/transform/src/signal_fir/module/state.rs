@@ -242,10 +242,7 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Declares the shared global circular cursor state (`fIOTA`), idempotent.
     ///
-    /// Also counts every use so clocked lowering can detect (and reject)
-    /// global-cursor reads from inside a guarded block (roadmap P3).
     pub(super) fn ensure_global_circular_cursor(&mut self) {
-        self.global_cursor_reads += 1;
         let mut ctx = DelayFirCtx {
             store: &mut self.store,
             real_ty: self.real_ty.clone(),
@@ -259,16 +256,30 @@ impl<'a> SignalToFirLower<'a> {
         GlobalCircularCursor.ensure_state(&mut ctx);
     }
 
-    /// Returns the masked current write index for the shared global cursor.
+    /// Returns the masked current write index for a circular structure lowered
+    /// in the current append-target region.
+    ///
+    /// At the top rate this is the shared `fIOTA`; inside a guarded clocked
+    /// block it is the effective domain's per-domain `fIOTA_d<i>` cursor
+    /// (roadmap P3 slice 4), so circular recursion carriers and delay-states
+    /// inside a block advance in fire time.
     pub(super) fn global_circular_current_index(&mut self, size: usize) -> FirId {
-        self.ensure_global_circular_cursor();
-        GlobalCircularCursor.current_index(&mut self.store, size)
+        let cursor = self.active_circular_cursor_name();
+        if cursor == "fIOTA" {
+            self.ensure_global_circular_cursor();
+        }
+        cursor_current_index(&mut self.store, &cursor, size)
     }
 
-    /// Returns the masked delayed read index for the shared global cursor.
+    /// Returns the masked delayed read index for a circular structure lowered
+    /// in the current append-target region (see
+    /// [`Self::global_circular_current_index`]).
     pub(super) fn global_circular_delayed_index(&mut self, amount: FirId, size: usize) -> FirId {
-        self.ensure_global_circular_cursor();
-        GlobalCircularCursor.delayed_index(&mut self.store, amount, size)
+        let cursor = self.active_circular_cursor_name();
+        if cursor == "fIOTA" {
+            self.ensure_global_circular_cursor();
+        }
+        cursor_delayed_index(&mut self.store, &cursor, amount, size)
     }
 
     /// Runs `f` with one recursion group pushed onto the active recursion stack.

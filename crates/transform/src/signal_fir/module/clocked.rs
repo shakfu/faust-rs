@@ -6,17 +6,22 @@
 //!   `master-dev-ocpp-od-fir-2-FIR19`, commit `8eebea429`)
 //! - `compiler/parallelize/loop.cpp` (`CodeIFblock`)
 //!
-//! # Scope of this slice
-//! **Boolean `ondemand` only**: the wrapper clock must be provably boolean
-//! (type interval ⊆ [0, 1]), and the block is emitted as one guarded `If`
-//! region (`if (clock != 0) { … }`) — the C++ `CodeIFblock` shape, reusing
-//! the generic FIR `If`/`Block` statements per the P2.1 vocabulary decision.
-//! Counted-loop integer `ondemand`, `upsampling`, and `downsampling` keep the
-//! structured `FRS-SFIR-0007` rejection, as do delay lines inside a clocked
-//! block that would need the per-domain `IOTA`
-//! (`delay/domain_counters.rs`) — only state whose updates are emitted
-//! *inside* the guarded region (shift-strategy delays, scalar recursion
-//! carriers) is allowed, because it advances exactly when the block fires.
+//! # Scope
+//! Guard shapes (plan §3.8): boolean `ondemand` → `if (clock != 0) { … }`
+//! (C++ `CodeIFblock`); integer `ondemand` / `upsampling` → counted
+//! `SimpleForLoop`; `downsampling` → `if (fDSCounter == 0)` + modulo post-code.
+//! All reuse the generic FIR `If` / `SimpleForLoop` / `Block` statements per
+//! the P2.1 vocabulary decision.
+//!
+//! **State inside a block advances in fire time.** Every delay/recursion
+//! strategy whose carrier lives in the domain has its end-of-sample
+//! maintenance routed into the guarded region (roadmap P3 slice 4): shift
+//! delays and scalar recursion emit their updates inline; `CircularPow2`
+//! lines and delay-states use the domain's per-domain `fIOTA_d<i>` cursor
+//! (advanced once per fire); inner `IfWrapping` lines advance their per-line
+//! counter in the block. The remaining `FRS-SFIR-0007` rejections are
+//! genuinely-unsupported shapes only (non-boolean real OD clocks, non-integer
+//! US/DS clocks).
 //!
 //! # Emission model (adaptation note)
 //! C++ drives emission from the `Hsched` schedule. This port keeps the
@@ -59,6 +64,10 @@ pub(super) struct ClockedState<'a> {
     /// Domains owning a per-domain circular cursor (`fIOTA_d<i>`): their
     /// guarded blocks advance it once per fire (roadmap P3).
     pub(super) iota_domains: HashSet<propagate::ClockDomainId>,
+    /// Per-domain inner `IfWrapping` delay-line counters `(name, size)`: their
+    /// advance is emitted inside the guarded block, not at the top sample end
+    /// (roadmap P3 slice 4).
+    pub(super) domain_ifwrap: HashMap<propagate::ClockDomainId, Vec<(String, usize)>>,
     /// Monotonic counter for `fPerm<i>` hold-field names.
     pub(super) next_perm_id: usize,
 }
@@ -79,6 +88,7 @@ impl<'a> ClockedState<'a> {
             perm_fields: HashMap::new(),
             emitted_blocks: HashSet::new(),
             iota_domains: HashSet::new(),
+            domain_ifwrap: HashMap::new(),
             next_perm_id: 0,
         }
     }
@@ -120,15 +130,7 @@ impl<'a> SignalToFirLower<'a> {
         let clocked = self.clocked.as_ref()?;
         let sig_env = self.clocked_env_of(sig)?;
 
-        let effective_depth = self
-            .regions
-            .redirect_depth()
-            .unwrap_or_else(|| self.regions.child_depth());
-        let effective_env: crate::clk_env::ClkEnv = if effective_depth == 0 {
-            None
-        } else {
-            Some(clocked.open_domains[effective_depth - 1])
-        };
+        let effective_env = self.effective_domain();
         if sig_env == effective_env {
             return None;
         }
@@ -145,32 +147,86 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Clock environment of the current append-target region: `None` at the
+    /// top rate (or when the program is not clocked), otherwise the domain of
+    /// the effective open guarded block (honoring an active redirection).
+    pub(super) fn effective_domain(&self) -> crate::clk_env::ClkEnv {
+        let clocked = self.clocked.as_ref()?;
+        let effective_depth = self
+            .regions
+            .redirect_depth()
+            .unwrap_or_else(|| self.regions.child_depth());
+        if effective_depth == 0 {
+            None
+        } else {
+            Some(clocked.open_domains[effective_depth - 1])
+        }
+    }
+
+    /// Name of the circular cursor to use for a circular structure lowered in
+    /// the current append-target region (roadmap P3 slice 4): the shared
+    /// `fIOTA` at the top rate, or the effective domain's `fIOTA_d<i>` inside
+    /// a guarded block. Declares the per-domain field and marks its domain so
+    /// the block advances the cursor once per fire.
+    pub(super) fn active_circular_cursor_name(&mut self) -> String {
+        match self.effective_domain() {
+            None => "fIOTA".to_owned(),
+            Some(domain) => {
+                let cursor = {
+                    let mut ctx = DelayFirCtx {
+                        store: &mut self.store,
+                        real_ty: self.real_ty.clone(),
+                        types: self.types,
+                        struct_declarations: &mut self.sections.struct_declarations,
+                        clear_statements: &mut self.sections.clear_statements,
+                        clear_init_seen: &mut self.sections.clear_init_seen,
+                        next_loop_var_id: &mut self.name_gen.next_loop_var_id,
+                        uses_iota: &mut self.uses_iota,
+                    };
+                    self.domain_counters.declare_retrieve_iota(domain, &mut ctx)
+                };
+                self.clocked
+                    .as_mut()
+                    .expect("effective_domain returned Some only for clocked programs")
+                    .iota_domains
+                    .insert(domain);
+                cursor
+            }
+        }
+    }
+
     /// Inferred clock environment of one prepared node, when known.
     fn clocked_env_of(&self, sig: SigId) -> Option<crate::clk_env::ClkEnv> {
         self.clocked.as_ref()?.envs.env(sig)
     }
 
-    /// Assigns per-domain circular cursors to the planned delay lines whose
-    /// carrier lives inside a clock domain (C++ `declareRetrieveIotaName`):
-    /// inner `CircularPow2` lines switch from the shared `fIOTA` to the
-    /// domain's `fIOTA_d<i>` field, advanced once per fire by the guarded
-    /// block (see `ensure_guarded_block`). Inner `IfWrapping` lines keep a
-    /// named rejection (their per-line counters bump at the top sample end);
-    /// shift-strategy lines are already correct (updates emitted inside the
-    /// guarded region).
+    /// Routes the end-of-sample maintenance of every delay line whose carrier
+    /// lives inside a clock domain into that domain's guarded block, so it
+    /// happens in **fire time** (roadmap P3 slice 4). Called once after delay
+    /// planning:
+    ///
+    /// - `CircularPow2` lines switch from the shared `fIOTA` to the domain's
+    ///   per-domain `fIOTA_d<i>` cursor (C++ `declareRetrieveIotaName`),
+    ///   advanced once per fire by [`Self::ensure_guarded_block`];
+    /// - `IfWrapping` lines are marked inner (so `emit_sample_end_updates`
+    ///   skips them at the top level) and their per-line counter advance is
+    ///   recorded per domain for the block to emit;
+    /// - `Shift` lines are already correct — their shift is emitted inside the
+    ///   guarded region during body lowering.
     pub(super) fn assign_clocked_delay_cursors(&mut self) -> Result<(), SignalFirError> {
         use super::super::delay::DelayKind;
 
         let Some(clocked) = self.clocked.as_ref() else {
             return Ok(());
         };
-        let mut inner_lines: Vec<(SigId, propagate::ClockDomainId, DelayKind)> = Vec::new();
+        let mut inner_lines: Vec<(SigId, propagate::ClockDomainId, DelayKind, usize)> = Vec::new();
         for (&carried, info) in self.delay.lines() {
             if let Some(Some(domain)) = clocked.envs.env(carried) {
-                inner_lines.push((carried, domain, info.strategy.clone()));
+                inner_lines.push((carried, domain, info.strategy.clone(), info.size));
             }
         }
-        for (carried, domain, strategy) in inner_lines {
+        for (carried, domain, strategy, size) in inner_lines {
+            self.delay.mark_line_inner(carried);
             match strategy {
                 DelayKind::Shift => {}
                 DelayKind::CircularPow2 => {
@@ -194,14 +250,14 @@ impl<'a> SignalToFirLower<'a> {
                         .iota_domains
                         .insert(domain);
                 }
-                DelayKind::IfWrapping { .. } => {
-                    return Err(clocked_not_lowered(format!(
-                        "delay line on signal {} inside a clocked block uses the \
-                         IfWrapping strategy (per-line counters advance at the top \
-                         sample end); use the default circular strategy (-dlt) or \
-                         wait for the per-domain counter wiring (P3 follow-up)",
-                        carried.as_u32(),
-                    )));
+                DelayKind::IfWrapping { counter_name } => {
+                    self.clocked
+                        .as_mut()
+                        .expect("clocked state present")
+                        .domain_ifwrap
+                        .entry(domain)
+                        .or_default()
+                        .push((counter_name, size));
                 }
             }
         }
@@ -435,7 +491,6 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         // ── Body: lower the held values inside the child region ──────────
-        let global_cursor_reads_before = self.global_cursor_reads;
         self.regions.open_child();
         {
             let clocked_state = self.clocked.as_mut().expect("clocked state present");
@@ -471,20 +526,6 @@ impl<'a> SignalToFirLower<'a> {
         self.regions.set_redirect(prev_redirect);
         body_result?;
 
-        // State inside the block must advance only when the block fires.
-        // Shift delays, per-domain circular lines, and recursion carriers
-        // emit their updates inside the child region (correct). A recursion
-        // carrier that read the *global* circular cursor from inside the
-        // block would advance every sample — reject until the per-domain
-        // cursor is wired into circular recursion storage (P3 follow-up).
-        if self.global_cursor_reads != global_cursor_reads_before {
-            return Err(clocked_not_lowered(
-                "recursive state inside this clocked block needs the shared \
-                 circular cursor (fIOTA); per-domain cursor wiring for circular \
-                 recursion carriers has not landed yet (P3 follow-up)",
-            ));
-        }
-
         // Per-domain circular cursor: advance once per fire, after all
         // reads/writes of this tick (block sample-end phase).
         if self
@@ -499,6 +540,20 @@ impl<'a> SignalToFirLower<'a> {
                 .to_owned();
             let bump = DomainCounters::emit_increment(&mut self.store, &cursor);
             body_phases.sample_end.push(bump);
+        }
+
+        // Inner `IfWrapping` delay-line counters: advance once per fire, in
+        // the block sample-end phase (they were skipped at the top level).
+        let ifwrap = self
+            .clocked
+            .as_ref()
+            .and_then(|c| c.domain_ifwrap.get(&domain))
+            .cloned()
+            .unwrap_or_default();
+        for (counter_name, size) in ifwrap {
+            let advance =
+                super::super::delay::emit_if_wrapping_advance(&mut self.store, &counter_name, size);
+            body_phases.sample_end.push(advance);
         }
 
         // ── Wrap the body in the guard and append to the outer region ────
