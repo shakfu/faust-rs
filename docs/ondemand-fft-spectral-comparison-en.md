@@ -219,6 +219,29 @@ already the infrastructure.
 
 ---
 
+## 6. Scalability: the compile/runtime wall is a fixable CSE gap
+
+The "Faust unrolls everything" framing above is only half the story on cost. A
+closer measurement shows the generated in-`ondemand` FFT is **O(N^2.6)**, not
+O(N log N): arithmetic op count grows ~6× per doubling of N (`ops/(N log N)`
+diverges 7.8 → 262 for N=8→128), and the code holds only ~2N temporaries — the
+butterfly sharing is gone.
+
+Crucially this is **not** intrinsic to Faust: the *plain* `an.fft(N)` (outside
+`ondemand`) is O(N log N) with a flat `ops/(N log N)` (8.0 → 9.0) and O(N log N)
+temporaries. Signals and FIR nodes are both hash-consed (the shared DAG exists);
+a correct FIR CSE pass materializes it — **but only for the flat statement
+buckets.** It deliberately does not descend into nested block bodies, and the
+`ondemand` guarded block is exactly such a body, so the fully-shared butterfly
+DAG is emitted as 2N inlined trees.
+
+The fix — running CSE **per nested scope** — is localized and improves *both*
+compile time and runtime at once (O(N^2.6) → O(N log N)), which is what would
+make FFT-in-Faust genuinely usable at large N. Full diagnosis and phased plan:
+[`porting/fft-scalability-cse-in-clocked-blocks-2026-07-09-en.md`](../porting/fft-scalability-cse-in-clocked-blocks-2026-07-09-en.md).
+
+---
+
 ### References
 
 - Semantics and phase convention:
