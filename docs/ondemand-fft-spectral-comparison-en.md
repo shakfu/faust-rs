@@ -150,6 +150,15 @@ branch, each verified numerically with `impulse-runner`):
   identity spectral stage reconstructs the input **exactly** in steady state
   (verified: the reconstruction reaches 1.0; the rectangular-window control gives
   gain 2.0, proving the window — not the harness — is the COLA agent).
+- **Phase-vocoder with inter-frame phase accumulation.** A per-bin one-frame
+  phase memory (`ph'`) and a synthesis phase accumulator (`psi = incr : +~_`)
+  running **once per frame inside the `ondemand` block** — verified in the
+  generated C++ to be lowered inside the frame-clock guard, i.e. as frame-rate
+  state. The phase-propagation identity reconstructs a sine exactly
+  (`max|wet[t] − dry[t−(N-1)]| = 1.5e-5`); a constant per-bin phase rate gives a
+  correct single-sideband **frequency shifter** (DC → a pure tone at the shift
+  frequency). This is the recursion-inside-the-block shape the other effects
+  above do not need but a vocoder does.
 
 **Faust's distinctive upside** — this is where it separates from Max/SC/Csound:
 
@@ -165,13 +174,20 @@ branch, each verified numerically with `impulse-runner`):
 
 **What is still hard / not yet done:**
 
-- A true **phase-vocoder pitch-shift / time-stretch** needs **inter-frame phase
-  accumulation** — recursion *inside* the `ondemand` block (the P3 per-domain
-  clock), not a spatial per-bin op. The same applies to phase-locked vocoders,
-  transient handling, constant-Q / multi-resolution, and adaptive hop.
+- **Duration-changing time-stretch** (analysis hop ≠ synthesis hop) is *not*
+  expressible in a synchronous 1-in/1-out Faust `process` at constant rate: the
+  graph cannot emit more (or fewer) samples than it consumes. It needs an
+  external rate-decoupling buffer, outside the synchronous model. Note this is a
+  property of the *streaming rate contract*, **not** of the phase machinery — the
+  inter-frame phase accumulation itself is now expressible (see above), and its
+  constant-rate products (identity reconstruction, frequency shifting) work.
+- A **clean pitch-shift** still wants either bin reassignment (a scatter, awkward
+  in a static graph) or time-stretch-plus-resample (which reintroduces the rate
+  issue). The same open items remain for phase-locked vocoders, transient
+  handling, constant-Q / multi-resolution, and adaptive hop.
 - Max/SC/Csound ship these **ready-made** (`PV_MagFreeze`, `PV_BinShift`,
-  `pvscale`, `pvstanal`, …). Faust provides the **substrate** to build *any* of
-  them — uniformly and differentiably — but you build them.
+  `pvscale`, `pvstanal`, …). Faust now has the **substrate and the inter-frame
+  recursion** to build them — uniformly and differentiably — but you build them.
 
 ---
 
@@ -191,10 +207,15 @@ Against dedicated FFT libraries and the environments built on them, Faust:
   free, multi-backend, and differentiable** inside a single graph — with small-N
   runtime that is already competitive with a generic library FFT.
 
-The natural next step, and the one that would close the remaining "inter-frame"
-gap versus SuperCollider / Csound, is a **phase-accumulating time-stretch**
-inside the `ondemand` block — which also lands squarely on the S4 differentiable-
-STFT milestone.
+The "inter-frame" gap versus SuperCollider / Csound — per-bin state accumulating
+across frames — is now closed: a phase-propagation vocoder (exact reconstruction)
+and a frequency shifter run with the accumulator lowered as frame-rate state
+inside the `ondemand` block. What remains is orthogonal to that machinery: a
+*duration-changing* time-stretch is barred by the synchronous rate contract, and
+a clean pitch-shift wants bin reassignment or resampling. The natural next step
+is instead to wire **FAD Phase B (P5)** through this STFT to reach the S4
+differentiable-STFT milestone — for which the phase-propagation identity is
+already the infrastructure.
 
 ---
 
