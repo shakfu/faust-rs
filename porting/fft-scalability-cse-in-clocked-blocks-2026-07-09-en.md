@@ -13,7 +13,7 @@ The framed FFT is now O(N log N): arithmetic ops for N=8→128 went
 `ops/(N log N)` flat 4.3→6.1, ×/doubling ≈ 2.5); generated code at N=256 shrank
 9.2 M → 60 k interp lines (~152×) and compile time 8.6 s → 1.8 s. Numerics
 unchanged (interleave_fft, impulse-runner, cpp_clocked_differential all pass;
-190 goldens unaffected). Phase B/C still open (see §5); N=512 still hits the
+190 goldens unaffected). Phases B–D still open (see §5); N=512 still hits the
 eval-budget wall.
 
 ---
@@ -167,9 +167,9 @@ make the evaluator iterative (explicit work stack) so no budget knob is needed,
 and land the propagate-memoization port ([[project-propagate-memoization-port]])
 so the two `fftb(N/2)` halves are not re-derived.
 
-### Phase D — O(1) overlap-add output (the dominant runtime cost)
+### Phase C — O(1) overlap-add output (the dominant runtime cost)
 
-**This is the #1 runtime lever — above Phase C.** Measured on the `N=1024`
+**This is the #1 runtime lever — above Phase D.** Measured on the `N=1024`
 denoiser (see §6): 82 % of the per-sample cost is the `interleave_hop`
 serialization harness, *not* the FFT. The culprit is `serialize_out`:
 
@@ -206,10 +206,10 @@ express a shared accumulator with a *scatter-add* write:
   spell). The read side (moving pointer, read-and-clear) is fine; the write side
   is the blocker.
 
-So Phase D needs one of:
+So Phase C needs one of:
 
 1. **A dedicated `serialize_out` / OLA compiler primitive** (mirrors the
-   "FFT as a structured node" fallback of Phase C): the `ondemand`/`interleave`
+   "FFT as a structured node" fallback of Phase D): the `ondemand`/`interleave`
    harness stays, but the reconstruction lowers to a ring-buffer accumulator
    (scatter-add at fire, read-clear per sample). Cleanest, and it also fixes
    `serialize_in`'s symmetric N-tap fan if lowered the same way. Cost: it breaks
@@ -222,7 +222,7 @@ So Phase D needs one of:
 Expected payoff: O(N)/sample → O(1)/sample removes ~5–6× of the runtime at
 `N=1024` on its own — the largest single win, bigger than rfft + SIMD combined.
 
-#### Phase D — concrete design sketch (option 1, the dedicated primitive)
+#### Phase C — concrete design sketch (option 1, the dedicated primitive)
 
 The path mirrors `ondemand` exactly, which is already a compiler primitive, not
 library sugar:
@@ -289,7 +289,7 @@ kernel — `serialize_in` (gather) → `ondemand` (frame-rate compute) →
 `serialize_out` (scatter + overlap-add) — shared by every frame-based multirate
 structure: analysis/synthesis filter banks, block / partitioned convolution,
 per-frame feature extraction (RMS, pitch, MFCC, **neural-net frame inputs**),
-LPC. All of them carry the *same* O(N)/sample `serialize_out` cost, so Phase D is
+LPC. All of them carry the *same* O(N)/sample `serialize_out` cost, so Phase C is
 a **general multirate optimization**, worth doing on its own merits independent
 of the FFT.
 
@@ -317,7 +317,7 @@ So the two sides are **not symmetric**, and the priority is
 multirate" in general? Yes for the *blocking* axis, with three caveats:**
 
 1. They optimize the **glue** (S/P ↔ P/S conversion), not the **payload** — the
-   block body still needs Phase A (CSE), and Phase C (rfft / `-vec`) for the FFT.
+   block body still needs Phase A (CSE), and Phase D (rfft / `-vec`) for the FFT.
 2. They do **not change rate**: `interleave` is 1-in/1-out at the input rate.
    True rate conversion (output rate ≠ input rate) is the **orthogonal** axis
    already covered by the P3 `upsampling` / `downsampling` primitives.
@@ -331,7 +331,7 @@ with `ondemand` they complete an efficient multirate primitive set — but each
 axis is needed: `serialize_*` alone optimizes blocking, not rate change, not the
 payload.
 
-### Phase C — constant-factor runtime wins on the FFT (after A/D)
+### Phase D — constant-factor runtime wins on the FFT (after A/C)
 
 - **Real-FFT**: the window taps are real; `(_,0)` doubles the work. An `rfft`
   core halves arithmetic and exposes only N/2+1 bins.
@@ -372,7 +372,7 @@ fully-unrolled 82 k-line `compute()` (I-cache thrash), complex-of-real (no rfft)
 and no SIMD/cache-blocking.
 
 Reading: Phase A made `N=1024` *compile* (O(N log N) code); the runtime is still
-prototype-grade (~10 voices/core). Phase D (O(1) OLA) then Phase C (rfft, twiddle
+prototype-grade (~10 voices/core). Phase C (O(1) OLA) then Phase D (rfft, twiddle
 folding, `-vec`) are what would move it toward production. Even fully optimized,
 the pure-Faust value proposition stays "composable + differentiable + multi-
 backend in one graph", not "beats FFTW".
