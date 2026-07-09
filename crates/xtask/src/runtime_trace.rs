@@ -1399,6 +1399,9 @@ pub(crate) fn render_rust_cpp_output(input: &Path) -> Result<String, compiler::C
 pub(crate) fn golden_gen_rust() -> Result<(), Box<dyn std::error::Error>> {
     let files = corpus_files()?;
     for file in files {
+        if !is_rust_golden_eligible(&file) {
+            continue;
+        }
         let case = case_name(&file)?;
         let output = golden_file_for_ref(&case, GoldenRef::Rust);
         if let Some(parent) = output.parent() {

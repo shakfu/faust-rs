@@ -26,7 +26,6 @@ struct RewriteState<'a> {
     ref_counts: &'a HashMap<FirId, usize>,
     materialized: HashMap<FirId, (String, FirType)>,
     temp_decls: Vec<FirId>,
-    counters: TypedCounters<'a>,
 }
 
 // ─── Reference counting ─────────────────────────────────────────────────────
@@ -145,46 +144,63 @@ fn is_trivial_value(store: &FirStore, node: FirId) -> bool {
 
 // ─── CSE materialization ────────────────────────────────────────────────────
 
-/// Materializes multi-referenced value nodes into temporary variables within
-/// one statement bucket.
+/// Materializes multi-referenced value nodes into temporary variables, **per
+/// execution scope**.
 ///
-/// Processes `statements` bottom-up: non-trivial expressions referenced ≥ 2
-/// times are wrapped in typed `DeclareVar(prefix<N>)` + `LoadVar(prefix<N>)`.
+/// `statements` is the flat statement list of one scope (a tier bucket, a block
+/// body, a loop body, …).  Non-trivial expressions referenced ≥ 2 times *within
+/// this scope* are wrapped in typed `DeclareVar(prefix<N>)` + `LoadVar(prefix<N>)`.
 ///
-/// Declarations are inserted **at the point of first use** rather than
-/// prepended before all statements.  This preserves sequential data
-/// dependencies between statements (e.g. in `constants_statements` where
-/// `fConst1` may depend on a struct field stored by the statement that
-/// initializes `fConst0`).
+/// Statements that carry a nested body (`If`/`Control`/loops/`Block`) are
+/// recursed into as their **own** scopes, so a shared value inside a guarded
+/// `ondemand` block is materialized locally to that block — the case the old
+/// flat pass silently missed, which made in-block FFTs emit as O(N²·ᐟ) inlined
+/// trees instead of the O(N log N) shared DAG.  See
+/// `porting/fft-scalability-cse-in-clocked-blocks-2026-07-09-en.md`.
 ///
-/// `float_start_counter` / `int_start_counter` allow the naming to pick up
-/// where a prior pass (e.g. variability placement) left off, avoiding name
-/// collisions when using the same prefixes (e.g. `fConst` / `iConst`).
+/// Declarations are inserted **at the point of first use** (preserving
+/// sequential data dependencies), and the `prefix`/counter pair is threaded
+/// through the whole scope tree so temp names stay unique.  `float_start_counter`
+/// / `int_start_counter` let the naming pick up where a prior pass left off.
 pub(super) fn materialize_shared_values(
     store: &mut FirStore,
     statements: &mut Vec<FirId>,
-    ref_counts: &HashMap<FirId, usize>,
     float_prefix: &str,
     float_start_counter: u32,
     int_prefix: &str,
     int_start_counter: u32,
 ) {
+    let mut counters = TypedCounters {
+        float_prefix,
+        float_counter: float_start_counter,
+        int_prefix,
+        int_counter: int_start_counter,
+    };
+    materialize_scope(store, statements, &mut counters);
+}
+
+/// CSE-materializes one execution scope (a flat statement list), recursing into
+/// any nested block/loop bodies as independent scopes.
+fn materialize_scope(
+    store: &mut FirStore,
+    statements: &mut Vec<FirId>,
+    counters: &mut TypedCounters<'_>,
+) {
+    // Reference counts are computed over *this* scope only: `value_children_of`
+    // does not descend into nested bodies, so a node shared inside a guarded
+    // block is not counted here — it is counted (and materialized) when we
+    // recurse into that block below.
+    let ref_counts = count_fir_value_uses(store, statements);
     let mut state = RewriteState {
-        ref_counts,
+        ref_counts: &ref_counts,
         materialized: HashMap::new(),
         temp_decls: Vec::new(),
-        counters: TypedCounters {
-            float_prefix,
-            float_counter: float_start_counter,
-            int_prefix,
-            int_counter: int_start_counter,
-        },
     };
     let mut result = Vec::with_capacity(statements.len());
 
     for &stmt in statements.iter() {
         state.temp_decls.clear();
-        let rewritten = rewrite_stmt(store, stmt, &mut state);
+        let rewritten = rewrite_stmt(store, stmt, &mut state, counters);
         // Insert declarations immediately before the statement that first
         // triggers them, so they see all prior state stores.
         result.extend(state.temp_decls.iter().copied());
@@ -194,13 +210,46 @@ pub(super) fn materialize_shared_values(
     *statements = result;
 }
 
+/// Recurses CSE into a nested body (a `Block` or a single statement), returning
+/// the rewritten body.  Temporaries materialized here are declared **inside**
+/// the body, so they are correctly scoped to it (never hoisted across the
+/// guarding condition).
+fn rewrite_scope_body(
+    store: &mut FirStore,
+    body: FirId,
+    counters: &mut TypedCounters<'_>,
+) -> FirId {
+    match match_fir(store, body) {
+        FirMatch::Block(mut stmts) => {
+            materialize_scope(store, &mut stmts, counters);
+            FirBuilder::new(store).block(&stmts)
+        }
+        // A single (non-block) statement as its own one-element scope. If CSE
+        // adds a declaration, the body must become a block to hold it.
+        _ => {
+            let mut stmts = vec![body];
+            materialize_scope(store, &mut stmts, counters);
+            if stmts.len() == 1 {
+                stmts[0]
+            } else {
+                FirBuilder::new(store).block(&stmts)
+            }
+        }
+    }
+}
+
 /// Rewrites a statement node by rewriting its value children.
 ///
 /// Statements themselves are never CSE candidates — only their embedded value
 /// sub-expressions are.  This function decodes the statement, rewrites each
 /// value child via [`rewrite_value`], and rebuilds the statement if any child
 /// changed.
-fn rewrite_stmt(store: &mut FirStore, stmt: FirId, state: &mut RewriteState<'_>) -> FirId {
+fn rewrite_stmt(
+    store: &mut FirStore,
+    stmt: FirId,
+    state: &mut RewriteState<'_>,
+    counters: &mut TypedCounters<'_>,
+) -> FirId {
     let matched = match_fir(store, stmt);
     match matched {
         FirMatch::StoreVar {
@@ -208,7 +257,7 @@ fn rewrite_stmt(store: &mut FirStore, stmt: FirId, state: &mut RewriteState<'_>)
             access,
             value,
         } => {
-            let nv = rewrite_value(store, value, state);
+            let nv = rewrite_value(store, value, state, counters);
             if nv == value {
                 return stmt;
             }
@@ -220,8 +269,8 @@ fn rewrite_stmt(store: &mut FirStore, stmt: FirId, state: &mut RewriteState<'_>)
             index,
             value,
         } => {
-            let ni = rewrite_value(store, index, state);
-            let nv = rewrite_value(store, value, state);
+            let ni = rewrite_value(store, index, state, counters);
+            let nv = rewrite_value(store, value, state, counters);
             if ni == index && nv == value {
                 return stmt;
             }
@@ -233,19 +282,72 @@ fn rewrite_stmt(store: &mut FirStore, stmt: FirId, state: &mut RewriteState<'_>)
             access,
             init: Some(init),
         } => {
-            let ni = rewrite_value(store, init, state);
+            let ni = rewrite_value(store, init, state, counters);
             if ni == init {
                 return stmt;
             }
             FirBuilder::new(store).declare_var(name, typ, access, Some(ni))
         }
         FirMatch::Drop(value) => {
-            let nv = rewrite_value(store, value, state);
+            let nv = rewrite_value(store, value, state, counters);
             if nv == value {
                 return stmt;
             }
             FirBuilder::new(store).drop_(nv)
         }
+
+        // ── Nested scopes: recurse CSE into their bodies (Phase A). ──
+        // The guard condition / loop header are left untouched (they belong to
+        // the enclosing scope and, for loops, may be re-evaluated); only the
+        // bodies are rewritten, each as its own materialization scope.
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            let nthen = rewrite_scope_body(store, then_block, counters);
+            let nelse = else_block.map(|e| rewrite_scope_body(store, e, counters));
+            FirBuilder::new(store).if_(cond, nthen, nelse)
+        }
+        FirMatch::Control { cond, stmt: inner } => {
+            let ninner = rewrite_scope_body(store, inner, counters);
+            FirBuilder::new(store).control(cond, ninner)
+        }
+        FirMatch::Block(_) => rewrite_scope_body(store, stmt, counters),
+        FirMatch::SimpleForLoop {
+            var,
+            upper,
+            body,
+            is_reverse,
+        } => {
+            let nbody = rewrite_scope_body(store, body, counters);
+            FirBuilder::new(store).simple_for_loop(var, upper, nbody, is_reverse)
+        }
+        FirMatch::ForLoop {
+            var,
+            init,
+            end,
+            step,
+            body,
+            is_reverse,
+        } => {
+            let nbody = rewrite_scope_body(store, body, counters);
+            FirBuilder::new(store).for_loop(var, init, end, step, nbody, is_reverse)
+        }
+        FirMatch::IteratorForLoop {
+            iterators,
+            is_reverse,
+            body,
+        } => {
+            let nbody = rewrite_scope_body(store, body, counters);
+            let iter_refs: Vec<&str> = iterators.iter().map(String::as_str).collect();
+            FirBuilder::new(store).iterator_for_loop(&iter_refs, is_reverse, nbody)
+        }
+        FirMatch::WhileLoop { cond, body } => {
+            let nbody = rewrite_scope_body(store, body, counters);
+            FirBuilder::new(store).while_loop(cond, nbody)
+        }
+
         // Statements without rewritable value children pass through unchanged.
         _ => stmt,
     }
@@ -257,19 +359,24 @@ fn rewrite_stmt(store: &mut FirStore, stmt: FirId, state: &mut RewriteState<'_>)
 /// reference.  Otherwise rewrites children first (bottom-up), then checks
 /// whether `node` itself qualifies for materialization (ref_count ≥ 2 and
 /// non-trivial).
-fn rewrite_value(store: &mut FirStore, node: FirId, state: &mut RewriteState<'_>) -> FirId {
+fn rewrite_value(
+    store: &mut FirStore,
+    node: FirId,
+    state: &mut RewriteState<'_>,
+    counters: &mut TypedCounters<'_>,
+) -> FirId {
     // Already materialized → return LoadVar reference.
     if let Some((name, typ)) = state.materialized.get(&node).cloned() {
         return FirBuilder::new(store).load_var(name, AccessType::Stack, typ);
     }
 
     // Rewrite children first (bottom-up).
-    let rewritten = rewrite_value_children(store, node, state);
+    let rewritten = rewrite_value_children(store, node, state, counters);
 
     // Candidate for materialization?
     if state.ref_counts.get(&node).copied().unwrap_or(0) >= 2 && !is_trivial_value(store, node) {
         let typ = store.value_type(rewritten).unwrap_or(FirType::Void);
-        let (prefix, counter) = typed_prefix_for(&typ, &mut state.counters);
+        let (prefix, counter) = typed_prefix_for(&typ, counters);
         let name = format!("{prefix}{counter}");
         *counter += 1;
         let decl = FirBuilder::new(store).declare_var(
@@ -292,35 +399,36 @@ fn rewrite_value_children(
     store: &mut FirStore,
     node: FirId,
     state: &mut RewriteState<'_>,
+    counters: &mut TypedCounters<'_>,
 ) -> FirId {
     let matched = match_fir(store, node);
     match matched {
         FirMatch::BinOp {
             op, lhs, rhs, typ, ..
         } => {
-            let nl = rewrite_value(store, lhs, state);
-            let nr = rewrite_value(store, rhs, state);
+            let nl = rewrite_value(store, lhs, state, counters);
+            let nr = rewrite_value(store, rhs, state, counters);
             if nl == lhs && nr == rhs {
                 return node;
             }
             FirBuilder::new(store).binop(op, nl, nr, typ)
         }
         FirMatch::Neg { value, typ } => {
-            let nv = rewrite_value(store, value, state);
+            let nv = rewrite_value(store, value, state, counters);
             if nv == value {
                 return node;
             }
             FirBuilder::new(store).neg(nv, typ)
         }
         FirMatch::Cast { typ, value } => {
-            let nv = rewrite_value(store, value, state);
+            let nv = rewrite_value(store, value, state, counters);
             if nv == value {
                 return node;
             }
             FirBuilder::new(store).cast(typ, nv)
         }
         FirMatch::Bitcast { typ, value } => {
-            let nv = rewrite_value(store, value, state);
+            let nv = rewrite_value(store, value, state, counters);
             if nv == value {
                 return node;
             }
@@ -332,9 +440,9 @@ fn rewrite_value_children(
             else_value,
             typ,
         } => {
-            let nc = rewrite_value(store, cond, state);
-            let nt = rewrite_value(store, then_value, state);
-            let ne = rewrite_value(store, else_value, state);
+            let nc = rewrite_value(store, cond, state, counters);
+            let nt = rewrite_value(store, then_value, state, counters);
+            let ne = rewrite_value(store, else_value, state, counters);
             if nc == cond && nt == then_value && ne == else_value {
                 return node;
             }
@@ -345,7 +453,7 @@ fn rewrite_value_children(
             let new_args: Vec<FirId> = args
                 .iter()
                 .map(|&a| {
-                    let na = rewrite_value(store, a, state);
+                    let na = rewrite_value(store, a, state, counters);
                     if na != a {
                         changed = true;
                     }
@@ -363,7 +471,7 @@ fn rewrite_value_children(
             index,
             typ,
         } => {
-            let ni = rewrite_value(store, index, state);
+            let ni = rewrite_value(store, index, state, counters);
             if ni == index {
                 return node;
             }
@@ -375,7 +483,7 @@ fn rewrite_value_children(
             value,
             typ,
         } => {
-            let nv = rewrite_value(store, value, state);
+            let nv = rewrite_value(store, value, state, counters);
             if nv == value {
                 return node;
             }
@@ -413,8 +521,7 @@ mod tests {
         let stmt = b.drop_(product);
         let mut statements = vec![stmt];
 
-        let rc = count_fir_value_uses(&store, &statements);
-        materialize_shared_values(&mut store, &mut statements, &rc, "fTemp", 0, "iTemp", 0);
+        materialize_shared_values(&mut store, &mut statements, "fTemp", 0, "iTemp", 0);
 
         assert_eq!(
             statements.len(),

@@ -7,6 +7,15 @@
 (the pass this note extends), [`ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md`](ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md),
 `docs/ondemand-fft-spectral-comparison-en.md`.
 
+**Status**: **Phase A implemented 2026-07-09** (`cse.rs` per-scope recursion).
+The framed FFT is now O(N log N): arithmetic ops for N=8→128 went
+188/1080/6488/39048/234632 → 104/301/834/2179/5428 (**43× fewer at N=128**,
+`ops/(N log N)` flat 4.3→6.1, ×/doubling ≈ 2.5); generated code at N=256 shrank
+9.2 M → 60 k interp lines (~152×) and compile time 8.6 s → 1.8 s. Numerics
+unchanged (interleave_fft, impulse-runner, cpp_clocked_differential all pass;
+190 goldens unaffected). Phase B/C still open (see §5); N=512 still hits the
+eval-budget wall.
+
 ---
 
 ## 1. Symptom
@@ -105,7 +114,15 @@ computation inside a clock-domain block currently pays the fully-inlined cost.
 
 ## 5. Correction plan
 
-### Phase A — per-scope CSE inside guarded blocks (the fix)
+### Phase A — per-scope CSE inside guarded blocks (the fix) — DONE
+
+*Implemented 2026-07-09.* `signal_fir/cse.rs` now runs CSE **per execution
+scope**: `materialize_scope` recurses into `If`/`Control`/loop/`Block` bodies as
+independent buckets (fresh ref-counts, temporaries local to the body), with the
+`fTemp`/`iTemp` counters threaded through the whole scope tree for unique names.
+Guard conditions and loop headers are left untouched (evaluated in the enclosing
+scope). `build.rs` call sites dropped the pre-computed `ref_counts` argument.
+The results above confirm O(N log N). Design as originally specified below.
 
 Make CSE run **once per execution scope**, treating each block / loop / guard
 body as its own bucket, materializing temporaries **local to that scope**

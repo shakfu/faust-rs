@@ -286,22 +286,18 @@ pub(crate) fn build_module<'a>(
     {
         use crate::signal_fir::cse;
 
-        let rc = cse::count_fir_value_uses(&lower.store, &lower.sections.constants_statements);
         cse::materialize_shared_values(
             &mut lower.store,
             &mut lower.sections.constants_statements,
-            &rc,
             "fConst",
             lower.name_gen.fconst_counter,
             "iConst",
             lower.name_gen.iconst_counter,
         );
 
-        let rc = cse::count_fir_value_uses(&lower.store, &lower.sections.control_statements);
         cse::materialize_shared_values(
             &mut lower.store,
             &mut lower.sections.control_statements,
-            &rc,
             "fSlow",
             lower.name_gen.fslow_counter,
             "iSlow",
@@ -309,11 +305,9 @@ pub(crate) fn build_module<'a>(
         );
 
         for (_, sample_loop_statements) in &mut sample_loops {
-            let rc = cse::count_fir_value_uses(&lower.store, sample_loop_statements);
             cse::materialize_shared_values(
                 &mut lower.store,
                 sample_loop_statements,
-                &rc,
                 "fTemp",
                 0,
                 "iTemp",
