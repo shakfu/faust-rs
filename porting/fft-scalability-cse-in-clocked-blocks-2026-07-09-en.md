@@ -282,6 +282,55 @@ machinery. The honest cost is the **purity break**: `interleave.lib` stops being
 trade the FFT-as-a-node fallback makes; both are the price of production-grade
 runtime for spectral work.
 
+#### Generality: these are the blocking operators of multirate, not FFT sugar
+
+The FFT is only one payload. `interleave` is the generic **blocking / deblocking**
+kernel — `serialize_in` (gather) → `ondemand` (frame-rate compute) →
+`serialize_out` (scatter + overlap-add) — shared by every frame-based multirate
+structure: analysis/synthesis filter banks, block / partitioned convolution,
+per-frame feature extraction (RMS, pitch, MFCC, **neural-net frame inputs**),
+LPC. All of them carry the *same* O(N)/sample `serialize_out` cost, so Phase D is
+a **general multirate optimization**, worth doing on its own merits independent
+of the FFT.
+
+**Measured gather/scatter asymmetry** (N=1024, `clang -O3`, mono @48 kHz):
+
+| stage | pattern | cost | expressible efficiently in pure Faust? |
+|---|---|---|---|
+| `serialize_in` + `ondemand(sum)` (no scatter) | gather: read N contiguous history samples at fire | **4.2 ns/sample** | **yes** — one delay line + fire-time reads → already O(1)/sample + O(N)/hop |
+| `serialize_out` (scatter + OLA) | write N values into an accumulator that overlaps future output | **1751 ns/sample** | **no** — no shared scatter-add in the diagram → O(N)/sample |
+
+So the two sides are **not symmetric**, and the priority is
+**`serialize_out` ≫ `serialize_in`**:
+
+- **`serialize_out` as a primitive is the fundamental fix** (the missing O(1)
+  scatter-add). It is the whole runtime win and it helps *all* frame-based
+  multirate.
+- **`serialize_in` as a primitive is optional** for the contiguous case (the
+  library form is already ~free). It earns its keep only for (a) **polyphase /
+  strided** gather — contiguous `@(N-1-i)` cannot spell the decimated `@(i)`
+  a polyphase bank needs — (b) hard-guaranteeing the fire-time lowering against
+  future scheduler changes, and (c) symmetry. Lower priority; land it with the
+  polyphase use case, not before.
+
+**Are `serialize_in`/`serialize_out` sufficient to "optimize `ondemand` for
+multirate" in general? Yes for the *blocking* axis, with three caveats:**
+
+1. They optimize the **glue** (S/P ↔ P/S conversion), not the **payload** — the
+   block body still needs Phase A (CSE), and Phase C (rfft / `-vec`) for the FFT.
+2. They do **not change rate**: `interleave` is 1-in/1-out at the input rate.
+   True rate conversion (output rate ≠ input rate) is the **orthogonal** axis
+   already covered by the P3 `upsampling` / `downsampling` primitives.
+3. Contiguous-only until `serialize_in` gains a strided variant.
+
+Architecturally: in the polyphase framework, {up-sampler, down-sampler, S/P–P/S
+blocking operators, delays} generate all multirate LTI systems. faust-rs already
+has `upsampling`/`downsampling` (the **rate-change** axis); `serialize_out`
+(+ optionally `serialize_in`) are the missing **blocking** operators. Together
+with `ondemand` they complete an efficient multirate primitive set — but each
+axis is needed: `serialize_*` alone optimizes blocking, not rate change, not the
+payload.
+
 ### Phase C — constant-factor runtime wins on the FFT (after A/D)
 
 - **Real-FFT**: the window taps are real; `(_,0)` doubles the work. An `rfft`
