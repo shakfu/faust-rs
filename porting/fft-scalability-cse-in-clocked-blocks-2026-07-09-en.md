@@ -222,6 +222,66 @@ So Phase D needs one of:
 Expected payoff: O(N)/sample → O(1)/sample removes ~5–6× of the runtime at
 `N=1024` on its own — the largest single win, bigger than rfft + SIMD combined.
 
+#### Phase D — concrete design sketch (option 1, the dedicated primitive)
+
+The path mirrors `ondemand` exactly, which is already a compiler primitive, not
+library sugar:
+
+- **Surface / box → signal.** `ondemand` is `BOX_ONDEMAND_TAG`
+  (`boxes/src/tags.rs`) → `SigMatch::OnDemand(&[SigId])` (`SIG_OD_TAG`,
+  `signals/src/lib.rs`) → lowered in `signal_fir/module/clocked.rs`. Add the
+  twin: `BOX_SERIALIZE_OUT_TAG` → a `SerializeOut { clock, hop, lanes: &[SigId] }`
+  signal node. `interleave.lib` keeps its shape but its output stage calls the
+  new primitive instead of `par(j,N, up0(H):@(j)) :> _`. (Type/arity: N lanes +
+  the boolean fire clock in, one signal out; hop is a compile-time literal.)
+
+- **FIR state (reuse the rwtable machinery).** The accumulator is a persistent
+  ring buffer `fOla[L]`, `L = N + hop` (headroom so a fire's write window never
+  laps the read pointer), plus one persistent `int` cursor. Both come from the
+  existing table path — `module/tables.rs::ensure_wrtbl_table` already declares a
+  per-instance writable table and its state; `builder.rs::{load_table,
+  store_table}` are the read-modify-write ops. No new FIR node kind is needed.
+
+- **Lowering — two rates, mirroring the P3 "state advances in fire time" rule
+  (`module/clocked.rs`).** Let `p` be the persistent cursor (the sample write
+  index).
+  - *Inside the fire guard* (once per hop; emitted in the guarded region exactly
+    like `PermVar` payloads): a `SimpleForLoop n = 0..N` doing a scatter-**add**
+    ```
+    fOla[(p + n) mod L] += lane[n]        // load_table + BinOp(Add) + store_table
+    ```
+    This is the whole O(N) cost, now paid **once per hop**.
+  - *Every sample* (top rate, outside the guard): read-and-clear at the cursor
+    ```
+    out = fOla[p mod L]; fOla[p mod L] = 0; p = p + 1     // O(1)
+    ```
+    `p mod L` reuses the same masked-index helper the circular delay lines already
+    use (`module/state.rs`). Emitting the read-clear at the sample end and the
+    scatter-add inside the guard is precisely the co-existence pattern P3 already
+    validates for per-domain IOTA / held payloads, so it slots into the existing
+    `ClockedState` region redirection rather than being a new scheduling regime.
+
+- **`serialize_in` symmetry (secondary).** `serialize_in(N) = _ <: par(i,N,
+  @(N-1-i))` is already O(N)/**hop** in principle (one input delay line, N taps
+  read at fire inside the block), but verify it is not being materialized at top
+  rate; if it is, the same primitive can expose the window as N reads of one
+  shared buffer indexed at fire.
+
+**Validation.** Bit-parity with the current library `serialize_out`: the
+`ondemand_pipeline.rs` interleave identities (`interleave(N,id)==@(N-1)`,
+`interleave(2,id)==mem`, the frame-delay composition) and the
+`ondemand_stft_cola_016` COLA anchor (constant → 1.0) must reproduce exactly;
+the impulse-runner effect checks unchanged. Then re-run the §6 benchmark — the
+identity-FX `interleave_hop` floor should drop from ~1.75 µs/sample toward the
+amortized FFT cost (~0.4 µs).
+
+**Scope / risk.** ~one new box tag + signal node + a lowering module
+(≈ the size of the `ondemand` lowering), all reusing the table + fire-time
+machinery. The honest cost is the **purity break**: `interleave.lib` stops being
+"pure P3-`ondemand` sugar" and gains a second backing primitive. That is the same
+trade the FFT-as-a-node fallback makes; both are the price of production-grade
+runtime for spectral work.
+
 ### Phase C — constant-factor runtime wins on the FFT (after A/D)
 
 - **Real-FFT**: the window taps are real; `(_,0)` doubles the work. An `rfft`
