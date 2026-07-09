@@ -160,12 +160,69 @@ walkable statement list at CSE time, a small hook in `module/clocked.rs`).
 ### Phase B — lift the front-end ceiling (needed to exploit A at large N)
 
 Even with A, box evaluation still recurses; `N=512` fails at
-`FRS-EVAL-0099` (guarded depth 1024). Make the evaluator iterative (explicit
-work stack) or raise the budget behind a larger worker stack, and land the
-propagate-memoization port ([[project-propagate-memoization-port]]) so the two
-`fftb(N/2)` halves are not re-derived. After A this unblocks `N≥1024`.
+`FRS-EVAL-0099` (guarded depth 1024). **Interim workaround (works today):**
+`FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=4096` raises the budget and compiles the full
+round-trip at `N=1024` (with A, ~0.5 M interp lines, ~40 s). The proper fix is to
+make the evaluator iterative (explicit work stack) so no budget knob is needed,
+and land the propagate-memoization port ([[project-propagate-memoization-port]])
+so the two `fftb(N/2)` halves are not re-derived.
 
-### Phase C — constant-factor runtime wins (after A)
+### Phase D — O(1) overlap-add output (the dominant runtime cost)
+
+**This is the #1 runtime lever — above Phase C.** Measured on the `N=1024`
+denoiser (see §6): 82 % of the per-sample cost is the `interleave_hop`
+serialization harness, *not* the FFT. The culprit is `serialize_out`:
+
+```faust
+serialize_out(N, H) = par(j, N, up0(H) : @(j)) :> _;
+```
+
+This reconstructs the output stream as a **sum of N delayed, clock-masked
+lanes**, evaluated **every sample**: ~N delay-line reads + N masks + N−1 adds per
+output sample — **O(N) per sample**. At `N=1024` that is the ~1.75 µs/sample
+floor measured with a trivial (identity) frame operator, before any FFT.
+
+A classical STFT resynthesis is **O(1) per sample**: it keeps a single
+**output accumulator ring buffer** and does
+
+- **at each fire** (once per `hop`): `for n in 0..N { ola[(wp+n) % L] += frame[n] }`
+  — an N-wide *scatter-add* of the reconstructed frame (O(N) **per hop**, i.e.
+  O(N/hop) ≈ O(1) amortized per sample);
+- **per sample**: `out = ola[rp]; ola[rp] = 0; rp = (rp+1) % L` — one destructive
+  read (O(1)).
+
+The whole difference is *where the N-work lives*: the Faust construction pays it
+`hop`-times over (every sample), the ring buffer pays it once per hop.
+
+**Why it cannot be a pure-Faust library fix.** The block diagram has no way to
+express a shared accumulator with a *scatter-add* write:
+
+- `par(j,N,…):>_` is inherently O(N)/sample — each lane is its own delay line,
+  summed every sample. There is no "collapse the N delays into one shared
+  accumulator" identity available to the diagram.
+- `rwtable` does not rescue it: Faust's table model has **one write per
+  activation**, so the N-wide scatter-add of a whole frame at a single fire tick
+  is not expressible (it would need N write ports, or a loop the diagram cannot
+  spell). The read side (moving pointer, read-and-clear) is fine; the write side
+  is the blocker.
+
+So Phase D needs one of:
+
+1. **A dedicated `serialize_out` / OLA compiler primitive** (mirrors the
+   "FFT as a structured node" fallback of Phase C): the `ondemand`/`interleave`
+   harness stays, but the reconstruction lowers to a ring-buffer accumulator
+   (scatter-add at fire, read-clear per sample). Cleanest, and it also fixes
+   `serialize_in`'s symmetric N-tap fan if lowered the same way. Cost: it breaks
+   the "pure library, no new primitive" purity of `interleave.lib` — a real
+   design tension worth stating explicitly.
+2. **A pattern-matching lowering** in `signal_fir` that recognizes the
+   `par(j,N, up0(H):@(j)) :> _` idiom and rewrites it to the accumulator. Keeps
+   the surface pure but is fragile (must match the exact masked-delay-sum shape).
+
+Expected payoff: O(N)/sample → O(1)/sample removes ~5–6× of the runtime at
+`N=1024` on its own — the largest single win, bigger than rfft + SIMD combined.
+
+### Phase C — constant-factor runtime wins on the FFT (after A/D)
 
 - **Real-FFT**: the window taps are real; `(_,0)` doubles the work. An `rfft`
   core halves arithmetic and exposes only N/2+1 bins.
@@ -183,7 +240,35 @@ propagate-memoization port ([[project-propagate-memoization-port]]) so the two
   clocked-block lowering itself duplicates statements per output bin (it should
   not, but verify with the temp-count regression).
 
-## 6. One-line summary
+## 6. Runtime cost — measured, and why the OLA dominates
+
+Benchmarked the `N=1024` Wiener denoiser
+(`tests/corpus/ondemand_stft_denoiser_1024.dsp`) as generated C++, `clang -O3`,
+mono @48 kHz, against a hand-written classical STFT denoiser (iterative radix-2
+FFT + ring-buffer OLA) on the same machine:
+
+| implementation | ns/sample | % of one core | voices/core |
+|---|---|---|---|
+| **Faust ondemand N=1024** | **2136** | **10.3 %** | ~10 |
+|   ↳ `interleave_hop` harness only (identity FX, no FFT) | 1751 | 8.4 % | — |
+|   ↳ FFT + IFFT + gate (amortized to frame rate) | ~385 | ~1.9 % | — |
+| classical radix-2 STFT (O(1) ring-buffer OLA) | 93.6 | 0.45 % | ~220 |
+| FFTW-based (rfft + SIMD, estimated) | ~20–40 | ~0.1–0.2 % | ~500–1000 |
+
+**Faust is ~23× slower than a naive hand-written STFT, ~50–100× vs FFTW.** The
+isolation measurement is the key finding: **82 % of the cost is the
+`serialize_out` OLA (O(N)/sample), not the FFT.** The amortized transform itself
+(~385 ns) is already ~4× the *entire* classical pipeline (93.6 ns), from the
+fully-unrolled 82 k-line `compute()` (I-cache thrash), complex-of-real (no rfft),
+and no SIMD/cache-blocking.
+
+Reading: Phase A made `N=1024` *compile* (O(N log N) code); the runtime is still
+prototype-grade (~10 voices/core). Phase D (O(1) OLA) then Phase C (rfft, twiddle
+folding, `-vec`) are what would move it toward production. Even fully optimized,
+the pure-Faust value proposition stays "composable + differentiable + multi-
+backend in one graph", not "beats FFTW".
+
+## 7. One-line summary
 
 FFT-in-Faust is not slow because Faust unrolls — it is slow because the FIR CSE
 pass does not descend into `ondemand` guarded blocks, so a fully-shared
