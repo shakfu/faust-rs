@@ -62,6 +62,7 @@ mod block_reverse_ad;
 mod cse;
 mod delay;
 mod error;
+mod loop_graph;
 mod module;
 mod placement;
 mod planner;
