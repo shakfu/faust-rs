@@ -1081,29 +1081,45 @@ impl<'a> ForwardADTransform<'a> {
                 self.zero_tangent(sig)
             }
             SigMatch::FFun(ff, largs) => self.transform_ffun(sig, ff, largs),
-            // Clock-domain machinery (`ondemand` / `upsampling` /
-            // `downsampling` wrappers and their glue): differentiating across
-            // a boundary would require the Phase B dual rules (roadmap P5).
-            // Until those land, record a loud boundary error instead of
-            // falling through to `zero_tangent` — a learning loop whose
-            // gradient is silently zero compiles fine and simply never
-            // converges (roadmap P0.4, cohabitation §4).
+            // ── FAD Phase B (roadmap P5), boundary wrappers ──
+            // Differentiation commutes with every boundary operator as long as
+            // the clock does not depend on the seed (cohabitation §5): the
+            // clock/clock-env child is opaque and never traversed, the value
+            // child carries the tangent. These pass-through rules are the
+            // wrapper half of the §6 dual-rule table; the block-augmentation
+            // half (`Seq`/`OnDemand`/`Upsampling`/`Downsampling` → `OD_aug`)
+            // is still staged below.
+            SigMatch::TempVar(u) => {
+                self.unary_chain(u, |b, p| b.temp_var(p), |b, _p, tx| b.temp_var(tx))
+            }
+            SigMatch::PermVar(u) => {
+                self.unary_chain(u, |b, p| b.perm_var(p), |b, _p, tx| b.perm_var(tx))
+            }
+            SigMatch::Clocked(c, u) => self.unary_chain(
+                u,
+                move |b, p| b.clocked(c, p),
+                move |b, _p, tx| b.clocked(c, tx),
+            ),
+            SigMatch::ZeroPad(u, h) => self.unary_chain(
+                u,
+                move |b, p| b.zero_pad(p, h),
+                move |b, _p, tx| b.zero_pad(tx, h),
+            ),
+            // ── Block augmentation (the P5 core) — not yet implemented ──
+            // `Seq(OD, y)` → `{ Seq(OD_aug, y), Seq(OD_aug, y') }` and
+            // `OD/US/DS` → `OD_aug` (payload Y∪Y', memoized once per block).
+            // Until it lands, record a loud boundary error instead of falling
+            // through to `zero_tangent` — a learning loop whose gradient is
+            // silently zero compiles fine and simply never converges (roadmap
+            // P0.4, cohabitation §4).
             SigMatch::Seq(_, _)
-            | SigMatch::Clocked(_, _)
             | SigMatch::ClockEnvToken(_)
-            | SigMatch::TempVar(_)
-            | SigMatch::PermVar(_)
-            | SigMatch::ZeroPad(_, _)
             | SigMatch::OnDemand(_)
             | SigMatch::Upsampling(_)
             | SigMatch::Downsampling(_) => {
                 let kind = match match_sig(self.arena, sig) {
                     SigMatch::Seq(_, _) => "clocked sequencing (Seq)",
-                    SigMatch::Clocked(_, _) => "clocked wrapper",
                     SigMatch::ClockEnvToken(_) => "clock-env token",
-                    SigMatch::TempVar(_) => "clock-boundary input (TempVar)",
-                    SigMatch::PermVar(_) => "clock-boundary output (PermVar)",
-                    SigMatch::ZeroPad(_, _) => "zero-padded upsampling input (ZeroPad)",
                     SigMatch::OnDemand(_) => "ondemand",
                     SigMatch::Upsampling(_) => "upsampling",
                     _ => "downsampling",
@@ -1697,6 +1713,77 @@ mod tests {
         assert_eq!(result[2], zero, "ds0/ds1 must be 0.0");
         assert_eq!(result[4], zero, "ds1/ds0 must be 0.0");
         assert_eq!(result[5], one, "ds1/ds1 must be 1.0");
+    }
+
+    /// FAD Phase B (roadmap P5): the boundary *wrapper* rules commute with
+    /// d/ds — `wrapper(s·x)' = wrapper(x)` — and must succeed (no
+    /// FRS-PROP-0004). Only the value child is differentiated; the
+    /// clock/clock-env child is opaque. The block-augmentation rules
+    /// (`Seq`/`OnDemand`/…) are still staged and keep erroring.
+    #[test]
+    fn fad_phase_b_wrapper_boundaries_pass_through() {
+        let mut arena = TreeArena::new();
+        let s = SigBuilder::new(&mut arena).real(3.0);
+        let x = SigBuilder::new(&mut arena).input(0);
+        // A seed-dependent value so the tangent is non-trivial.
+        let sx = SigBuilder::new(&mut arena).mul(s, x);
+
+        // TempVar(u)' = TempVar(u')
+        let tv = SigBuilder::new(&mut arena).temp_var(sx);
+        let out = generate_fad_signals_multi(&mut arena, &[tv], &[s])
+            .expect("FAD across a TempVar boundary must succeed");
+        assert_eq!(out.len(), 2, "bundle is [primal, tangent]");
+        assert!(matches!(match_sig(&arena, out[0]), SigMatch::TempVar(_)));
+        assert!(
+            matches!(match_sig(&arena, out[1]), SigMatch::TempVar(_)),
+            "TempVar tangent must stay wrapped, not collapse to zero"
+        );
+
+        // PermVar(u)' = PermVar(u')
+        let pv = SigBuilder::new(&mut arena).perm_var(sx);
+        let out = generate_fad_signals_multi(&mut arena, &[pv], &[s])
+            .expect("FAD across a PermVar boundary must succeed");
+        assert!(matches!(match_sig(&arena, out[1]), SigMatch::PermVar(_)));
+
+        // Clocked(c, u)' = Clocked(c, u') — the clock-env child is opaque.
+        let env = SigBuilder::new(&mut arena).clock_env_token(0);
+        let ck = SigBuilder::new(&mut arena).clocked(env, sx);
+        let out = generate_fad_signals_multi(&mut arena, &[ck], &[s])
+            .expect("FAD across a Clocked boundary must succeed");
+        let SigMatch::Clocked(t_env, _) = match_sig(&arena, out[1]) else {
+            panic!("Clocked tangent must stay a Clocked wrapper");
+        };
+        assert_eq!(t_env, env, "the clock-env child must be preserved verbatim");
+
+        // ZeroPad(u, H)' = ZeroPad(u', H)
+        let h = SigBuilder::new(&mut arena).real(1.0);
+        let zp = SigBuilder::new(&mut arena).zero_pad(sx, h);
+        let out = generate_fad_signals_multi(&mut arena, &[zp], &[s])
+            .expect("FAD across a ZeroPad boundary must succeed");
+        let SigMatch::ZeroPad(_, t_h) = match_sig(&arena, out[1]) else {
+            panic!("ZeroPad tangent must stay a ZeroPad wrapper");
+        };
+        assert_eq!(t_h, h, "the clock/H child must be preserved verbatim");
+    }
+
+    /// The block-augmentation boundaries (`Seq`/`OnDemand`/…) are not yet
+    /// implemented, so `fad` across them must still fail loudly
+    /// (FRS-PROP-0004), never silently-zero tangents.
+    #[test]
+    fn fad_phase_b_block_augmentation_still_errors() {
+        let mut arena = TreeArena::new();
+        let s = SigBuilder::new(&mut arena).real(3.0);
+        let x = SigBuilder::new(&mut arena).input(0);
+        let sx = SigBuilder::new(&mut arena).mul(s, x);
+        let env = SigBuilder::new(&mut arena).clock_env_token(0);
+        let clock = SigBuilder::new(&mut arena).clocked(env, s);
+        let od = SigBuilder::new(&mut arena).on_demand(&[clock, sx]);
+        let err = generate_fad_signals_multi(&mut arena, &[od], &[s])
+            .expect_err("FAD across an ondemand block must still error (P5 core pending)");
+        assert!(
+            matches!(err, PropagateError::FadUnsupportedNode { .. }),
+            "expected FadUnsupportedNode, got {err:?}"
+        );
     }
 
     /// `Proj(0, REC([s, c]))` with seed `s` must rewrite to:

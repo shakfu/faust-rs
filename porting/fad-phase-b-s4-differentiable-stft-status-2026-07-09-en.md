@@ -34,7 +34,24 @@ rewrite plus a battery of finite-difference tests.
   phase-vocoder inter-frame machinery (2026-07-09), and **Phase A per-scope CSE**
   which keeps the framed FFT O(N log N) (commit `03127f30`).
 
-## 3. The exact blocker — one match arm
+## 2b. Progress — the wrapper half of P5 is done (2026-07-09)
+
+The **boundary wrapper rules** are implemented in `forward_ad.rs`: the single
+error arm was split so `TempVar`/`PermVar`/`Clocked`/`ZeroPad` now differentiate
+via `(wrapper u)' = wrapper(u')` (value child carries the tangent; the
+clock/clock-env child is opaque). Verified:
+
+- unit tests on the four wrappers (`fad_phase_b_wrapper_boundaries_pass_through`);
+- **numeric parity end-to-end**: `ondemand(fad(*(g), g))` — previously rejected
+  with `FRS-PROP-0004` — now differentiates correctly through the block's
+  `TempVar` data input: tangent = held input snapshot, `primal == g · tangent`
+  (`fad_inside_ondemand_crossing_seed_reads_clocked_input`, run through the
+  interpreter). 76/76 workspace test binaries + 190 goldens unaffected.
+
+Still open (§4): the **block-augmentation** half — `Seq(OD, y)` and
+`OD/US/DS → OD_aug` — which keeps erroring loudly until it lands.
+
+## 3. The exact blocker — one match arm (before 2b)
 
 In `crates/propagate/src/forward_ad.rs` (the `transform()` dispatch), all **eight**
 boundary node kinds — `Seq`, `Clocked`, `TempVar`, `PermVar`, `ZeroPad`,

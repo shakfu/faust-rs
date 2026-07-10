@@ -602,25 +602,41 @@ fn fad_around_ondemand_is_rejected_loudly() {
 }
 
 #[test]
-fn fad_inside_ondemand_with_crossing_seed_is_rejected_loudly() {
-    // Cohabitation §4 row 3: `ondemand(fad(*(g), g))` — the differentiated
-    // body reads the clocked wrapper inputs, so the seed path crosses the
-    // boundary. Must fail with FRS-PROP-0004 instead of zero tangents.
-    let err = expect_compile_error(
-        "fad_inside_od",
-        r#"g = hslider("g", 1, 0, 10, 0.1);
-           process = (button("gate"), _) : ondemand(fad(*(g), g));"#,
+fn fad_inside_ondemand_crossing_seed_reads_clocked_input() {
+    // Cohabitation §4 row 3 / §5–6: `ondemand(fad(*(g), g))` differentiates
+    // `g · x` where `x` is the block's clocked data input, so the seed path
+    // crosses a `TempVar` boundary. FAD Phase B (roadmap P5) wrapper rule
+    // `(snap u)' = snap(u')` makes this exact: the tangent is the held input
+    // snapshot, so `primal == g · tangent`. Before P5 this was rejected with
+    // FRS-PROP-0004; the boundary wrapper rules now differentiate it.
+    let clk = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let data = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let g = 0.5_f32;
+
+    let out = run_od_fad_source(
+        "od_fad_cross",
+        format!(
+            r#"g = hslider("g", {g}, -10, 10, 0.001);
+               process = ((_ != 0), _) : ondemand(fad(*(g), g));"#
+        ),
+        &[clk, data.clone()],
     );
-    let diagnostics = err
-        .diagnostics()
-        .expect("boundary rejection should expose diagnostics");
-    assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.code.0 == "FRS-PROP-0004"),
-        "expected FRS-PROP-0004, got: {err}"
-    );
+    assert_eq!(out.len(), 2, "fad bundle = [primal, tangent]");
+
+    // Fire at n=2 snapshots data[2]=3; both outputs are 0 before the first
+    // fire and hold afterwards. tangent = held input, primal = g · tangent.
+    let held = data[2];
+    for (n, (&primal, &tangent)) in out[0].iter().zip(out[1].iter()).enumerate() {
+        let (want_p, want_t) = if n < 2 { (0.0, 0.0) } else { (g * held, held) };
+        assert!(
+            (tangent - want_t).abs() < 1.0e-6,
+            "frame {n}: tangent {tangent} vs held input {want_t} (must not be silently zero)"
+        );
+        assert!(
+            (primal - want_p).abs() < 1.0e-6,
+            "frame {n}: primal {primal} vs {want_p}"
+        );
+    }
 }
 
 #[test]
