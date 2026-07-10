@@ -161,8 +161,16 @@ ring) — orthogonal and later.
    scalar untouched (190 goldens), valid C at `-O3 -Wall -Wextra`. Extend
    incrementally (pure prefix, multiple recursive groups) — the partition already
    handles them for a flat body.
-5. **S-E — measure.** Confirm the C compiler now vectorizes the split loops
-   (inspect asm / a microbenchmark) — the whole point.
+5. **S-E — measure. ✅ (2026-07-10)** Confirmed on arm64 / Apple clang (NEON):
+   the split's tail loop vectorizes (`-Rpass=loop-vectorize`: width 4 interleaved
+   4 for a `*0.5` tail; `fmul.4s` in the asm), while the serial core and the
+   scalar single loop do not. Net speedup is **conditional** (the split adds a
+   store+load per sample through `vbufN`): `1.15×` for a compute-heavy
+   abs/min/max shaper tail, `0.92×` for a cheap `*0.5` tail — a small regression
+   when the vectorizable work doesn't clear the buffering overhead. So a **cost
+   heuristic** (split only when the tail's op count is high enough, à la Faust's
+   vectorization policy) is the natural follow-up before making the split
+   unconditional. Results are always bit-exact (oracle-locked); only speed moves.
 
 Reverse-time (RAD/BRA) slices keep forcing scalar mode throughout (V5 caveat).
 
