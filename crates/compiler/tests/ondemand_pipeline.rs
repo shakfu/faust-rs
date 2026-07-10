@@ -10,9 +10,11 @@
 //!   `FRS-SFIR-0004`.
 //! - P0.2: two structurally identical wrapper instances in different contexts
 //!   get *distinct* clock domains (the C++ de Bruijn collision class).
-//! - P0.4: `fad` across a boundary fails loudly (`FRS-PROP-0004`), never
-//!   silently-zero tangents; `rad` names the clocked construct it rejects.
-//!   The four rows of the cohabitation §4 table are pinned below.
+//! - P0.4 / P5: `fad` across a boundary is now differentiated (FAD Phase B
+//!   wrapper + block-augmentation rules) — `fad_inside_ondemand_*` and
+//!   `fad_around_ondemand_*` check the gradients numerically; only a bare
+//!   wrapper reached outside a `Seq` (defensive) still errors. `rad` across a
+//!   boundary still fails loudly and names the clocked construct it rejects.
 
 use std::collections::BTreeSet;
 
@@ -609,8 +611,16 @@ fn fad_inside_ondemand_nonlinear_frame_reduction_matches_central_difference() {
     );
     assert_eq!(fad_out.len(), 2, "fad bundle = [primal, tangent]");
 
-    let plus = run_od_fad_source("od_fad_sp_p", render(g + eps, "loss"), &ins.clone().map(|v| v.to_vec()));
-    let minus = run_od_fad_source("od_fad_sp_m", render(g - eps, "loss"), &ins.map(|v| v.to_vec()));
+    let plus = run_od_fad_source(
+        "od_fad_sp_p",
+        render(g + eps, "loss"),
+        &ins.clone().map(|v| v.to_vec()),
+    );
+    let minus = run_od_fad_source(
+        "od_fad_sp_m",
+        render(g - eps, "loss"),
+        &ins.map(|v| v.to_vec()),
+    );
 
     // Steady frame after the fire at n=2.
     let n = 5;
@@ -633,24 +643,72 @@ fn expect_compile_error(name: &str, source: &str) -> compiler::CompilerError {
 }
 
 #[test]
-fn fad_around_ondemand_is_rejected_loudly() {
-    // Cohabitation §4 row 2: `fad(… : ondemand(*(g)), g)` used to propagate
-    // *silently-zero* tangents. It must now fail with the structured
-    // FRS-PROP-0004 boundary error.
-    let err = expect_compile_error(
+fn fad_around_ondemand_differentiates_through_the_block() {
+    // Cohabitation §4 row 2 / §6: `fad(… : ondemand(*(g)), g)` — the *fad-outside*
+    // form, where the differentiated output reads the block from outside. FAD
+    // Phase B (roadmap P5) block augmentation `OD → OD_aug` (payload carries the
+    // interleaved primal + tangent held-outputs, `Seq` re-routed once) makes it
+    // exact: the block computes `[g·x, x]`, so tangent = held input, primal =
+    // g·tangent. Before P5 this was rejected with FRS-PROP-0004.
+    let clk = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let data = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let g = 0.5_f32;
+
+    let out = run_od_fad_source(
         "fad_around_od",
-        r#"g = hslider("g", 1, 0, 10, 0.1);
-           process = fad((button("gate"), _) : ondemand(*(g)), g);"#,
+        format!(
+            r#"g = hslider("g", {g}, -10, 10, 0.001);
+               process = fad(((_ != 0), _) : ondemand(*(g)), g);"#
+        ),
+        &[clk, data.clone()],
     );
-    let diagnostics = err
-        .diagnostics()
-        .expect("boundary rejection should expose diagnostics");
+    assert_eq!(out.len(), 2, "fad bundle = [primal, tangent]");
+
+    // Fire at n=2 snapshots data[2]=3; 0 before the first fire, held after.
+    let held = data[2];
+    for (n, (&primal, &tangent)) in out[0].iter().zip(out[1].iter()).enumerate() {
+        let (want_p, want_t) = if n < 2 { (0.0, 0.0) } else { (g * held, held) };
+        assert!(
+            (tangent - want_t).abs() < 1.0e-6,
+            "frame {n}: tangent {tangent} vs held input {want_t} (must not be silently zero)"
+        );
+        assert!(
+            (primal - want_p).abs() < 1.0e-6,
+            "frame {n}: primal {primal} vs {want_p}"
+        );
+    }
+}
+
+/// Nonlinear fad-*outside*: `fad((clk, x) : ondemand((g·x)²), g)` — the block is
+/// nonlinear in the seed, so the augmented tangent held-output is `2·g·x²`.
+/// Exercises OD_aug through a nonlinear body; gradient checked exactly.
+#[test]
+fn fad_around_ondemand_nonlinear_body_gradient_is_exact() {
+    let clk = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let data = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let g = 0.5_f32;
+    let out = run_od_fad_source(
+        "fad_around_od_nl",
+        format!(
+            r#"g = hslider("g", {g}, -10, 10, 0.001);
+               sq = _ <: _*_;
+               process = fad(((_ != 0), _) : ondemand(sq(*(g))), g);"#
+        ),
+        &[clk, data.clone()],
+    );
+    let held = data[2];
+    let n = 5;
     assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.code.0 == "FRS-PROP-0004"),
-        "expected FRS-PROP-0004, got: {err}"
+        (out[0][n] - (g * held) * (g * held)).abs() < 1.0e-5,
+        "primal {} vs (g·x)²={}",
+        out[0][n],
+        (g * held) * (g * held)
+    );
+    assert!(
+        (out[1][n] - 2.0 * g * held * held).abs() < 1.0e-5,
+        "tangent {} vs 2·g·x²={}",
+        out[1][n],
+        2.0 * g * held * held
     );
 }
 

@@ -67,12 +67,28 @@ exact — an impulse window gives a flat spectrum, `Σ|g·X| = 8g`, so
 inline nonlinear frame reduction
 (`fad_inside_ondemand_nonlinear_frame_reduction_matches_central_difference`).
 
-What still needs `OD_aug` (§4): the **fad-*outside*** form —
-`fad(EXPR : ondemand(F) : loss, θ)` — where the differentiated loss reads the
-block *outputs* from outside (e.g. comparing a *resynthesized* time signal to a
-target after `serialize_out`). Much of DDSP (a spectral loss on the analysis
-frame) is the inside form and works today; time-domain reconstruction losses are
-the outside form and wait on the augmentation.
+### 2d. P5 complete — block augmentation (`OD_aug`) landed (2026-07-09)
+
+The **fad-*outside*** form now works too: `fad(EXPR : ondemand(F), θ)`
+differentiates through the block from outside. `forward_ad.rs` gained
+`transform_seq` + `augment_block`: `Seq(OD, y)` → `{ Seq(OD_aug, y),
+Seq(OD_aug, y') }`, where `OD_aug` rebuilds the wrapper payload as
+`[clock, lane₀, lane₀', lane₁, lane₁', …]` (primal + one tangent per seed per held
+lane), **memoized once per source block** (`od_aug_cache`) so every `Seq` consumer
+shares one augmented block (§6.1 "one block, not two"). The clock lane is opaque.
+A bare wrapper reached outside a `Seq` stays a loud error (defensive).
+
+Verified numerically through the interpreter:
+- `fad_around_ondemand_differentiates_through_the_block`:
+  `fad((clk,x):ondemand(*(g)), g)` → tangent = held input, `primal = g·tangent`;
+- `fad_around_ondemand_nonlinear_body_gradient_is_exact`:
+  `fad((clk,x):ondemand((g·x)²), g)` → tangent = `2·g·x²` exactly;
+- CLI: nonlinear `(g·x)²` matched central differences (9.0000).
+
+So **both forms of P5 are done**: fad-inside (§2c) and fad-outside (§2d). This
+unblocks the full S4 surface, including time-domain reconstruction spectral
+losses (loss read after `serialize_out`). 76/76 workspace binaries, 190 goldens
+unaffected, clippy clean.
 
 ## 3. The exact blocker — one match arm (before 2b)
 
