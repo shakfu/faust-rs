@@ -595,35 +595,96 @@ pub(crate) struct RecursivePartition {
     pub(crate) boundary: Vec<(String, FirType)>,
 }
 
-/// Collects every `LoadVar (name, access)` occurring in a value tree.
-fn collect_var_loads(store: &FirStore, node: FirId, out: &mut Vec<(String, AccessType)>) {
+/// Collects every storage reference occurring in a FIR value tree.
+///
+/// The recursive-slice split must be conservative: a missed nested read can make
+/// the partition hoist a tail past the serial state update that it still
+/// observes. Keep this traversal symmetric with [`rewrite_var_loads`].
+fn collect_var_loads(store: &FirStore, node: FirId, out: &mut Vec<(String, AccessType)>) -> bool {
     match match_fir(store, node) {
-        FirMatch::LoadVar { name, access, .. } => out.push((name, access)),
+        FirMatch::Int32 { .. }
+        | FirMatch::Int64 { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Quad { .. }
+        | FirMatch::FixedPoint { .. }
+        | FirMatch::Int32Array { .. }
+        | FirMatch::Float32Array { .. }
+        | FirMatch::Float64Array { .. }
+        | FirMatch::QuadArray { .. }
+        | FirMatch::FixedPointArray { .. }
+        | FirMatch::NullValue { .. }
+        | FirMatch::NewDsp { .. } => true,
+        FirMatch::LoadVar { name, access, .. } | FirMatch::LoadVarAddress { name, access, .. } => {
+            out.push((name, access));
+            true
+        }
+        FirMatch::ValueArray { values, .. } => {
+            for v in values {
+                if !collect_var_loads(store, v, out) {
+                    return false;
+                }
+            }
+            true
+        }
         FirMatch::BinOp { lhs, rhs, .. } => {
-            collect_var_loads(store, lhs, out);
-            collect_var_loads(store, rhs, out);
+            collect_var_loads(store, lhs, out) && collect_var_loads(store, rhs, out)
         }
         FirMatch::Neg { value, .. }
         | FirMatch::Cast { value, .. }
-        | FirMatch::Bitcast { value, .. }
-        | FirMatch::TeeVar { value, .. } => collect_var_loads(store, value, out),
+        | FirMatch::Bitcast { value, .. } => collect_var_loads(store, value, out),
+        FirMatch::TeeVar {
+            name,
+            access,
+            value,
+            ..
+        } => {
+            // `TeeVar` is a value expression with a side effect; treating the
+            // target as a reference makes `Struct` tees stay in the serial core.
+            out.push((name, access));
+            collect_var_loads(store, value, out)
+        }
         FirMatch::Select2 {
             cond,
             then_value,
             else_value,
             ..
         } => {
-            collect_var_loads(store, cond, out);
-            collect_var_loads(store, then_value, out);
-            collect_var_loads(store, else_value, out);
+            collect_var_loads(store, cond, out)
+                && collect_var_loads(store, then_value, out)
+                && collect_var_loads(store, else_value, out)
         }
         FirMatch::FunCall { args, .. } => {
             for a in args {
-                collect_var_loads(store, a, out);
+                if !collect_var_loads(store, a, out) {
+                    return false;
+                }
             }
+            true
         }
-        FirMatch::LoadTable { index, .. } => collect_var_loads(store, index, out),
-        _ => {}
+        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
+            collect_var_loads(store, part, out)
+        }
+        FirMatch::LoadSoundfileBuffer {
+            chan, part, idx, ..
+        } => {
+            collect_var_loads(store, chan, out)
+                && collect_var_loads(store, part, out)
+                && collect_var_loads(store, idx, out)
+        }
+        FirMatch::LoadTable {
+            name,
+            access,
+            index,
+            ..
+        } => {
+            out.push((name, access));
+            collect_var_loads(store, index, out)
+        }
+        // Statement/control/UI/module nodes are not value trees accepted by the
+        // split analysis. Falling back keeps the fused serial loop.
+        _ => false,
     }
 }
 
@@ -639,8 +700,10 @@ fn stmt_reads_writes(store: &FirStore, stmt: FirId) -> Option<(VarRefs, VarRefs)
         FirMatch::DeclareVar {
             name, access, init, ..
         } => {
-            if let Some(init) = init {
-                collect_var_loads(store, init, &mut reads);
+            if let Some(init) = init
+                && !collect_var_loads(store, init, &mut reads)
+            {
+                return None;
             }
             vec![(name, access)]
         }
@@ -649,7 +712,9 @@ fn stmt_reads_writes(store: &FirStore, stmt: FirId) -> Option<(VarRefs, VarRefs)
             access,
             value,
         } => {
-            collect_var_loads(store, value, &mut reads);
+            if !collect_var_loads(store, value, &mut reads) {
+                return None;
+            }
             vec![(name, access)]
         }
         FirMatch::StoreTable {
@@ -658,8 +723,11 @@ fn stmt_reads_writes(store: &FirStore, stmt: FirId) -> Option<(VarRefs, VarRefs)
             index,
             value,
         } => {
-            collect_var_loads(store, index, &mut reads);
-            collect_var_loads(store, value, &mut reads);
+            if !collect_var_loads(store, index, &mut reads)
+                || !collect_var_loads(store, value, &mut reads)
+            {
+                return None;
+            }
             vec![(name, access)]
         }
         _ => return None,
@@ -766,49 +834,85 @@ pub(crate) fn partition_recursive_body(
     })
 }
 
-/// Rebuilds a value tree (or statement), replacing every `LoadVar` whose name is
-/// a key of `repl` with `repl[name]` (a chunk-buffer load). Returns `node`
-/// unchanged when nothing matched, preserving interned identity on subtrees that
-/// do not touch a boundary temp.
+/// Rebuilds a value tree (or supported statement), replacing every `LoadVar`
+/// whose name is a key of `repl` with `repl[name]` (a chunk-buffer load).
+/// Returns `node` unchanged when nothing matched, preserving interned identity
+/// on subtrees that do not touch a boundary temp.
+///
+/// Returns `None` when a boundary value is used in a shape that cannot be
+/// represented as a scalar chunk-buffer load (for example taking its address).
 #[must_use]
 pub(crate) fn rewrite_var_loads(
     store: &mut FirStore,
     node: FirId,
     repl: &AHashMap<String, FirId>,
-) -> FirId {
+) -> Option<FirId> {
     match match_fir(store, node) {
-        FirMatch::LoadVar { name, .. } => repl.get(&name).copied().unwrap_or(node),
-        FirMatch::BinOp { op, lhs, rhs, typ } => {
-            let l = rewrite_var_loads(store, lhs, repl);
-            let r = rewrite_var_loads(store, rhs, repl);
-            if l == lhs && r == rhs {
-                node
+        FirMatch::LoadVar { name, .. } => Some(repl.get(&name).copied().unwrap_or(node)),
+        FirMatch::LoadVarAddress { name, .. } => {
+            if repl.contains_key(&name) {
+                None
             } else {
-                FirBuilder::new(store).binop(op, l, r, typ)
+                Some(node)
+            }
+        }
+        FirMatch::Int32 { .. }
+        | FirMatch::Int64 { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Quad { .. }
+        | FirMatch::FixedPoint { .. }
+        | FirMatch::Int32Array { .. }
+        | FirMatch::Float32Array { .. }
+        | FirMatch::Float64Array { .. }
+        | FirMatch::QuadArray { .. }
+        | FirMatch::FixedPointArray { .. }
+        | FirMatch::NullValue { .. }
+        | FirMatch::NewDsp { .. } => Some(node),
+        FirMatch::ValueArray { values, typ } => {
+            let new_values: Option<Vec<FirId>> = values
+                .iter()
+                .map(|&v| rewrite_var_loads(store, v, repl))
+                .collect();
+            let new_values = new_values?;
+            if new_values == values {
+                Some(node)
+            } else {
+                Some(FirBuilder::new(store).value_array(&new_values, typ))
+            }
+        }
+        FirMatch::BinOp { op, lhs, rhs, typ } => {
+            let l = rewrite_var_loads(store, lhs, repl)?;
+            let r = rewrite_var_loads(store, rhs, repl)?;
+            if l == lhs && r == rhs {
+                Some(node)
+            } else {
+                Some(FirBuilder::new(store).binop(op, l, r, typ))
             }
         }
         FirMatch::Neg { value, typ } => {
-            let v = rewrite_var_loads(store, value, repl);
+            let v = rewrite_var_loads(store, value, repl)?;
             if v == value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).neg(v, typ)
+                Some(FirBuilder::new(store).neg(v, typ))
             }
         }
         FirMatch::Cast { typ, value } => {
-            let v = rewrite_var_loads(store, value, repl);
+            let v = rewrite_var_loads(store, value, repl)?;
             if v == value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).cast(typ, v)
+                Some(FirBuilder::new(store).cast(typ, v))
             }
         }
         FirMatch::Bitcast { typ, value } => {
-            let v = rewrite_var_loads(store, value, repl);
+            let v = rewrite_var_loads(store, value, repl)?;
             if v == value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).bitcast(typ, v)
+                Some(FirBuilder::new(store).bitcast(typ, v))
             }
         }
         FirMatch::Select2 {
@@ -817,24 +921,25 @@ pub(crate) fn rewrite_var_loads(
             else_value,
             typ,
         } => {
-            let c = rewrite_var_loads(store, cond, repl);
-            let t = rewrite_var_loads(store, then_value, repl);
-            let e = rewrite_var_loads(store, else_value, repl);
+            let c = rewrite_var_loads(store, cond, repl)?;
+            let t = rewrite_var_loads(store, then_value, repl)?;
+            let e = rewrite_var_loads(store, else_value, repl)?;
             if c == cond && t == then_value && e == else_value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).select2(c, t, e, typ)
+                Some(FirBuilder::new(store).select2(c, t, e, typ))
             }
         }
         FirMatch::FunCall { name, args, typ } => {
-            let new_args: Vec<FirId> = args
+            let new_args: Option<Vec<FirId>> = args
                 .iter()
                 .map(|&a| rewrite_var_loads(store, a, repl))
                 .collect();
+            let new_args = new_args?;
             if new_args == args {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).fun_call(name, &new_args, typ)
+                Some(FirBuilder::new(store).fun_call(name, &new_args, typ))
             }
         }
         FirMatch::LoadTable {
@@ -843,11 +948,49 @@ pub(crate) fn rewrite_var_loads(
             index,
             typ,
         } => {
-            let idx = rewrite_var_loads(store, index, repl);
+            if repl.contains_key(&name) {
+                return None;
+            }
+            let idx = rewrite_var_loads(store, index, repl)?;
             if idx == index {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).load_table(name, access, idx, typ)
+                Some(FirBuilder::new(store).load_table(name, access, idx, typ))
+            }
+        }
+        FirMatch::LoadSoundfileLength { var, part } => {
+            let new_part = rewrite_var_loads(store, part, repl)?;
+            if new_part == part {
+                Some(node)
+            } else {
+                Some(FirBuilder::new(store).load_soundfile_length(var, new_part))
+            }
+        }
+        FirMatch::LoadSoundfileRate { var, part } => {
+            let new_part = rewrite_var_loads(store, part, repl)?;
+            if new_part == part {
+                Some(node)
+            } else {
+                Some(FirBuilder::new(store).load_soundfile_rate(var, new_part))
+            }
+        }
+        FirMatch::LoadSoundfileBuffer {
+            var,
+            chan,
+            part,
+            idx,
+            typ,
+        } => {
+            let new_chan = rewrite_var_loads(store, chan, repl)?;
+            let new_part = rewrite_var_loads(store, part, repl)?;
+            let new_idx = rewrite_var_loads(store, idx, repl)?;
+            if new_chan == chan && new_part == part && new_idx == idx {
+                Some(node)
+            } else {
+                Some(
+                    FirBuilder::new(store)
+                        .load_soundfile_buffer(var, new_chan, new_part, new_idx, typ),
+                )
             }
         }
         FirMatch::TeeVar {
@@ -856,11 +999,14 @@ pub(crate) fn rewrite_var_loads(
             value,
             typ,
         } => {
-            let v = rewrite_var_loads(store, value, repl);
+            if repl.contains_key(&name) {
+                return None;
+            }
+            let v = rewrite_var_loads(store, value, repl)?;
             if v == value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).tee_var(name, access, v, typ)
+                Some(FirBuilder::new(store).tee_var(name, access, v, typ))
             }
         }
         FirMatch::StoreTable {
@@ -869,12 +1015,15 @@ pub(crate) fn rewrite_var_loads(
             index,
             value,
         } => {
-            let idx = rewrite_var_loads(store, index, repl);
-            let v = rewrite_var_loads(store, value, repl);
+            if repl.contains_key(&name) {
+                return None;
+            }
+            let idx = rewrite_var_loads(store, index, repl)?;
+            let v = rewrite_var_loads(store, value, repl)?;
             if idx == index && v == value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).store_table(name, access, idx, v)
+                Some(FirBuilder::new(store).store_table(name, access, idx, v))
             }
         }
         FirMatch::StoreVar {
@@ -882,11 +1031,14 @@ pub(crate) fn rewrite_var_loads(
             access,
             value,
         } => {
-            let v = rewrite_var_loads(store, value, repl);
+            if repl.contains_key(&name) {
+                return None;
+            }
+            let v = rewrite_var_loads(store, value, repl)?;
             if v == value {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).store_var(name, access, v)
+                Some(FirBuilder::new(store).store_var(name, access, v))
             }
         }
         FirMatch::DeclareVar {
@@ -895,14 +1047,18 @@ pub(crate) fn rewrite_var_loads(
             access,
             init: Some(init),
         } => {
-            let ni = rewrite_var_loads(store, init, repl);
+            if repl.contains_key(&name) {
+                return None;
+            }
+            let ni = rewrite_var_loads(store, init, repl)?;
             if ni == init {
-                node
+                Some(node)
             } else {
-                FirBuilder::new(store).declare_var(name, typ, access, Some(ni))
+                Some(FirBuilder::new(store).declare_var(name, typ, access, Some(ni)))
             }
         }
-        _ => node,
+        FirMatch::DeclareVar { .. } => Some(node),
+        _ => None,
     }
 }
 
@@ -1357,6 +1513,32 @@ mod tests {
     }
 
     #[test]
+    fn partition_declines_tail_that_reads_struct_table_state() {
+        // APF-like shape: the output expression reads `fRec[0]`/`fRec[2]`
+        // directly.  Hoisting that output after the serial core would observe
+        // the chunk-final table state instead of the per-sample state.
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let zero = b.int32(0);
+        let one_i = b.int32(1);
+        let two = b.int32(2);
+        let rec1 = b.load_table("fRec", AccessType::Struct, one_i, FirType::Float32);
+        let temp = b.declare_var("fTemp", FirType::Float32, AccessType::Stack, Some(rec1));
+
+        let cur = b.load_table("fRec", AccessType::Struct, zero, FirType::Float32);
+        let prev2 = b.load_table("fRec", AccessType::Struct, two, FirType::Float32);
+        let sum = b.binop(FirBinOp::Add, cur, prev2, FirType::Float32);
+        let out = b.store_table("output0", AccessType::Stack, i0, sum);
+
+        let temp_load = b.load_var("fTemp", AccessType::Stack, FirType::Float32);
+        let store_state = b.store_table("fRec", AccessType::Struct, zero, temp_load);
+
+        assert!(partition_recursive_body(&store, &[temp, out, store_state]).is_none());
+    }
+
+    #[test]
     fn partition_declines_unsupported_statement() {
         // A bare value node is not a statement kind the split handles → fallback.
         let mut store = FirStore::new();
@@ -1375,7 +1557,8 @@ mod tests {
         let mut repl = AHashMap::new();
         repl.insert("fRecCur".to_string(), load);
 
-        let rewritten = rewrite_var_loads(&mut store, out, &repl);
+        let rewritten =
+            rewrite_var_loads(&mut store, out, &repl).expect("output tail is rewritable");
         assert_ne!(rewritten, out, "the output write must be rebuilt");
 
         // The tail is now `output0[i0] = 0.5 * vbuf0[i0-vindex]`.
@@ -1398,6 +1581,45 @@ mod tests {
         // rhs is the buffer load, not a bare fRecCur LoadVar.
         assert!(matches!(
             match_fir(&store, rhs),
+            FirMatch::LoadTable { ref name, .. } if name == "vbuf0"
+        ));
+    }
+
+    #[test]
+    fn rewrite_var_loads_descends_into_soundfile_buffer_index() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let rec = b.load_var("fRec", AccessType::Struct, FirType::Int32);
+        let idx_decl = b.declare_var("iRecCur", FirType::Int32, AccessType::Stack, Some(rec));
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let zero = b.int32(0);
+        let idx = b.load_var("iRecCur", AccessType::Stack, FirType::Int32);
+        let sample = b.load_soundfile_buffer("fSound0", zero, zero, idx, FirType::Float32);
+        let out = b.store_table("output0", AccessType::Stack, i0, sample);
+        let idx2 = b.load_var("iRecCur", AccessType::Stack, FirType::Int32);
+        let store_state = b.store_var("fRec", AccessType::Struct, idx2);
+
+        let part = partition_recursive_body(&store, &[idx_decl, out, store_state])
+            .expect("soundfile index tail is splittable through a boundary buffer");
+        assert_eq!(part.vectorizable, vec![out]);
+        assert_eq!(part.boundary, vec![("iRecCur".to_string(), FirType::Int32)]);
+
+        let buf = ChunkBuffer::new(0, FirType::Int32, 32);
+        let load = buf.load(&mut store);
+        let mut repl = AHashMap::new();
+        repl.insert("iRecCur".to_string(), load);
+        let rewritten =
+            rewrite_var_loads(&mut store, out, &repl).expect("soundfile tail is rewritable");
+
+        let FirMatch::StoreTable { value, .. } = match_fir(&store, rewritten) else {
+            panic!("still an output store");
+        };
+        let FirMatch::LoadSoundfileBuffer { idx, .. } = match_fir(&store, value) else {
+            panic!("output value is still a soundfile buffer load");
+        };
+        assert!(matches!(
+            match_fir(&store, idx),
             FirMatch::LoadTable { ref name, .. } if name == "vbuf0"
         ));
     }

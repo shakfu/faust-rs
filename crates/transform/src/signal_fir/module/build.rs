@@ -162,7 +162,7 @@ fn split_bodies(
         .vectorizable
         .iter()
         .map(|&s| rewrite_var_loads(store, s, &repl))
-        .collect();
+        .collect::<Option<_>>()?;
 
     Some((serial_body, tail_body, buf_decls))
 }
