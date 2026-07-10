@@ -26,8 +26,9 @@ use std::collections::BTreeSet;
 
 use ahash::AHashMap;
 use fir::{AccessType, FirId, FirMatch, FirStore, match_fir};
-use signals::SigId;
+use signals::{SigId, SigMatch, match_sig};
 use sigtype::Variability;
+use tlib::TreeArena;
 
 /// Index of a loop node in a [`LoopGraph`].
 ///
@@ -372,6 +373,69 @@ impl LoopAssignment {
     }
 }
 
+/// The **sample-value operands** of a signal — the edges [`assign_loops`] should
+/// follow. `match_sig` already decodes the op-code / control ids out of the enum,
+/// so this returns only the `SigId` value fields, never the raw arena children
+/// (which include the op-code atom and constant indices — following those, since
+/// `int(0)` is hash-consed, would fabricate a spurious cross-loop edge).
+///
+/// Unhandled variants (constants, inputs, controls, soundfiles, waveforms,
+/// `FConst`/`FVar`/`FFun`, and the whole clock-domain boundary
+/// `Clocked`/`OnDemand`/`Seq`/`TempVar`/…) return no children: a **conservative**
+/// leaf, which can only *under*-separate (never add a wrong edge). The boundary
+/// is a scalar island (vector doc §6, D1) handled by a later slice.
+#[must_use]
+pub(crate) fn signal_value_children(arena: &TreeArena, sig: SigId) -> Vec<SigId> {
+    match match_sig(arena, sig) {
+        SigMatch::BinOp(_, x, y)
+        | SigMatch::Pow(x, y)
+        | SigMatch::Min(x, y)
+        | SigMatch::Max(x, y)
+        | SigMatch::Fmod(x, y)
+        | SigMatch::Remainder(x, y)
+        | SigMatch::Atan2(x, y)
+        | SigMatch::Prefix(x, y)
+        | SigMatch::Attach(x, y)
+        | SigMatch::Enable(x, y)
+        | SigMatch::Control(x, y)
+        | SigMatch::Delay(x, y) => vec![x, y],
+        SigMatch::Delay1(x)
+        | SigMatch::IntCast(x)
+        | SigMatch::BitCast(x)
+        | SigMatch::FloatCast(x)
+        | SigMatch::Gen(x)
+        | SigMatch::Acos(x)
+        | SigMatch::Asin(x)
+        | SigMatch::Atan(x)
+        | SigMatch::Cos(x)
+        | SigMatch::Sin(x)
+        | SigMatch::Tan(x)
+        | SigMatch::Exp(x)
+        | SigMatch::Exp10(x)
+        | SigMatch::Log(x)
+        | SigMatch::Log10(x)
+        | SigMatch::Sqrt(x)
+        | SigMatch::Abs(x)
+        | SigMatch::Floor(x)
+        | SigMatch::Ceil(x)
+        | SigMatch::Rint(x)
+        | SigMatch::Round(x)
+        | SigMatch::Lowest(x)
+        | SigMatch::Highest(x)
+        | SigMatch::Output(_, x)
+        | SigMatch::VBargraph(_, x)
+        | SigMatch::HBargraph(_, x)
+        | SigMatch::Proj(_, x)
+        | SigMatch::Rec(x)
+        | SigMatch::ReverseTimeRec(x) => vec![x],
+        SigMatch::Select2(a, b, c) | SigMatch::AssertBounds(a, b, c) => vec![a, b, c],
+        SigMatch::RdTbl(t, i) => vec![t, i],
+        SigMatch::WrTbl(t, s, wi, ws) => vec![t, s, wi, ws],
+        SigMatch::Fir(xs) | SigMatch::Iir(xs) => xs.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 /// Assigns every sample signal reachable from `outputs` to a loop.
 ///
 /// `children(sig)` yields the signal's **sample-value operands** — the edges to
@@ -596,7 +660,6 @@ mod tests {
 
     // ── loop_env assignment (S-A) ──
     use signals::SigBuilder;
-    use tlib::TreeArena;
 
     /// Three distinct signal ids to wire a mock value-child graph with.
     fn three_sigs() -> (TreeArena, SigId, SigId, SigId) {
@@ -708,6 +771,55 @@ mod tests {
         let pos = |l: LoopId| order.iter().position(|&x| x == l).unwrap();
         assert!(pos(leaf_loop) < pos(mid_loop), "leaf loop emits before mid");
         assert!(pos(mid_loop) < pos(asn.root), "mid loop emits before root");
+    }
+
+    #[test]
+    fn value_children_drive_a_real_signal_graph_without_the_op_atom_cycle() {
+        // out = (in0 + in1) * sin(in0).
+        let mut arena = TreeArena::new();
+        let in0 = SigBuilder::new(&mut arena).input(0);
+        let in1 = SigBuilder::new(&mut arena).input(1);
+        let sum = SigBuilder::new(&mut arena).add(in0, in1);
+        let s = SigBuilder::new(&mut arena).sin(in0);
+        let out = SigBuilder::new(&mut arena).mul(sum, s);
+
+        // Only value operands — no op-code atom, no input index.
+        assert_eq!(signal_value_children(&arena, out), vec![sum, s]);
+        assert_eq!(signal_value_children(&arena, sum), vec![in0, in1]);
+        assert_eq!(signal_value_children(&arena, s), vec![in0]);
+        assert!(signal_value_children(&arena, in0).is_empty());
+
+        // All-inline on the real graph: one loop, and — the S-A bug — no cycle.
+        let asn = assign_loops(
+            &[out],
+            |sig| signal_value_children(&arena, sig),
+            |_| base_props(),
+        );
+        assert_eq!(asn.graph.len(), 1);
+        assert!(asn.graph.topological_order().is_ok());
+
+        // in0 is genuinely shared (read by both `sum` and `s`) → its own loop,
+        // still acyclic.
+        let asn = assign_loops(
+            &[out],
+            |sig| signal_value_children(&arena, sig),
+            |sig| {
+                if sig == in0 {
+                    SignalLoopProps {
+                        is_shared: true,
+                        ..base_props()
+                    }
+                } else {
+                    base_props()
+                }
+            },
+        );
+        let in0_loop = asn.loop_of(in0).expect("in0 is placed");
+        assert_ne!(in0_loop, asn.root);
+        assert!(
+            asn.graph.topological_order().is_ok(),
+            "sharing must not create a cycle"
+        );
     }
 
     #[test]
