@@ -589,6 +589,14 @@ fn emit_stmt(
                 if let Some(init) = init {
                     let init = emit_value(store, options, class_name, init)?;
                     let _ = write!(out, " = {init}");
+                } else if let FirType::Array(inner, size) = &typ
+                    && *size > 0
+                {
+                    let _ = write!(
+                        out,
+                        " = new StaticArray<{}>({size})",
+                        emit_type(inner, options)
+                    );
                 }
                 let _ = writeln!(out, ";");
             }
@@ -1474,6 +1482,55 @@ mod tests {
         assert!(out.contains(
             "compute(count: i32, inputs: Array<StaticArray<f64>>, outputs: Array<StaticArray<f64>>): void"
         ));
+    }
+
+    #[test]
+    fn initializes_local_static_array_buffers() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let vbuf = b.declare_var(
+            "vbuf0",
+            FirType::Array(Box::new(FirType::FaustFloat), 32),
+            AccessType::Stack,
+            None,
+        );
+        let body = b.block(&[vbuf]);
+        let args = [
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_owned(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: args.iter().map(|arg| arg.typ.clone()).collect(),
+                ret: Box::new(FirType::Void),
+            },
+            &args,
+            Some(body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let out = generate_asc_module(&store, module, &AscOptions::default())
+            .expect("module should generate");
+        assert!(out.contains("let vbuf0: StaticArray<f32> = new StaticArray<f32>(32);"));
     }
 
     #[test]

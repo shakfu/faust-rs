@@ -397,6 +397,14 @@ fn compile_module_lowers_loop_local_declare_var() {
     assert!(compiled.compute_body_lowered());
 }
 
+#[test]
+fn compile_module_lowers_stack_local_array_buffer() {
+    let (store, module) = build_stack_local_array_buffer_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("stack-local array buffer should lower");
+    assert!(compiled.compute_body_lowered());
+}
+
 extern "C" fn test_foreign_gain(x: f32) -> f32 {
     x * 0.5
 }
@@ -1467,6 +1475,74 @@ fn build_struct_array_var_subset_module() -> (fir::FirStore, FirId) {
         0,
         0,
         "struct_array_var_subset",
+        dsp_struct,
+        globals,
+        functions,
+        sd,
+    );
+    (store, module)
+}
+
+fn build_stack_local_array_buffer_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let globals = b.block(&[]);
+    let dsp_struct = b.block(&[]);
+
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+    let vbuf = b.declare_var(
+        "vbuf0",
+        FirType::Array(Box::new(FirType::FaustFloat), 32),
+        AccessType::Stack,
+        None,
+    );
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let value = b.float32(0.25);
+    let store_vbuf = b.store_table("vbuf0", AccessType::Stack, i0, value);
+    let read_vbuf = b.load_table("vbuf0", AccessType::Stack, i0, FirType::FaustFloat);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, read_vbuf);
+    let loop_body = b.block(&[store_vbuf, store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, vbuf, sample_loop]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: compute_args.iter().map(|arg| arg.typ.clone()).collect(),
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let sd = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "stack_local_array_buffer",
         dsp_struct,
         globals,
         functions,

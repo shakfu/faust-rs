@@ -316,6 +316,36 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 value: self.fb.ins().iconst(self.ptr_ty, 0),
                 pointee: Some(FirTypeRef::from_fir_type(inner)),
             }),
+            FirType::Array(inner, len) if *len > 0 => {
+                let elem_ty = self.fir_type_to_clif(inner)?;
+                let elem_size = elem_ty.bytes();
+                let len = u32::try_from(*len).map_err(|_| {
+                    LoweringError::Unsupported(format!(
+                        "Cranelift local array length does not fit in u32: {len}"
+                    ))
+                })?;
+                let size = elem_size.checked_mul(len).ok_or_else(|| {
+                    LoweringError::Unsupported(
+                        "Cranelift local array stack-slot size overflow".to_string(),
+                    )
+                })?;
+                let align_shift = match elem_size {
+                    8 => 3,
+                    4 => 2,
+                    2 => 1,
+                    _ => 0,
+                };
+                let slot = self.fb.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size,
+                    align_shift,
+                ));
+                let value = self.fb.ins().stack_addr(self.ptr_ty, slot, 0);
+                Ok(LoweredExpr::Ptr {
+                    value,
+                    pointee: Some(FirTypeRef::from_fir_type(inner)),
+                })
+            }
             FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => Ok(LoweredExpr::Ptr {
                 value: self.fb.ins().iconst(self.ptr_ty, 0),
                 pointee: None,
