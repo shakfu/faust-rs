@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::signal_fir::ComputeMode;
+use crate::signal_fir::loop_graph::LoopKind;
 
 /// RAD reverse-time scheduling state, populated post-construction in `build_module`.
 #[derive(Default)]
@@ -50,16 +51,22 @@ pub(super) struct RadReverseState {
 /// body has no loop-carried dependency; loop *separation* (splitting recursive
 /// groups into their own serial loops) is a later slice.
 ///
-/// Reverse-time loops force scalar mode — chunking would change the implicit
-/// TBPTT window from `count` to `vec_size` (vector doc §5 caveat).
+/// Only `Vectorizable` (state-free) slices are chunked: a slice that carries
+/// cross-sample state has a loop-carried dependency the C compiler cannot
+/// vectorize as one block, so chunking it is pure overhead — it stays one plain
+/// serial loop. Reverse-time loops likewise force scalar mode (chunking would
+/// change the implicit TBPTT window from `count` to `vec_size`, vector doc §5).
 fn emit_sample_loop(
     store: &mut FirStore,
     exec: &[FirId],
     is_reverse: bool,
+    kind: LoopKind,
     compute_mode: ComputeMode,
 ) -> FirId {
     let vec_size = match compute_mode {
-        ComputeMode::Vector { vec_size, .. } if !is_reverse => vec_size.max(1),
+        ComputeMode::Vector { vec_size, .. } if !is_reverse && kind == LoopKind::Vectorizable => {
+            vec_size.max(1)
+        }
         _ => {
             let mut b = FirBuilder::new(store);
             let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
@@ -514,21 +521,29 @@ pub(crate) fn build_module<'a>(
     };
 
     let compute_statements = {
-        use crate::signal_fir::loop_graph::{LoopGraph, LoopKind};
+        use crate::signal_fir::loop_graph::{LoopGraph, LoopKind, slice_has_persistent_state};
 
-        // Route the per-sample slices through the loop graph (roadmap P6, V4).
-        // Scalar mode is one vectorizable loop node per non-empty slice with
-        // empty pre/post — emitted in insertion order via `topological_order`,
-        // so the FIR is bit-identical to the previous inline emission (the 190
-        // goldens are the guarantee). Vector mode (V5) will partition a slice
-        // into several loop nodes and wrap them in a chunk driver; the slices
-        // are not partitioned yet, so both modes emit one loop per slice here.
+        // Route the per-sample slices through the loop graph (roadmap P6, V4/V5b).
+        // One loop node per non-empty slice, classified `Recursive` when the
+        // slice writes cross-sample state (a recursion carrier / delay line) and
+        // `Vectorizable` otherwise. Emitted in insertion order via
+        // `topological_order`. Scalar mode ignores the kind and stays one loop
+        // per slice — bit-identical to the previous inline emission (the 190
+        // goldens are the guarantee). Vector mode chunks only `Vectorizable`
+        // slices (a fully-recursive slice cannot auto-vectorize as one block, so
+        // chunking it is pure overhead); per-statement separation of a recursive
+        // core from its vectorizable pre/post parts is a later slice.
         let mut graph = LoopGraph::new();
         for (is_reverse, sample_loop_statements) in &sample_loops {
             if sample_loop_statements.is_empty() {
                 continue;
             }
-            let id = graph.add_loop(LoopKind::Vectorizable, *is_reverse);
+            let kind = if slice_has_persistent_state(&lower.store, sample_loop_statements) {
+                LoopKind::Recursive
+            } else {
+                LoopKind::Vectorizable
+            };
+            let id = graph.add_loop(kind, *is_reverse);
             graph
                 .node_mut(id)
                 .exec
@@ -543,13 +558,14 @@ pub(crate) fn build_module<'a>(
         for id in order {
             let node = graph.node(id);
             let is_reverse = node.is_reverse;
+            let kind = node.kind;
             let pre = node.pre.clone();
             let exec = node.exec.clone();
             let post = node.post.clone();
             all.extend(pre);
             if !exec.is_empty() {
                 let sample_loop =
-                    emit_sample_loop(&mut lower.store, &exec, is_reverse, compute_mode);
+                    emit_sample_loop(&mut lower.store, &exec, is_reverse, kind, compute_mode);
                 all.push(sample_loop);
             }
             all.extend(post);

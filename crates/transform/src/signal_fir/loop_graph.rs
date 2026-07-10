@@ -24,7 +24,7 @@
 
 use std::collections::BTreeSet;
 
-use fir::FirId;
+use fir::{AccessType, FirId, FirMatch, FirStore, match_fir};
 use sigtype::Variability;
 
 /// Index of a loop node in a [`LoopGraph`].
@@ -287,6 +287,57 @@ pub(crate) fn needs_separate_loop(props: &SignalLoopProps) -> LoopSeparation {
     LoopSeparation::Inline
 }
 
+// ── Loop-carried classification (V5b, separation foundation) ─────────────────
+//
+// Actually *splitting* a slice's recursive core out from its vectorizable
+// pre/post parts (with cross-loop chunk buffers) requires loop-aware lowering:
+// the fused sample body (`fRecCur = fRec + …; out = f(fRecCur); fRec = fRecCur`)
+// is a single loop-carried chain by the time it reaches the FIR, so it cannot be
+// partitioned after the fact. What *is* recoverable from the FIR is whether a
+// slice carries persistent (cross-sample) state at all — the classification that
+// decides `Recursive` vs `Vectorizable`, and whether chunking it can pay off.
+
+/// Whether a sample-loop slice writes persistent (cross-sample) DSP state — a
+/// `Struct`-access `StoreVar`/`StoreTable` (a recursion carrier `fRec*`, a delay
+/// line, an `fIOTA`, …). Such a slice has a loop-carried dependency, so its inner
+/// loop cannot be auto-vectorized as one block: it is `LoopKind::Recursive`. A
+/// slice that writes no state is `LoopKind::Vectorizable`.
+#[must_use]
+pub(crate) fn slice_has_persistent_state(store: &FirStore, statements: &[FirId]) -> bool {
+    statements
+        .iter()
+        .any(|&s| node_writes_struct_state(store, s))
+}
+
+fn node_writes_struct_state(store: &FirStore, node: FirId) -> bool {
+    match match_fir(store, node) {
+        FirMatch::StoreVar {
+            access: AccessType::Struct,
+            ..
+        }
+        | FirMatch::StoreTable {
+            access: AccessType::Struct,
+            ..
+        } => true,
+        // Recurse into structural bodies (guarded clocked blocks, loops, blocks).
+        FirMatch::Block(body) => body.iter().any(|&s| node_writes_struct_state(store, s)),
+        FirMatch::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            node_writes_struct_state(store, then_block)
+                || else_block.is_some_and(|e| node_writes_struct_state(store, e))
+        }
+        FirMatch::Control { stmt, .. } => node_writes_struct_state(store, stmt),
+        FirMatch::SimpleForLoop { body, .. }
+        | FirMatch::ForLoop { body, .. }
+        | FirMatch::IteratorForLoop { body, .. }
+        | FirMatch::WhileLoop { body, .. } => node_writes_struct_state(store, body),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +498,39 @@ mod tests {
         g.add_dep(b, a);
         let err = g.topological_order().unwrap_err();
         assert_eq!(err.unscheduled, vec![a, b]);
+    }
+
+    #[test]
+    fn persistent_state_detection() {
+        let mut store = fir::FirStore::new();
+        // Stateless: out = 0.5 * in.  (no Struct store)
+        let stateless = {
+            let mut b = fir::FirBuilder::new(&mut store);
+            let half = b.float32(0.5);
+            let inp = b.load_var("in", AccessType::Stack, fir::FirType::Float32);
+            let prod = b.binop(fir::FirBinOp::Mul, half, inp, fir::FirType::Float32);
+            b.store_var("out", AccessType::Stack, prod)
+        };
+        assert!(!slice_has_persistent_state(&store, &[stateless]));
+
+        // Stateful: fRec = fRec + 1  (a Struct store = cross-sample carrier).
+        let stateful = {
+            let mut b = fir::FirBuilder::new(&mut store);
+            let rec = b.load_var("fRec", AccessType::Struct, fir::FirType::Float32);
+            let one = b.float32(1.0);
+            let sum = b.binop(fir::FirBinOp::Add, rec, one, fir::FirType::Float32);
+            b.store_var("fRec", AccessType::Struct, sum)
+        };
+        assert!(slice_has_persistent_state(&store, &[stateful]));
+
+        // Nested inside a guarded block (clocked-domain shape) is still detected.
+        let guarded = {
+            let mut b = fir::FirBuilder::new(&mut store);
+            let body = b.block(&[stateful]);
+            let cond = b.int32(1);
+            b.if_(cond, body, None)
+        };
+        assert!(slice_has_persistent_state(&store, &[guarded]));
     }
 
     #[test]
