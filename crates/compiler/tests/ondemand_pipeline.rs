@@ -571,6 +571,59 @@ fn fad_inside_ondemand_tangent_holds_between_fires() {
     }
 }
 
+#[test]
+fn fad_inside_ondemand_nonlinear_frame_reduction_matches_central_difference() {
+    // FAD Phase B wrapper rules (roadmap P5) enable the "fad inside the block"
+    // form of a *differentiable spectral loss* (milestone S4): a nonlinear
+    // frame-rate reduction of clocked window inputs, differentiated w.r.t. a
+    // parameter `g` that scales the inputs *inside* the block. The seed path
+    // crosses the four `TempVar` window taps (zero-tangent inputs) and threads
+    // through square / sum / sqrt / square — the same chain a magnitude
+    // spectral loss uses. Gradient must match central differences.
+    //
+    // Frame op reduces 4 clocked taps: loss(g) = (g·‖x‖ − 5)², nonlinear in g.
+    let clk = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let x0 = vec![1.0_f32; 6];
+    let x1 = vec![2.0_f32; 6];
+    let x2 = vec![3.0_f32; 6];
+    let x3 = vec![4.0_f32; 6];
+    let ins = [clk, x0, x1, x2, x3];
+    let g = 0.7_f32;
+    let eps = 1.0e-3_f32;
+
+    let body = |op: &str| {
+        format!(
+            r#"g = hslider("g", {{P}}, -10, 10, 0.0001);
+               sq = _ <: _*_;
+               norm = par(i, 4, *(g)) : par(i, 4, sq) :> _ : sqrt;
+               loss = norm : -(5.0) : sq;
+               process = ((_ != 0), _, _, _, _) : ondemand({op});"#
+        )
+    };
+    let render = |p: f32, op: &str| body(op).replace("{P}", &format!("{p}"));
+
+    let fad_out = run_od_fad_source(
+        "od_fad_spectral",
+        render(g, "fad(loss, g)"),
+        &ins.clone().map(|v| v.to_vec()),
+    );
+    assert_eq!(fad_out.len(), 2, "fad bundle = [primal, tangent]");
+
+    let plus = run_od_fad_source("od_fad_sp_p", render(g + eps, "loss"), &ins.clone().map(|v| v.to_vec()));
+    let minus = run_od_fad_source("od_fad_sp_m", render(g - eps, "loss"), &ins.map(|v| v.to_vec()));
+
+    // Steady frame after the fire at n=2.
+    let n = 5;
+    let central = (plus[0][n] - minus[0][n]) / (2.0 * eps);
+    assert!(
+        (fad_out[1][n] - central).abs() < 2.0e-2,
+        "tangent {} vs central difference {central} (must not be silently zero)",
+        fad_out[1][n],
+    );
+    // Sanity: the gradient is genuinely non-zero here.
+    assert!(fad_out[1][n].abs() > 1.0, "expected a non-trivial gradient");
+}
+
 // ── P0.4 — loud AD diagnostics at domain boundaries ──────────────────────────
 
 fn expect_compile_error(name: &str, source: &str) -> compiler::CompilerError {

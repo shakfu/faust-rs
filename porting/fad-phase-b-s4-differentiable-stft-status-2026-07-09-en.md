@@ -51,6 +51,29 @@ clock/clock-env child is opaque). Verified:
 Still open (§4): the **block-augmentation** half — `Seq(OD, y)` and
 `OD/US/DS → OD_aug` — which keeps erroring loudly until it lands.
 
+### 2c. S4 core reached via the "fad inside the block" form
+
+The wrapper rules already unlock a **differentiable STFT spectral loss** — the S4
+milestone — when the loss is computed *inside* the frame block and the learnable
+parameter scales the window inside it. `ondemand(fad(loss(g·window), g))`: the
+seed path crosses the block's `TempVar` window inputs (wrapper rules) and threads
+through the FFT + magnitude + nonlinear loss (existing fad rules).
+
+Demonstrated by `tests/corpus/ondemand_fad_spectral_loss_008.dsp` (framed FFT via
+`interleave.lib`): the block emits `[loss, dloss/dg]` at frame rate. Analytically
+exact — an impulse window gives a flat spectrum, `Σ|g·X| = 8g`, so
+`loss = (8g − 4)²`, `dloss/dg = 2(8g − 4)·8`; at g=1 the block outputs
+`[16, 64]`, matching. Gradient also validated vs central differences on an
+inline nonlinear frame reduction
+(`fad_inside_ondemand_nonlinear_frame_reduction_matches_central_difference`).
+
+What still needs `OD_aug` (§4): the **fad-*outside*** form —
+`fad(EXPR : ondemand(F) : loss, θ)` — where the differentiated loss reads the
+block *outputs* from outside (e.g. comparing a *resynthesized* time signal to a
+target after `serialize_out`). Much of DDSP (a spectral loss on the analysis
+frame) is the inside form and works today; time-domain reconstruction losses are
+the outside form and wait on the augmentation.
+
 ## 3. The exact blocker — one match arm (before 2b)
 
 In `crates/propagate/src/forward_ad.rs` (the `transform()` dispatch), all **eight**
