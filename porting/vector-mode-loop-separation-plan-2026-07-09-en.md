@@ -148,10 +148,19 @@ ring) — orthogonal and later.
    the routing seam before any real split.
 3. **S-C — chunk buffers.** Add the buffer declare/store/load mechanism (§4) and
    a `loop_graph` unit test for the buffer index arithmetic.
-4. **S-D — first real split: pure tail.** Split a state-free *suffix* (e.g. an
-   output scaling) out of a recursive slice into its own vectorizable loop, fed by
-   one chunk buffer. The narrowest useful separation; oracle-gated. Extend
-   incrementally (pure prefix, multiple recursive groups) once the seam holds.
+4. **S-D — first real split: pure tail. ✅ (2026-07-10)** Splits a recursive
+   slice's state-free tail into its own vectorizable inner loop fed by a chunk
+   buffer. Realized as a FIR-level partition on the fused body
+   (`partition_recursive_body`): a fixpoint closes the serial core under
+   "producers of temps a serial statement reads", so the tail is provably safe to
+   hoist past it (§2's fragility is avoided by the fixpoint, not by pre-fusion
+   assignment — the same correctness, reached from the FIR). `emit_sample_loop`
+   emits `[buffers, chunk driver{serial loop, tail loop}]` for a forward
+   `Recursive` slice; anything unsupported (clocked-island `If`, nothing to hoist)
+   falls back to one serial loop. Bit-exact (V6 `recursive_split_pure_tail`),
+   scalar untouched (190 goldens), valid C at `-O3 -Wall -Wextra`. Extend
+   incrementally (pure prefix, multiple recursive groups) — the partition already
+   handles them for a flat body.
 5. **S-E — measure.** Confirm the C compiler now vectorizes the split loops
    (inspect asm / a microbenchmark) — the whole point.
 

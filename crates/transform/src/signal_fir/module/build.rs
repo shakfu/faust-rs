@@ -13,6 +13,8 @@
 //! All other submodules in `module/` provide `impl SignalToFirLower` methods
 //! that are invoked from the orchestration logic here.
 
+use ahash::AHashMap;
+
 use super::*;
 use crate::signal_fir::ComputeMode;
 use crate::signal_fir::loop_graph::LoopKind;
@@ -51,12 +53,43 @@ pub(super) struct RadReverseState {
 /// body has no loop-carried dependency; loop *separation* (splitting recursive
 /// groups into their own serial loops) is a later slice.
 ///
-/// Only `Vectorizable` (state-free) slices are chunked: a slice that carries
-/// cross-sample state has a loop-carried dependency the C compiler cannot
-/// vectorize as one block, so chunking it is pure overhead — it stays one plain
-/// serial loop. Reverse-time loops likewise force scalar mode (chunking would
-/// change the implicit TBPTT window from `count` to `vec_size`, vector doc §5).
+/// A `Vectorizable` (state-free) slice is chunked whole. A `Recursive` slice is
+/// **split** when possible (vector doc §5 S-D): its state-free tail is hoisted
+/// into a second, vectorizable inner loop fed by chunk buffers, leaving only the
+/// recursive core serial — otherwise it stays one plain serial loop (chunking a
+/// loop-carried body as one block is pure overhead the C compiler cannot
+/// vectorize). Reverse-time loops force scalar mode (chunking would change the
+/// implicit TBPTT window from `count` to `vec_size`, vector doc §5).
+///
+/// Returns the slice's statements: usually one loop, but the split path returns
+/// the chunk-buffer declarations followed by the split chunk driver.
 fn emit_sample_loop(
+    store: &mut FirStore,
+    exec: &[FirId],
+    is_reverse: bool,
+    kind: LoopKind,
+    compute_mode: ComputeMode,
+) -> Vec<FirId> {
+    // Recursive slice, vector mode, forward time: try the pure-tail split.
+    if let ComputeMode::Vector { vec_size, .. } = compute_mode
+        && !is_reverse
+        && kind == LoopKind::Recursive
+        && let Some(split) = emit_split_sample_loop(store, exec, vec_size.max(1))
+    {
+        return split;
+    }
+    vec![emit_single_sample_loop(
+        store,
+        exec,
+        is_reverse,
+        kind,
+        compute_mode,
+    )]
+}
+
+/// One loop for a slice: the scalar/reverse single `for`, or the vector-mode
+/// chunk driver for a `Vectorizable` slice.
+fn emit_single_sample_loop(
     store: &mut FirStore,
     exec: &[FirId],
     is_reverse: bool,
@@ -97,6 +130,123 @@ fn emit_sample_loop(
     let inner = b.for_loop("i0", i0_init, i0_end, step1, inner_body, false);
 
     let outer_body = b.block(&[vend_decl, inner]);
+
+    // Outer chunk loop: for (vindex = 0; vindex < count; vindex += vs).
+    let zero = b.int32(0);
+    let vindex_init = b.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(zero));
+    let count_end = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let vsz_step = b.int32(vs);
+    b.for_loop(
+        "vindex",
+        vindex_init,
+        count_end,
+        vsz_step,
+        outer_body,
+        false,
+    )
+}
+
+/// Emits the pure-tail split of a recursive slice (vector doc §5 S-D), or `None`
+/// if the body is not splittable (falls back to one serial loop). Layout:
+///
+/// ```text
+/// <elem> vbuf0[vec_size];                        // once, reused per chunk
+/// for (vindex …) {
+///     int vend = min(vindex + vs, count);
+///     for (i0 = vindex; i0 < vend; i0++) {        // serial core
+///         <serial>; vbuf0[i0 - vindex] = <temp>;
+///     }
+///     for (i0 = vindex; i0 < vend; i0++) {        // vectorizable tail
+///         <tail with temp → vbuf0[i0 - vindex]>
+///     }
+/// }
+/// ```
+///
+/// Bit-exact: the serial core runs the whole chunk first (state evolves exactly
+/// as in the fused loop, buffering each carrier value), then the tail reads those
+/// values back at the same global `i0`.
+fn emit_split_sample_loop(
+    store: &mut FirStore,
+    exec: &[FirId],
+    vec_size: u32,
+) -> Option<Vec<FirId>> {
+    use crate::signal_fir::loop_graph::{ChunkBuffer, partition_recursive_body, rewrite_var_loads};
+
+    let part = partition_recursive_body(store, exec)?;
+    let vs = i32::try_from(vec_size).unwrap_or(i32::MAX);
+
+    // A chunk buffer per boundary temp (deterministic vbufN numbering).
+    let buffers: Vec<ChunkBuffer> = part
+        .boundary
+        .iter()
+        .enumerate()
+        .map(|(i, (_, ty))| {
+            ChunkBuffer::new(u32::try_from(i).unwrap_or(u32::MAX), ty.clone(), vec_size)
+        })
+        .collect();
+    let buf_decls: Vec<FirId> = buffers.iter().map(|buf| buf.declare(store)).collect();
+
+    // Serial inner body = serial core + `vbufN[i0 - vindex] = temp`.
+    let mut serial_body = part.serial.clone();
+    for (buf, (name, ty)) in buffers.iter().zip(&part.boundary) {
+        let val = FirBuilder::new(store).load_var(name.clone(), AccessType::Stack, ty.clone());
+        serial_body.push(buf.store(store, val));
+    }
+
+    // Tail inner body = tail statements with boundary reads → buffer loads.
+    let mut repl = AHashMap::new();
+    for (buf, (name, _)) in buffers.iter().zip(&part.boundary) {
+        let load = buf.load(store);
+        repl.insert(name.clone(), load);
+    }
+    let tail_body: Vec<FirId> = part
+        .vectorizable
+        .iter()
+        .map(|&s| rewrite_var_loads(store, s, &repl))
+        .collect();
+
+    let outer = build_split_chunk_driver(store, &serial_body, &tail_body, vs);
+    let mut out = buf_decls;
+    out.push(outer);
+    Some(out)
+}
+
+/// Builds the outer chunk loop wrapping a serial inner loop then a vectorizable
+/// inner loop, both iterating the global `i0 = vindex … vend`.
+fn build_split_chunk_driver(
+    store: &mut FirStore,
+    serial_body: &[FirId],
+    tail_body: &[FirId],
+    vs: i32,
+) -> FirId {
+    let mut b = FirBuilder::new(store);
+
+    // vend = (vindex + vs < count) ? vindex + vs : count.
+    let vindex_r = b.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let vsz = b.int32(vs);
+    let next = b.binop(FirBinOp::Add, vindex_r, vsz, FirType::Int32);
+    let count_hi = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let cond = b.binop(FirBinOp::Lt, next, count_hi, FirType::Int32);
+    let vend_val = b.select2(cond, next, count_hi, FirType::Int32);
+    let vend_decl = b.declare_var("vend", FirType::Int32, AccessType::Stack, Some(vend_val));
+
+    // for (i0 = vindex; i0 < vend; i0++) { <serial> }
+    let s_start = b.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let s_init = b.declare_var("i0", FirType::Int32, AccessType::Loop, Some(s_start));
+    let s_end = b.load_var("vend", AccessType::Stack, FirType::Int32);
+    let s_step = b.int32(1);
+    let s_block = b.block(serial_body);
+    let serial_inner = b.for_loop("i0", s_init, s_end, s_step, s_block, false);
+
+    // for (i0 = vindex; i0 < vend; i0++) { <tail> }
+    let t_start = b.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let t_init = b.declare_var("i0", FirType::Int32, AccessType::Loop, Some(t_start));
+    let t_end = b.load_var("vend", AccessType::Stack, FirType::Int32);
+    let t_step = b.int32(1);
+    let t_block = b.block(tail_body);
+    let tail_inner = b.for_loop("i0", t_init, t_end, t_step, t_block, false);
+
+    let outer_body = b.block(&[vend_decl, serial_inner, tail_inner]);
 
     // Outer chunk loop: for (vindex = 0; vindex < count; vindex += vs).
     let zero = b.int32(0);
@@ -566,7 +716,7 @@ pub(crate) fn build_module<'a>(
             if !exec.is_empty() {
                 let sample_loop =
                     emit_sample_loop(&mut lower.store, &exec, is_reverse, kind, compute_mode);
-                all.push(sample_loop);
+                all.extend(sample_loop);
             }
             all.extend(post);
         }

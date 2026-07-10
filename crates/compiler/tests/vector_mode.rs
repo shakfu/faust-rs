@@ -100,6 +100,16 @@ fn vec_size_not_dividing_the_block_bit_exact() {
 }
 
 #[test]
+fn recursive_split_pure_tail_is_bit_exact() {
+    // `(_ : + ~ _) * 0.5` is the S-D split case: the integrator is the serial
+    // core, the `* 0.5` output scaling is hoisted into a second vectorizable inner
+    // loop fed by a chunk buffer. The split must stay bit-exact vs scalar.
+    assert_scalar_vector_bit_exact("split_tail", "process = (_ : + ~ _) * 0.5;", 32);
+    // Tail chunk (vec_size ∤ block) through the split path too.
+    assert_scalar_vector_bit_exact("split_tail_odd", "process = (_ : + ~ _) * 0.5;", 24);
+}
+
+#[test]
 fn two_pole_filter_is_bit_exact() {
     // A second-order recurrence — deeper loop-carried state across the boundary.
     assert_scalar_vector_bit_exact(
