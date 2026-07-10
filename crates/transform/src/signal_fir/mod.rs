@@ -345,6 +345,7 @@ fn compile_fastlane_inner(
         options.real_type.as_fir_type(),
         options.max_copy_delay,
         options.delay_line_threshold,
+        options.compute_mode,
         clocked,
     )
 }

@@ -14,6 +14,7 @@
 //! that are invoked from the orchestration logic here.
 
 use super::*;
+use crate::signal_fir::ComputeMode;
 
 /// RAD reverse-time scheduling state, populated post-construction in `build_module`.
 #[derive(Default)]
@@ -30,6 +31,79 @@ pub(super) struct RadReverseState {
     pub(super) forward_output_by_sig_key: HashMap<String, usize>,
     /// True while lowering the reverse-time sample-loop slice.
     pub(super) lowering_reverse_loop: bool,
+}
+
+/// Emits one sample loop node's `for`. Scalar mode — and any reverse-time loop —
+/// stays a single `for (i0 = 0; i0 < count; i0++)`. Vector mode (`-vec`) wraps a
+/// forward loop in the chunk driver (roadmap P6, V5):
+///
+/// ```text
+/// for (vindex = 0; vindex < count; vindex += vec_size) {
+///     int vend = (vindex + vec_size < count) ? vindex + vec_size : count;
+///     for (i0 = vindex; i0 < vend; i0++) { <exec> }
+/// }
+/// ```
+///
+/// It is **bit-exact vs scalar**: the inner loop keeps the *global* sample index
+/// `i0` (no I/O pointer rebasing), so the body is unchanged and only the loop
+/// bounds are chunked. The C compiler can auto-vectorize the inner loop when the
+/// body has no loop-carried dependency; loop *separation* (splitting recursive
+/// groups into their own serial loops) is a later slice.
+///
+/// Reverse-time loops force scalar mode — chunking would change the implicit
+/// TBPTT window from `count` to `vec_size` (vector doc §5 caveat).
+fn emit_sample_loop(
+    store: &mut FirStore,
+    exec: &[FirId],
+    is_reverse: bool,
+    compute_mode: ComputeMode,
+) -> FirId {
+    let vec_size = match compute_mode {
+        ComputeMode::Vector { vec_size, .. } if !is_reverse => vec_size.max(1),
+        _ => {
+            let mut b = FirBuilder::new(store);
+            let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+            let body = b.block(exec);
+            return b.simple_for_loop("i0", upper, body, is_reverse);
+        }
+    };
+    let vs = i32::try_from(vec_size).unwrap_or(i32::MAX);
+    let mut b = FirBuilder::new(store);
+
+    // vend = (vindex + vs < count) ? vindex + vs : count. Comparisons are Int32.
+    let vindex_r = b.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let vsz = b.int32(vs);
+    let next = b.binop(FirBinOp::Add, vindex_r, vsz, FirType::Int32);
+    let count_hi = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let cond = b.binop(FirBinOp::Lt, next, count_hi, FirType::Int32);
+    let vend_val = b.select2(cond, next, count_hi, FirType::Int32);
+    let vend_decl = b.declare_var("vend", FirType::Int32, AccessType::Stack, Some(vend_val));
+
+    // Inner: for (i0 = vindex; i0 < vend; i0++) { <exec> } — body reads the
+    // global `i0` exactly as scalar does. A general `ForLoop` init is the loop
+    // variable's `DeclareVar`.
+    let i0_start = b.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let i0_init = b.declare_var("i0", FirType::Int32, AccessType::Loop, Some(i0_start));
+    let i0_end = b.load_var("vend", AccessType::Stack, FirType::Int32);
+    let step1 = b.int32(1);
+    let inner_body = b.block(exec);
+    let inner = b.for_loop("i0", i0_init, i0_end, step1, inner_body, false);
+
+    let outer_body = b.block(&[vend_decl, inner]);
+
+    // Outer chunk loop: for (vindex = 0; vindex < count; vindex += vs).
+    let zero = b.int32(0);
+    let vindex_init = b.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(zero));
+    let count_end = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let vsz_step = b.int32(vs);
+    b.for_loop(
+        "vindex",
+        vindex_init,
+        count_end,
+        vsz_step,
+        outer_body,
+        false,
+    )
 }
 
 /// Lowers a prepared signal forest into a complete FIR module.
@@ -130,6 +204,7 @@ pub(crate) fn build_module<'a>(
     real_ty: FirType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
+    compute_mode: ComputeMode,
     clocked: Option<clocked::ClockedPlan<'a>>,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let delay_opts = DelayOptions {
@@ -473,12 +548,8 @@ pub(crate) fn build_module<'a>(
             let post = node.post.clone();
             all.extend(pre);
             if !exec.is_empty() {
-                let sample_loop = {
-                    let mut b = FirBuilder::new(&mut lower.store);
-                    let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-                    let body = b.block(&exec);
-                    b.simple_for_loop("i0", upper, body, is_reverse)
-                };
+                let sample_loop =
+                    emit_sample_loop(&mut lower.store, &exec, is_reverse, compute_mode);
                 all.push(sample_loop);
             }
             all.extend(post);
