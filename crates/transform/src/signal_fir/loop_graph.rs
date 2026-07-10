@@ -25,6 +25,7 @@
 use std::collections::BTreeSet;
 
 use fir::FirId;
+use sigtype::Variability;
 
 /// Index of a loop node in a [`LoopGraph`].
 ///
@@ -199,18 +200,188 @@ impl LoopGraph {
         } else {
             let scheduled: BTreeSet<LoopId> = order.iter().copied().collect();
             Err(LoopCycle {
-                unscheduled: self
-                    .ids()
-                    .filter(|id| !scheduled.contains(id))
-                    .collect(),
+                unscheduled: self.ids().filter(|id| !scheduled.contains(id)).collect(),
             })
         }
     }
 }
 
+// ── Loop-separation criterion (V3) ──────────────────────────────────────────
+//
+// A port of the C++ `needSeparateLoop` (`compile_vect.cpp:304-339`,
+// `dag_instructions_compiler.cpp:370-393`; the table is in the vector doc §2).
+// This is the *decision*: given a sample signal's properties, does it get its
+// own chunk loop, and may that loop vectorize? The lowering (V4) extracts the
+// [`SignalLoopProps`] and consumes the [`LoopSeparation`] verdict; keeping the
+// decision pure makes it exhaustively testable without the lowering machinery.
+
+/// The `needSeparateLoop` queries for one signal, as computed by the lowering.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SignalLoopProps {
+    /// Rate class. Only `Samp` signals live in the sample loop at all; `Konst`
+    /// and `Block` ("slower than kSamp") are compiled once into control code.
+    pub(crate) variability: Variability,
+    /// Largest delay any reader applies to this signal (`getMaxDelay`). A
+    /// non-zero value forces a dedicated loop with a delay-line buffer.
+    pub(crate) max_delay: usize,
+    /// This signal is a recursive-group projection (a back-edge carrier): it
+    /// must be computed one sample at a time.
+    pub(crate) is_recursive_proj: bool,
+    /// This signal feeds ≥ 2 distinct consumers (`hasMultiOccurrences`): worth
+    /// materializing once in a chunk buffer instead of recomputing.
+    pub(crate) is_shared: bool,
+    /// This signal is a `sigDelay` *read* — compiled where used, never split.
+    pub(crate) is_delay_read: bool,
+    /// This signal is "very simple" (a leaf: var / const / input) — free to
+    /// duplicate, so never given a loop of its own.
+    pub(crate) is_very_simple: bool,
+}
+
+/// Verdict for one sample-rate signal: whether it gets its own chunk loop, and
+/// whether that loop may auto-vectorize.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LoopSeparation {
+    /// No dedicated loop: inline into the consumer's loop (or, for non-`Samp`
+    /// signals, hoist to control code outside the chunk loop).
+    Inline,
+    /// A dedicated loop the C backend may auto-vectorize.
+    SeparateVectorizable,
+    /// A dedicated **serial** loop (recursive group — one sample after another).
+    SeparateSerial,
+}
+
+impl LoopSeparation {
+    /// The [`LoopKind`] a *separated* verdict maps to (`None` for `Inline`).
+    #[must_use]
+    pub(crate) fn loop_kind(self) -> Option<LoopKind> {
+        match self {
+            Self::Inline => None,
+            Self::SeparateVectorizable => Some(LoopKind::Vectorizable),
+            Self::SeparateSerial => Some(LoopKind::Recursive),
+        }
+    }
+}
+
+/// Decides whether `props` requires its own chunk loop (vector doc §2 table).
+///
+/// Precedence (first match wins):
+/// 1. non-`Samp` rate, or a `sigDelay` read → **inline** (control / read-site);
+/// 2. recursive projection → **separate serial** loop;
+/// 3. very-simple leaf → **inline** (free to duplicate);
+/// 4. used delayed (`max_delay > 0`) or shared → **separate vectorizable** loop;
+/// 5. otherwise → **inline** into the consumer.
+#[must_use]
+pub(crate) fn needs_separate_loop(props: &SignalLoopProps) -> LoopSeparation {
+    if props.variability != Variability::Samp || props.is_delay_read {
+        return LoopSeparation::Inline;
+    }
+    if props.is_recursive_proj {
+        return LoopSeparation::SeparateSerial;
+    }
+    if props.is_very_simple {
+        return LoopSeparation::Inline;
+    }
+    if props.max_delay > 0 || props.is_shared {
+        return LoopSeparation::SeparateVectorizable;
+    }
+    LoopSeparation::Inline
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sample-rate, non-shared, non-delayed, non-recursive, non-trivial signal
+    /// (the "otherwise" row) — the base other rows tweak one field from.
+    fn base_props() -> SignalLoopProps {
+        SignalLoopProps {
+            variability: Variability::Samp,
+            max_delay: 0,
+            is_recursive_proj: false,
+            is_shared: false,
+            is_delay_read: false,
+            is_very_simple: false,
+        }
+    }
+
+    #[test]
+    fn non_sample_rate_signals_are_inlined() {
+        for v in [Variability::Konst, Variability::Block] {
+            let p = SignalLoopProps {
+                variability: v,
+                // Even if delayed/shared, slower-than-sample stays out of the loop.
+                max_delay: 8,
+                is_shared: true,
+                ..base_props()
+            };
+            assert_eq!(needs_separate_loop(&p), LoopSeparation::Inline);
+        }
+    }
+
+    #[test]
+    fn delay_reads_are_inlined() {
+        let p = SignalLoopProps {
+            is_delay_read: true,
+            max_delay: 8,
+            is_shared: true,
+            ..base_props()
+        };
+        assert_eq!(needs_separate_loop(&p), LoopSeparation::Inline);
+    }
+
+    #[test]
+    fn recursive_projection_gets_a_serial_loop() {
+        let p = SignalLoopProps {
+            is_recursive_proj: true,
+            ..base_props()
+        };
+        assert_eq!(needs_separate_loop(&p), LoopSeparation::SeparateSerial);
+        assert_eq!(
+            needs_separate_loop(&p).loop_kind(),
+            Some(LoopKind::Recursive)
+        );
+    }
+
+    #[test]
+    fn very_simple_leaves_are_inlined_even_if_shared() {
+        let p = SignalLoopProps {
+            is_very_simple: true,
+            is_shared: true,
+            ..base_props()
+        };
+        assert_eq!(needs_separate_loop(&p), LoopSeparation::Inline);
+    }
+
+    #[test]
+    fn delayed_or_shared_expressions_get_a_vectorizable_loop() {
+        let delayed = SignalLoopProps {
+            max_delay: 1,
+            ..base_props()
+        };
+        assert_eq!(
+            needs_separate_loop(&delayed),
+            LoopSeparation::SeparateVectorizable
+        );
+        assert_eq!(
+            needs_separate_loop(&delayed).loop_kind(),
+            Some(LoopKind::Vectorizable)
+        );
+
+        let shared = SignalLoopProps {
+            is_shared: true,
+            ..base_props()
+        };
+        assert_eq!(
+            needs_separate_loop(&shared),
+            LoopSeparation::SeparateVectorizable
+        );
+    }
+
+    #[test]
+    fn plain_sample_expression_is_inlined() {
+        assert_eq!(needs_separate_loop(&base_props()), LoopSeparation::Inline);
+        assert_eq!(base_props().variability, Variability::Samp);
+    }
 
     #[test]
     fn empty_graph_orders_to_nothing() {
