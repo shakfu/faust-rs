@@ -25,7 +25,7 @@
 use std::collections::BTreeSet;
 
 use ahash::AHashMap;
-use fir::{AccessType, FirId, FirMatch, FirStore, match_fir};
+use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType, match_fir};
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::Variability;
 use tlib::TreeArena;
@@ -496,6 +496,71 @@ fn assign_one(
     }
 }
 
+// ── Cross-loop chunk buffers (vector doc §4, S-C) ────────────────────────────
+//
+// A sample value produced in one loop and consumed in another is materialized in
+// a `vec_size`-element array, indexed by the **chunk-local** `i0 - vindex` so the
+// producing store and the consuming load address the same slot within the chunk.
+// This keeps V5's "global `i0`, no I/O rebasing" bit-exactness. The mechanism is
+// pure FIR building; S-D wires it into the split emission.
+
+/// A cross-loop chunk buffer `<elem> vbufN[vec_size]`.
+#[derive(Clone, Debug)]
+pub(crate) struct ChunkBuffer {
+    name: String,
+    elem: FirType,
+    vec_size: u32,
+}
+
+impl ChunkBuffer {
+    /// A fresh buffer with the deterministic name `vbuf<index>`.
+    #[must_use]
+    pub(crate) fn new(index: u32, elem: FirType, vec_size: u32) -> Self {
+        Self {
+            name: format!("vbuf{index}"),
+            elem,
+            vec_size,
+        }
+    }
+
+    /// The buffer's variable name.
+    #[must_use]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// `<elem> vbufN[vec_size];` — the stack-array declaration (loop pre-phase).
+    pub(crate) fn declare(&self, store: &mut FirStore) -> FirId {
+        let ty = FirType::Array(Box::new(self.elem.clone()), self.vec_size as usize);
+        FirBuilder::new(store).declare_var(self.name.clone(), ty, AccessType::Stack, None)
+    }
+
+    /// The chunk-local index `i0 - vindex` (Int32).
+    fn chunk_index(store: &mut FirStore) -> FirId {
+        let mut b = FirBuilder::new(store);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let vindex = b.load_var("vindex", AccessType::Loop, FirType::Int32);
+        b.binop(FirBinOp::Sub, i0, vindex, FirType::Int32)
+    }
+
+    /// `vbufN[i0 - vindex] = value;` — emitted in the producing loop's `exec`.
+    pub(crate) fn store(&self, store: &mut FirStore, value: FirId) -> FirId {
+        let idx = Self::chunk_index(store);
+        FirBuilder::new(store).store_table(self.name.clone(), AccessType::Stack, idx, value)
+    }
+
+    /// `vbufN[i0 - vindex]` — read in the consuming loop's `exec`.
+    pub(crate) fn load(&self, store: &mut FirStore) -> FirId {
+        let idx = Self::chunk_index(store);
+        FirBuilder::new(store).load_table(
+            self.name.clone(),
+            AccessType::Stack,
+            idx,
+            self.elem.clone(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,6 +885,81 @@ mod tests {
             asn.graph.topological_order().is_ok(),
             "sharing must not create a cycle"
         );
+    }
+
+    /// `index` must be the chunk-local `i0 - vindex`.
+    fn assert_chunk_index(store: &FirStore, index: FirId) {
+        let FirMatch::BinOp {
+            op: FirBinOp::Sub,
+            lhs,
+            rhs,
+            ..
+        } = match_fir(store, index)
+        else {
+            panic!("chunk index must be a subtraction");
+        };
+        assert!(
+            matches!(match_fir(store, lhs), FirMatch::LoadVar { ref name, access: AccessType::Loop, .. } if name == "i0")
+        );
+        assert!(
+            matches!(match_fir(store, rhs), FirMatch::LoadVar { ref name, access: AccessType::Loop, .. } if name == "vindex")
+        );
+    }
+
+    #[test]
+    fn chunk_buffer_declare_store_load() {
+        let mut store = FirStore::new();
+        let buf = ChunkBuffer::new(0, FirType::Float32, 32);
+        assert_eq!(buf.name(), "vbuf0");
+
+        // declare: `float vbuf0[32];` — a stack array, uninitialized.
+        let decl = buf.declare(&mut store);
+        let FirMatch::DeclareVar {
+            name,
+            typ,
+            access,
+            init,
+        } = match_fir(&store, decl)
+        else {
+            panic!("declare must be a DeclareVar");
+        };
+        assert_eq!(name, "vbuf0");
+        assert_eq!(access, AccessType::Stack);
+        assert!(init.is_none());
+        assert_eq!(typ, FirType::Array(Box::new(FirType::Float32), 32));
+
+        // store: `vbuf0[i0 - vindex] = value;`
+        let value = FirBuilder::new(&mut store).float32(1.5);
+        let st = buf.store(&mut store, value);
+        let FirMatch::StoreTable {
+            name,
+            access,
+            index,
+            value: stored,
+        } = match_fir(&store, st)
+        else {
+            panic!("store must be a StoreTable");
+        };
+        assert_eq!(name, "vbuf0");
+        assert_eq!(access, AccessType::Stack);
+        assert_eq!(stored, value);
+        assert_chunk_index(&store, index);
+
+        // load: `vbuf0[i0 - vindex]`
+        let ld = buf.load(&mut store);
+        let FirMatch::LoadTable {
+            name,
+            access,
+            index,
+            typ,
+        } = match_fir(&store, ld)
+        else {
+            panic!("load must be a LoadTable");
+        };
+        assert_eq!(name, "vbuf0");
+        assert_eq!(access, AccessType::Stack);
+        assert_eq!(typ, FirType::Float32);
+        assert_chunk_index(&store, index);
     }
 
     #[test]
