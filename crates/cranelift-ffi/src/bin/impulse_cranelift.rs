@@ -51,6 +51,9 @@ struct Options {
     frames: usize,
     double: bool,
     import_dirs: Vec<String>,
+    /// Vector-mode flags forwarded verbatim to the FFI factory argv
+    /// (`-vec`, `-vs <n>`, `-lv <n>`); empty for scalar mode.
+    vec_argv: Vec<String>,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -58,6 +61,7 @@ fn parse_args() -> Result<Options, String> {
     let mut frames = DEFAULT_FRAMES;
     let mut double = false;
     let mut import_dirs = Vec::new();
+    let mut vec_argv = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -71,6 +75,15 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|e| format!("bad -n value: {e}"))?;
             }
             "-I" => import_dirs.push(args.next().ok_or("missing value after -I")?),
+            "-vec" => vec_argv.push("-vec".to_owned()),
+            "-vs" => {
+                vec_argv.push("-vs".to_owned());
+                vec_argv.push(args.next().ok_or("missing value after -vs")?);
+            }
+            "-lv" => {
+                vec_argv.push("-lv".to_owned());
+                vec_argv.push(args.next().ok_or("missing value after -lv")?);
+            }
             other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
             other => {
                 if dsp.is_some() {
@@ -85,6 +98,7 @@ fn parse_args() -> Result<Options, String> {
         frames,
         double,
         import_dirs,
+        vec_argv,
     })
 }
 
@@ -105,6 +119,9 @@ fn run() -> Result<String, String> {
     let mut argv_storage: Vec<CString> = Vec::new();
     if options.double {
         argv_storage.push(CString::new("-double").map_err(|e| e.to_string())?);
+    }
+    for opt in &options.vec_argv {
+        argv_storage.push(CString::new(opt.as_str()).map_err(|e| e.to_string())?);
     }
     for dir in &search {
         argv_storage.push(CString::new("-I").map_err(|e| e.to_string())?);

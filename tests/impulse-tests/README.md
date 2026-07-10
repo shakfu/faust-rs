@@ -35,6 +35,10 @@ See the design write-up in
    - `make assemblyscript` — the faust-rs AssemblyScript backend is compiled
      with `asc`, executed through Node's native WebAssembly runtime, and
      compared on the scalar prefix with `filesCompare -part`.
+   - `make <backend>-vec0` / `make <backend>-vec1` — run the same backend with
+     `-vec -lv 0` or `-vec -lv 1` respectively. Available for `cpp`, `c`,
+     `interp`, `cranelift`, `wasm`, and `assemblyscript`; `make all-vec` runs
+     both vector loop variants across all backends.
 
 ## Requirements
 
@@ -60,9 +64,12 @@ make c             # check the C backend
 make cranelift     # check the Cranelift JIT backend (64-bit)
 make wasm          # check the WASM backend (64-bit scalar prefix)
 make assemblyscript # check the AssemblyScript backend (scalar prefix)
+make cpp-vec0      # check the C++ backend with -vec -lv 0
+make cpp-vec1      # check the C++ backend with -vec -lv 1
+make all-vec       # check -vec -lv 0 and -vec -lv 1 across all backends
 make bench         # compare C++ Faust and faust-rs performance with faustbench -single
 make compile-bench # compare C++ Faust and faust-rs compile time
-make all           # cpp + c + interp + cranelift
+make all           # cpp + c + interp + cranelift + wasm + assemblyscript
 make -k -j8 cpp    # parallel, keep going past failures
 make help          # list targets and variables
 make clean         # remove ir/ and build/
@@ -103,6 +110,7 @@ Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
 | Cranelift JIT (scalar prefix, `-part`, 64-bit) | **92** | 0 | 1 (`subcontainer1`) |
 | WASM (scalar prefix, `-part`, 64-bit, Node) | **92** | 0 | 1 (`subcontainer1`) |
 | AssemblyScript (scalar prefix, `-part`, `asc` + Node) | **92** | 0 | 1 (`subcontainer1`) |
+| Vector variants (`-vec -lv 0` / `-vec -lv 1`) | inherit backend gates |  |  |
 
 The C++ backend reproduces the full 60000-frame reference exactly on 92/93 DSPs,
 so the remaining mismatches are backend-specific divergences the harness
@@ -111,8 +119,10 @@ tolerance (bounded rounding) or listed as a known failure (real gap) in
 [`known.mk`](known.mk) / [`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those
 applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
 (92), `make cranelift` (92), `make interp` (92), `make wasm` (92), and
-`make assemblyscript` (92) build and pass; excluded cases are documented in
-`known.mk` to fix later.
+`make assemblyscript` (92) build and pass. The vector-mode gates use suffixed
+outdirs such as `cpp-vec0` / `cpp-vec1`, inherit the base backend known-failure
+lists, and can be run per backend or together with `make all-vec`; excluded
+cases are documented in `known.mk` to fix later.
 
 ## Performance Bench
 

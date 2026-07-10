@@ -67,7 +67,28 @@ KNOWN_FAIL_wasm :=
 # fixture through imported soundfile helpers.
 KNOWN_FAIL_assemblyscript :=
 
+# --- vector-mode variants ----------------------------------------------------
+# The `-vec` targets reuse each backend's outdir with a `-vec0`/`-vec1` suffix
+# (e.g. cpp-vec0). Vector mode is bit-exact vs scalar, so a vec variant inherits
+# its base backend's known-failures; any genuinely vec-specific divergence is
+# added as KNOWN_FAIL_<outdir> (e.g. KNOWN_FAIL_cpp-vec0).
+KNOWN_FAIL_cpp-vec0 :=
+KNOWN_FAIL_cpp-vec1 :=
+KNOWN_FAIL_c-vec0 :=
+KNOWN_FAIL_c-vec1 :=
+KNOWN_FAIL_interp-vec0 :=
+KNOWN_FAIL_interp-vec1 :=
+KNOWN_FAIL_cranelift-vec0 :=
+KNOWN_FAIL_cranelift-vec1 :=
+KNOWN_FAIL_wasm-vec0 :=
+KNOWN_FAIL_wasm-vec1 :=
+KNOWN_FAIL_assemblyscript-vec0 :=
+KNOWN_FAIL_assemblyscript-vec1 :=
+
 # Tolerance to apply when a per-DSP override exists, else the global `precision`.
 dsp_precision = $(if $(PRECISION_$1),$(PRECISION_$1),$(precision))
-# Names excluded for a given backend outdir.
-known_fail_for = $(KNOWN_FAIL_all) $(KNOWN_FAIL_$1)
+# Base backend name for a (possibly vec-variant) outdir: `cpp-vec0` -> `cpp`.
+base_backend = $(patsubst %-vec0,%,$(patsubst %-vec1,%,$1))
+# Names excluded for a given backend outdir. A vec variant inherits its base
+# backend's known-failures plus any variant-specific KNOWN_FAIL_<outdir>.
+known_fail_for = $(KNOWN_FAIL_all) $(KNOWN_FAIL_$(call base_backend,$1)) $(KNOWN_FAIL_$1)

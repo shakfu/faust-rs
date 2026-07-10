@@ -24,8 +24,8 @@ use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
 use compiler::{
-    AuxFileArtifact, Compiler as FaustCompiler, ExpandDspRequest, GenerateAuxFilesRequest,
-    RealType, SignalFirLane, default_import_search_paths,
+    AuxFileArtifact, Compiler as FaustCompiler, ComputeMode, ExpandDspRequest,
+    GenerateAuxFilesRequest, RealType, SignalFirLane, default_import_search_paths,
 };
 use fir::{FirMatch, match_fir};
 use utils::{
@@ -877,19 +877,35 @@ struct CompiledCraneliftFactory {
 }
 
 /// Runs the real compiler pipeline to FIR, then compiles one Cranelift JIT module.
+/// Builds a [`FaustCompiler`] configured from the shared FFI argv subset:
+/// `-double` selects the real type, `-vec`/`-vs`/`-lv` select the compute mode.
+/// Returns the compiler plus the parsed `double` flag (needed by the JIT).
+fn compiler_from_argv(argv: &[String]) -> (FaustCompiler, bool) {
+    let parsed = parse_ffi_compile_args(argv).unwrap_or_default();
+    let compute_mode = if parsed.vec_mode {
+        ComputeMode::Vector {
+            vec_size: parsed.vec_size,
+            loop_variant: parsed.loop_variant,
+        }
+    } else {
+        ComputeMode::Scalar
+    };
+    let compiler = FaustCompiler::new()
+        .with_real_type(if parsed.double {
+            RealType::Float64
+        } else {
+            RealType::Float32
+        })
+        .with_compute_mode(compute_mode);
+    (compiler, parsed.double)
+}
+
 fn preflight_compile_file_to_cranelift(
     path: &Path,
     argv: &[String],
     opt_level: c_int,
 ) -> Result<CompiledCraneliftFactory, String> {
-    let double = parse_ffi_compile_args(argv)
-        .map(|a| a.double)
-        .unwrap_or(false);
-    let compiler = FaustCompiler::new().with_real_type(if double {
-        RealType::Float64
-    } else {
-        RealType::Float32
-    });
+    let (compiler, double) = compiler_from_argv(argv);
     let search_paths = collect_search_paths_for_file(path, argv);
     let fir = compiler
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
@@ -920,14 +936,7 @@ fn preflight_compile_source_to_cranelift(
     opt_level: c_int,
     argv: &[String],
 ) -> Result<CompiledCraneliftFactory, String> {
-    let double = parse_ffi_compile_args(argv)
-        .map(|a| a.double)
-        .unwrap_or(false);
-    let compiler = FaustCompiler::new().with_real_type(if double {
-        RealType::Float64
-    } else {
-        RealType::Float32
-    });
+    let (compiler, double) = compiler_from_argv(argv);
     let fir = compiler
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;

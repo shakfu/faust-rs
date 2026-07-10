@@ -44,6 +44,12 @@ SCALARFRAMES ?= 15000
 # filesCompare tolerance override (empty -> default 2e-06).
 precision ?=
 
+# Extra faust-rs / runner options injected into every backend invocation. The
+# vector-mode targets set this to `-vec -lv 0` / `-vec -lv 1`; empty by default
+# (scalar). Vector mode is bit-exact vs scalar, so the same reference oracle
+# applies — only the loop/storage structure of the generated code changes.
+VECOPTS ?=
+
 # --- performance benchmark --------------------------------------------------
 # `faustbench` invokes a `faust` binary found on PATH, so Make.bench creates
 # temporary PATH wrappers around FAUST_CPP and FAUST_RS.

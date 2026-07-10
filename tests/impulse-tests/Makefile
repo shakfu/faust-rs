@@ -29,9 +29,15 @@ include common.mk
 
 MAKE ?= make
 
-.PHONY: all reference interp c cpp cranelift wasm assemblyscript bench compile-bench build tools help clean distclean
+.PHONY: all all-vec0 all-vec1 all-vec reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 bench compile-bench build tools help clean distclean
 
 all: cpp c interp cranelift wasm assemblyscript
+
+all-vec0: cpp-vec0 c-vec0 interp-vec0 cranelift-vec0 wasm-vec0 assemblyscript-vec0
+
+all-vec1: cpp-vec1 c-vec1 interp-vec1 cranelift-vec1 wasm-vec1 assemblyscript-vec1
+
+all-vec: all-vec0 all-vec1
 
 reference:
 	$(MAKE) -f Make.ref reference
@@ -39,20 +45,56 @@ reference:
 interp:
 	$(MAKE) -f Make.interp all outdir=interp
 
+interp-vec0:
+	$(MAKE) -f Make.interp all outdir=interp-vec0 VECOPTS="-vec -lv 0"
+
+interp-vec1:
+	$(MAKE) -f Make.interp all outdir=interp-vec1 VECOPTS="-vec -lv 1"
+
 cpp:
 	$(MAKE) -f Make.gcc all outdir=cpp lang=cpp
+
+cpp-vec0:
+	$(MAKE) -f Make.gcc all outdir=cpp-vec0 lang=cpp VECOPTS="-vec -lv 0"
+
+cpp-vec1:
+	$(MAKE) -f Make.gcc all outdir=cpp-vec1 lang=cpp VECOPTS="-vec -lv 1"
 
 c:
 	$(MAKE) -f Make.gcc all outdir=c lang=c
 
+c-vec0:
+	$(MAKE) -f Make.gcc all outdir=c-vec0 lang=c VECOPTS="-vec -lv 0"
+
+c-vec1:
+	$(MAKE) -f Make.gcc all outdir=c-vec1 lang=c VECOPTS="-vec -lv 1"
+
 cranelift:
 	$(MAKE) -f Make.cranelift all outdir=cranelift
+
+cranelift-vec0:
+	$(MAKE) -f Make.cranelift all outdir=cranelift-vec0 VECOPTS="-vec -lv 0"
+
+cranelift-vec1:
+	$(MAKE) -f Make.cranelift all outdir=cranelift-vec1 VECOPTS="-vec -lv 1"
 
 wasm:
 	$(MAKE) -f Make.wasm all outdir=wasm
 
+wasm-vec0:
+	$(MAKE) -f Make.wasm all outdir=wasm-vec0 VECOPTS="-vec -lv 0"
+
+wasm-vec1:
+	$(MAKE) -f Make.wasm all outdir=wasm-vec1 VECOPTS="-vec -lv 1"
+
 assemblyscript:
 	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript
+
+assemblyscript-vec0:
+	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript-vec0 VECOPTS="-vec -lv 0"
+
+assemblyscript-vec1:
+	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript-vec1 VECOPTS="-vec -lv 1"
 
 bench:
 	@$(MAKE) -f Make.bench bench
@@ -85,6 +127,8 @@ help:
 	@echo "  cranelift      : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
 	@echo "  wasm           : check the faust-rs WASM backend (scalar prefix, 64-bit, Node)"
 	@echo "  assemblyscript : check the faust-rs AssemblyScript backend (scalar prefix, Node/asc)"
+	@echo "  *-vec0/*-vec1  : check a backend with -vec -lv 0 / -vec -lv 1"
+	@echo "  all-vec        : run all vector-mode backend variants"
 	@echo "  bench          : compare C++ Faust and faust-rs generated-code speed with faustbench -single"
 	@echo "  compile-bench  : compare C++ Faust and faust-rs compile time on the DSP corpus"
 	@echo "  cpp            : check the faust-rs C++ backend (full 4-pass)"

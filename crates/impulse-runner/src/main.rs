@@ -30,7 +30,7 @@ use std::process::ExitCode;
 use codegen::backends::interp::{
     FbcDspInstance, FbcOpcode, FbcReal, InterpOptions, Soundfile, generate_interp_module,
 };
-use compiler::{Compiler, FirVerifyOptions, RealType, SignalFirLane};
+use compiler::{Compiler, ComputeMode, FirVerifyOptions, RealType, SignalFirLane};
 use fir::{FirId, FirStore};
 
 /// Reference protocol constants (mirrors `controlTools.h`).
@@ -46,6 +46,7 @@ struct Options {
     double: bool,
     frames: usize,
     import_dirs: Vec<PathBuf>,
+    compute_mode: ComputeMode,
 }
 
 fn main() -> ExitCode {
@@ -73,6 +74,7 @@ fn real_main() -> Result<String, String> {
 
     let compiler = Compiler::new()
         .with_real_type(real_type)
+        .with_compute_mode(options.compute_mode)
         .with_fir_verify_options(FirVerifyOptions {
             enabled: true,
             strict: false,
@@ -100,6 +102,12 @@ fn parse_args() -> Result<Options, String> {
     let mut double = false;
     let mut frames = DEFAULT_FRAMES;
     let mut import_dirs = Vec::new();
+    // Vector-mode flags, mirroring the faust-rs CLI (`-vec`, `-vs N`, `-lv N`).
+    // Accumulated separately so their order does not matter; folded into a
+    // `ComputeMode` at the end.
+    let mut vec_mode = false;
+    let mut vec_size = ComputeMode::DEFAULT_VEC_SIZE;
+    let mut loop_variant = 0u8;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -116,11 +124,22 @@ fn parse_args() -> Result<Options, String> {
                 let value = args.next().ok_or("missing value after -I")?;
                 import_dirs.push(PathBuf::from(value));
             }
-            // Accept and ignore other Faust options the Makefile may pass so the
-            // runner can be a near drop-in for the C++ `impulseinterp` binary.
+            "-vec" => vec_mode = true,
+            "-vs" => {
+                let value = args.next().ok_or("missing value after -vs")?;
+                vec_size = value
+                    .parse::<u32>()
+                    .map_err(|e| format!("bad -vs value: {e}"))?;
+            }
+            "-lv" => {
+                let value = args.next().ok_or("missing value after -lv")?;
+                loop_variant = value
+                    .parse::<u8>()
+                    .map_err(|e| format!("bad -lv value: {e}"))?;
+            }
+            // Reject unknown flags loudly: an option taking an argument we do not
+            // model would desync parsing.
             other if other.starts_with('-') => {
-                // Options taking an argument we do not model would desync parsing;
-                // none are passed today, so reject unknown flags loudly instead.
                 return Err(format!("unknown option: {other}"));
             }
             other => {
@@ -132,11 +151,21 @@ fn parse_args() -> Result<Options, String> {
         }
     }
 
+    let compute_mode = if vec_mode {
+        ComputeMode::Vector {
+            vec_size,
+            loop_variant,
+        }
+    } else {
+        ComputeMode::Scalar
+    };
+
     Ok(Options {
         dsp: dsp.ok_or("missing <file.dsp> argument")?,
         double,
         frames,
         import_dirs,
+        compute_mode,
     })
 }
 
