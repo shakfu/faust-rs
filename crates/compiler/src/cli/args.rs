@@ -231,8 +231,10 @@ pub struct CliArgs {
     /// Vector size for `-vec` (`-vs N`). Default: 32.
     #[arg(long = "vs", default_value_t = ComputeMode::DEFAULT_VEC_SIZE)]
     pub vs: u32,
-    /// Vector loop variant for `-vec` (`-lv 0|1`): 0 = simple, 1 = faster
-    /// (constant-count main loop + remainder). Default: 0.
+    /// Vector loop variant for `-vec` (`-lv 0|1`, as Faust C++): 0 = fastest
+    /// (default) — a constant-trip main loop over `count - count % vs` plus a
+    /// scalar remainder, the autovectorization-friendly form; 1 = simple — a
+    /// single loop with a runtime `min(vindex + vs, count)` bound.
     #[arg(long = "lv", default_value_t = 0)]
     pub lv: u8,
     /// Display compilation phases timing information (`-time`).

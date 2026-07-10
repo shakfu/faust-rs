@@ -133,8 +133,10 @@ pub enum ComputeMode {
     Vector {
         /// Chunk size (`-vs N`; Faust default 32).
         vec_size: u32,
-        /// Chunk-driver variant: `0` = simple (`-lv 0`), `1` = faster
-        /// (`-lv 1`, constant-count main loop + remainder).
+        /// Chunk-driver variant (`-lv`, as Faust C++): `0` = fastest (default) —
+        /// a constant-trip main loop over `count - count % vec_size` plus a scalar
+        /// remainder (autovectorization-friendly); `1` = simple — one loop with a
+        /// runtime `min(vindex + vec_size, count)` bound.
         loop_variant: u8,
     },
 }

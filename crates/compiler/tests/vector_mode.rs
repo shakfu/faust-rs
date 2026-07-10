@@ -50,29 +50,32 @@ fn ramp(frames: usize) -> Vec<f32> {
 }
 
 fn assert_scalar_vector_bit_exact(name: &str, source: &str, vec_size: u32) {
-    // 64-sample block with vec_size = 32 → two full chunks + the state crossing
-    // the boundary at sample 32.
+    // 64-sample block: with vec_size 32 → two full chunks + a boundary crossing;
+    // with a non-dividing vec_size → a short remainder / tail chunk. Both loop
+    // variants (`-lv 0` fastest, `-lv 1` simple) must match scalar bit-for-bit.
     let frames = 64;
     let input = ramp(frames);
     let scalar = run(source, ComputeMode::Scalar, &input);
-    let vector = run(
-        source,
-        ComputeMode::Vector {
-            vec_size,
-            loop_variant: 0,
-        },
-        &input,
-    );
-    assert_eq!(
-        scalar.len(),
-        vector.len(),
-        "{name}: output channel count differs"
-    );
-    for (ch, (s, v)) in scalar.iter().zip(vector.iter()).enumerate() {
-        assert_eq!(
-            s, v,
-            "{name}: channel {ch} differs between scalar and vector (-vs {vec_size})"
+    for loop_variant in [0_u8, 1] {
+        let vector = run(
+            source,
+            ComputeMode::Vector {
+                vec_size,
+                loop_variant,
+            },
+            &input,
         );
+        assert_eq!(
+            scalar.len(),
+            vector.len(),
+            "{name}: output channel count differs (-lv {loop_variant})"
+        );
+        for (ch, (s, v)) in scalar.iter().zip(vector.iter()).enumerate() {
+            assert_eq!(
+                s, v,
+                "{name}: channel {ch} differs, scalar vs -vec (-vs {vec_size} -lv {loop_variant})"
+            );
+        }
     }
 }
 
