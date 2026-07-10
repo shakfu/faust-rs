@@ -27,7 +27,8 @@ use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_modul
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
-    Compiler, FaustInstallPaths, FirVerifyOptions, RealType, compile_options_json_string,
+    Compiler, ComputeMode, FaustInstallPaths, FirVerifyOptions, RealType,
+    compile_options_json_string,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
     golden_snapshot_from_file,
 };
@@ -319,6 +320,18 @@ pub fn selected_real_type(cli: &CliArgs) -> RealType {
     }
 }
 
+/// Maps the `-vec`/`-vs`/`-lv` switches to a [`ComputeMode`] (roadmap P6, V1).
+pub fn selected_compute_mode(cli: &CliArgs) -> ComputeMode {
+    if cli.vec {
+        ComputeMode::Vector {
+            vec_size: cli.vs,
+            loop_variant: cli.lv,
+        }
+    } else {
+        ComputeMode::Scalar
+    }
+}
+
 /// Maps CLI precision switches to the Julia backend's real type, mirroring
 /// [`selected_real_type`] for the Julia code generator.
 pub fn selected_julia_real_type(cli: &CliArgs) -> JuliaRealType {
@@ -339,7 +352,8 @@ pub fn compiler_from_cli(
         .with_process_name(cli.process_name.clone())
         .with_real_type(selected_real_type(cli))
         .with_mcd(cli.mcd)
-        .with_dlt(cli.dlt);
+        .with_dlt(cli.dlt)
+        .with_compute_mode(selected_compute_mode(cli));
     if let Some(flag) = cancel {
         compiler = compiler.with_cancel(flag);
     }

@@ -99,6 +99,8 @@ pub(crate) struct SignalLoweringContext {
     pub(crate) max_copy_delay: u32,
     /// Delay-line count threshold above which the lowerer switches strategy.
     pub(crate) delay_line_threshold: u32,
+    /// `compute()` codegen strategy (scalar / vector). Roadmap P6 (V1 plumbing).
+    pub(crate) compute_mode: ComputeMode,
     /// Optional per-phase timing callback; `None` disables timing.
     pub(crate) timing_sink: Option<TimingSink>,
 }
@@ -169,6 +171,7 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
             ctx.real_type,
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
+            ctx.compute_mode,
         )
     })
     .map_err(LowerToInterpError::Transform)?;
@@ -213,6 +216,10 @@ pub(crate) fn serialize_factory<R: FbcReal>(factory: &FbcDspFactory<R>) -> Resul
 ///
 /// This is the shared implementation behind FIR dump/verification flows and is
 /// also used as the backend-independent boundary for lane comparisons.
+// The parameters are exactly the facade-owned lowering knobs; bundling them is
+// a separate refactor (they also flow individually through the C++/C/Julia
+// paths). Kept explicit for now.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_signals_to_fir(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -221,6 +228,7 @@ pub(crate) fn lower_signals_to_fir(
     real_type: RealType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
+    compute_mode: ComputeMode,
 ) -> Result<FirCompileOutput, LowerToFirError> {
     let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
     let lowered = lower_signals_to_fir_transform_fastlane(
@@ -229,6 +237,7 @@ pub(crate) fn lower_signals_to_fir(
         real_type,
         max_copy_delay,
         delay_line_threshold,
+        compute_mode,
     )
     .map_err(LowerToFirError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
@@ -249,12 +258,14 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
     real_type: RealType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
+    compute_mode: ComputeMode,
 ) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
         module_name,
         real_type,
         max_copy_delay,
         delay_line_threshold,
+        compute_mode,
     };
     let lowered = transform::signal_fir::compile_signals_to_fir_fastlane_clocked(
         &output.parse.state.arena,
@@ -287,6 +298,7 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
             ctx.real_type,
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
+            ctx.compute_mode,
         )
     })
     .map_err(LowerError::Transform)?;
@@ -316,6 +328,7 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
             ctx.real_type,
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
+            ctx.compute_mode,
         )
     })
     .map_err(LowerError::Transform)?;
@@ -345,6 +358,7 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
             ctx.real_type,
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
+            ctx.compute_mode,
         )
     })
     .map_err(LowerError::Transform)?;

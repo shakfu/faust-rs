@@ -7,7 +7,7 @@
 //! rather than re-reading raw process arguments.
 
 use clap::{ArgAction, Parser, ValueEnum};
-use compiler::SignalFirLane;
+use compiler::{ComputeMode, SignalFirLane};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -221,6 +221,20 @@ pub struct CliArgs {
     /// Default: disabled (all delays above `mcd` use circular-pow2).
     #[arg(long = "dlt", default_value_t = u32::MAX)]
     pub dlt: u32,
+    /// Vector mode (`-vec`): restructure `compute()` into an outer chunk loop
+    /// so the C compiler can auto-vectorize the inner loops (SIMD).
+    ///
+    /// Roadmap P6 (V1): plumbing only — selecting it records the option but
+    /// still emits scalar code until the `LoopGraph` lowering (V2+) lands.
+    #[arg(long = "vec", action = ArgAction::SetTrue)]
+    pub vec: bool,
+    /// Vector size for `-vec` (`-vs N`). Default: 32.
+    #[arg(long = "vs", default_value_t = ComputeMode::DEFAULT_VEC_SIZE)]
+    pub vs: u32,
+    /// Vector loop variant for `-vec` (`-lv 0|1`): 0 = simple, 1 = faster
+    /// (constant-count main loop + remainder). Default: 0.
+    #[arg(long = "lv", default_value_t = 0)]
+    pub lv: u8,
     /// Display compilation phases timing information (`-time`).
     #[arg(long = "compilation-time", action = ArgAction::SetTrue)]
     pub compilation_time: bool,
@@ -331,6 +345,24 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
         }
         if arg == "-dlt" {
             normalized.push("--dlt".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-vec" {
+            normalized.push("--vec".to_owned());
+            continue;
+        }
+        if arg == "-vs" {
+            normalized.push("--vs".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-lv" {
+            normalized.push("--lv".to_owned());
             if let Some(value) = it.next() {
                 normalized.push(value);
             }

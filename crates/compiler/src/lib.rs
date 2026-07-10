@@ -84,7 +84,7 @@ use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
 use signals::SigId;
 use sigtype::TypeAnnotator;
 use tlib::NodeKind;
-pub use transform::signal_fir::RealType;
+pub use transform::signal_fir::{ComputeMode, RealType};
 use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
 use ui::UiProgram;
 
@@ -374,6 +374,10 @@ pub struct Compiler {
     /// Delay above which the if-based wrapping strategy is used.
     /// Mirrors Faust `-dlt N`. Default: `u32::MAX` (disabled).
     delay_line_threshold: u32,
+    /// Codegen strategy for `compute()`: scalar (default) or vector mode
+    /// (`-vec`/`-vs`/`-lv`). Roadmap P6 (V1 plumbing only — `Vector` still
+    /// lowers as `Scalar` until the `LoopGraph` slices land).
+    compute_mode: ComputeMode,
     /// Optional cooperative cancellation flag.
     ///
     /// When set, the evaluator checks this flag on every recursive call and
@@ -420,6 +424,7 @@ impl Compiler {
             real_type: RealType::default(),
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,
+            compute_mode: ComputeMode::Scalar,
             cancel: None,
             timing_sink: None,
         }
@@ -471,6 +476,17 @@ impl Compiler {
         self
     }
 
+    /// Selects the `compute()` codegen strategy (`-vec` / scalar).
+    ///
+    /// Roadmap P6 (V1). Vector mode is currently plumbing-only: selecting it
+    /// records the option but still emits scalar code until the `LoopGraph`
+    /// lowering (V2+) lands.
+    #[must_use]
+    pub fn with_compute_mode(mut self, mode: ComputeMode) -> Self {
+        self.compute_mode = mode;
+        self
+    }
+
     /// Returns a compiler facade with a cooperative cancellation flag.
     ///
     /// The caller retains an `Arc<AtomicBool>` clone and can set it to `true`
@@ -514,6 +530,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            compute_mode: self.compute_mode,
             timing_sink: self.timing_sink.clone(),
         }
     }
@@ -535,6 +552,7 @@ impl Compiler {
             self.real_type,
             self.max_copy_delay,
             self.delay_line_threshold,
+            self.compute_mode,
         )
         .map_err(|error| lower_fir_error_to_compiler(source, error))
     }

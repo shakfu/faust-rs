@@ -110,6 +110,45 @@ impl RealType {
     }
 }
 
+/// Codegen strategy for the generated `compute()` body.
+///
+/// `Scalar` compiles the whole signal graph into one per-sample loop. `Vector`
+/// (`-vec`) restructures it into an **outer chunk loop** of `vec_size` samples
+/// containing a DAG of small inner loops, so the C compiler can auto-vectorize
+/// the non-recursive ones (SIMD); recursive computations stay in serial loops.
+///
+/// Roadmap P6, vector doc V1
+/// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). **V1 plumbs the
+/// option/CLI surface only**: `Scalar` is the sole lowering acted on today, and
+/// selecting `Vector` currently falls back to scalar codegen until the
+/// `LoopGraph` lowering (V2+) lands. It is threaded now so later slices have a
+/// stable configuration point and CLI contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComputeMode {
+    /// One scalar loop over the whole block (`for i in 0..count`).
+    #[default]
+    Scalar,
+    /// Vector mode: outer chunk loop of `vec_size` samples, inner loop DAG.
+    Vector {
+        /// Chunk size (`-vs N`; Faust default 32).
+        vec_size: u32,
+        /// Chunk-driver variant: `0` = simple (`-lv 0`), `1` = faster
+        /// (`-lv 1`, constant-count main loop + remainder).
+        loop_variant: u8,
+    },
+}
+
+impl ComputeMode {
+    /// The default Faust vector size (`-vs`) when `-vec` is given without `-vs`.
+    pub const DEFAULT_VEC_SIZE: u32 = 32;
+
+    /// Whether this mode requests vector-mode codegen.
+    #[must_use]
+    pub fn is_vector(self) -> bool {
+        matches!(self, Self::Vector { .. })
+    }
+}
+
 /// Configuration options for [`compile_signals_to_fir_fastlane_with_ui`].
 ///
 /// These options describe the externally visible module contract.
@@ -149,6 +188,10 @@ pub struct SignalFirOptions {
     /// per-line counter variable. Default: `u32::MAX` (disabled; all delays at
     /// or above `max_copy_delay` use circular-pow2).
     pub delay_line_threshold: u32,
+    /// Codegen strategy for `compute()`: scalar (default) or vector mode
+    /// (`-vec`). Roadmap P6 (V1 plumbing; `Vector` still lowers as `Scalar`
+    /// until the `LoopGraph` slices land).
+    pub compute_mode: ComputeMode,
 }
 
 impl Default for SignalFirOptions {
@@ -158,6 +201,7 @@ impl Default for SignalFirOptions {
             real_type: RealType::Float32,
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,
+            compute_mode: ComputeMode::Scalar,
         }
     }
 }
