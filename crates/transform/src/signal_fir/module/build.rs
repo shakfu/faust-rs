@@ -439,19 +439,49 @@ pub(crate) fn build_module<'a>(
     };
 
     let compute_statements = {
-        let mut all = Vec::new();
-        all.extend(lower.sections.control_statements.iter().copied());
+        use crate::signal_fir::loop_graph::{LoopGraph, LoopKind};
+
+        // Route the per-sample slices through the loop graph (roadmap P6, V4).
+        // Scalar mode is one vectorizable loop node per non-empty slice with
+        // empty pre/post — emitted in insertion order via `topological_order`,
+        // so the FIR is bit-identical to the previous inline emission (the 190
+        // goldens are the guarantee). Vector mode (V5) will partition a slice
+        // into several loop nodes and wrap them in a chunk driver; the slices
+        // are not partitioned yet, so both modes emit one loop per slice here.
+        let mut graph = LoopGraph::new();
         for (is_reverse, sample_loop_statements) in &sample_loops {
             if sample_loop_statements.is_empty() {
                 continue;
             }
-            let sample_loop = {
-                let mut b = FirBuilder::new(&mut lower.store);
-                let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-                let body = b.block(sample_loop_statements);
-                b.simple_for_loop("i0", upper, body, *is_reverse)
-            };
-            all.push(sample_loop);
+            let id = graph.add_loop(LoopKind::Vectorizable, *is_reverse);
+            graph
+                .node_mut(id)
+                .exec
+                .extend(sample_loop_statements.iter().copied());
+        }
+        let order = graph
+            .topological_order()
+            .expect("scalar sample loop graph has no dependency edges, so no cycle");
+
+        let mut all = Vec::new();
+        all.extend(lower.sections.control_statements.iter().copied());
+        for id in order {
+            let node = graph.node(id);
+            let is_reverse = node.is_reverse;
+            let pre = node.pre.clone();
+            let exec = node.exec.clone();
+            let post = node.post.clone();
+            all.extend(pre);
+            if !exec.is_empty() {
+                let sample_loop = {
+                    let mut b = FirBuilder::new(&mut lower.store);
+                    let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+                    let body = b.block(&exec);
+                    b.simple_for_loop("i0", upper, body, is_reverse)
+                };
+                all.push(sample_loop);
+            }
+            all.extend(post);
         }
         all
     };
