@@ -195,9 +195,41 @@ def conflicts : Effect -> Effect -> Bool
   | .foreignCall _ _, _ => true
   | _, .foreignCall _ _ => true
   | .read _, .read _ => false
-  | .read a, .write b => a == b
-  | .write a, .read b => a == b
-  | .write a, .write b => a == b
+  | .read a, .write b => decide (a = b)
+  | .write a, .read b => decide (a = b)
+  | .write a, .write b => decide (a = b)
+
+/-
+  `conflicts` is used as a symmetric commutation test, so its symmetry is a
+  required property rather than an incidental one. The resource comparison uses
+  `decide (a = b)` on `DecidableEq Resource`, which makes the symmetry provable
+  from `eq_comm` instead of relying on an unproved `BEq` law.
+-/
+
+theorem decide_eq_symm {α : Type} [DecidableEq α] (a b : α) :
+    decide (a = b) = decide (b = a) := by
+  by_cases h : a = b
+  · subst h; rfl
+  · rw [decide_eq_false h, decide_eq_false (fun h' => h h'.symm)]
+
+theorem conflicts_symm (a b : Effect) : conflicts a b = conflicts b a := by
+  cases a with
+  | read ra =>
+    cases b with
+    | read rb => rfl
+    | write rb => simp only [conflicts]; exact decide_eq_symm ra rb
+    | foreignCall nb pb => cases pb <;> rfl
+  | write ra =>
+    cases b with
+    | read rb => simp only [conflicts]; exact decide_eq_symm ra rb
+    | write rb => simp only [conflicts]; exact decide_eq_symm ra rb
+    | foreignCall nb pb => cases pb <;> rfl
+  | foreignCall na pa =>
+    cases pa <;>
+      cases b with
+      | read rb => rfl
+      | write rb => rfl
+      | foreignCall nb pb => cases pb <;> rfl
 
 end Effect
 
@@ -259,27 +291,37 @@ inductive Expr where
   | clocked (clock : ClockId) (value : Expr)
   deriving Repr
 
+/-
+  Base signals live in a fixed root clock domain. This is what makes the typing
+  judgment a total *function* of the expression: earlier drafts let each literal
+  and input carry a free `clock`, so a single expression admitted many judgments
+  and the companion document's `Totality` claim ("exactly one judgment exists")
+  was false. `Clocked` is the sole clock-changing constructor, and
+  `hasType_functional` below now proves determinism.
+-/
+def rootClock : ClockId := 0
+
 inductive HasType : Expr -> Decoration -> Prop where
-  | intLit (value : Int) (clock : ClockId) :
+  | intLit (value : Int) :
       HasType (.intLit value)
         { valueTy := .int
           rate := .konst
           vectorability := .vect
-          clock := clock
+          clock := rootClock
           effects := [] }
-  | realLit (value : Float) (clock : ClockId) :
+  | realLit (value : Float) :
       HasType (.realLit value)
         { valueTy := .real
           rate := .konst
           vectorability := .vect
-          clock := clock
+          clock := rootClock
           effects := [] }
-  | input (channel : Nat) (clock : ClockId) :
+  | input (channel : Nat) :
       HasType (.input channel)
         { valueTy := .real
           rate := .samp
           vectorability := .vect
-          clock := clock
+          clock := rootClock
           effects := [] }
   | bin {left right : Expr} {dl dr : Decoration} {resultTy : ValueTy}
       (leftTyped : HasType left dl)
@@ -317,6 +359,113 @@ inductive HasType : Expr -> Decoration -> Prop where
   | clocked {value : Expr} {d : Decoration} (clock : ClockId)
       (valueTyped : HasType value d) :
       HasType (.clocked clock value) { d with clock := clock }
+
+/-
+  `delay` deliberately over-approximates: it emits `ReadState`/`WriteState` for
+  every delay, including the `n = 0` case the companion document says "may
+  discharge its state effects." Over-approximation is the sound direction for
+  scheduling (it can only add ordering constraints), and this constructor cannot
+  inspect the amount, so the discharge is left to the concrete delay analysis.
+
+  `hasType_functional` establishes the `Totality`/uniqueness property: the
+  representative judgment assigns at most one decoration to any expression. The
+  proof inducts on the first derivation and inverts the second; each expression
+  head admits a single constructor, and every decoration component is fixed
+  either by a sub-derivation (via the induction hypothesis) or by a function
+  (`promoteNumeric`, list projection).
+-/
+
+theorem hasType_functional {e : Expr} {d₁ d₂ : Decoration}
+    (h₁ : HasType e d₁) (h₂ : HasType e d₂) : d₁ = d₂ := by
+  induction h₁ generalizing d₂ with
+  | intLit => cases h₂; rfl
+  | realLit => cases h₂; rfl
+  | input => cases h₂; rfl
+  | bin _ _ _ promoted ihl ihr =>
+    cases h₂ with
+    | bin _ _ _ promoted₂ =>
+      have hl := ihl ‹_›
+      have hr := ihr ‹_›
+      subst hl; subst hr
+      rw [promoted] at promoted₂
+      cases promoted₂
+      rfl
+  | delay _ _ _ _ _ ihv iha =>
+    cases h₂ with
+    | delay _ _ _ _ _ =>
+      have hv := ihv ‹_›
+      have ha := iha ‹_›
+      subst hv; subst ha
+      rfl
+  | proj _ groupIsTuple componentAt ih =>
+    cases h₂ with
+    | proj _ groupIsTuple₂ componentAt₂ =>
+      have hg := ih ‹_›
+      subst hg
+      rw [groupIsTuple] at groupIsTuple₂
+      cases groupIsTuple₂
+      rw [componentAt] at componentAt₂
+      cases componentAt₂
+      rfl
+  | clocked _ _ ih =>
+    cases h₂ with
+    | clocked _ _ =>
+      have hd := ih ‹_›
+      subst hd
+      rfl
+
+/-
+  `Expr` and `HasType` document representative rules; faust-rs must not rebuild
+  its production forest in this miniature AST. The structures below are the
+  actual cross-language boundary: one record is exported for every reachable
+  prepared `SigId`, together with the labelled dependencies used by planning.
+-/
+
+structure SignalDecorationRecord where
+  signal : SigId
+  decoration : Decoration
+  executionCondition : Nat
+  maxDelay : Nat
+  delayRead : Bool
+  recursiveProjection : Bool
+  multipleOccurrences : Bool
+  verySimple : Bool
+  deriving Repr
+
+inductive AnalysisDependencyKind where
+  | immediate
+  | delayed (amount : Nat)
+  | control
+  | clockBoundary
+  | effect (atom : Effect)
+  deriving Repr
+
+structure AnalysisDependency where
+  consumer : SigId
+  kind : AnalysisDependencyKind
+  dependency : SigId
+  deriving Repr
+
+def AllAnalysisEndpoints (signals : List SigId) :
+    List AnalysisDependency -> Prop
+  | [] => True
+  | edge :: rest =>
+      edge.consumer ∈ signals ∧ edge.dependency ∈ signals
+        ∧ AllAnalysisEndpoints signals rest
+
+structure DecorationCertificate (reachable : List SigId) where
+  records : List SignalDecorationRecord
+  dependencies : List AnalysisDependency
+  recordsNodup : (records.map (fun record => record.signal)).Nodup
+  recordsCover : (records.map (fun record => record.signal)).Perm reachable
+  dependencyEndpoints : AllAnalysisEndpoints reachable dependencies
+
+/-
+  A concrete `verifyDecorations` must additionally validate each record against
+  the authoritative type, clock, occurrence, delay, and effect analyses. Those
+  compiler-specific maps are intentionally parameters of the future checker,
+  not axioms asserted by this standalone specification.
+-/
 
 /-! ## Dependency graph and schedule certificates -/
 
@@ -366,11 +515,18 @@ def noDuplicatesB [BEq Node] [LawfulBEq Node] : List Node -> Bool
   A schedule covers a graph exactly when it is a duplicate-free permutation of
   `graph.nodes`. The two `all` clauses check both inclusions instead of assuming
   that equal list lengths imply equality of finite sets.
+
+  `noDuplicatesB graph.nodes` is required as well: without it a graph whose node
+  list contained duplicates would be "covered" by its deduplicated order, so the
+  reference checker would be strictly weaker than the Rust R1 checker (which
+  demands unique nodes). Both inclusions plus both `Nodup` facts give a genuine
+  set bijection, matched below by `CoversRel`.
 -/
 
 def coversB [BEq Node] [LawfulBEq Node]
     (graph : DependencyGraph Node) (order : List Node) : Bool :=
-  noDuplicatesB order
+  noDuplicatesB graph.nodes
+    && noDuplicatesB order
     && graph.nodes.all (fun node => order.contains node)
     && order.all (fun node => graph.nodes.contains node)
 
@@ -407,9 +563,80 @@ theorem verifySchedule_eq_true_iff [BEq Node] [LawfulBEq Node]
   rfl
 
 /-
-  The theorem is reflexive because the executable checker is the definition of
-  the proposition. This small trusted checker can validate orders produced by
-  a more complicated scheduler without reusing that scheduler's algorithm.
+  The theorem above is reflexive because `ValidSchedule` is *defined* as the
+  checker returning `true`; on its own it says nothing about topological order.
+  The predicates and lemmas below supply the missing semantic anchor: an
+  independently stated relational meaning of "valid schedule", and a proof that
+  the Boolean checker is both sound and complete against it. This is what makes
+  `verifySchedule` a trustworthy reference oracle rather than a tautology.
+-/
+
+/-- Relational meaning of coverage: both lists are duplicate-free and denote the
+    same finite set. Stated without reference to the Boolean checker. -/
+def CoversRel [BEq Node] [LawfulBEq Node]
+    (graph : DependencyGraph Node) (order : List Node) : Prop :=
+  graph.nodes.Nodup ∧ order.Nodup
+    ∧ (∀ n ∈ graph.nodes, n ∈ order)
+    ∧ (∀ n ∈ order, n ∈ graph.nodes)
+
+/-- Relational meaning of causality: every dependency precedes its consumer in
+    the order. `Before` is the position comparison, stated over the order. -/
+def RespectsDepsRel [BEq Node] [LawfulBEq Node]
+    (graph : DependencyGraph Node) (order : List Node) : Prop :=
+  ∀ consumer ∈ graph.nodes, ∀ dependency ∈ graph.dependencies consumer,
+    Before order dependency consumer
+
+/-- The independent semantic notion of a valid topological schedule. -/
+def ValidScheduleRel [BEq Node] [LawfulBEq Node]
+    (graph : DependencyGraph Node) (order : List Node) : Prop :=
+  CoversRel graph order ∧ RespectsDepsRel graph order
+
+theorem noDuplicatesB_iff_nodup [BEq Node] [LawfulBEq Node] (l : List Node) :
+    noDuplicatesB l = true ↔ l.Nodup := by
+  induction l with
+  | nil => simp [noDuplicatesB]
+  | cons a t ih =>
+    rw [noDuplicatesB, Bool.and_eq_true, Bool.not_eq_true', List.nodup_cons, ih]
+    simp
+
+theorem coversB_iff [BEq Node] [LawfulBEq Node]
+    (graph : DependencyGraph Node) (order : List Node) :
+    coversB graph order = true ↔ CoversRel graph order := by
+  rw [coversB]
+  simp only [Bool.and_eq_true, noDuplicatesB_iff_nodup, List.all_eq_true,
+             List.contains_iff_mem, CoversRel, and_assoc]
+
+theorem respectsDependenciesB_iff [BEq Node] [LawfulBEq Node]
+    (graph : DependencyGraph Node) (order : List Node) :
+    respectsDependenciesB graph order = true ↔ RespectsDepsRel graph order := by
+  rw [respectsDependenciesB]
+  simp only [List.all_eq_true, RespectsDepsRel, Before]
+
+/-- Soundness and completeness of the Boolean checker against the independent
+    relational specification. Unlike `verifySchedule_eq_true_iff`, this is not a
+    `rfl`: it connects the checker to `ValidScheduleRel`, a definition that never
+    mentions `validScheduleB`. -/
+theorem validScheduleB_iff [BEq Node] [LawfulBEq Node]
+    (graph : DependencyGraph Node) (order : List Node) :
+    validScheduleB graph order = true ↔ ValidScheduleRel graph order := by
+  rw [validScheduleB, Bool.and_eq_true, coversB_iff, respectsDependenciesB_iff]
+  exact Iff.rfl
+
+theorem verifySchedule_sound [BEq Node] [LawfulBEq Node]
+    {graph : DependencyGraph Node} {order : List Node}
+    (accepted : verifySchedule graph order = true) : ValidScheduleRel graph order :=
+  (validScheduleB_iff graph order).mp accepted
+
+theorem verifySchedule_complete [BEq Node] [LawfulBEq Node]
+    {graph : DependencyGraph Node} {order : List Node}
+    (valid : ValidScheduleRel graph order) : verifySchedule graph order = true :=
+  (validScheduleB_iff graph order).mpr valid
+
+/-
+  This small trusted checker can validate orders produced by a more complicated
+  scheduler without reusing that scheduler's algorithm, and `validScheduleB_iff`
+  proves the checker's `true` result is exactly the mathematical validity
+  predicate.
 -/
 
 inductive SchedulingStrategy where
@@ -505,6 +732,13 @@ structure Scheduler (Node : Type) [BEq Node] [LawfulBEq Node] where
   The `run` field is a total Lean function, so termination is part of the
   implementation boundary. `sound` and `complete` are the S-Sound and
   S-Complete obligations. Determinism follows from `run` being a function.
+
+  This structure is an L4 refinement target for a future mechanized scheduler;
+  it is not a structure that the progressive Rust port must construct. The
+  production L2 path is `run candidate -> certify? candidate`: Rust may use an
+  ordinary scheduler, but no candidate reaches lowering unless the independent
+  checker constructs a `ScheduleCertificate`. Proving `Scheduler.complete`
+  concerns the producer and does not change or weaken that trust boundary.
 -/
 
 def diamondGraph : DependencyGraph Nat where
@@ -569,6 +803,23 @@ def separateLoop (facts : SignalFacts) : Bool :=
   else
     false
 
+def separateLoopFormula (facts : SignalFacts) : Bool :=
+  (0 < facts.maxDelay)
+    || (!facts.verySimple
+      && !facts.rate.isSlow
+      && !facts.delayRead
+      && (facts.recursiveProjection || facts.multipleOccurrences))
+
+theorem separateLoop_complete (facts : SignalFacts) :
+    separateLoop facts = separateLoopFormula facts := by
+  rcases facts with ⟨maxDelay, verySimple, rate, delayRead,
+    recursiveProjection, multipleOccurrences⟩
+  by_cases hasDelay : 0 < maxDelay
+  · simp [separateLoop, separateLoopFormula, hasDelay]
+  · cases verySimple <;> cases rate <;> cases delayRead <;>
+      cases recursiveProjection <;> cases multipleOccurrences <;>
+      simp [separateLoop, separateLoopFormula, hasDelay, Rate.isSlow]
+
 theorem maxDelay_dominates (facts : SignalFacts) (hasDelay : 0 < facts.maxDelay) :
     separateLoop facts = true := by
   simp [separateLoop, hasDelay]
@@ -579,8 +830,9 @@ theorem verySimple_without_delay_is_inline (facts : SignalFacts)
   simp [separateLoop, noDelay, simple]
 
 /-
-  These two theorems pin the most regression-prone precedence cases. Additional
-  truth-table cases can be added as `example`s and discharged by `decide`.
+  `separateLoop_complete` exhausts the finite Boolean/rate cases after splitting
+  `maxDelay` into zero and positive branches. It pins all six priority rows, not
+  only the two historically regression-prone examples below it.
 -/
 
 example : separateLoop
@@ -664,6 +916,30 @@ theorem chunkIndex_lt (i0 vindex vecSize : Nat)
   from hiding an invalid sample position.
 -/
 
+/-- A signal is duplicable when re-evaluating it in another region at the same
+    logical sample yields identical bits and observations. Sufficient structural
+    condition used here: its aggregated effect set contains only pure foreign
+    calls — no state/table/UI/output read or write, and no impure/unknown call.
+    Because effects propagate to parents (see `HasType`), this also discharges
+    the "recursively duplicable operands" requirement. It is conservative: it may
+    reject a genuinely duplicable signal, but never accepts a non-duplicable one,
+    so `P-Duplicate` can never be satisfied vacuously. -/
+def duplicableEffectsB (es : List Effect) : Bool :=
+  es.all fun e =>
+    match e with
+    | .foreignCall _ .pure => true
+    | _ => false
+
+/-- An effect is reorderable across samples when it carries no per-sample state.
+    Reads and writes of loop-carried state are exactly the accesses that loop
+    fission must not reorder, so they are excluded here. -/
+def sampleReorderableB (es : List Effect) : Bool :=
+  es.all fun e =>
+    match e with
+    | .read (.state _) => false
+    | .write (.state _) => false
+    | _ => true
+
 structure VectorPlan where
   signals : List SigId
   loops : List LoopId
@@ -671,17 +947,17 @@ structure VectorPlan where
   vecSizePositive : 0 < vecSize
   signalType : SigId -> ValueTy
   placement : SigId -> Placement
-  duplicable : SigId -> Prop
+  effects : SigId -> List Effect
+  vectorability : SigId -> Vectorability
   roots : LoopId -> List SigId
   loopKind : LoopId -> LoopKind
-  vectorizationSafe : LoopId -> Prop
   epochs : List ExecutionEpoch
   transports : List Transport
   dataEdges : List (LoopId × LoopId)
   effectEdges : List (LoopId × LoopId)
   stableName : LoopId -> String
   placementDuplicate : ∀ signal,
-    placement signal = .inline -> duplicable signal
+    placement signal = .inline -> duplicableEffectsB (effects signal) = true
   rootsNodup : ∀ loop, (roots loop).Nodup
   ownedHasRoot : ∀ signal loop,
     placement signal = .owned loop -> signal ∈ roots loop
@@ -692,14 +968,32 @@ structure VectorPlan where
   `VectorPlan` is the strategy-independent result of signal-level analysis.
   Proof fields enforce local construction invariants immediately:
 
-  * an inline signal is duplicable;
+  * an inline signal is duplicable (checked against its effects, not asserted);
   * roots contain no duplicates within a loop;
   * ownership and root membership agree in both directions.
+
+  Duplicability and vectorization-safety are no longer opaque `Prop` parameters
+  (which could be discharged by `fun _ => True`). They are *defined* below from
+  the per-signal `effects` and `vectorability` data the analysis actually
+  produces, so the corresponding invariants have real content.
 
   Functions such as `signalType`, `placement`, and `loopKind` stand for immutable
   tables in the Rust implementation. The absence of `SchedulingStrategy` is
   intentional and makes P-Strategy visible in the type itself.
 -/
+
+/-- `P-Duplicate` content: an inline/duplicated signal has only pure-foreign
+    effects. Defined from `effects`, so it is never vacuously true. -/
+def VectorPlan.Duplicable (plan : VectorPlan) (s : SigId) : Prop :=
+  duplicableEffectsB (plan.effects s) = true
+
+/-- `VecSafe` content (a conservative sufficient condition): every materialized
+    root of the loop is locally vectorizable and carries no cross-sample state
+    effect. This can classify more loops as unsafe than C++, which is the sound
+    direction; a relaxation must add and test a new discharge rule. -/
+def VectorPlan.VecSafe (plan : VectorPlan) (l : LoopId) : Prop :=
+  (∀ s ∈ plan.roots l, plan.vectorability s = Vectorability.vect)
+    ∧ (∀ s ∈ plan.roots l, sampleReorderableB (plan.effects s) = true)
 
 def VectorPlan.allEdges (plan : VectorPlan) : List (LoopId × LoopId) :=
   plan.dataEdges ++ plan.effectEdges
@@ -776,7 +1070,7 @@ structure VectorPlanCertificate (plan : VectorPlan) where
   transportTyped : AllTransportsWellTyped plan.signalType plan.vecSize plan.transports
   barriersValid : EpochBarriersValid plan.epochs plan.allEdges
   vectorizableSafe : ∀ loop,
-    plan.loopKind loop = .vectorizable -> plan.vectorizationSafe loop
+    plan.loopKind loop = .vectorizable -> plan.VecSafe loop
 
 /-
   This certificate is the finite gate between planning and FIR lowering:
@@ -941,20 +1235,26 @@ inductive LoopVariant where
 
 def VSimulation
     (State Input Output Observation : Type)
+    (scheduleValid : List (List LoopId) -> Prop)
     (scalarRun : State -> List Input -> ExecutionResult State Output Observation)
     (vectorRun : Nat -> LoopVariant -> List (List LoopId) -> State -> List Input ->
       ExecutionResult State Output Observation) : Prop :=
   ∀ vecSize variant epochSchedules initialState inputs,
     0 < vecSize ->
+    scheduleValid epochSchedules ->
     vectorRun vecSize variant epochSchedules initialState inputs =
       scalarRun initialState inputs
 
 /-
   `VSimulation` quantifies over both loop variants (`-lv 0` and `-lv 1`), every
-  positive chunk size, every selected per-epoch schedule, initial state, and
-  input sequence. A concrete theorem must additionally restrict
-  `epochSchedules` to schedules certified valid for the program's epoch graphs;
-  that program-indexed refinement belongs with the faust-rs execution model.
+  positive chunk size, every initial state, and input sequence.
+
+  The `scheduleValid` premise is essential and was missing from an earlier draft:
+  without it the statement demanded scalar/vector agreement even for a
+  non-topological (invalid) per-epoch schedule, which is false. `scheduleValid`
+  is the program-indexed refinement (each element valid for its epoch graph,
+  via `ValidScheduleRel`) supplied by the faust-rs execution model; here it is an
+  abstract parameter so the definition states the theorem that is actually true.
 -/
 
 def ScheduleIndependent
@@ -970,27 +1270,18 @@ def ScheduleIndependent
   barrier obligations are the premises needed by the eventual proof.
 -/
 
-/-! ## Executable smoke checks -/
+/-! ## Executable regression guards -/
 
 /-
-  `#eval` commands run while Lean elaborates this file. Expected output is:
-
-      true
-      false
-      Faust.VectorScheduling.SchedulingStrategy.depthFirst
-      Faust.VectorScheduling.SchedulingStrategy.reverseBreadthFirst
-      true
-
-  These checks are examples, not substitutes for the propositions above. They
-  make accidental changes to edge direction, option decoding, or separation
-  precedence immediately visible during standalone validation.
+  Unlike printed `#eval` output, every `#guard` is an assertion: changing edge
+  direction, strategy decoding, or separation precedence makes elaboration fail.
 -/
 
-#eval verifySchedule diamondGraph [0, 1, 2, 3]
-#eval verifySchedule diamondGraph [1, 0, 2, 3]
-#eval decodeStrategy 0
-#eval decodeStrategy 3
-#eval separateLoop
+#guard verifySchedule diamondGraph [0, 1, 2, 3]
+#guard !verifySchedule diamondGraph [1, 0, 2, 3]
+#guard decodeStrategy 0 == .depthFirst
+#guard decodeStrategy 3 == .reverseBreadthFirst
+#guard separateLoop
   { maxDelay := 0
     verySimple := false
     rate := .samp
