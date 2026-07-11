@@ -1,4 +1,13 @@
-# Vector-mode signal-level analysis: C++ study and port plan
+---
+title: "Vector-mode signal-level analysis: C++ study and port plan"
+date: 2026-07-10
+page-size: A4
+margins: 20 22
+page-numbers: true
+font-body: Roboto
+font-heading: Roboto Condensed
+font-mono: Roboto Mono
+---
 
 **Date:** 2026-07-10
 
@@ -18,10 +27,23 @@
 [FIR-model hardening](vector-mode-fir-model-hardening-plan-2026-07-10-en.md),
 and the [signal-to-FIR rewriting calculus](signal-to-fir-rewriting-calculus-2026-06-20-en.md).
 
+::: toc+
+- **Conclusion** - state the architectural decision and its rationale.
+- **What Faust C++ actually does** - establish the behavioral reference.
+- **Current faust-rs state** - identify the implemented baseline and gaps.
+- **Recommended architecture boundary** - assign ownership and scheduling roles.
+- **Formal specification layer** - state the mathematical safety contracts.
+- **Port plan** - sequence implementation phases and acceptance gates.
+- **Risks and guardrails** - keep parity and semantic hazards explicit.
+- **Proposed decision** - record the normative porting direction.
+:::
+
 ## 1. Conclusion
 
+::: important [Porting decision]
 Yes: vectorization decisions should primarily be made on the prepared signal
 graph, before signals are fused into FIR statements.
+:::
 
 The current FIR partition was useful for validating the chunk driver,
 cross-loop buffers, and backend support. It can extract a pure tail from an
@@ -108,14 +130,15 @@ For each signal that has not been compiled yet:
 
 The C++ `needSeparateLoop` rule, in exact precedence order, is:
 
-| Priority | Signal property | Decision |
-|---|---|---|
-| 1 | `maxDelay > 0` | separate loop |
-| 2 | `verySimple` or variability `< kSamp` | inline |
-| 3 | `sigDelay` read | inline at the use site |
-| 4 | recursive projection | separate serial loop |
-| 5 | multiple occurrences | separate loop |
-| 6 | other sample expression | inline into the consumer |
+```csv
+Priority,Signal property,Decision
+1,maxDelay > 0,Separate loop
+2,verySimple or variability < kSamp,Inline
+3,sigDelay read,Inline at the use site
+4,Recursive projection,Separate serial loop
+5,Multiple occurrences,Separate loop
+6,Other sample expression,Inline into the consumer
+```
 
 The order is semantic. In particular, a simple or slow value that is used with
 a delay first matches `maxDelay > 0`, because its sample history still has to be
@@ -150,18 +173,19 @@ the chunk driver and `-lv` variants.
 C++ uses neither a FIR post-pass nor one pure pass equivalent to a complete
 scheduler. It uses a hybrid model:
 
-```text
-prepared and annotated signals
-        |
-        v
-CS(sig) traversal with memoization
-        |
-        +-- separation decision on the signal
-        +-- CodeLoop open/absorb decision
-        +-- edge on cross-loop reuse
-        +-- transport-buffer selection
-        v
-CodeLoop graph -> sorting -> FIR/backend
+```mermaid
+flowchart TD
+    A["Prepared and annotated signals"] --> B["CS(sig) traversal<br>with memoization"]
+    B --> C["Signal separation decision"]
+    B --> D["CodeLoop open or absorb decision"]
+    B --> E["Cross-loop dependency edge"]
+    B --> F["Transport-buffer selection"]
+    C --> G["CodeLoop graph"]
+    D --> G
+    E --> G
+    F --> G
+    G --> H["Loop sorting"]
+    H --> I["FIR and backend emission"]
 ```
 
 The key invariant to port is not the exact C++ object structure. It is that loop
@@ -263,13 +287,15 @@ With the common `consumer -> dependency` edge orientation, the default
 faust-rs deliberately does not preserve the C++ option split. The single public
 `-ss` strategy selects the serialization of the active execution DAG:
 
-```text
-scalar mode:
-    -ss -> control and per-domain signal DAGs
-
-vector mode:
-    fixed epoch order -> -ss on each completed epoch LoopGraph
-    canonical recursive lowering -> inline expressions inside each LoopNode
+```mermaid
+flowchart LR
+    SS["-ss strategy"] --> SC["Scalar mode"]
+    SS --> VC["Vector mode"]
+    SC --> SD["Control and per-domain<br>signal DAGs"]
+    VC --> EP["Fixed epoch order"]
+    EP --> LG["Completed per-epoch<br>LoopGraph"]
+    LG --> LS["-ss loop schedule"]
+    LS --> RL["Canonical recursive lowering<br>inside each LoopNode"]
 ```
 
 The exact cross-mode mapping is:
@@ -364,18 +390,19 @@ domains, and lowering options, so it belongs under
 
 The proposed ownership boundary is:
 
-| Layer | Responsibility |
-|---|---|
-| `signals` | canonical node shapes and inspection |
-| `signal_prepare` | prepared forest, types, causality, and recursion invariants |
-| generic `schedule(strategy, dag)` | deterministic DFS/BFS/special/reverse-BFS serialization |
-| `hgraph` | scalar control and per-domain signal DAGs and schedules |
-| `signal_fir::vector_analysis` | uses, loop boundaries, loop graph, and required transports |
-| `LoopGraph` | strategy-independent vector execution dependencies |
-| `ExecutionSchedule` | selected scalar signal orders or per-epoch vector loop orders |
-| `SignalToFirLower` | value/instruction emission into planned regions |
-| FIR | backend-neutral loops, arrays, accesses, and phases |
-| backends | mechanical FIR translation with no vectorization re-analysis |
+```csv
+Layer,Responsibility
+signals,Canonical node shapes and inspection
+signal_prepare,"Prepared forest, types, causality, and recursion invariants"
+"schedule(strategy, dag)","Deterministic DFS, BFS, Special, or Reverse-BFS serialization"
+hgraph,Scalar control and per-domain signal DAGs and schedules
+signal_fir::vector_analysis,"Uses, loop boundaries, loop graph, and required transports"
+LoopGraph,Strategy-independent vector execution dependencies
+ExecutionSchedule,Selected scalar signal orders or per-epoch vector loop orders
+SignalToFirLower,Value and instruction emission into planned regions
+FIR,"Backend-neutral loops, arrays, accesses, and phases"
+backends,Mechanical FIR translation with no vectorization re-analysis
+```
 
 The vector analysis and the selected schedule must be separate values. This
 makes it structurally impossible for `-ss` to alter vector partitioning:
@@ -499,60 +526,68 @@ mechanized proof of the whole compiler.
 
 For one prepared output forest, define:
 
-```text
-S       finite set of reachable prepared SigId values
-L       finite set of allocated LoopId values
-C       rooted tree of clock domains, with ancestor order <=c
-Rate    {Konst <=r Block <=r Samp}
-Vec     {Vect <=v Scal <=v TrueScal}
-Theta   existing SigType value shapes and numeric qualifiers
-Res     set of abstract mutable/effect resources
-Eff     finite sets of effect atoms over Res
+```math
+\begin{aligned}
+S   &:= \text{finite set of reachable prepared SigId values} \\
+L   &:= \text{finite set of allocated LoopId values} \\
+C   &:= \text{rooted clock-domain tree with ancestor order } \le_c \\
+\Theta &:= \text{existing SigType shapes and numeric qualifiers} \\
+Res &:= \text{abstract mutable and effect resources} \\
+Eff &:= \text{finite effect sets over } Res
+\end{aligned}
+```
+
+```adt
+Rate ::= Konst | Block | Samp
+Vec  ::= Vect | Scal | TrueScal
 ```
 
 The canonical type map from `sigtype`, the clock-environment map, and the new
 effect analysis jointly establish the decoration judgment:
 
-```text
-Gamma; Omega; Epsilon |- s : theta @ rate [clock] ! effects
+```math
+\Gamma; \Omega; \mathcal{E} \vdash s : \theta\; @\; rate\; [clock]\; !\; effects
 ```
 
 where `Gamma(s) = theta`, `rate = variability(theta)`, `Omega(s) = clock`, and
 `Epsilon(s) = effects`. The required properties are:
 
-```text
-Totality:     forall s in S, exactly one judgment exists.
-Stability:    the judgment depends only on the prepared forest and options
-              that affect semantics, never on -ss or traversal order.
-Consistency:  Gamma agrees with the existing total SigType map.
-Domain:       Omega agrees with ClkEnvMap and the clock-domain tree.
-Effects:      Epsilon over-approximates every observable read/write of s.
-```
+::: definition [Analysis judgment requirements]
+- **Totality:** for every $s \in S$, exactly one judgment exists.
+- **Stability:** the judgment depends only on the prepared forest and options
+  that affect semantics, never on `-ss` or traversal order.
+- **Consistency:** $\Gamma$ agrees with the existing total `SigType` map.
+- **Domain:** $\Omega$ agrees with `ClkEnvMap` and the clock-domain tree.
+- **Effects:** $\mathcal{E}$ over-approximates every observable read or write
+  of $s$.
+:::
 
 Representative rules are shown below. They are not a replacement for the full
 constructor rules in `sigtype`; they make explicit the facts consumed by this
 plan.
 
-```text
-Gamma |- x : tx @ rx [c] ! ex     Gamma |- y : ty @ ry [c] ! ey
-promote(op, tx, ty) = t
----------------------------------------------------------------- (T-BIN)
-Gamma |- BinOp(op,x,y) : t @ (rx join ry) [c] ! (ex union ey)
+```inference (T-BIN)
+\Gamma \vdash x : \tau_x @ r_x [c] ! \varepsilon_x; \Gamma \vdash y : \tau_y @ r_y [c] ! \varepsilon_y; promote(op, \tau_x, \tau_y) = \tau
+---
+\Gamma \vdash BinOp(op,x,y) : \tau @ (r_x \sqcup r_y) [c] ! (\varepsilon_x \cup \varepsilon_y)
+```
 
-Gamma |- x : t @ rx [c] ! ex      Gamma |- n : Int @ rn [c] ! en
-interval(n) subseteq [0,+infinity)
-state_resource(Delay(x,n)) = k
----------------------------------------------------------------- (T-DELAY)
-Gamma |- Delay(x,n) : t @ (rx join rn) [c]
-         ! (ex union en union {ReadState(k),WriteState(k)})
+```inference (T-DELAY)
+\Gamma \vdash x : \tau @ r_x [c] ! \varepsilon_x; \Gamma \vdash n : Int @ r_n [c] ! \varepsilon_n; interval(n) \subseteq [0,+\infty); stateResource(Delay(x,n)) = k
+---
+\Gamma \vdash Delay(x,n) : \tau @ (r_x \sqcup r_n) [c] ! (\varepsilon_x \cup \varepsilon_n \cup \{ReadState(k),WriteState(k)\})
+```
 
-Gamma |- g : Tuple(t0,...,tk,...) @ Samp [c] ! eg
----------------------------------------------------------------- (T-PROJ)
-Gamma |- Proj(k,g) : tk @ Samp [c] ! eg
+```inference (T-PROJ)
+\Gamma \vdash g : Tuple(\tau_0,\ldots,\tau_k,\ldots) @ Samp [c] ! \varepsilon_g
+---
+\Gamma \vdash Proj(k,g) : \tau_k @ Samp [c] ! \varepsilon_g
+```
 
-Gamma |- x : t @ r [c] ! e
----------------------------------------------------------------- (T-CLOCKED)
-Gamma |- Clocked(c,x) : t @ r [c] ! e
+```inference (T-CLOCKED)
+\Gamma \vdash x : \tau @ r [c] ! \varepsilon
+---
+\Gamma \vdash Clocked(c,x) : \tau @ r [c] ! \varepsilon
 ```
 
 `Clocked`'s environment token is an annotation, not a value dependency. For a
@@ -563,13 +598,13 @@ preserving possible same-tick dependence.
 The effect decoration adds constructor-owned effects in addition to child
 effects:
 
-```text
-Delay/Prefix/recursion state k   {ReadState(k), WriteState(k)}
-RdTbl(table k,...)                {ReadTable(k)}
-WrTbl(table k,...)                {WriteTable(k)}
-Bargraph(control k,...)           {WriteUi(k)}
-Output(channel k,...)              {WriteOutput(k)}
-FFun(name,...)                    {Foreign(name,purity(name))}
+```adt
+Effect ::= ReadState(k) | WriteState(k)
+         | ReadTable(k) | WriteTable(k)
+         | WriteUi(k) | WriteOutput(k)
+         | Foreign(name, purity)
+
+Purity ::= Pure | Impure | Unknown
 ```
 
 Here `k` is a stable abstract resource identity, not a generated FIR variable
@@ -581,19 +616,20 @@ clock-domain, hold, and table index/counter state, receives the corresponding
 The existing `Vectorability` qualifier is an analysis input, but it is not
 identified with `LoopKind`. Define a separate witness:
 
-```text
-VecSafe(l) :=
-    no loop-carried dependence remains inside l
-    and all effects in l are reorderable across samples
-    and every non-Vect operation has a dedicated SIMD-safety rule.
+```math
+\begin{aligned}
+VecSafe(l) :=\;& \text{no loop-carried dependence remains inside } l \\
+&\land\; \text{all effects in } l \text{ are reorderable across samples} \\
+&\land\; \text{every non-Vect operation has a SIMD-safety rule.}
+\end{aligned}
 ```
 
 `vectorability(s) = Vect` is a local sufficient fact for an otherwise pure
 operation. `Scal` or `TrueScal` requires a dedicated discharge rule or forces a
 serial loop/island. The mandatory implication is one-way:
 
-```text
-LoopKind(l) = Vectorizable  ==>  VecSafe(l)
+```math
+LoopKind(l) = Vectorizable \quad \Longrightarrow \quad VecSafe(l)
 ```
 
 The converse is an optimization choice, not a correctness requirement.
@@ -605,14 +641,16 @@ testing a new discharge rule.
 
 The structured dependency analysis returns labelled edges:
 
-```text
-Dep subseteq S x DepKind x S
+```math
+Dep \subseteq S \times DepKind \times S
+```
 
-DepKind = Immediate
-        | Delayed(n), n >= 1
-        | Control
-        | ClockBoundary
-        | Effect(resource, mode)
+```adt
+DepKind ::= Immediate
+          | Delayed(n)              (* n >= 1 *)
+          | Control
+          | ClockBoundary
+          | Effect(resource, mode)
 ```
 
 An edge `(u, Immediate, v)` means that consumer `u` needs the current-tick value
@@ -623,16 +661,18 @@ state allocation, but is excluded from the same-tick ordering graph.
 For each scalar execution region `R` (controls, top domain, or one nested clock
 domain), define:
 
-```text
-G_R = (S_R, E_R)
-E_R = immediate same-region edges union required effect-order edges
+```math
+\begin{aligned}
+G_R &= (S_R, E_R) \\
+E_R &= E_{immediate}^{R} \cup E_{effect}^{R}
+\end{aligned}
 ```
 
 The causality obligation is:
 
-```text
-WF-Causality:  forall R, G_R is a finite DAG.
-```
+::: definition [WF-Causality]
+For every execution region $R$, $G_R$ is a finite DAG.
+:::
 
 A cycle in the full signal relation is legal only if every cyclic path is cut
 by at least one `Delayed(n)` edge or represented by an explicit recursion group.
@@ -640,13 +680,14 @@ An immediate self-edge or an immediate SCC is a causality error.
 
 Clock-domain consistency is:
 
-```text
-(u, Immediate, v) and Omega(u) = c_u and Omega(v) = c_v
-
-either c_v = c_u,
-or     c_v <=c c_u and v is an external precondition of c_u,
-or     the dependency crosses an explicit wrapper boundary;
-otherwise the forest is ill-clocked.
+```math
+\begin{aligned}
+&(u, Immediate, v) \land \Omega(u)=c_u \land \Omega(v)=c_v \\
+&\Longrightarrow
+  c_v=c_u
+  \;\lor\; (c_v \le_c c_u \land ExternalPrecondition(v,c_u))
+  \;\lor\; WrapperBoundary(u,v).
+\end{aligned}
 ```
 
 This prevents a value owned by a child or sibling domain from being silently
@@ -656,12 +697,11 @@ scheduled in an ancestor domain.
 
 Use at least these abstract effect atoms:
 
-```text
-ReadState(k)    WriteState(k)
-ReadTable(k)    WriteTable(k)
-WriteUi(k)
-WriteOutput(k)
-Foreign(name, Pure | Impure | Unknown)
+```adt
+Effect ::= ReadState(k) | WriteState(k)
+         | ReadTable(k) | WriteTable(k)
+         | WriteUi(k) | WriteOutput(k)
+         | Foreign(name, purity)
 ```
 
 Two effect sets conflict, written `e1 # e2`, when they touch the same mutable
@@ -670,9 +710,9 @@ with every non-local effect unless a stronger contract is available.
 
 For two loops `a` and `b` that are incomparable in `LoopGraph`, require:
 
-```text
+```math
 Commute(a,b) :=
-    forall ea in Effects(a), eb in Effects(b), not (ea # eb)
+\forall e_a \in Effects(a),\; \forall e_b \in Effects(b),\; \neg(e_a \mathbin{\#} e_b)
 ```
 
 If `Commute(a,b)` cannot be proved, the planner must add a directed effect edge
@@ -684,14 +724,14 @@ schedules observationally equivalent rather than merely data-flow-correct.
 
 For a finite dependency DAG `G = (V,E)`, a schedule is a bijection:
 
-```text
-pi : V -> {0,...,|V|-1}
+```math
+\pi : V \rightarrow \{0,\ldots,|V|-1\}
 ```
 
 It is valid exactly when:
 
-```text
-Valid(G,pi) := forall (u,v) in E, pi(v) < pi(u).
+```math
+Valid(G,\pi) := \forall (u,v) \in E,\; \pi(v) < \pi(u)
 ```
 
 Let `key(v)` be the stable Rust rank. Let `deps(v)` and `roots(G)` be ordered by
@@ -725,12 +765,12 @@ lists, appending the remainder of the longer list, exactly as C++
 
 Every implementation must satisfy four scheduler obligations:
 
-```text
-S-Sound:         schedule(G,s) = pi  ==>  Valid(G,pi)
-S-Complete:      G is a DAG           ==>  pi contains every node exactly once
-S-Deterministic: same (G,s,key)       ==>  same pi
-S-Terminating:   finite G             ==>  success or typed Cycle error
-```
+::: definition [Scheduler obligations]
+- **S-Sound:** $schedule(G,s)=\pi \Longrightarrow Valid(G,\pi)$.
+- **S-Complete:** if $G$ is a DAG, $\pi$ contains every node exactly once.
+- **S-Deterministic:** equal $(G,s,key)$ inputs produce the same $\pi$.
+- **S-Terminating:** finite $G$ yields success or a typed `Cycle` error.
+:::
 
 `Special`'s path-list expansion additionally has a resource obligation: either
 its measured growth is accepted for the supported corpus, or a compact
@@ -740,26 +780,28 @@ implementation must be proved order-equivalent to the literal definition.
 
 For each signal `s`, let:
 
-```text
-d(s)       maximum delayed use of s
-simple(s)  C++ verySimple predicate
-slow(s)    variability(s) < Samp
-read(s)    s is a sigDelay read node
-proj(s)    s is a recursive-group projection
-multi(s)   context-sensitive multiple-occurrence predicate
-```
+::: definition [Signal separation facts]
+- $d(s)$ is the maximum delayed use of $s$.
+- $simple(s)$ is the C++ `verySimple` predicate.
+- $slow(s)$ means $variability(s) < Samp$.
+- $read(s)$ means that $s$ is a `sigDelay` read node.
+- $proj(s)$ means that $s$ is a recursion-group projection.
+- $multi(s)$ is the context-sensitive multiple-occurrence predicate.
+:::
 
 The loop-boundary decision is the following ordered function; the first matching
 line wins:
 
-```text
+```math
 Separate(s) =
-    Yes       if d(s) > 0
-    No        if simple(s) or slow(s)
-    No        if read(s)
-    Yes       if proj(s)
-    Yes       if multi(s)
-    No        otherwise
+\begin{cases}
+Yes & \text{if } d(s)>0 \\
+No  & \text{if } simple(s) \lor slow(s) \\
+No  & \text{if } read(s) \\
+Yes & \text{if } proj(s) \\
+Yes & \text{if } multi(s) \\
+No  & \text{otherwise.}
+\end{cases}
 ```
 
 This order is normative. In particular, `d(s) > 0` dominates both `simple(s)`
@@ -767,13 +809,15 @@ and `slow(s)`.
 
 Placement is a partial ownership discipline:
 
-```text
-Place(s) in { Control, Inline, Owned(l) }
-
-Control:  evaluated in a fixed slower lifecycle/domain region.
-Inline:   no unique loop owner; may have instances (l,s) in several loops.
-Owned(l): exactly one materialized producer loop l.
+```adt
+Placement ::= Control
+            | Inline
+            | Owned(l)
 ```
+
+- `Control` is evaluated in a fixed slower lifecycle or domain region.
+- `Inline` has no unique owner and may have instances $(l,s)$ in several loops.
+- `Owned(l)` has exactly one materialized producer loop $l$.
 
 Define `Duplicable(s)` to mean that reevaluating `s` in another region at the
 same logical sample produces the same bits and observations. It requires no
@@ -784,15 +828,18 @@ duplicable operands satisfy it.
 
 Required ownership invariants are:
 
-```text
-P-Unique:    Place(s)=Owned(l1) and Place(s)=Owned(l2) ==> l1=l2
-P-Inline:    Place(s)=Inline ==> no global cross-region FirId cache entry
-P-Duplicate: Place(s)=Inline ==> Duplicable(s)
-P-Root:      each Owned(l) signal appears exactly once among roots(l)
-P-Control:   a Control value is available before every sample/chunk consumer
-P-Strategy:  Place, roots, epochs, edges, transports, LoopId allocation,
-             and names are independent of -ss
-```
+::: definition [Placement invariants]
+- **P-Unique:** $Place(s)=Owned(l_1) \land Place(s)=Owned(l_2)
+  \Longrightarrow l_1=l_2$.
+- **P-Inline:** $Place(s)=Inline$ implies no global cross-region `FirId` cache
+  entry.
+- **P-Duplicate:** $Place(s)=Inline \Longrightarrow Duplicable(s)$.
+- **P-Root:** each `Owned(l)` signal appears exactly once in $roots(l)$.
+- **P-Control:** a control value is available before every sample or chunk
+  consumer.
+- **P-Strategy:** placement, roots, epochs, edges, transports, `LoopId`
+  allocation, and names are independent of `-ss`.
+:::
 
 Recursion-group identity is preserved by construction. All projections of one
 active group are owned by, or absorbed into, one serial recursive loop. A cycle
@@ -800,63 +847,70 @@ must never survive as a cycle between `LoopId` nodes.
 
 Write the region-aware lowering judgment as:
 
-```text
-Plan; l |- s => value ; delta
+```math
+Plan;\; l \vdash s \Rightarrow value\;;\; \delta
 ```
 
 where `delta` is the finite set of emitted local code, loop edges, and transports
 required by this use. Its core rewrite rules are:
 
-```text
-Place(s)=Inline       Plan;l |- each immediate dependency of s
----------------------------------------------------------------- (R-INLINE)
-Plan;l |- s => rebuild s in region l ; union dependency deltas
+```inference (R-INLINE)
+Place(s)=Inline; Plan;l \vdash dependencies(s) \Rightarrow values;\delta_{deps}
+---
+Plan;l \vdash s \Rightarrow rebuild(s,l);\delta_{deps}
+```
 
+```inference (R-LOCAL)
 Place(s)=Owned(l)
----------------------------------------------------------------- (R-LOCAL)
-Plan;l |- s => compute-or-reuse the materialized value in l
-              ; local code on first region-scoped visit
+---
+Plan;l \vdash s \Rightarrow materializeOrReuse(s,l);\delta_{local}
+```
 
-Place(s)=Owned(m)     m != l     Gamma(s)=theta
----------------------------------------------------------------- (R-CROSS)
-Plan;l |- s => load T(s,m,l) : lower_type(theta)
-              ; { edge l->m, typed transport T(s,m,l) }
+```inference (R-CROSS)
+Place(s)=Owned(m); m \neq l; \Gamma(s)=\theta
+---
+Plan;l \vdash s \Rightarrow load(T(s,m,l)) : lowerType(\theta);\{l \rightarrow m, T(s,m,l)\}
+```
 
-Place(s)=Control      control value dominates region l
----------------------------------------------------------------- (R-CONTROL)
-Plan;l |- s => load the lifecycle/domain materialization ; empty
+```inference (R-CONTROL)
+Place(s)=Control; dominates(control(s),l)
+---
+Plan;l \vdash s \Rightarrow load(control(s));\varnothing
 ```
 
 `R-INLINE` uses a cache scoped by `(l,s)` and is applicable only under
 `P-Duplicate`. `R-CROSS` is the only rule that creates cross-loop value reuse.
 All four rules carry these preservation obligations:
 
-```text
-R-Type:    Gamma(s)=theta ==> FIRType(value)=lower_type(theta)
-R-Effects: every non-duplicable effect of s is emitted exactly once, and the
-           relative order of conflicting effects is preserved
-R-Value:   storage insertion does not alter the per-sample value bits
-```
+::: definition [Lowering preservation obligations]
+- **R-Type:** $\Gamma(s)=\theta \Longrightarrow
+  FIRType(value)=lowerType(\theta)$.
+- **R-Effects:** every nonduplicable effect of $s$ is emitted exactly once, and
+  the relative order of conflicting effects is preserved.
+- **R-Value:** storage insertion does not alter per-sample value bits.
+:::
 
 Let `epoch : L -> EpochId` partition loops into a fixed ordered sequence such as
 forward and reverse AD execution. For each epoch `e`, the schedulable loop graph
 is the induced graph:
 
-```text
-L_e   = { l in L | epoch(l)=e }
-G_L^e = (L_e, (E_data union E_effect) restricted to L_e)
+```math
+\begin{aligned}
+L_e &= \{l \in L \mid epoch(l)=e\} \\
+G_L^e &= (L_e,\; (E_{data} \cup E_{effect})|_{L_e})
+\end{aligned}
 ```
 
 The complete plan must satisfy:
 
-```text
-L-DAG:       every G_L^e is acyclic.
-L-Complete:  every cross-loop current-sample read has a producer edge and
-             a transport.
-L-Effects:   loops incomparable inside the same epoch commute.
-L-Barriers:  epoch order is explicit and every cross-epoch edge (u,v), where
-             u depends on v, satisfies epoch(v) < epoch(u).
-```
+::: definition [Complete vector-plan obligations]
+- **L-DAG:** every $G_L^e$ is acyclic.
+- **L-Complete:** every cross-loop current-sample read has a producer edge and
+  a transport.
+- **L-Effects:** loops incomparable inside one epoch commute.
+- **L-Barriers:** epoch order is explicit and every cross-epoch edge $(u,v)$,
+  where $u$ depends on $v$, satisfies $epoch(v)<epoch(u)$.
+:::
 
 `-ss` schedules each `G_L^e` independently. It cannot reorder epochs.
 
@@ -865,19 +919,20 @@ L-Barriers:  epoch order is explicit and every cross-epoch edge (u,v), where
 Let `lower_type(theta)` be the existing signal-type-to-FIR-type mapping and `q`
 the vector chunk size. A cross-loop transport is well typed when:
 
-```text
-Gamma(s) = theta
-lower_type(theta) = tau
-T(s,p,c) : Array(q,tau)
+```inference (T-TRANSPORT)
+\Gamma(s)=\theta; lowerType(\theta)=\tau; p \neq c
+---
+T(s,p,c) : Array(q,\tau)
 ```
 
 Its operational rule is:
 
-```text
-j = i0 - vindex,  0 <= j < q
-
-producer p:  T(s,p,c)[j] := value(s,i0)
-consumer c:  load T(s,p,c)[j] : tau
+```math
+\begin{aligned}
+j &= i_0-vindex, \qquad 0 \le j < q \\
+T(s,p,c)[j] &:= value(s,i_0) \quad & \text{in producer } p \\
+load\;T(s,p,c)[j] &: \tau \quad & \text{in consumer } c
+\end{aligned}
 ```
 
 The producer store and every consumer load must use the same chunk-local index.
@@ -889,8 +944,9 @@ contract, or otherwise change its arithmetic expression.
 Region visibility is a lexical preorder `<=reg` where ancestors outlive their
 descendants:
 
-```text
-Reusable(value produced in R, requested in Q) := R <=reg Q
+```math
+Reusable(value\text{ produced in }R,\;value\text{ requested in }Q)
+:= R \le_{reg} Q
 ```
 
 Sibling regions are incomparable. Reuse across siblings therefore requires
@@ -901,38 +957,43 @@ entry records enough information to prove `Reusable`.
 
 Let scalar execution order events by sample first:
 
-```text
-(i,a) <scalar (j,b) iff i < j or (i=j and a precedes b in the scalar body).
+```math
+(i,a) <_{scalar} (j,b)
+\iff i<j \lor (i=j \land a<_{body}b)
 ```
 
 Let vector execution order events by scheduled loop first, then by that loop's
 sample direction:
 
-```text
-(i,a) <vec (j,b) iff
-    schedule(loop(a)) < schedule(loop(b)),
-    or loop(a)=loop(b) and the loop-local sample/statement order says so.
+```math
+\begin{aligned}
+(i,a) <_{vec} (j,b) \iff\;&
+schedule(loop(a)) < schedule(loop(b)) \\
+&\lor\; (loop(a)=loop(b) \land (i,a)<_{local}(j,b)).
+\end{aligned}
 ```
 
 Let `D` be the true dependence relation containing data, state, control, and
 effect dependencies between dynamic events. Loop fission is legal exactly when
 the transformed order preserves every dependence:
 
-```text
-FissionSafe := forall (x,y) in D, x <scalar y ==> x <vec y.
+```math
+FissionSafe := \forall (x,y) \in D,\; x<_{scalar}y \Longrightarrow x<_{vec}y
 ```
 
 The implementation does not enumerate dynamic events. It checks the following
 finite sufficient condition:
 
-```text
-StaticFissionSafe(plan) :=
-    L-DAG and L-Complete and L-Effects and L-Barriers
-    and every loop-carried dependence is internal to a serial LoopNode
-    and every cross-loop current-sample dependence has a typed transport.
+::: definition [StaticFissionSafe]
+`StaticFissionSafe(plan)` holds when `L-DAG`, `L-Complete`, `L-Effects`, and
+`L-Barriers` hold; every loop-carried dependence is internal to a serial
+`LoopNode`; and every cross-loop current-sample dependence has a typed
+transport.
+:::
 
-Proof obligation: StaticFissionSafe(plan) ==> FissionSafe(plan).
-```
+::: theorem [Loop-fission proof obligation]
+$StaticFissionSafe(plan) \Longrightarrow FissionSafe(plan)$.
+:::
 
 This criterion explains the key implementation rules:
 
@@ -952,9 +1013,12 @@ eventually be the unique producer of this proof witness.
 
 Let the scalar DSP transition be:
 
-```text
-Step : State x InputSample -> State x OutputSample x Observations
-Run(n, state0, inputs) = n repeated Step transitions
+```math
+\begin{aligned}
+Step &: State \times InputSample \rightarrow
+        State \times OutputSample \times Observations \\
+Run(n,state_0,inputs) &:= Step^n(state_0,inputs)
+\end{aligned}
 ```
 
 Let vector execution with chunk size `q`, loop variant `lv`, and one valid
@@ -962,15 +1026,17 @@ schedule `pi_e` per epoch be `VecRun(q,lv,{pi_e},n,state0,inputs)`.
 
 The main port correctness theorem is the following proof obligation:
 
-```text
-V-Simulation:
-forall well-typed prepared programs P,
-forall state0, inputs, n, q>0, lv in {0,1},
-forall {pi_e} such that for every epoch e, Valid(G_L^e,pi_e),
+::: theorem [V-Simulation]
+For every well-typed prepared program $P$, initial state $state_0$, input
+sequence, sample count $n$, chunk size $q>0$, loop variant
+$lv \in \{0,1\}$, and family of schedules $\{\pi_e\}$ satisfying
+$Valid(G_L^e,\pi_e)$ for every epoch $e$:
 
-VecRun(q,lv,{pi_e},n,state0,inputs)
-    = Run(n,state0,inputs)
+```math
+VecRun(q,lv,\{\pi_e\},n,state_0,inputs)
+= Run(n,state_0,inputs).
 ```
+:::
 
 Equality covers output samples, final persistent state, tables, UI zones, and
 declared external observations. For current impulse gates, the intended
@@ -978,11 +1044,13 @@ refinement is bit equality, not approximate real-number equality.
 
 Schedule independence is the corollary required by `-ss`:
 
-```text
-SS-Independent:
-Valid(G,pi1) and Valid(G,pi2)
-    ==> Obs(Execute(G,pi1)) = Obs(Execute(G,pi2)).
+::: theorem [SS-Independent]
+```math
+Valid(G,\pi_1) \land Valid(G,\pi_2)
+\Longrightarrow
+Obs(Execute(G,\pi_1)) = Obs(Execute(G,\pi_2)).
 ```
+:::
 
 This corollary is valid only if `L-Complete`, `L-Effects`, and `L-Barriers` hold.
 A successful topological sort alone is not a proof of semantic equivalence.
@@ -995,28 +1063,32 @@ lifecycle and domain nesting compose the per-region simulations.
 For a carried value of type `tau` with maximum history `D > 0`, use the abstract
 history state (the `D=0` case has no history state):
 
-```text
-H in tau^D, with H[0] the previous sample.
-
-delay_read(0,x,H) = x
-delay_read(n,x,H) = H[n-1]              for 1 <= n <= D
-history_step(x,H) = [x,H[0],...,H[D-2]]
+```math
+\begin{aligned}
+H &\in \tau^D, \qquad H[0]\text{ is the previous sample} \\
+delayRead(0,x,H) &= x \\
+delayRead(n,x,H) &= H[n-1] \qquad (1 \le n \le D) \\
+historyStep(x,H) &= [x,H[0],\ldots,H[D-2]].
+\end{aligned}
 ```
 
 Short copy buffers and long ring buffers are concrete representations of `H`.
 Each implementation needs an abstraction function `alpha` from concrete memory
 and cursor state to `H`, with the simulation obligation:
 
-```text
-DelaySim:
-alpha(concrete_step(memory,cursor,x)) = history_step(x,alpha(memory,cursor))
-and every concrete read n equals delay_read(n,x,H).
+::: theorem [DelaySim]
+```math
+\alpha(concreteStep(memory,cursor,x))
+= historyStep(x,\alpha(memory,cursor)),
 ```
+
+and every concrete read at delay $n$ equals $delayRead(n,x,H)$.
+:::
 
 For a recursion group with state tuple `R`, define one scalar transition:
 
-```text
-(R_i, outputs_i) = RecStep(R_(i-1), inputs_i).
+```math
+(R_i,outputs_i)=RecStep(R_{i-1},inputs_i).
 ```
 
 All projections at sample `i` observe components of the same `R_i`. The group
@@ -1026,8 +1098,8 @@ loops is legal, but splitting the computation of `R_i` itself is not.
 For a clock domain `c`, let `fires(c,i)` be the wrapper-defined number of inner
 transitions at outer sample `i` (zero, one, or a counted amount):
 
-```text
-ClockStep(c,i,state) = Step_c repeated fires(c,i) times.
+```math
+ClockStep(c,i,state) := Step_c^{fires(c,i)}(state).
 ```
 
 When `fires(c,i)=0`, domain-owned state is unchanged and held outputs preserve
@@ -1038,9 +1110,11 @@ declared external preconditions.
 For reverse AD, define a forward transition that produces primal outputs and a
 tape, followed by a reverse transition that consumes that tape:
 
-```text
-(state_f, primal, tape) = Forward(state0, inputs)
-(state_r, adjoints)     = Reverse(state_f, tape, seeds)
+```math
+\begin{aligned}
+(state_f,primal,tape) &= Forward(state_0,inputs) \\
+(state_r,adjoints) &= Reverse(state_f,tape,seeds).
+\end{aligned}
 ```
 
 The epoch order `Forward < Reverse` is part of the semantics. No `-ss` strategy
@@ -1053,21 +1127,16 @@ rules.
 The implementation should materialize three independently checkable
 certificates:
 
-```text
-ScheduleCertificate {
-    strategy, node_count, ordered_nodes, edge_hash
-}
-
-VectorPlanCertificate {
-    placement, loop_roots, loop_kinds, epochs, data_edges, effect_edges,
-    barriers, transports, vec_safe_witnesses, stable_names
-}
-
-RoutedFirCertificate {
-    value_regions, fir_types, transport_stores, transport_loads,
-    emitted_effects, epoch_bodies
-}
+```adt
+ScheduleCertificate ::= ScheduleCert(strategy, nodeCount, orderedNodes, edgeHash)
+VectorPlanCertificate ::= VectorPlanCert(planFacts)
+RoutedFirCertificate ::= RoutedFirCert(routingFacts)
 ```
+
+Here `planFacts` contains placement, loop roots and kinds, epochs, data and
+effect edges, barriers, transports, `VecSafe` witnesses, and stable names.
+`routingFacts` contains value regions, FIR types, transport stores and loads,
+emitted effects, and epoch bodies.
 
 `verify_schedule` checks `S-Sound` and `S-Complete` without reusing the selected
 scheduling algorithm. `verify_vector_plan` checks `P-*`, `L-*`, transport typing,
@@ -1077,16 +1146,17 @@ region visibility, and `VecSafe` witnesses before FIR emission.
 
 The phase-level formal obligations are:
 
-| Phase | Required obligations |
-|---|---|
-| P0 | C++ observations and abstract DAG fixtures are reproducible |
-| P1 | `S-Sound`, `S-Complete`, `S-Deterministic`, `S-Terminating` |
-| P2 | CLI/FFI mapping is total on documented inputs and canonical by enum |
-| P3 | `WF-Causality`, clock/effect completeness, scalar `SS-Independent` |
-| P4 | analysis totality/stability, exact `Separate`, `P-*`, strategy independence |
-| P5 | `L-*`, `R-*`, typed transports, `VecSafe`, `StaticFissionSafe => FissionSafe` |
-| P6 | `DelaySim`, `RecStep`, `ClockStep`, island nesting, AD epoch simulation |
-| P7 | `V-Simulation` and cross-backend translation validation on the corpus |
+```csv
+Phase,Required obligations
+P0,C++ observations and abstract DAG fixtures are reproducible
+P1,"S-Sound, S-Complete, S-Deterministic, and S-Terminating"
+P2,CLI and FFI mapping is total on documented inputs and canonical by enum
+P3,"WF-Causality, clock and effect completeness, and scalar SS-Independent"
+P4,"Analysis totality and stability, exact Separate, P-* invariants, and strategy independence"
+P5,"L-* and R-* invariants, typed transports, VecSafe, and StaticFissionSafe implies FissionSafe"
+P6,"DelaySim, RecStep, ClockStep, island nesting, and AD epoch simulation"
+P7,V-Simulation and cross-backend translation validation on the corpus
+```
 
 The practical verification ladder is:
 
