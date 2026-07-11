@@ -25,7 +25,9 @@ font-mono: Roboto Mono
 [initial `-vec` analysis](vector-mode-analysis-port-plan-2026-06-10-en.md),
 [current loop-separation design](vector-mode-loop-separation-plan-2026-07-09-en.md),
 [FIR-model hardening](vector-mode-fir-model-hardening-plan-2026-07-10-en.md),
-and the [signal-to-FIR rewriting calculus](signal-to-fir-rewriting-calculus-2026-06-20-en.md).
+the [signal-to-FIR rewriting calculus](signal-to-fir-rewriting-calculus-2026-06-20-en.md),
+the [Lean formal specification](vector-mode-scheduling-formal-spec.lean), and
+the [Lean/Rust certified porting plan](lean-rust-certified-porting-plan-2026-07-11-en.md).
 
 ::: toc+
 - **Conclusion** - state the architectural decision and its rationale.
@@ -196,12 +198,13 @@ still available.
 
 `-ss <n>` selects a topological ordering policy for signal dependency graphs:
 
-| CLI value | C++ function | Algorithm |
-|---|---|---|
-| `0` (default) | `dfschedule` | depth-first postorder from graph roots |
-| `1` | `bfschedule` | dependency-level order from leaves to roots |
-| `2` | `spschedule` | recursively interleaved branch order, then reverse deduplication |
-| `3+` | `rbschedule` | levelize the reversed graph, then reverse the schedule |
+```csv
+CLI value,C++ function,Algorithm
+0 (default),dfschedule,Depth-first postorder from graph roots
+1,bfschedule,Dependency-level order from leaves to roots
+2,spschedule,"Recursively interleaved branch order, then reverse deduplication"
+3+,rbschedule,"Levelize the reversed graph, then reverse the schedule"
+```
 
 The implementation lives in `compiler/DirectedGraph/Schedule.hh`. The graph
 edge convention is `consumer -> dependency`; therefore every valid schedule
@@ -300,12 +303,13 @@ flowchart LR
 
 The exact cross-mode mapping is:
 
-| `-ss` | Scalar DAG | Vector `LoopGraph` |
-|---|---|---|
-| `0` (default) | C++ `dfschedule` parity target | subsumes C++ `-dfs` |
-| `1` | C++ `bfschedule` parity target | new dependency-leaf level order |
-| `2` | C++ `spschedule` parity target | new interleaved order |
-| `3+` | C++ `rbschedule` parity target | closest to default C++ `sortGraph` levels |
+```csv
+-ss,Scalar DAG,Vector LoopGraph
+0 (default),C++ dfschedule parity target,Subsumes C++ -dfs
+1,C++ bfschedule parity target,New dependency-leaf level order
+2,C++ spschedule parity target,New interleaved order
+3+,C++ rbschedule parity target,Closest to default C++ sortGraph levels
+```
 
 Therefore the faust-rs vector default intentionally changes from the C++
 vector default: Rust `-ss 0` means DFS in both modes. Users wanting the closest
@@ -522,6 +526,16 @@ The formulas are design contracts. The first implementation target is an
 executable specification plus property tests and independent verifiers, not a
 mechanized proof of the whole compiler.
 
+::: warning [Formal assurance status]
+This layer is **formally specified**, not a proof that faust-rs is correct.
+Lean's kernel checks the definitions, theorems, and executable guards present
+in the companion file. `FissionSafe`, `V-Simulation`, schedule independence,
+and the concrete Rust refinement remain open obligations until they receive
+explicit proofs. Project and release communication must use "kernel-checked
+specification" or "translation validated" as appropriate, never "formally
+verified compiler".
+:::
+
 ### 5.1 Semantic domains and analysis judgment
 
 For one prepared output forest, define:
@@ -564,7 +578,11 @@ where `Gamma(s) = theta`, `rate = variability(theta)`, `Omega(s) = clock`, and
 
 Representative rules are shown below. They are not a replacement for the full
 constructor rules in `sigtype`; they make explicit the facts consumed by this
-plan.
+plan. The companion Lean `Expr` and `HasType` definitions are illustrative and
+must not become an independent shadow AST. The implementation boundary is a
+canonical `DecorationCertificate` exported from the real prepared `SigId`
+forest and checked against `SigType`, `ClkEnvMap`, effect analysis, and the
+rules below.
 
 ```inference (T-BIN)
 \Gamma \vdash x : \tau_x @ r_x [c] ! \varepsilon_x; \Gamma \vdash y : \tau_y @ r_y [c] ! \varepsilon_y; promote(op, \tau_x, \tau_y) = \tau
@@ -1124,21 +1142,27 @@ rules.
 
 ### 5.10 Executable certificates and proof obligations by phase
 
-The implementation should materialize three independently checkable
+The implementation should materialize four independently checkable
 certificates:
 
 ```adt
+DecorationCertificate ::= DecorationCert(signalFacts, dependencyFacts)
 ScheduleCertificate ::= ScheduleCert(strategy, nodeCount, orderedNodes, edgeHash)
 VectorPlanCertificate ::= VectorPlanCert(planFacts)
 RoutedFirCertificate ::= RoutedFirCert(routingFacts)
 ```
 
-Here `planFacts` contains placement, loop roots and kinds, epochs, data and
+Here `signalFacts` contains the canonical type, variability, vectorability,
+clock, effects, occurrences, and delay facts exported for each prepared
+`SigId`; `dependencyFacts` binds those records to the prepared forest and its
+labelled edges. `planFacts` contains placement, loop roots and kinds, epochs, data and
 effect edges, barriers, transports, `VecSafe` witnesses, and stable names.
 `routingFacts` contains value regions, FIR types, transport stores and loads,
 emitted effects, and epoch bodies.
 
-`verify_schedule` checks `S-Sound` and `S-Complete` without reusing the selected
+`verify_decorations` checks analysis totality, type/clock consistency, effect
+coverage, and exact signal identity before vector planning. `verify_schedule`
+checks `S-Sound` and `S-Complete` without reusing the selected
 scheduling algorithm. `verify_vector_plan` checks `P-*`, `L-*`, transport typing,
 region visibility, and `VecSafe` witnesses before FIR emission.
 `verify_routed_fir` checks `R-Type`, `R-Effects`, and structural evidence for
@@ -1149,10 +1173,11 @@ The phase-level formal obligations are:
 ```csv
 Phase,Required obligations
 P0,C++ observations and abstract DAG fixtures are reproducible
+PV,"One nontrivial VectorPlan-to-backend slice is bit-exact for -lv 0 and -lv 1"
 P1,"S-Sound, S-Complete, S-Deterministic, and S-Terminating"
 P2,CLI and FFI mapping is total on documented inputs and canonical by enum
 P3,"WF-Causality, clock and effect completeness, and scalar SS-Independent"
-P4,"Analysis totality and stability, exact Separate, P-* invariants, and strategy independence"
+P4,"Verified DecorationCertificate, analysis totality and stability, exact Separate, P-* invariants, and strategy independence"
 P5,"L-* and R-* invariants, typed transports, VecSafe, and StaticFissionSafe implies FissionSafe"
 P6,"DelaySim, RecStep, ClockStep, island nesting, and AD epoch simulation"
 P7,V-Simulation and cross-backend translation validation on the corpus
@@ -1161,14 +1186,17 @@ P7,V-Simulation and cross-backend translation validation on the corpus
 The practical verification ladder is:
 
 1. pure reference functions for the mathematical definitions;
-2. exhaustive enumeration of small finite DAGs plus generated larger DAGs;
+2. an early end-to-end scalar/vector trace through one backend;
 3. independent certificate verifiers run in tests and debug builds;
-4. differential traces against C++ and scalar faust-rs;
+4. exhaustive enumeration of small finite DAGs plus generated larger DAGs and
+   differential traces against C++ and scalar faust-rs;
 5. optional bounded or deductive mechanization of the generic scheduler and
    transport index lemmas once the executable model stabilizes.
 
-This order avoids proving a moving implementation while still turning every
-formal statement above into an executable acceptance condition.
+This order prevents structural assurance work from delaying the first evidence
+that vector execution is semantically correct. It still avoids proving a moving
+implementation while turning every formal statement above into an executable
+acceptance condition.
 
 ## 6. Port plan
 
@@ -1216,6 +1244,35 @@ from the oracle.
 
 **Exit criterion:** a versioned matrix of expected shapes and minimal DSPs
 exists before the architecture changes.
+
+### PV - Early vertical vector execution slice
+
+**Formal gate:** one nontrivial prepared signal forest is lowered through a
+provisional signal-level `VectorPlan`, routed FIR, and one executable backend,
+with bit-exact scalar/vector results for `-lv 0` and `-lv 1`.
+
+- Select one focused DSP containing a shared sample expression, a pure tail,
+  one materialized cross-loop value, and persistent state observable after
+  multiple blocks. Keep recursion groups and clock domains out of this first
+  slice.
+- Implement only the minimal `Inline`/`Owned` placement, loop edge, typed chunk
+  transport, and region-routing path needed by that DSP. The slice must consume
+  prepared `SigId` facts; it may not discover the split from fused FIR.
+- Use `-ss 0` initially and run the existing independent schedule postcondition
+  checker. Full four-strategy conformance remains P1 work.
+- Execute scalar, `-vec -lv 0`, and `-vec -lv 1` through the interpreter or
+  another already reliable executable backend. Compare output bits and final
+  persistent state over several block sizes, including a tail block.
+- Snapshot loop roots, the cross-loop edge, transport type/length, and routed
+  regions. Assert that forcing conservative serial placement changes topology
+  so the test cannot pass merely by vectorizing nothing.
+- Do not block this slice on RFC 8785, Lean-side SHA-256, exhaustive DAG
+  enumeration, every backend, or the final certificate schema implementation.
+  A minimal deterministic DTO and the Rust postcondition check are sufficient.
+
+**Exit criterion:** the new signal-level path, not the transitional FIR
+partition, executes one representative split bit-exactly for both loop variants
+and demonstrates a real vectorizable loop plus a real typed transport.
 
 ### P1 - Generic scheduler core
 
@@ -1270,6 +1327,10 @@ produce no compiler or factory state.
   without `-vec`; `-vec` must not alter its default or parsing.
 - Document public API mapping as `adapted`: CLI behavior matches documented C++
   values, while the Rust enum and strict parse errors are idiomatic Rust APIs.
+- Record the user-visible default divergence in `README.md`, release notes, and
+  the daily porting journal before activation: Rust `-ss 0` selects DFS in both
+  modes, while the closest match for default C++ vector levelization is
+  `-ss 3`. Do not leave this compatibility note only in an internal plan.
 
 **Exit criterion:** all entry points retain and report the selected strategy,
 but scheduling is still behaviorally inactive.
@@ -1321,10 +1382,23 @@ satisfies all `P-*` obligations independently of `-ss`.
 - Produce `SignalUseInfo` per `SigId`: variability, context-sensitive uses,
   `max_delay`, delay-read shape, projection/group identity, triviality, effects,
   and clock domain.
+- Export one canonical decoration record per reachable prepared `SigId`, keyed
+  by stable signal identity and containing `SigType`, variability,
+  vectorability, clock, effects, occurrence facts, and delay facts. Build
+  `DecorationCertificate` from these real records; do not translate the forest
+  through the illustrative Lean `Expr` AST.
+- Implement `verify_decorations` independently from vector placement. It checks
+  exact signal coverage, consistency with the total type and clock maps,
+  conservative effect coverage, and labelled dependency endpoints before a
+  `VectorPlan` may be built.
 - Reuse results from `placement` and `delay::plan`, or merge them into one
   traversal. Do not maintain divergent definitions of sharing and `max_delay`.
 - Port the exact `needSeparateLoop` precedence, especially
   `verySimple + maxDelay > 0` and `Block + maxDelay > 0`.
+- Mirror Lean's exhaustive `separateLoop_complete` characterization in Rust
+  property tests. Enumerate every Boolean/rate combination for `maxDelay = 0`
+  and one positive delay, then compare the Rust decision with the reference
+  function.
 - Replace `assign_loops` with a pure `VectorPlan` builder. Represent inline
   signals as `Inline`, controls as `Control`, and only materialized sample
   values as `Owned(LoopId)`.
@@ -1335,9 +1409,10 @@ satisfies all `P-*` obligations independently of `-ss`.
 - Allocate loop ids, epoch membership, transport ids, and buffer names before
   scheduling. The plan builder must not accept a `SchedulingStrategy` argument.
 
-**Exit criterion:** deterministic `SignalUseInfo` and `VectorPlan` snapshots
-reproduce the P0 topology cases. A structural test proves that changing the
-configured `-ss` value leaves the serialized plan snapshot byte-identical.
+**Exit criterion:** an independently accepted `DecorationCertificate`,
+deterministic `SignalUseInfo`, and `VectorPlan` snapshots reproduce the P0
+topology cases. A structural test proves that changing the configured `-ss`
+value leaves the serialized plan snapshot byte-identical.
 
 ### P5 - LoopGraph completion, scheduling, and region routing
 
@@ -1374,10 +1449,18 @@ lowering, an independent FIR check establishes `R-Type`, `R-Effects`, and
 - Assert that changing `-ss` changes only the per-epoch orders in
   `ExecutionSchedule::Vector`, never `VectorPlan`, epoch membership, ids,
   transports, or buffer names.
+- Add a vectorization-retention gate separate from semantic parity. For each P0
+  case known to vectorize in C++, record the minimum expected vectorizable loop
+  roots, loop count, and required transports. Reject an unexpected all-serial
+  or all-island plan even when its output is bit-exact. Conservative fallback is
+  permitted only for a named unsupported effect/clock/recursion reason captured
+  in the snapshot.
 
 **Exit criterion:** shared expressions and pure prefixes/tails are separated
 without inspecting FIR statements; all four strategies execute bit-exactly for
-both `-lv 0` and `-lv 1`.
+both `-lv 0` and `-lv 1`; and the vectorization-retention corpus proves that
+safety conservatism has not silently reduced every accepted plan to serial
+execution.
 
 ### P6 - Vector recursions, delays, clock domains, and AD
 
@@ -1430,6 +1513,10 @@ mode/strategy/backend combinations, including final state and observable effects
   vector mode they must produce identical `LoopGraph`/transport snapshots while
   allowing different loop orders. Also compare state after multiple blocks,
   tables, UI zones, and effectful cases, not only the first audio impulse.
+- Track vectorization coverage as a first-class CI metric: number of
+  vectorizable/serial/island loops, retained C++-vectorizable cases, fallback
+  reason counts, and transport bytes. Fail on an unexplained coverage decrease;
+  do not treat an all-serial but bit-exact result as success.
 - Add CLI and FFI integration cases proving that `-ss` reaches every backend and
   that unsupported or malformed values fail before factory creation.
 - Measure buffer cost, then add a signal-level cost model to avoid splits whose
@@ -1444,7 +1531,8 @@ mode/strategy/backend combinations, including final state and observable effects
 impulse backend passes scalar `-ss 0/1/2/3` and `vec0`/`vec1` crossed with
 `-ss 0/1/2/3`; optimized and unoptimized execution agree on the representative
 corpus; vector mode has one strategy-independent source of truth for its loop
-graph.
+graph; and the versioned vectorization-coverage baseline has no unexplained
+regression.
 
 ## 7. Risks and guardrails
 
@@ -1513,6 +1601,13 @@ obligation discharged by scalar/vector traces, final-state comparison, C++
 differential tests, and optimized/unoptimized execution parity. Conservative
 effect or `VecSafe` fallbacks may reduce vectorization but must never be relaxed
 only to satisfy a performance target.
+
+The Lean `Scheduler.sound`/`complete` interface is an explicit L4 refinement
+target, not a prerequisite for progressive Rust implementation. The production
+path is L2: an ordinary Rust scheduler proposes an order and the independent
+checker accepts or rejects it. Likewise, the illustrative Lean `Expr`/`HasType`
+rules become relevant to the real compiler only through the canonical
+`DecorationCertificate` exported from `signal_prepare`.
 
 ### Default behavior
 

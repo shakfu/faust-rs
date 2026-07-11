@@ -5,6 +5,9 @@
   "description": "Canonical interchange boundary between faust-rs certificate producers and independent Rust/Lean verifiers. Structural validity is not semantic acceptance.",
   "oneOf": [
     {
+      "$ref": "#/$defs/decorationCertificate"
+    },
+    {
       "$ref": "#/$defs/scheduleCertificate"
     },
     {
@@ -244,6 +247,187 @@
           }
         }
       ]
+    },
+    "analysisSignalRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal_id",
+        "value_type",
+        "rate",
+        "vectorability",
+        "clock_id",
+        "effects",
+        "execution_condition_id",
+        "max_delay",
+        "delay_read",
+        "recursive_projection",
+        "multiple_occurrences",
+        "very_simple"
+      ],
+      "properties": {
+        "signal_id": {
+          "$ref": "#/$defs/uint53"
+        },
+        "value_type": {
+          "$ref": "#/$defs/signalType"
+        },
+        "rate": {
+          "enum": [
+            "konst",
+            "block",
+            "samp"
+          ]
+        },
+        "vectorability": {
+          "enum": [
+            "vect",
+            "scal",
+            "true_scal"
+          ]
+        },
+        "clock_id": {
+          "$ref": "#/$defs/uint53"
+        },
+        "effects": {
+          "description": "Conservative effects in semantic source order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/effect"
+          }
+        },
+        "execution_condition_id": {
+          "$ref": "#/$defs/uint53"
+        },
+        "max_delay": {
+          "$ref": "#/$defs/uint53"
+        },
+        "delay_read": {
+          "type": "boolean"
+        },
+        "recursive_projection": {
+          "type": "boolean"
+        },
+        "multiple_occurrences": {
+          "type": "boolean"
+        },
+        "very_simple": {
+          "type": "boolean"
+        }
+      }
+    },
+    "analysisDependencyEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "consumer",
+        "dependency",
+        "kind"
+      ],
+      "properties": {
+        "consumer": {
+          "$ref": "#/$defs/uint53"
+        },
+        "dependency": {
+          "$ref": "#/$defs/uint53"
+        },
+        "kind": {
+          "enum": [
+            "immediate",
+            "delayed",
+            "control",
+            "clock_boundary",
+            "effect"
+          ]
+        },
+        "delay": {
+          "$ref": "#/$defs/positiveUint53"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "delayed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "delay"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "delay"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "decorationSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signals",
+        "dependencies"
+      ],
+      "properties": {
+        "signals": {
+          "description": "Exact reachable prepared-signal set ordered by ascending signal_id.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/analysisSignalRecord"
+          }
+        },
+        "dependencies": {
+          "description": "Set-like array ordered by (consumer, dependency, kind, delay).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/analysisDependencyEdge"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "decorationCertificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_kind",
+        "producer",
+        "program",
+        "decorations",
+        "decoration_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "artifact_kind": {
+          "const": "decoration_certificate"
+        },
+        "producer": {
+          "$ref": "#/$defs/producer"
+        },
+        "program": {
+          "$ref": "#/$defs/program"
+        },
+        "decorations": {
+          "$ref": "#/$defs/decorationSnapshot"
+        },
+        "decoration_hash": {
+          "description": "SHA-256 of canonical JSON decorations.",
+          "$ref": "#/$defs/sha256"
+        }
+      }
     },
     "dependencyEdge": {
       "type": "object",
@@ -773,6 +957,7 @@
         "artifact_kind",
         "producer",
         "program",
+        "decoration_hash",
         "plan",
         "plan_hash"
       ],
@@ -788,6 +973,10 @@
         },
         "program": {
           "$ref": "#/$defs/program"
+        },
+        "decoration_hash": {
+          "description": "Accepted DecorationCertificate subject hash from which this plan was built.",
+          "$ref": "#/$defs/sha256"
         },
         "plan": {
           "$ref": "#/$defs/vectorPlan"
@@ -1093,13 +1282,14 @@
         },
         "target_artifact_kind": {
           "enum": [
+            "decoration_certificate",
             "schedule_certificate",
             "vector_plan_certificate",
             "routed_fir_certificate"
           ]
         },
         "target_subject_hash": {
-          "description": "graph_hash, plan_hash, or routed_fir_hash according to target_artifact_kind.",
+          "description": "decoration_hash, graph_hash, plan_hash, or routed_fir_hash according to target_artifact_kind.",
           "$ref": "#/$defs/sha256"
         },
         "verifier": {

@@ -54,6 +54,19 @@ Required rollout policy:
 - L4 starts with small pure verifiers and analysis functions, not backends;
 - a lower level must never be described as a proof of a higher level.
 
+Normative terminology:
+
+- **formally specified** means Lean contains a typed definition of the contract;
+- **kernel checked** means Lean accepted a concrete theorem or executable guard;
+- **runtime certified** means the independent Rust checker accepted one result;
+- **translation validated** means independent executions agreed on the tested
+  observations;
+- **formally verified** is reserved for a stated refinement theorem whose
+  assumptions and trusted computing base are named.
+
+The current companion Lean file is a kernel-checked specification with selected
+finite theorems and guards. It is not a formally verified faust-rs compiler.
+
 ## 3. Trust Boundaries
 
 ### 3.1 Producer/checker separation
@@ -64,6 +77,9 @@ obviously terminating traversals over canonical finite snapshots.
 
 The checker must not call the producer algorithm. In particular:
 
+- `verify_decorations` checks exact prepared-signal coverage and consistency of
+  type, variability, clock, effect, occurrence, delay, and labelled dependency
+  facts without rebuilding vector placement;
 - `verify_schedule` checks permutation coverage and every edge order; it does
   not rerun DFS/BFS/Special/Reverse-BFS;
 - `verify_vector_plan` reconstructs induced epoch graphs and checks ownership,
@@ -77,6 +93,14 @@ The checker must not call the producer algorithm. In particular:
 defines the normative mathematical meaning of the finite checks. Executable
 Lean functions are the reference oracle. Proposition-valued interfaces state
 the remaining proof obligations.
+
+The Lean `Scheduler.sound`/`complete` structure is an optional L4 refinement
+target for the producer, not a Rust runtime requirement. Progressive Rust work
+uses the L2 path: an ordinary scheduler proposes an order, and the independent
+checker constructs a certificate or rejects it. The illustrative Lean
+`Expr`/`HasType` subset is connected to production only through decoration
+records exported from the real prepared `SigId` forest; it must not evolve into
+an untested shadow AST.
 
 The canonical JSON schema is not the semantics. It validates syntax, shape,
 closed enums, integer ranges, and required fields. Semantic verification still
@@ -98,17 +122,18 @@ The normative machine-readable schema is:
 porting/schemas/vector-verification-certificate-v1.schema.json
 ```
 
-It defines four top-level artifact kinds:
+It defines five top-level artifact kinds:
 
-1. `schedule_certificate`;
-2. `vector_plan_certificate`;
-3. `routed_fir_certificate`;
-4. `verification_result`.
+1. `decoration_certificate`;
+2. `schedule_certificate`;
+3. `vector_plan_certificate`;
+4. `routed_fir_certificate`;
+5. `verification_result`.
 
-The first three contain claims to be checked. They are not valid merely because
+The first four contain claims to be checked. They are not valid merely because
 they satisfy JSON Schema. `verification_result` records a named verifier's
 acceptance or rejection of the relevant canonical subject hash: `graph_hash`,
-`plan_hash`, or `routed_fir_hash`.
+`decoration_hash`, `plan_hash`, or `routed_fir_hash`.
 
 ### 4.1 Versioning
 
@@ -171,6 +196,8 @@ Arrays representing mathematical sets have one required order:
 |---|---|
 | graph `nodes` | ascending node id |
 | graph `edges` | `(consumer, dependency, kind)` ascending |
+| decoration `signals` | ascending signal id |
+| decoration `dependencies` | `(consumer, dependency, kind, delay)` ascending |
 | plan `signals` | ascending signal id |
 | plan `loops` | ascending loop id |
 | plan `epochs` | `(rank, id)` ascending |
@@ -213,6 +240,8 @@ position(edge.dependency) < position(edge.consumer)
 Hashes bind a certificate to the exact object it checks.
 
 ```text
+decoration_hash = SHA256(canonical_json(decorations))
+
 graph_hash = SHA256(canonical_json(graph))
 
 plan_hash = SHA256(canonical_json(plan))
@@ -281,7 +310,8 @@ claim that the verifier must justify from signal analysis.
 | `GraphSnapshot` | `DependencyGraph` | `crates/transform` generic scheduler module |
 | `ScheduleCertificate` | `ScheduleCertificate` | `crates/transform` |
 | `Strategy` | `SchedulingStrategy` | `crates/transform`, threaded by `crates/compiler` |
-| `SignalRecord` | `Decoration` plus placement facts | `signal_fir::vector_analysis` |
+| `SignalDecorationRecord` | `Decoration` plus analysis facts | `signal_prepare` and `signal_fir::vector_analysis` |
+| `DecorationCertificate` | representative `HasType` rules plus consistency obligations | `signal_fir::vector_verify` |
 | `VectorPlan` | `VectorPlan` | `signal_fir::vector_analysis` |
 | `VectorPlanCertificate` | `VectorPlanCertificate` | `signal_fir::vector_verify` |
 | `Transport` | `Transport` | signal FIR vector routing |
@@ -294,7 +324,7 @@ be pure, deterministic, and tested independently from JSON rendering.
 
 ## 6. Progressive Integration Plan
 
-### R0 - Freeze schema and examples
+### R0 - Freeze the minimal DTO shape
 
 Deliverables:
 
@@ -302,15 +332,49 @@ Deliverables:
 - add one valid and one invalid artifact example for each certificate kind and
   each schedule scope;
 - validate examples structurally with a JSON Schema validator;
-- add canonicalization and hash test vectors shared by Rust and Lean;
 - pin the Lean version used in CI or document the elan toolchain requirement.
 
 Pass criteria:
 
-- Rust and Lean parse the same valid examples;
-- both reject unknown fields, unknown enums, duplicate ids, and malformed hashes;
-- canonical byte and hash test vectors are identical on Linux, macOS, and
-  Windows.
+- Rust parses the valid minimal examples and rejects unknown fields/enums;
+- DTO conversion is deterministic in one process and independent of `HashMap`
+  iteration;
+- the schema and provisional Rust checker are sufficient for the early vertical
+  slice below.
+
+Full RFC 8785 conformance, Lean-side SHA-256, cross-platform byte identity, and
+the exhaustive invalid corpus are explicitly deferred until after RV. The
+schema shape is useful before then; perfect canonical hashing is not allowed to
+block the first semantic execution result.
+
+### RV - Early executable vertical slice
+
+Drive one nontrivial DSP through:
+
+```text
+prepared SigId forest
+    -> provisional DecorationCertificate
+    -> minimal signal-level VectorPlan
+    -> routed FIR
+    -> one executable backend
+    -> scalar/vector output and final-state comparison
+```
+
+Required case properties:
+
+- one shared sample expression and one pure tail;
+- at least two loop regions and one typed cross-loop transport;
+- one persistent state value compared after multiple blocks;
+- bit-exact scalar, `-vec -lv 0`, and `-vec -lv 1` execution;
+- a topology assertion that fails if the implementation silently serializes or
+  inlines the entire case.
+
+Use `-ss 0` and the Rust schedule postcondition checker initially. Do not wait
+for four-strategy conformance, the Lean JSON importer, cross-OS hashes, all
+backends, recursion groups, or clock islands.
+
+Pass criterion: the signal-level planning path executes a genuine vector split
+bit-exactly through one backend before broader structural assurance work grows.
 
 ### R1 - Schedule certificate at L2
 
@@ -348,12 +412,45 @@ CI must compare Rust and Lean acceptance on:
 - relabelled graphs and randomized insertion orders;
 - deliberately corrupted node counts, orders, edges, and hashes.
 
+Complete the deferred canonical boundary here:
+
+- add shared RFC 8785 and SHA-256 test vectors;
+- require Rust and Lean to compute identical canonical subject hashes;
+- prove snapshot byte/hash identity on Linux, macOS, and Windows;
+- reject duplicate object keys before canonicalization.
+
+RV must already be green before this work becomes a phase blocker.
+
+### R2D - Decoration certificate at L2/L3
+
+Export `DecorationCertificate` directly from the real prepared `SigId` forest.
+Each signal record contains:
+
+- stable signal id and canonical signal type;
+- variability and vectorability;
+- clock-domain id;
+- conservative ordered effects;
+- context-sensitive occurrence and execution-condition facts;
+- delay-read shape and maximum delayed use;
+- labelled dependencies with stable endpoints.
+
+The Rust and Lean checkers verify exact reachable-signal coverage, consistency
+with the total type/clock maps, dependency endpoints, and effect coverage. The
+Lean `Expr`/`HasType` subset remains explanatory; no compiler pass translates
+production signals into that mini-AST merely to satisfy the checker.
+
+Pass criterion: mutating any signal type, clock, effect, delay, occurrence, or
+dependency endpoint makes at least one independent verifier reject the
+certificate before `VectorPlan` construction.
+
 ### R3 - Vector plan certificate at L2/L3
 
 Implement the strategy-independent `VectorPlan` DTO and verifier.
 
 Required checks:
 
+- `decoration_hash` names an independently accepted certificate for the same
+  program and semantic options;
 - unique signal, loop, epoch, transport, and stable-name identities;
 - exact epoch coverage and unique epoch ranks;
 - ownership/root equivalence and inline duplicability;
@@ -365,6 +462,11 @@ Required checks:
 - recursion groups and clock islands remain serial;
 - every vectorizable loop has a recognized `VecSafe` witness kind;
 - changing `-ss` leaves canonical plan bytes and `plan_hash` unchanged.
+
+Semantic safety and vectorization retention are separate gates. For every
+versioned case known to vectorize, record minimum vectorizable roots/loops,
+required transports, and allowed named fallback reasons. Reject an unexplained
+all-serial plan even if scalar/vector execution remains bit-exact.
 
 The Lean checker should initially mirror these finite checks. Deeper semantic
 witnesses can replace enumerated witness tags as the execution model matures.
@@ -487,6 +589,8 @@ Every semantic check needs a mutation that proves rejection. Minimum mutations:
 - reverse one dependency edge;
 - place a consumer before its dependency;
 - alter `graph_hash` or `plan_hash`;
+- alter one decoration type, clock, effect, occurrence, delay fact, or labelled
+  dependency endpoint;
 - duplicate a loop across epochs;
 - change an epoch rank;
 - assign an owned root to the wrong loop;
@@ -497,6 +601,7 @@ Every semantic check needs a mutation that proves rejection. Minimum mutations:
 - move a loop between forward/reverse AD epochs;
 - change one routed FIR store/load index;
 - duplicate or omit an effectful FIR statement.
+- replace every vectorizable loop with an unexplained serial fallback.
 
 A checker without a demonstrated rejecting mutation is not complete enough to
 serve as a trust boundary.
@@ -517,16 +622,19 @@ serve as a trust boundary.
 
 The certified porting architecture is operational when:
 
-1. the canonical schema has shared Rust/Lean parser and hash vectors;
-2. scheduler results are L2 checked in every successful compiler path;
-3. vector plans and routed FIR are rejected before emission on any failed check;
-4. CI rechecks all versioned artifacts with Lean;
-5. `-ss` changes only certified schedules, never `VectorPlan` identity;
-6. `-vec -lv 0` and `-vec -lv 1` match scalar execution across all supported
+1. the RV signal-level vertical slice is bit-exact and demonstrably vectorized;
+2. the canonical schema has shared Rust/Lean parser and hash vectors;
+3. decoration and scheduler results are L2 checked before vector planning;
+4. vector plans and routed FIR are rejected before emission on any failed check;
+5. CI rechecks all versioned artifacts with Lean;
+6. `-ss` changes only certified schedules, never `VectorPlan` identity;
+7. `-vec -lv 0` and `-vec -lv 1` match scalar execution across all supported
    backends and scheduling strategies;
-7. every unsupported semantic case fails with a typed diagnostic rather than
+8. the vectorization-retention corpus has no unexplained all-serial fallback or
+   coverage decrease;
+9. every unsupported semantic case fails with a typed diagnostic rather than
    bypassing certification;
-8. the remaining trusted computing base and unproved obligations are listed in
+10. the remaining trusted computing base and unproved obligations are listed in
    the current handoff and release documentation.
 
 This architecture does not turn the complete compiler into one monolithic Lean
