@@ -601,7 +601,9 @@ Every semantic check needs a mutation that proves rejection. Minimum mutations:
 - move a loop between forward/reverse AD epochs;
 - change one routed FIR store/load index;
 - duplicate or omit an effectful FIR statement.
-- replace every vectorizable loop with an unexplained serial fallback.
+- replace every vectorizable loop with an unexplained serial fallback;
+- (once lockstep bundles exist) corrupt one lane of an isomorphism witness or
+  bundle two loops connected by a dependency path.
 
 A checker without a demonstrated rejecting mutation is not complete enough to
 serve as a trust boundary.
@@ -616,7 +618,12 @@ serve as a trust boundary.
   explicit converter;
 - semantic changes require a plan/journal entry even when JSON shape is
   unchanged;
-- hash projection changes always require a schema version change.
+- hash projection changes always require a schema version change;
+- the planned lockstep-bundling extension (see the port plan's "Lockstep
+  instance vectorization extension" section) is a v2 candidate: it adds a
+  `lockstep` loop kind with a `width`, an isomorphism witness carrying one leaf
+  mapping per lane, and a `layout` field (`planar`/`interleaved`) on transports.
+  It must not be retrofitted into v1 objects.
 
 ## 10. Completion Criteria
 

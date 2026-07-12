@@ -243,6 +243,14 @@ Consequently the `cycles` / `graph2dag` / `cut` / delay-multiset family of
   transports) and only then schedules it. Changing `-ss` cannot change the plan.
 - **A single public `-ss`** spanning scalar and vector modes, replacing the C++
   `-ss` / `-dfs` split.
+- **Lockstep instance vectorization (planned).** C++ has no instance-level SIMD:
+  recursive loops stay scalar. faust-rs plans to bundle k isomorphic, mutually
+  independent serial loops into one lockstep loop (one SIMD lane per instance) —
+  legal under the same incomparability + effect-commutation premises, plus an
+  isomorphism witness. Measured on 4 independent biquads
+  ([`bench_lockstep_biquad.c`](../tests/bench/bench_lockstep_biquad.c), Apple M1): 3.3-3.8×
+  bit-exact without intrinsics, 4.5× ceiling with explicit NEON. See the port
+  plan's "Lockstep instance vectorization extension" section.
 
 ## 8. Effects and commutation: an explicit ordering condition
 

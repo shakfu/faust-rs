@@ -132,6 +132,30 @@ others at `1.15×`. Systematic separation is therefore not always profitable, an
 the compiler must eventually decide case by case.
 :::
 
+### The other direction: stacking instances (lockstep)
+
+Block computation fails on recursion — but there is a second, complementary
+direction. Picture **four identical filters** (say four biquads) on four
+separate outputs. Each one is recursive, so none can be block-computed in time.
+Yet the four are independent of each other and perform *the same* operations:
+at every instant, the processor can execute the four state updates with **one
+SIMD instruction** — one lane per filter, all four advancing sample by sample
+together, in *lockstep*.
+
+This is not a new theory: bundling k loops this way is legal under exactly the
+rules already stated — no dependency between them, commuting effects, same
+clock and phase — plus one new check: their structures must be *identical up to
+the leaves* (inputs, coefficients, states). And each lane runs exactly its
+scalar instruction sequence, so the output stays **bit-for-bit identical**.
+
+Measured on 4 independent biquads (Apple M1): **~3.7× faster** than four
+separate loops, bit-exact, without even writing SIMD by hand — merely fusing
+the four loops lets the C compiler vectorize them — and 4.5× with explicit
+SIMD. The audio buffers keep their usual non-interleaved layout: the
+interleaving lives only inside the bundle. Filter banks, `par(i, N, f)`
+constructs, multichannel processing, and multi-parameter FAD derivatives are
+the natural beneficiaries.
+
 ## 4. The key idea: plan, *then* schedule
 
 The heart of the proposal fits in one sentence: **deciding where the loop
@@ -364,6 +388,7 @@ vectorized" cannot slip through unnoticed.
 **The constraints**
 
 - Recursion and effects ⇒ **serial** loop.
+- Identical independent recursions ⇒ **lockstep** SIMD lanes.
 - Rate change (OD/US/DS) ⇒ serial **island**.
 - FAD vectorizes; RAD stays **serial**.
 - Forward pass **before** backward pass: mandatory **epoch** order.

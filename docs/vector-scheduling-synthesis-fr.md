@@ -142,6 +142,32 @@ d'autres à `1,15×`. La séparation systématique n'est donc pas toujours renta
 et le compilateur doit à terme décider au cas par cas.
 :::
 
+### L'autre direction : empiler les instances (lockstep)
+
+Le calcul par blocs échoue sur la récursion — mais il existe une seconde
+direction, complémentaire. Imaginez **quatre filtres identiques** (quatre
+biquads) sur quatre sorties séparées. Chacun est récursif, donc aucun ne peut
+être calculé par blocs dans le temps. Pourtant les quatre sont indépendants
+entre eux et font *les mêmes* opérations : à chaque instant, le processeur peut
+exécuter les quatre mises à jour d'état en **une seule instruction SIMD** — une
+lane par filtre, les quatre avançant échantillon par échantillon ensemble, en
+*lockstep*.
+
+Ce n'est pas une théorie nouvelle : regrouper k boucles ainsi est légal sous
+exactement les règles déjà énoncées — aucune dépendance entre elles, effets qui
+commutent, même horloge et même phase — plus une vérification nouvelle : leurs
+structures doivent être *identiques aux feuilles près* (entrées, coefficients,
+états). Et chaque lane exécute exactement sa séquence d'instructions scalaire,
+donc la sortie reste **identique au bit près**.
+
+Mesuré sur 4 biquads indépendants (Apple M1) : **~3,7× plus rapide** que quatre
+boucles séparées, bit-exact, sans même écrire de SIMD à la main — fusionner
+simplement les quatre boucles suffit pour que le compilateur C les vectorise —
+et 4,5× en SIMD explicite. Les buffers audio gardent leur format habituel non
+entrelacé : l'entrelacement ne vit qu'à l'intérieur du groupe. Bancs de
+filtres, constructions `par(i, N, f)`, traitement multicanal et dérivées FAD
+multi-paramètres en sont les bénéficiaires naturels.
+
 ## 4. L'idée clé : planifier, *puis* ordonnancer
 
 Le cœur de la proposition tient en une phrase : **décider où sont les frontières
@@ -387,6 +413,7 @@ tout en douce, pour que « correct mais non vectorisé » ne passe pas inaperçu
 **Les contraintes**
 
 - Récursion et effets ⇒ boucle **sérielle**.
+- Récursions identiques indépendantes ⇒ lanes SIMD **lockstep**.
 - Changement de rythme (OD/US/DS) ⇒ **îlot** sériel.
 - FAD se vectorise ; RAD reste **sériel**.
 - Passe avant **avant** passe arrière : ordre d'**époques** imposé.

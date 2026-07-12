@@ -37,6 +37,7 @@ the [Lean/Rust certified porting plan](lean-rust-certified-porting-plan-2026-07-
 - **Formal specification layer** - state the mathematical safety contracts.
 - **Port plan** - sequence implementation phases and acceptance gates.
 - **Risks and guardrails** - keep parity and semantic hazards explicit.
+- **Lockstep instance vectorization extension** - accelerate recursive loops across independent instances.
 - **Proposed decision** - record the normative porting direction.
 :::
 
@@ -1616,7 +1617,98 @@ maps vector mode to the C++ `-dfs` family rather than C++ default `sortGraph`.
 That difference is intentional and user-visible. `-ss 3` is the closest vector
 levelization compatibility setting, with deterministic Rust tie ordering.
 
-## 8. Proposed decision
+## 8. Lockstep instance vectorization extension
+
+**Status:** planned extension, sequenced after P5/P6; measured feasibility
+evidence exists. It is recorded here because it constrains `LoopKind`,
+transports, and the certificate schema now, even though implementation comes
+later.
+
+Time-direction vectorization leaves every recursive loop serial: the carried
+dependence `y(i-1) -> y(i)` forbids computing a chunk in parallel. Yet many real
+graphs contain `k` **structurally identical, mutually independent** serial
+computations — `par(i, N, f)` filter banks, ambisonics channels, FDN lines,
+polyphonic voices, and FAD multi-seed tangent lanes. These can execute in
+**lockstep**: one SIMD lane per instance, all lanes advancing sample by sample
+together. The recursion stays serial in time; the parallelism is across
+instances ("vertical"), the compiler-literature analogue being loop fusion plus
+SLP vectorization.
+
+### 8.1 Legality: no new semantic axioms
+
+Lockstep execution interleaves the bundled loops' per-sample events
+(`A(0), B(0), A(1), B(1), ...` instead of `A(0..q); B(0..q)`). It is therefore
+just another linearization of the same dependence relation `D`, and its
+correctness premises are the ones this plan already formalizes:
+
+- the `k` loops are pairwise incomparable in the epoch graph `G_L^e`;
+- their effects pairwise satisfy `Commute` (section 5.3);
+- they share one clock domain and one epoch;
+- **new obligation:** the `k` loop bodies are isomorphic modulo leaves
+  (inputs, constants, state identities), witnessed by an explicit per-lane leaf
+  mapping that an independent checker validates by parallel traversal.
+
+Formal-model additions are local: a third loop kind
+`Lockstep { width, lanes }` (serial in time, parallel across lanes — neither
+`Vectorizable` nor plain `Recursive`), an `IsoWitness` in the plan certificate,
+and a `layout` field (`Planar | Interleaved(k)`) on transports. `-ss` sees a
+bundle as one node of the epoch DAG, so P-Strategy is untouched.
+
+### 8.2 Bit-exactness and the contraction policy
+
+Each lane performs exactly the scalar IEEE op sequence of its instance, so
+lockstep is the only recursion acceleration compatible with the bit-exact
+contract — unlike parallel-form IIR restructurings, which reassociate and are
+excluded by section 5.6. The one caveat is FMA contraction: scalar and lockstep
+lowerings must apply the same contraction policy, or lanes drift by ulps. The
+benchmark confirms both directions: identical policy gives bit-identical
+output; a divergent hand-written kernel shows ~1e-5 differences.
+
+### 8.3 Measured evidence
+
+[`bench_lockstep_biquad.c`](../tests/bench/bench_lockstep_biquad.c) runs 4 independent RBJ
+peak biquads (DF2-transposed, distinct coefficients per lane) on Apple M1,
+clang 14, `-O3`, no fast-math, chunk 512, best of 3:
+
+```csv
+Version, ns per lane-sample, Speedup vs V1, Bit-exact vs V1
+V0 single biquad scalar, 4.35, -, reference lane
+V1 four separate scalar loops (current lowering), 4.15, 1.00x, reference
+V2 fused time loop with 4 scalar chains, 1.12, 3.69x, yes
+V3 lane-inner C loop + chunk transposes, 1.24, 3.34x, yes
+V3k lane-inner C loop on interleaved buffers, 1.09, 3.80x, yes
+V4 explicit NEON + chunk transposes, 1.12, 3.70x, no (1e-5)
+V4k explicit NEON on interleaved buffers, 0.92, 4.53x, no (1e-5)
+```
+
+Key findings:
+
+- the latency argument is confirmed: one time step costs ~the same for four
+  results as for one, because the carried FMA chain dominates;
+- **plain fusion is enough for the C/C++ backends**: clang SLP-vectorizes the
+  fused scalar body (V2) with no interleaving, no transposes, no intrinsics,
+  and stays bit-exact;
+- an explicit lane-innermost loop (V3) is the backend-neutral FIR lowering for
+  interpreter/Cranelift/wasm paths;
+- manual SIMD keeps ~20% headroom (V4k) — not worth FIR vector types initially.
+
+### 8.4 ABI decision and exclusions
+
+The external `compute` ABI stays planar (non-interleaved). Boundary transposes
+cost 12-22% of the bundled kernel and V2 avoids them entirely on C backends;
+breaking every architecture file for that margin is not justified. Interleaving
+exists only chunk-locally inside a bundle (SoA state, optional AoSoA buffers).
+
+Out of scope for the extension: biquad *cascades* (stage-to-stage dependence
+requires algebraic restructuring, not bit-exact), OD islands with different
+triggers (divergent control flow would need masking), and near-isomorphic
+instances (the witness must be exact; no padding heuristics initially).
+
+Detection is a signal-level shape hash — prepared `par(i, N, f)` instances are
+isomorphic modulo leaf indices by construction — which is one more argument for
+deciding vectorization before FIR fusion.
+
+## 9. Proposed decision
 
 Adopt a strategy-independent signal-level `VectorPlan` as the target
 architecture and retain the FIR partition only until P6 covers its regression
