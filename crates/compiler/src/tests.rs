@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    Compiler, CompilerError, ExpandDspRequest, GenerateAuxFilesRequest, SignalFirLane,
-    WasmArtifactRequest, build_import_search_paths, compile_options_json_string,
-    default_import_search_paths, golden_snapshot, resolve_module_name, resolve_ui_root_label,
+    Compiler, CompilerError, ComputeMode, ExpandDspRequest, GenerateAuxFilesRequest,
+    SchedulingStrategy, SignalFirLane, WasmArtifactRequest, build_import_search_paths,
+    compile_options_json_string, default_import_search_paths, golden_snapshot, resolve_module_name,
+    resolve_ui_root_label,
 };
 use codegen::backends::wasm::WasmOptions;
 use parser::VirtualSourceMap;
@@ -186,6 +187,54 @@ fn resolve_ui_root_label_falls_back_to_source_stem() {
         &parser::CompilationMetadataSnapshot::default(),
     );
     assert_eq!(name, "sine_phasor");
+}
+
+// ── Compiler::with_scheduling_strategy (vectorization port plan P2) ──────────
+//
+// P2 threads `-ss` / `--scheduling-strategy` through the `Compiler` builder
+// into `SignalLoweringContext` (and, from there, into `SignalFirOptions`;
+// see `transform::signal_fir::tests::signal_fir_options_default_scheduling_strategy_is_depth_first`
+// for the receiving end). Scheduling stays behaviorally inactive: these tests
+// only check that the selected strategy reaches the lowering context, not
+// that it changes any compiled output.
+
+#[test]
+fn compiler_default_scheduling_strategy_is_depth_first() {
+    let compiler = Compiler::new();
+    let ctx = compiler.lowering_ctx(SignalFirLane::TransformFastLane);
+    assert_eq!(ctx.scheduling_strategy, SchedulingStrategy::DepthFirst);
+}
+
+#[test]
+fn compiler_with_scheduling_strategy_reaches_lowering_context() {
+    let compiler =
+        Compiler::new().with_scheduling_strategy(SchedulingStrategy::ReverseBreadthFirst);
+    let ctx = compiler.lowering_ctx(SignalFirLane::TransformFastLane);
+    assert_eq!(
+        ctx.scheduling_strategy,
+        SchedulingStrategy::ReverseBreadthFirst
+    );
+}
+
+#[test]
+fn compiler_scheduling_strategy_is_independent_of_compute_mode() {
+    // Selecting `-vec` (a `ComputeMode`) must not perturb the default
+    // scheduling strategy, and selecting a non-default scheduling strategy
+    // must not perturb the default (scalar) compute mode.
+    let vector_compiler = Compiler::new().with_compute_mode(ComputeMode::Vector {
+        vec_size: 64,
+        loop_variant: 1,
+    });
+    let vector_ctx = vector_compiler.lowering_ctx(SignalFirLane::TransformFastLane);
+    assert_eq!(
+        vector_ctx.scheduling_strategy,
+        SchedulingStrategy::DepthFirst
+    );
+
+    let scheduled_compiler =
+        Compiler::new().with_scheduling_strategy(SchedulingStrategy::BreadthFirst);
+    let scheduled_ctx = scheduled_compiler.lowering_ctx(SignalFirLane::TransformFastLane);
+    assert_eq!(scheduled_ctx.compute_mode, ComputeMode::Scalar);
 }
 
 // ── Compiler::compile_source ──────────────────────────────────────────────

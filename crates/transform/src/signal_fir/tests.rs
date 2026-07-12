@@ -22,6 +22,7 @@ use super::{
     delay::{DelayManager, DelayOptions, plan_delays},
     siggen::interpret_generator_for_test,
 };
+use crate::schedule::SchedulingStrategy;
 use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
 use signals::{BinOp, BlockRevPolicy, SigBuilder};
 
@@ -4216,4 +4217,49 @@ fn fastlane_rejects_unsupported_family_with_typed_error() {
     let err = compile_fastlane_without_ui(&arena, &[sig], 0, 1, &SignalFirOptions::default())
         .expect_err("an unsupported signal family must not silently compile");
     assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
+}
+
+// ─── P2: `-ss` / `--scheduling-strategy` option plumbing ──────────────────────
+//
+// Vectorization port plan phase P2 threads `SchedulingStrategy` into
+// `SignalFirOptions` without activating scheduling. These tests only check
+// that the field is present, defaults to `DepthFirst` (matching `-ss 0` in
+// scalar and vector modes alike), and round-trips through struct-update
+// syntax like every other option in this struct.
+
+#[test]
+fn signal_fir_options_default_scheduling_strategy_is_depth_first() {
+    assert_eq!(
+        SignalFirOptions::default().scheduling_strategy,
+        SchedulingStrategy::DepthFirst
+    );
+}
+
+#[test]
+fn signal_fir_options_scheduling_strategy_is_independent_of_compute_mode() {
+    use super::ComputeMode;
+
+    // Selecting a non-default scheduling strategy must not perturb the
+    // (still separate) compute-mode default, and vice versa.
+    let options = SignalFirOptions {
+        scheduling_strategy: SchedulingStrategy::ReverseBreadthFirst,
+        ..SignalFirOptions::default()
+    };
+    assert_eq!(
+        options.scheduling_strategy,
+        SchedulingStrategy::ReverseBreadthFirst
+    );
+    assert_eq!(options.compute_mode, ComputeMode::Scalar);
+
+    let vector_options = SignalFirOptions {
+        compute_mode: ComputeMode::Vector {
+            vec_size: 64,
+            loop_variant: 1,
+        },
+        ..SignalFirOptions::default()
+    };
+    assert_eq!(
+        vector_options.scheduling_strategy,
+        SchedulingStrategy::DepthFirst
+    );
 }

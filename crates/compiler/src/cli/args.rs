@@ -237,6 +237,22 @@ pub struct CliArgs {
     /// single loop with a runtime `min(vindex + vs, count)` bound.
     #[arg(long = "lv", default_value_t = 0)]
     pub lv: u8,
+    /// Signal/loop dependency scheduling strategy (`-ss N`, as Faust C++):
+    /// `0` = depth-first (default), `1` = breadth-first, `2` = special
+    /// (interleaved), `n >= 3` = reverse breadth-first. Decoded through
+    /// [`compiler::SchedulingStrategy::decode`].
+    ///
+    /// Independent of `-vec`/`-vs`/`-lv`: it applies to the scalar
+    /// control/signal schedule and, once the vectorization port lands
+    /// scheduling, to the vector loop schedule as well. Vectorization port
+    /// plan phase P2: plumbing only — the value is parsed, stored, and
+    /// reported, but no compile path invokes the scheduler yet.
+    ///
+    /// `adapted` API mapping vs C++ `atoi`: a missing value, a non-integer
+    /// value, or a negative value is a hard parse error here instead of
+    /// silently falling back to `0`.
+    #[arg(long = "scheduling-strategy", default_value_t = 0)]
+    pub scheduling_strategy: u32,
     /// Display compilation phases timing information (`-time`).
     #[arg(long = "compilation-time", action = ArgAction::SetTrue)]
     pub compilation_time: bool,
@@ -365,6 +381,13 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
         }
         if arg == "-lv" {
             normalized.push("--lv".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-ss" {
+            normalized.push("--scheduling-strategy".to_owned());
             if let Some(value) = it.next() {
                 normalized.push(value);
             }

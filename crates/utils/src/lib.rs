@@ -269,8 +269,9 @@ pub fn null_c_string_array() -> *const *const c_char {
 
 /// Minimal shared subset of Faust CLI-like options accepted by Rust FFI crates.
 ///
-/// Supported options: `-I <path>`, `-cn <name>`, `-double`, and the vector-mode
-/// trio `-vec` / `-vs <n>` / `-lv <n>`.
+/// Supported options: `-I <path>`, `-cn <name>`, `-double`, the vector-mode
+/// trio `-vec` / `-vs <n>` / `-lv <n>`, and the scheduling-strategy option
+/// `-ss <n>`.
 /// Unknown options are ignored so backend FFI crates can accept broader argv
 /// vectors while incrementally extending support.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -293,11 +294,26 @@ pub struct FfiCompileArgs {
     /// Vector loop variant (`-lv <n>`; 0 = fastest/default, 1 = simple). Only
     /// meaningful when [`Self::vec_mode`] is set.
     pub loop_variant: u8,
+    /// Raw signal/loop scheduling-strategy value (`-ss <n>`; Faust default
+    /// `0`, depth-first).
+    ///
+    /// Kept as the raw non-negative integer here (rather than a decoded
+    /// enum) because `utils` is a dependency-light leaf crate and the
+    /// `SchedulingStrategy` enum lives in `transform`. Callers that depend on
+    /// `compiler`/`transform` decode it with
+    /// `transform::schedule::SchedulingStrategy::decode` (re-exported as
+    /// `compiler::SchedulingStrategy`): `0 -> DepthFirst`,
+    /// `1 -> BreadthFirst`, `2 -> Special`, `n >= 3 -> ReverseBreadthFirst`.
+    /// Vectorization port plan phase P2: parsed and threaded, but no FFI
+    /// compile path invokes the scheduler yet.
+    pub scheduling_strategy: u32,
 }
 
-/// Parses the shared FFI option subset (`-I`, `-cn`, `-double`, `-vec`/`-vs`/`-lv`)
-/// from an argv vector. `vec_size` defaults to 32 when `-vec` is given without
-/// `-vs`, matching the Faust CLI.
+/// Parses the shared FFI option subset (`-I`, `-cn`, `-double`,
+/// `-vec`/`-vs`/`-lv`, `-ss`) from an argv vector. `vec_size` defaults to 32
+/// when `-vec` is given without `-vs`, matching the Faust CLI.
+/// `scheduling_strategy` defaults to `0` (depth-first) when `-ss` is absent,
+/// mirroring the CLI's `--scheduling-strategy` default.
 pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
     let mut parsed = FfiCompileArgs {
         vec_size: 32,
@@ -345,6 +361,15 @@ pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String>
                 return Err("missing value after -lv".to_owned());
             };
             parsed.loop_variant = value.parse().map_err(|e| format!("bad -lv value: {e}"))?;
+            i += 2;
+            continue;
+        }
+        if arg == "-ss" {
+            let Some(value) = argv.get(i + 1) else {
+                return Err("missing value after -ss".to_owned());
+            };
+            parsed.scheduling_strategy =
+                value.parse().map_err(|e| format!("bad -ss value: {e}"))?;
             i += 2;
             continue;
         }
@@ -575,5 +600,51 @@ mod tests {
         assert!(parsed.vec_mode);
         assert_eq!(parsed.vec_size, 32);
         assert_eq!(parsed.loop_variant, 0);
+    }
+
+    #[test]
+    fn parse_ffi_compile_args_accepts_ss_option() {
+        let argv = vec!["-ss".to_owned(), "3".to_owned()];
+        let parsed = parse_ffi_compile_args(&argv).unwrap();
+        assert_eq!(parsed.scheduling_strategy, 3);
+    }
+
+    #[test]
+    fn parse_ffi_compile_args_ss_defaults_to_zero_when_absent() {
+        let parsed = parse_ffi_compile_args(&[]).unwrap();
+        assert_eq!(parsed.scheduling_strategy, 0);
+    }
+
+    #[test]
+    fn parse_ffi_compile_args_ss_is_independent_of_vec() {
+        // `-ss` must parse without `-vec` present, and must not perturb the
+        // vector-mode defaults.
+        let argv = vec!["-ss".to_owned(), "1".to_owned()];
+        let parsed = parse_ffi_compile_args(&argv).unwrap();
+        assert_eq!(parsed.scheduling_strategy, 1);
+        assert!(!parsed.vec_mode);
+        assert_eq!(parsed.vec_size, 32);
+        assert_eq!(parsed.loop_variant, 0);
+    }
+
+    #[test]
+    fn parse_ffi_compile_args_rejects_missing_ss_value() {
+        let argv = vec!["-ss".to_owned()];
+        let err = parse_ffi_compile_args(&argv).unwrap_err();
+        assert!(err.contains("missing value after -ss"), "{err}");
+    }
+
+    #[test]
+    fn parse_ffi_compile_args_rejects_non_integer_ss_value() {
+        let argv = vec!["-ss".to_owned(), "abc".to_owned()];
+        let err = parse_ffi_compile_args(&argv).unwrap_err();
+        assert!(err.contains("bad -ss value"), "{err}");
+    }
+
+    #[test]
+    fn parse_ffi_compile_args_rejects_negative_ss_value() {
+        let argv = vec!["-ss".to_owned(), "-1".to_owned()];
+        let err = parse_ffi_compile_args(&argv).unwrap_err();
+        assert!(err.contains("bad -ss value"), "{err}");
     }
 }

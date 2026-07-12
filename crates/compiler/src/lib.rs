@@ -84,6 +84,7 @@ use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
 use signals::SigId;
 use sigtype::TypeAnnotator;
 use tlib::NodeKind;
+pub use transform::schedule::SchedulingStrategy;
 pub use transform::signal_fir::{ComputeMode, RealType};
 use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
 use ui::UiProgram;
@@ -378,6 +379,13 @@ pub struct Compiler {
     /// (`-vec`/`-vs`/`-lv`). Roadmap P6 (V1 plumbing only — `Vector` still
     /// lowers as `Scalar` until the `LoopGraph` slices land).
     compute_mode: ComputeMode,
+    /// Signal/loop dependency scheduling policy (`-ss` /
+    /// `--scheduling-strategy`). Vectorization port plan phase P2: plumbing
+    /// only — stored and threaded through to [`SignalFirOptions`], but no
+    /// compile path invokes [`transform::schedule::schedule`] yet.
+    /// Independent of [`ComputeMode`]; defaults to
+    /// [`SchedulingStrategy::DepthFirst`] in scalar and vector modes alike.
+    scheduling_strategy: SchedulingStrategy,
     /// Optional cooperative cancellation flag.
     ///
     /// When set, the evaluator checks this flag on every recursive call and
@@ -425,6 +433,7 @@ impl Compiler {
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,
             compute_mode: ComputeMode::Scalar,
+            scheduling_strategy: SchedulingStrategy::DepthFirst,
             cancel: None,
             timing_sink: None,
         }
@@ -487,6 +496,22 @@ impl Compiler {
         self
     }
 
+    /// Selects the signal/loop dependency scheduling strategy (`-ss` /
+    /// `--scheduling-strategy`).
+    ///
+    /// Vectorization port plan phase P2: plumbing only. The strategy is
+    /// stored and threaded through to [`SignalFirOptions`] so it is visible
+    /// to every lowering path, but nothing in the compile pipeline invokes
+    /// [`transform::schedule::schedule`] yet — P3 activates scalar
+    /// scheduling. Independent of [`ComputeMode`]: selecting `-vec` does not
+    /// change this default, and selecting a strategy does not change the
+    /// scalar/vector codegen path.
+    #[must_use]
+    pub fn with_scheduling_strategy(mut self, strategy: SchedulingStrategy) -> Self {
+        self.scheduling_strategy = strategy;
+        self
+    }
+
     /// Returns a compiler facade with a cooperative cancellation flag.
     ///
     /// The caller retains an `Arc<AtomicBool>` clone and can set it to `true`
@@ -531,6 +556,7 @@ impl Compiler {
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
             compute_mode: self.compute_mode,
+            scheduling_strategy: self.scheduling_strategy,
             timing_sink: self.timing_sink.clone(),
         }
     }
@@ -553,6 +579,7 @@ impl Compiler {
             self.max_copy_delay,
             self.delay_line_threshold,
             self.compute_mode,
+            self.scheduling_strategy,
         )
         .map_err(|error| lower_fir_error_to_compiler(source, error))
     }

@@ -76,6 +76,7 @@ use signals::SigId;
 use tlib::TreeArena;
 use ui::UiProgram;
 
+use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 /// Internal DSP computation precision used when lowering signals to FIR.
@@ -195,6 +196,14 @@ pub struct SignalFirOptions {
     /// (`-vec`). Roadmap P6 (V1 plumbing; `Vector` still lowers as `Scalar`
     /// until the `LoopGraph` slices land).
     pub compute_mode: ComputeMode,
+    /// Signal/loop dependency scheduling policy (`-ss` /
+    /// `--scheduling-strategy`). Vectorization port plan phase P2: plumbing
+    /// only — the selected strategy is stored and reported but no lowering
+    /// path calls [`crate::schedule::schedule`] yet (P3 activates scalar
+    /// scheduling). Deliberately independent of [`ComputeMode`]: the same
+    /// strategy applies to the scalar control/signal DAG and, once P5 lands,
+    /// to the vector `LoopGraph` schedule (plan §2.5).
+    pub scheduling_strategy: SchedulingStrategy,
 }
 
 impl Default for SignalFirOptions {
@@ -205,6 +214,7 @@ impl Default for SignalFirOptions {
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,
             compute_mode: ComputeMode::Scalar,
+            scheduling_strategy: SchedulingStrategy::DepthFirst,
         }
     }
 }

@@ -101,6 +101,11 @@ pub(crate) struct SignalLoweringContext {
     pub(crate) delay_line_threshold: u32,
     /// `compute()` codegen strategy (scalar / vector). Roadmap P6 (V1 plumbing).
     pub(crate) compute_mode: ComputeMode,
+    /// Signal/loop dependency scheduling policy (`-ss` /
+    /// `--scheduling-strategy`). Vectorization port plan phase P2: plumbing
+    /// only, threaded through to [`SignalFirOptions`] without activating
+    /// scheduling.
+    pub(crate) scheduling_strategy: SchedulingStrategy,
     /// Optional per-phase timing callback; `None` disables timing.
     pub(crate) timing_sink: Option<TimingSink>,
 }
@@ -172,6 +177,7 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
             ctx.compute_mode,
+            ctx.scheduling_strategy,
         )
     })
     .map_err(LowerToInterpError::Transform)?;
@@ -229,6 +235,7 @@ pub(crate) fn lower_signals_to_fir(
     max_copy_delay: u32,
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
+    scheduling_strategy: SchedulingStrategy,
 ) -> Result<FirCompileOutput, LowerToFirError> {
     let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
     let lowered = lower_signals_to_fir_transform_fastlane(
@@ -238,6 +245,7 @@ pub(crate) fn lower_signals_to_fir(
         max_copy_delay,
         delay_line_threshold,
         compute_mode,
+        scheduling_strategy,
     )
     .map_err(LowerToFirError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
@@ -259,6 +267,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
     max_copy_delay: u32,
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
+    scheduling_strategy: SchedulingStrategy,
 ) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
         module_name,
@@ -266,6 +275,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         max_copy_delay,
         delay_line_threshold,
         compute_mode,
+        scheduling_strategy,
     };
     let lowered = transform::signal_fir::compile_signals_to_fir_fastlane_clocked(
         &output.parse.state.arena,
@@ -299,6 +309,7 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
             ctx.compute_mode,
+            ctx.scheduling_strategy,
         )
     })
     .map_err(LowerError::Transform)?;
@@ -329,6 +340,7 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
             ctx.compute_mode,
+            ctx.scheduling_strategy,
         )
     })
     .map_err(LowerError::Transform)?;
@@ -359,6 +371,7 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
             ctx.max_copy_delay,
             ctx.delay_line_threshold,
             ctx.compute_mode,
+            ctx.scheduling_strategy,
         )
     })
     .map_err(LowerError::Transform)?;

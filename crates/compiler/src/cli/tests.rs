@@ -78,6 +78,124 @@ fn vec_flags_map_to_compute_mode() {
     assert_eq!(selected_compute_mode(&cli), ComputeMode::Scalar);
 }
 
+// ── `-ss` / `--scheduling-strategy` (vectorization port plan P2) ─────────────
+//
+// P2 is plumbing-only: these tests check parsing, defaulting, legacy `-ss`
+// normalization, and `SchedulingStrategy::decode` mapping — not that
+// scheduling is active (no compiled-output assertions here).
+
+#[test]
+fn scheduling_strategy_flag_decodes_all_documented_values() {
+    use super::runner::selected_scheduling_strategy;
+    use compiler::SchedulingStrategy;
+
+    let cases: [(u32, SchedulingStrategy); 6] = [
+        (0, SchedulingStrategy::DepthFirst),
+        (1, SchedulingStrategy::BreadthFirst),
+        (2, SchedulingStrategy::Special),
+        (3, SchedulingStrategy::ReverseBreadthFirst),
+        (4, SchedulingStrategy::ReverseBreadthFirst),
+        (42, SchedulingStrategy::ReverseBreadthFirst),
+    ];
+    for (n, expected) in cases {
+        let cli = CliArgs::parse_from([
+            "faust-rs",
+            "--scheduling-strategy",
+            &n.to_string(),
+            "foo.dsp",
+        ]);
+        assert_eq!(cli.scheduling_strategy, n);
+        assert_eq!(
+            selected_scheduling_strategy(&cli),
+            expected,
+            "-ss {n} should decode to {expected:?}"
+        );
+    }
+
+    // `-ss 3` and `-ss 42` both decode to `ReverseBreadthFirst`.
+    let cli3 = CliArgs::parse_from(["faust-rs", "--scheduling-strategy", "3", "foo.dsp"]);
+    let cli42 = CliArgs::parse_from(["faust-rs", "--scheduling-strategy", "42", "foo.dsp"]);
+    assert_eq!(
+        selected_scheduling_strategy(&cli3),
+        selected_scheduling_strategy(&cli42)
+    );
+}
+
+#[test]
+fn scheduling_strategy_defaults_to_depth_first_in_scalar_and_vector_modes() {
+    use super::runner::selected_scheduling_strategy;
+    use compiler::SchedulingStrategy;
+
+    let scalar = CliArgs::parse_from(["faust-rs", "foo.dsp"]);
+    assert_eq!(scalar.scheduling_strategy, 0);
+    assert_eq!(
+        selected_scheduling_strategy(&scalar),
+        SchedulingStrategy::DepthFirst
+    );
+
+    // `-vec` must not alter the `-ss` default.
+    let vector = CliArgs::parse_from(["faust-rs", "--vec", "foo.dsp"]);
+    assert_eq!(vector.scheduling_strategy, 0);
+    assert_eq!(
+        selected_scheduling_strategy(&vector),
+        SchedulingStrategy::DepthFirst
+    );
+}
+
+#[test]
+fn scheduling_strategy_flag_is_accepted_without_vec() {
+    let cli = CliArgs::parse_from(["faust-rs", "--scheduling-strategy", "1", "foo.dsp"]);
+    assert!(!cli.vec);
+    assert_eq!(cli.scheduling_strategy, 1);
+}
+
+#[test]
+fn scheduling_strategy_flag_rejects_missing_value() {
+    // `--scheduling-strategy` as the trailing argument, with nothing after it.
+    let result = CliArgs::try_parse_from(["faust-rs", "--scheduling-strategy"]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn scheduling_strategy_flag_rejects_negative_value() {
+    let result = CliArgs::try_parse_from(["faust-rs", "--scheduling-strategy", "-1", "foo.dsp"]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn scheduling_strategy_flag_rejects_non_integer_value() {
+    let result = CliArgs::try_parse_from(["faust-rs", "--scheduling-strategy", "abc", "foo.dsp"]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn normalize_legacy_args_maps_dash_ss_to_scheduling_strategy() {
+    let args = vec![
+        "faust-rs".to_owned(),
+        "-ss".to_owned(),
+        "42".to_owned(),
+        "foo.dsp".to_owned(),
+    ];
+    let normalized = normalize_legacy_args(args);
+    assert_eq!(
+        normalized,
+        vec![
+            "faust-rs".to_owned(),
+            "--scheduling-strategy".to_owned(),
+            "42".to_owned(),
+            "foo.dsp".to_owned(),
+        ]
+    );
+
+    let cli = CliArgs::parse_from(normalize_legacy_args(vec![
+        "faust-rs".to_owned(),
+        "-ss".to_owned(),
+        "3".to_owned(),
+        "foo.dsp".to_owned(),
+    ]));
+    assert_eq!(cli.scheduling_strategy, 3);
+}
+
 #[test]
 fn normalize_legacy_args_maps_dash_pn_to_process_name() {
     let args = vec![
