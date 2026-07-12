@@ -303,6 +303,16 @@ Effects remain in semantic source order and use tagged resource objects. Unknown
 or impure foreign calls are explicit; absence of an effect entry means a purity
 claim that the verifier must justify from signal analysis.
 
+Resource identities are derived from the prepared forest alone and are
+strategy-independent (design in the port plan, section 4.4): state resources
+use the owning signal id (hash-consing makes identical subtrees one signal,
+hence one state — semantically exact); recursion-group state uses
+`(group, projection index)`; tables use the creation-node id; UI zones use the
+canonical UI path id; outputs use the channel index; foreign calls use the
+declared name and signature with no purity inference. Verifiers recompute
+every identity from the exported forest facts; an identity minted during
+lowering or scheduling is a rejection.
+
 ## 5. Rust/Lean Mapping Contract
 
 | Canonical definition | Lean definition | Planned Rust owner |
@@ -438,6 +448,11 @@ The Rust and Lean checkers verify exact reachable-signal coverage, consistency
 with the total type/clock maps, dependency endpoints, and effect coverage. The
 Lean `Expr`/`HasType` subset remains explanatory; no compiler pass translates
 production signals into that mini-AST merely to satisfy the checker.
+
+The certificate is the exported projection of the in-memory `SignalUseInfo`
+table (port plan, section 4.3); both must be produced by the same unified
+traversal and the same `signal_dependencies` child walk, so the exported facts
+cannot drift from the facts the planner actually consumed.
 
 Pass criterion: mutating any signal type, clock, effect, delay, occurrence, or
 dependency endpoint makes at least one independent verifier reject the

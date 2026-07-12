@@ -515,6 +515,175 @@ access, UI writes, or state shared outside one recursion owner) must be
 co-located or chained conservatively. Only proven-independent loops may be
 reordered by `-ss`.
 
+### 4.3 Unified signal-use analysis design
+
+This subsection is the implementation design consumed by P4. Its goal is one
+pass, one child walk, one result table.
+
+**Single labelled child walk.** One function is the only place that enumerates
+a signal's children with their dependency labels:
+
+```rust
+fn signal_dependencies(arena: &TreeArena, sig: SigId)
+    -> Result<Vec<LabelledEdge>, AnalysisError>
+
+struct LabelledEdge {
+    child: SigId,
+    kind: DepKind, // Immediate | Delayed(u32) | Control | ClockBoundary | Effect
+}
+```
+
+`hgraph` construction, use analysis, and the `VectorPlan` builder all consume
+this function. Maintaining a second child walk anywhere is a review-rejection
+criterion, because divergent walks are how C++ parity silently breaks.
+
+**One traversal, one table.** The analysis performs a single iterative
+post-order traversal from the output list (explicit stack, no recursion) and
+fills one table:
+
+```rust
+struct SignalUseInfo {
+    variability: Variability,          // from the existing total type map
+    clock: ClkEnv,                     // from ClkEnvMap
+    occurrences: OccInfo,              // context-sensitive, below
+    max_delay: u32,                    // max delayed use of this signal
+    delay_reads: u32,                  // number of delayed read sites
+    is_delay_read: bool,               // the node itself is a sigDelay read
+    recursive_projection: Option<(SigId, usize)>, // (group, index)
+    very_simple: bool,                 // C++ verySimple predicate
+    effects: Vec<EffectAtom>,          // ordered, conservative (section 4.4)
+}
+```
+
+**OccMarkup port.** `OccInfo` reproduces the context-sensitive C++ semantics:
+an occurrence is counted per use context, not globally:
+
+```rust
+struct UseContext {
+    variability: Variability,  // variability of the *consumer's* context
+    exec_condition: CondId,    // canonical execution-condition class
+}
+
+struct OccInfo {
+    per_context: Vec<(UseContext, u32)>, // sorted by (variability, cond)
+    multi: bool,
+}
+```
+
+`multi` is derived exactly as `hasMultiOccurrences()`: more than one occurrence
+in one context, or occurrences from a faster context than the signal's own
+variability, or occurrences under different execution conditions. Parents push
+their context onto each child visit; delayed edges contribute to `max_delay`
+and `delay_reads` of the *carried* signal but not to same-tick occurrence
+contexts.
+
+**Ownership consolidation.** `placement.rs` reference counting and
+`delay/plan.rs` delay analysis stop recomputing these facts: the delay plan
+keeps ownership of storage geometry but reads `max_delay`/`delay_reads` from
+`SignalUseInfo`; the placement variability boundary reads `occurrences`. One
+definition of sharing, one definition of `max_delay`. P4's exit test compares
+the table against C++ `OccMarkup` on the P0 corpus signal by signal
+(`maxDelay`, delayed-read count, multi bit, context variability set).
+
+The exported projection of this table is the `DecorationCertificate` of the
+certified porting plan; the in-memory table and the exported records must be
+produced by the same traversal.
+
+### 4.4 Stable effect-resource identity
+
+Effect atoms need resource identities that are deterministic, strategy
+independent, and derivable from the prepared forest alone. The rules:
+
+```csv
+Resource, Identity, Rationale
+State (delay line / rec carrier / counter), owning SigId (+ cell discriminant), hash-consing makes identical subtrees one SigId; same signal means same state - semantically exact
+Recursion group state, "(group SigId, projection index)", groups and projections are explicit in the prepared forest
+Table, SigId of the table-creation node, accesses identify the table instance through its creation chain root
+UI zone, canonical UI path id from the prepared forest, allocated in source order; independent of -ss
+Output, channel index, fixed by the output list
+Foreign call, function name + declared signature, no purity inference: Unknown unless declared pure
+```
+
+The hash-consing point deserves emphasis: two textually identical
+`delay(x, n)` expressions are the *same* `SigId`, hence the same state
+resource — which is semantically correct, precisely because they are the same
+signal. No resource identity may ever be minted during lowering or scheduling;
+`verify_vector_plan` recomputes every identity from the forest and rejects
+mismatches.
+
+### 4.5 Region-aware value cache and pre-planned transports
+
+The P5 lowering cache replaces the raw `SigId -> FirId` map with three tables
+whose visibility rules are explicit:
+
+```rust
+struct ValueCache {
+    control: HashMap<SigId, FirId>,            // ancestor region: visible below
+    owned:   HashMap<SigId, (LoopId, FirId)>,  // unique producer loop
+    inline:  HashMap<(LoopId, SigId), FirId>,  // per-region instances
+}
+```
+
+Lookup from requesting region `Q`:
+
+- `control` hits are always reusable (`R ≤reg Q` holds by construction);
+- `owned` hits in the same loop return the `FirId`; hits from a *different*
+  loop return the pre-planned transport load for `(sig, Q)` — never the raw
+  `FirId`;
+- `inline` hits require the exact `(Q, sig)` key; sibling instances are
+  invisible and the signal is re-lowered under `P-Duplicate`.
+
+**Transports are pre-planned, never allocated on demand.** All cross-loop
+current-sample reads are known from the `VectorPlan` edges, so transport ids,
+buffer names, and the `(sig, producer, consumer)` table are frozen at plan
+construction (P4), before any schedule exists. Lowering only *resolves*
+against this table. This is what makes storage names strategy-independent; a
+lowering path that needs a transport absent from the plan is a plan bug and
+must fail closed, not allocate.
+
+CSE composes without interference: it runs per routed region after routing,
+never across region boundaries, so it can only merge values the cache already
+scoped to one region. `verify_routed_fir` independently rejects any value
+reference from `Q` to a definition in `R` unless `R ≤reg Q` or a declared
+transport carries it.
+
+### 4.6 Control and per-domain graph construction
+
+P3's parity gap with C++ `dependenciesGraphs` is closed by this membership
+design. `Hgraph` gains an explicit control graph next to the existing top and
+per-domain graphs:
+
+```rust
+enum GraphKey {
+    Control,          // new: slower-than-sample signals
+    Top,              // sample-rate signals of the root domain
+    Domain(ClkEnv),   // one per clock-domain wrapper
+}
+```
+
+Membership and edge rules:
+
+- a signal belongs to `Control` iff its variability is `Konst` or `Block` and
+  it is not owned by a clock-domain wrapper's per-fire evaluation;
+- `Samp` signals belong to their domain's graph (`Top` or `Domain(env)`);
+- a wrapper appears as a single node in its parent graph; its body signals
+  form the nested `Domain` graph — a signal appears in exactly one graph;
+- immediate edges order execution within one graph; delayed edges stay
+  placement-only (the existing `delayed` flag); references from a sample graph
+  to a control value are preconditions, not ordering edges — controls are
+  compiled first as a fixed outer phase (section 4.2), matching C++
+  `scheduleSigList` applying the strategy to controls, top, and each wrapper
+  subgraph independently;
+- cross-domain immediate references are legal only through the wrapper node or
+  a declared external precondition (`is_external`), mirroring the clock
+  consistency rule of section 5.2.
+
+The audit (`auditHgraph` parity) is extended accordingly: exact one-graph
+membership for every reachable signal, no `Samp` signal in `Control`, no
+undeclared cross-domain immediate edge. Activation stays behind the P3 shadow
+mode: the selected `Hsched` is compared against demand-driven lowering before
+it becomes authoritative.
+
 ## 5. Formal specification layer
 
 This section extends, rather than replaces, the
@@ -1346,7 +1515,8 @@ allowed to drive lowering.
   not only when clock domains exist.
 - Complete the current Rust `Hgraph` parity gap before activation: represent the
   C++ control graph explicitly, preserve top and nested domain graphs, and keep
-  delayed edges placement-only rather than same-tick ordering edges.
+  delayed edges placement-only rather than same-tick ordering edges. The
+  membership and edge rules are the design of section 4.6.
 - Introduce the common conservative effect classification here, before enabling
   schedule-dependent emission. Add effect-order edges or fixed source-order
   chains whenever commutation is not proved.
@@ -1375,11 +1545,13 @@ audited and documented rather than assumed absent.
 `Separate` function is exact, and the provisional `VectorPlanCertificate`
 satisfies all `P-*` obligations independently of `-ss`.
 
-- Add `vector_analysis.rs` under `signal_fir`.
+- Add `vector_analysis.rs` under `signal_fir`, implementing the unified
+  traversal, `SignalUseInfo` table, and OccMarkup semantics of section 4.3 and
+  the resource-identity rules of section 4.4.
 - Consolidate the dependency/effect API introduced for scalar scheduling with
   delay, occurrence, and vector-placement facts. It must distinguish at least
   `Immediate`, `Delayed(n)`, `Control`, `Effect`, and `ClockBoundary` without
-  maintaining a second child walk.
+  maintaining a second child walk (`signal_dependencies` is the single owner).
 - Produce `SignalUseInfo` per `SigId`: variability, context-sensitive uses,
   `max_delay`, delay-read shape, projection/group identity, triviality, effects,
   and clock domain.
@@ -1424,6 +1596,9 @@ lowering, an independent FIR check establishes `R-Type`, `R-Effects`, and
 
 - Add every cross-loop data dependency before scheduling. For each immediate
   sample value, record a typed chunk transport from producer to each consumer.
+  Transports are frozen at plan construction and only resolved during lowering;
+  the three-table value cache and its visibility rules are the design of
+  section 4.5.
 - Add or conservatively co-locate effect dependencies for mutable tables,
   impure/unknown foreign calls, UI writes, and shared state. A data-only DAG is
   insufficient for arbitrary legal reordering.
