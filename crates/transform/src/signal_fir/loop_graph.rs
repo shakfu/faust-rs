@@ -30,6 +30,8 @@ use signals::{SigId, SigMatch, match_sig};
 use sigtype::Variability;
 use tlib::TreeArena;
 
+use crate::schedule::ScheduleDag;
+
 /// Index of a loop node in a [`LoopGraph`].
 ///
 /// Allocation order == insertion order, and every set/queue below is
@@ -206,6 +208,29 @@ impl LoopGraph {
                 unscheduled: self.ids().filter(|id| !scheduled.contains(id)).collect(),
             })
         }
+    }
+}
+
+/// [`crate::schedule::ScheduleDag`] adapter (roadmap P1). `LoopGraph` is
+/// `pub(crate)` behind a private `signal_fir::loop_graph` module path, so
+/// this impl lives here rather than alongside the generic scheduler core:
+/// `crate::schedule` cannot name `LoopGraph` at all, while every item in
+/// `signal_fir::loop_graph` can already name both `LoopGraph` (this module)
+/// and `ScheduleDag` (`pub`, reachable crate-wide) — the impl goes where
+/// visibility allows, per the trait's own orphan-rule freedom (same crate on
+/// either side). Nodes are already `LoopId`-ordered by allocation
+/// (`add_loop` assigns ids `0, 1, 2, ...`) and deps are already a
+/// `BTreeSet<LoopId>`, so both methods are simple, already-ordered
+/// collections — no behavior of `LoopGraph` itself changes.
+impl ScheduleDag for LoopGraph {
+    type Node = LoopId;
+
+    fn nodes(&self) -> Vec<Self::Node> {
+        self.ids().collect()
+    }
+
+    fn dependencies(&self, n: Self::Node) -> Vec<Self::Node> {
+        self.node(n).deps.iter().copied().collect()
     }
 }
 
@@ -1222,6 +1247,44 @@ mod tests {
         g.add_dep(b, a);
         let err = g.topological_order().unwrap_err();
         assert_eq!(err.unscheduled, vec![a, b]);
+    }
+
+    /// The generic scheduler core (roadmap P1) must agree with
+    /// `LoopGraph`'s own `topological_order` on the same DAG: build one
+    /// through the existing `add_loop`/`add_dep` API, run all four
+    /// `crate::schedule` strategies over it, and check every result against
+    /// the independent `verify_schedule` checker.
+    #[test]
+    fn schedule_dag_conformance_through_the_existing_api() {
+        use crate::schedule::{SchedulingStrategy, schedule, verify_schedule};
+
+        let mut g = LoopGraph::new();
+        let a = g.add_loop(LoopKind::Vectorizable, false);
+        let b = g.add_loop(LoopKind::Vectorizable, false);
+        let c = g.add_loop(LoopKind::Recursive, false);
+        // c depends on b, b depends on a.
+        g.add_dep(c, b);
+        g.add_dep(b, a);
+
+        for strategy in [
+            SchedulingStrategy::DepthFirst,
+            SchedulingStrategy::BreadthFirst,
+            SchedulingStrategy::Special,
+            SchedulingStrategy::ReverseBreadthFirst,
+        ] {
+            let order = schedule(strategy, &g).expect("acyclic loop graph schedules");
+            assert!(
+                verify_schedule(&g, &order).is_ok(),
+                "{strategy:?}: {order:?} fails verify_schedule"
+            );
+        }
+        // Every strategy agrees with `topological_order` on this simple
+        // chain: only one valid order exists.
+        assert_eq!(
+            schedule(SchedulingStrategy::DepthFirst, &g).unwrap(),
+            vec![a, b, c]
+        );
+        assert_eq!(g.topological_order().unwrap(), vec![a, b, c]);
     }
 
     // ── loop_env assignment (S-A) ──

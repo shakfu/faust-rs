@@ -23,6 +23,7 @@
 
 pub mod clk_env;
 pub mod hgraph;
+pub mod schedule;
 pub mod signal_fir;
 pub mod signal_prepare;
 
