@@ -88,7 +88,8 @@ flowchart TB
   G --> S["Loop-separation decision"]
   S --> P["Vector plan<br>placement, epochs, transports"]
   P --> L["Region lowering<br>+ loop fission"]
-  L --> X["Execution semantics<br>delays, epochs, simulation"]
+  L --> K["Lockstep bundling<br>(v2 extension)"]
+  K --> X["Execution semantics<br>delays, epochs, simulation"]
 ```
 
 ### 3.1 Analysis domains — the vocabulary
@@ -188,7 +189,34 @@ facts (`StaticFissionSafe`) implies the true dynamic safety (`FissionSafe`). The
 file **states this as an obligation**, not an assumed fact: it is the crux and it
 is deliberately left open.
 
-### 3.7 Execution semantics — what "same sound" means
+### 3.7 Lockstep bundling — accelerating recursion across instances
+
+Time vectorization leaves recursive loops serial, so the specification also
+covers the planned **lockstep** extension: k structurally identical, mutually
+independent serial loops executed together, one SIMD lane per instance. Three
+additions, all local:
+
+- `Expr.shape` erases exactly the leaf payloads (literal values, input
+  channels, state resources). Isomorphism *is* equality of shapes — so
+  reflexivity, symmetry and transitivity come for free, and the executable
+  checker `isoB` just decides shape equality (the reference for the Rust
+  shape-hash detector).
+- A fourth loop kind, `lockstep (width)`: serial in time, parallel across
+  lanes — deliberately neither `vectorizable` nor plain `recursive`.
+- `LockstepObligations`, the finite gate for one bundle: at least two lanes,
+  no duplicates, every lane in the plan, and pairwise — no dependency path in
+  either direction, commuting effects, same epoch.
+
+*At stake:* two things, one of each kind. **Proved**:
+`iso_decorations_agree` — isomorphic lanes receive the same value type, rate,
+vectorizability and clock, which is what lets one bundle share a single
+transport element type and placement (effects are deliberately excluded: each
+lane owns its state, and commutation handles them). **Stated**: `LockstepSafe`
+is *literally* `FissionSafe` with the lockstep order substituted — the
+extension introduces no new semantic axiom; its premises are the ones the file
+already demands.
+
+### 3.8 Execution semantics — what "same sound" means
 
 Abstract, backend-neutral models of delays (`delayRead`, `historyStep`),
 step-by-step running (`iterate`), and execution results (outputs + final state +
@@ -230,7 +258,8 @@ if edge direction, strategy decoding, or the separation rule ever drift.
 | typing assigns one decoration (`hasType_functional`)              | `ScheduleIndependent`                         |
 | schedule checker sound **and** complete (`validScheduleB_iff`)    | `Scheduler` soundness/completeness            |
 | transport index stays in bounds (`chunkIndex_lt`)                 | delay/recursion/clock/AD refinements          |
-| exhaustive separation rule (`separateLoop_complete`)              | —                                             |
+| exhaustive separation rule (`separateLoop_complete`)              | `LockstepSafe` (a `FissionSafe` instance)     |
+| isomorphic lanes share type/rate/vectorizability/clock (`iso_decorations_agree`) | —                              |
 
 The pattern is deliberate: the small, reusable, adversarial-input-facing pieces
 are proven; the deep semantic equivalences are stated and, for now, tested.

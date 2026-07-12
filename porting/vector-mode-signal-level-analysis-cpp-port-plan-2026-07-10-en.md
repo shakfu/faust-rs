@@ -1648,10 +1648,15 @@ correctness premises are the ones this plan already formalizes:
   (inputs, constants, state identities), witnessed by an explicit per-lane leaf
   mapping that an independent checker validates by parallel traversal.
 
-Formal-model additions are local: a third loop kind
-`Lockstep { width, lanes }` (serial in time, parallel across lanes — neither
-`Vectorizable` nor plain `Recursive`), an `IsoWitness` in the plan certificate,
-and a `layout` field (`Planar | Interleaved(k)`) on transports. `-ss` sees a
+Formal-model additions are local: a fourth loop kind
+`Lockstep { width }` (serial in time, parallel across lanes — neither
+`Vectorizable` nor plain `Recursive`, and distinct from `Island`), an
+`IsoWitness` in the plan certificate, and a `layout` field
+(`Planar | Interleaved(k)`) on transports. These are now mechanized in the
+companion Lean specification (`LoopKind.lockstep`, `Expr.shape` /
+`IsoModuloLeaves` / `isoB`, `LockstepObligations`, `LockstepSafe`), including
+a proved theorem `iso_decorations_agree`: isomorphic lanes share value type,
+rate, vectorability, and clock. `-ss` sees a
 bundle as one node of the epoch DAG, so P-Strategy is untouched.
 
 ### 8.2 Bit-exactness and the contraction policy

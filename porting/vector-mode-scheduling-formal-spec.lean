@@ -14,6 +14,8 @@
   * the ordered C++ needSeparateLoop decision;
   * effects, placement, epochs, and typed transports;
   * region-aware lowering and fission/simulation proof obligations;
+  * lockstep instance bundling: isomorphism modulo leaves and bundle
+    obligations (planned schema-v2 extension);
   * abstract delay and repeated-transition semantics.
 
   It deliberately does not claim a proof of the complete Faust compiler.
@@ -413,6 +415,128 @@ theorem hasType_functional {e : Expr} {d₁ d₂ : Decoration}
       have hd := ih ‹_›
       subst hd
       rfl
+
+/-! ### Structural isomorphism modulo leaves (lockstep prerequisite) -/
+
+/-
+  Lockstep instance bundling runs k serial computations in SIMD lanes, one lane
+  per instance. Its structural precondition is that the k bodies are the *same
+  computation up to the leaves*: literal values, input channels, and state
+  resources may differ per lane, while the constructor skeleton, projection
+  indices, and clock annotations must match.
+
+  Rather than defining a binary relation and proving it is an equivalence, the
+  skeleton is extracted as a first-class value: `Expr.shape` erases exactly the
+  leaf payloads. Isomorphism is then *equality of shapes*, so reflexivity,
+  symmetry, and transitivity are inherited from `Eq` for free, and the
+  executable checker is decidable equality on `Shape`. This also mirrors the
+  planned Rust implementation, which detects bundling candidates with a shape
+  hash over prepared signals.
+-/
+
+inductive Shape where
+  | intLit
+  | realLit
+  | input
+  | bin (left right : Shape)
+  | delay (value amount : Shape)
+  | proj (index : Nat) (group : Shape)
+  | clocked (clock : ClockId) (value : Shape)
+  deriving Repr, DecidableEq, BEq
+
+def Expr.shape : Expr -> Shape
+  | .intLit _ => .intLit
+  | .realLit _ => .realLit
+  | .input _ => .input
+  | .bin l r => .bin l.shape r.shape
+  | .delay v n _ => .delay v.shape n.shape
+  | .proj i g => .proj i g.shape
+  | .clocked c v => .clocked c v.shape
+
+def IsoModuloLeaves (a b : Expr) : Prop := a.shape = b.shape
+
+/-- Executable form of the isomorphism test (the reference for the Rust
+    shape-hash detector: hash collisions must be confirmed by this equality). -/
+def isoB (a b : Expr) : Bool := decide (a.shape = b.shape)
+
+theorem isoB_iff (a b : Expr) : isoB a b = true ↔ IsoModuloLeaves a b := by
+  simp [isoB, IsoModuloLeaves]
+
+theorem iso_refl (e : Expr) : IsoModuloLeaves e e := rfl
+
+theorem iso_symm {a b : Expr} (h : IsoModuloLeaves a b) : IsoModuloLeaves b a :=
+  h.symm
+
+theorem iso_trans {a b c : Expr} (hab : IsoModuloLeaves a b)
+    (hbc : IsoModuloLeaves b c) : IsoModuloLeaves a c :=
+  hab.trans hbc
+
+/-
+  `iso_decorations_agree` is the semantic payoff of the definition: isomorphic
+  lanes receive the same value type, rate, vectorability, and clock. This is
+  what lets one bundle share a single transport element type, rate analysis,
+  and clock placement across lanes. Effects are deliberately *not* claimed
+  equal: each lane touches its own state resources, and lockstep legality
+  handles effects separately through pairwise commutation.
+-/
+
+theorem iso_decorations_agree {a b : Expr} {da db : Decoration}
+    (ha : HasType a da) (hb : HasType b db) (iso : IsoModuloLeaves a b) :
+    da.valueTy = db.valueTy ∧ da.rate = db.rate
+      ∧ da.vectorability = db.vectorability ∧ da.clock = db.clock := by
+  unfold IsoModuloLeaves at iso
+  induction ha generalizing b db with
+  | intLit v =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  | realLit v =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  | input channel =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  | bin _ _ _ promoted ihl ihr =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb with
+    | @bin _ _ dl' dr' resultTy' lT' rT' _ promoted' =>
+      obtain ⟨isoL, isoR⟩ := iso
+      obtain ⟨vl, rl, xl, cl⟩ := ihl lT' isoL
+      obtain ⟨vr, rr, xr, _⟩ := ihr rT' isoR
+      rw [vl, vr] at promoted
+      rw [promoted] at promoted'
+      cases promoted'
+      exact ⟨rfl, by simp [rl, rr], by simp [xl, xr], by simp [cl]⟩
+  | delay state _ _ _ _ ihv iha =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb with
+    | @delay _ _ dv' da' state' vT' aT' _ _ =>
+      obtain ⟨isoV, isoA⟩ := iso
+      obtain ⟨vv, rv, xv, cv⟩ := ihv vT' isoV
+      obtain ⟨_, ra, xa, _⟩ := iha aT' isoA
+      exact ⟨vv, by simp [rv, ra], by simp [xv, xa], cv⟩
+  | proj groupTyped groupIsTuple componentAt ih =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb with
+    | @proj _ _ dg' components' component' gT' groupIsTuple' componentAt' =>
+      obtain ⟨isoIdx, isoG⟩ := iso
+      obtain ⟨vg, _, _, cg⟩ := ih gT' isoG
+      rw [groupIsTuple, groupIsTuple'] at vg
+      cases vg
+      subst isoIdx
+      rw [componentAt] at componentAt'
+      cases componentAt'
+      exact ⟨rfl, rfl, rfl, cg⟩
+  | clocked clock _ ih =>
+    cases b <;> simp [Expr.shape] at iso
+    cases hb with
+    | clocked _ vT' =>
+      obtain ⟨isoC, isoV⟩ := iso
+      obtain ⟨vv, rv, xv, _⟩ := ih vT' isoV
+      subst isoC
+      exact ⟨vv, rv, xv, rfl⟩
 
 /-
   `Expr` and `HasType` document representative rules; faust-rs must not rebuild
@@ -854,7 +978,10 @@ example : separateLoop
   * `owned loop` has one materialized producer loop.
 
   Loop kind records whether a loop may use vector FIR, must preserve a recursive
-  group's serial semantics, or is a serial clock/effect island.
+  group's serial semantics, is a serial clock/effect island, or is a lockstep
+  bundle of `width` isomorphic serial instances (serial in time, parallel
+  across SIMD lanes — a fourth kind, neither `vectorizable` nor plain
+  `recursive`; see the lockstep section below).
 -/
 
 inductive Placement where
@@ -867,6 +994,7 @@ inductive LoopKind where
   | vectorizable
   | recursive (group : Nat)
   | island (clock : ClockId)
+  | lockstep (width : Nat)
   deriving Repr, DecidableEq, BEq
 
 structure ExecutionEpoch where
@@ -1167,6 +1295,77 @@ def StaticImpliesDynamicFission
   obligation here, not an assumed theorem.
 -/
 
+/-! ## Lockstep instance bundling (planned schema-v2 extension) -/
+
+/-
+  A lockstep bundle merges k structurally isomorphic, mutually independent
+  serial loops into one loop that advances all k instances sample by sample,
+  one SIMD lane per instance. The recursion stays serial in time; the
+  parallelism is across lanes. Each lane executes exactly its scalar IEEE op
+  sequence, so bundling is bit-exact per lane (given one FMA-contraction
+  policy shared by scalar and lockstep lowering).
+
+  Legality reuses obligations this file already defines. Lockstep execution
+  interleaves the bundled loops' per-sample events — `A(0), B(0), A(1), B(1)`
+  instead of `A(0..q); B(0..q)` — so it is one more linearization of the same
+  dependence relation, admissible exactly when the loops are independent and
+  their effects commute. The single genuinely new obligation is the structural
+  isomorphism witness (`IsoModuloLeaves` at the representative `Expr` layer, a
+  shape hash plus per-lane leaf maps in the production certificate).
+-/
+
+def VectorPlan.loopEffects (plan : VectorPlan) (l : LoopId) : List Effect :=
+  (plan.roots l).flatMap plan.effects
+
+/-
+  `Reaches` is plain reachability over the plan's data and effect edges. Two
+  loops are `Independent` when neither reaches the other; only such loops may
+  be bundled, because lockstep executes them simultaneously per sample.
+-/
+
+inductive Reaches (edges : List (LoopId × LoopId)) : LoopId -> LoopId -> Prop where
+  | here {a b : LoopId} : (a, b) ∈ edges -> Reaches edges a b
+  | step {a b c : LoopId} : (a, b) ∈ edges -> Reaches edges b c ->
+      Reaches edges a c
+
+def Independent (plan : VectorPlan) (a b : LoopId) : Prop :=
+  ¬Reaches plan.allEdges a b ∧ ¬Reaches plan.allEdges b a
+
+def PairwiseBundlable (plan : VectorPlan) : List LoopId -> Prop
+  | [] => True
+  | l :: rest =>
+      (∀ m ∈ rest,
+        Independent plan l m
+          ∧ effectsCommute (plan.loopEffects l) (plan.loopEffects m) = true
+          ∧ epochRankOf? plan.epochs l = epochRankOf? plan.epochs m)
+        ∧ PairwiseBundlable plan rest
+
+/-
+  The finite gate for one bundle. The isomorphism side lives at the signal
+  layer: production certificates carry one leaf mapping per lane, checked by
+  parallel traversal; `iso_decorations_agree` is the proved statement that
+  isomorphic lanes share value type, rate, vectorability, and clock — which is
+  what lets one bundle use a single transport element type and one clock/epoch
+  placement for all lanes.
+-/
+
+structure LockstepObligations (plan : VectorPlan) (lanes : List LoopId) where
+  widthAtLeastTwo : 2 ≤ lanes.length
+  lanesNodup : lanes.Nodup
+  lanesInPlan : ∀ l ∈ lanes, l ∈ plan.loops
+  bundlable : PairwiseBundlable plan lanes
+
+/-
+  The semantic obligation needs no new machinery: lockstep order is one more
+  execution order that must preserve every true dependence, which is literally
+  the `FissionSafe` statement with the lockstep order substituted for the
+  chunked vector order. No new axiom is introduced by the extension.
+-/
+
+def LockstepSafe (deps : List (Event × Event))
+    (scalarBefore lockstepBefore : Event -> Event -> Prop) : Prop :=
+  FissionSafe deps scalarBefore lockstepBefore
+
 /-! ## Delay and transition semantics -/
 
 /-
@@ -1288,5 +1487,24 @@ def ScheduleIndependent
     delayRead := false
     recursiveProjection := false
     multipleOccurrences := true }
+
+/-
+  Two one-pole-style lanes: same skeleton, different input channels, literal
+  values, and state resources — isomorphic modulo leaves. Changing the shape
+  (a different delay-amount constructor) must break the isomorphism.
+-/
+
+private def isoLaneA : Expr :=
+  .bin (.input 0) (.delay (.input 0) (.intLit 1) (.state 0))
+
+private def isoLaneB : Expr :=
+  .bin (.input 1) (.delay (.input 1) (.intLit 2) (.state 1))
+
+private def isoLaneBad : Expr :=
+  .bin (.input 1) (.delay (.input 1) (.realLit 2.0) (.state 1))
+
+#guard isoB isoLaneA isoLaneB
+#guard !isoB isoLaneA isoLaneBad
+#guard !isoB isoLaneA (.input 0)
 
 end Faust.VectorScheduling

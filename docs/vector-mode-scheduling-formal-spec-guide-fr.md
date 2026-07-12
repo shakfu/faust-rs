@@ -89,7 +89,8 @@ flowchart TB
   G --> S["Décision de séparation de boucle"]
   S --> P["Plan vectoriel<br>placement, époques, transports"]
   P --> L["Abaissement par régions<br>+ fission de boucle"]
-  L --> X["Sémantique d'exécution<br>délais, époques, simulation"]
+  L --> K["Bundling lockstep<br>(extension v2)"]
+  K --> X["Sémantique d'exécution<br>délais, époques, simulation"]
 ```
 
 ### 3.1 Domaines d'analyse — le vocabulaire
@@ -196,7 +197,36 @@ sûreté dynamique (`FissionSafe`). Le fichier l'**énonce comme une obligation*
 pas comme un fait admis : c'est le point crucial, et il est délibérément laissé
 ouvert.
 
-### 3.7 Sémantique d'exécution — ce que veut dire « le même son »
+### 3.7 Bundling lockstep — accélérer la récursion à travers les instances
+
+La vectorisation temporelle laisse les boucles récursives sérielles ; la
+spécification couvre donc aussi l'extension **lockstep** planifiée : k boucles
+sérielles structurellement identiques et mutuellement indépendantes, exécutées
+ensemble, une lane SIMD par instance. Trois ajouts, tous locaux :
+
+- `Expr.shape` efface exactement les charges des feuilles (valeurs littérales,
+  canaux d'entrée, ressources d'état). L'isomorphisme *est* l'égalité des
+  formes — réflexivité, symétrie et transitivité sont donc gratuites, et le
+  vérificateur exécutable `isoB` décide simplement l'égalité de formes (la
+  référence pour le détecteur Rust par hash de forme).
+- Un quatrième genre de boucle, `lockstep (width)` : sériel dans le temps,
+  parallèle à travers les lanes — délibérément ni `vectorizable`, ni
+  simplement `recursive`.
+- `LockstepObligations`, la porte finie pour un bundle : au moins deux lanes,
+  sans doublon, chaque lane dans le plan, et deux à deux — aucun chemin de
+  dépendance dans un sens ou l'autre, effets qui commutent, même époque.
+
+*Enjeu :* deux choses, une de chaque nature. **Prouvé** :
+`iso_decorations_agree` — des lanes isomorphes reçoivent le même type de
+valeur, le même taux, la même vectorisabilité et la même horloge, ce qui
+permet à un bundle de partager un seul type d'élément de transport et un seul
+placement (les effets sont volontairement exclus : chaque lane possède son
+état, et la commutation s'en charge). **Énoncé** : `LockstepSafe` est
+*littéralement* `FissionSafe` avec l'ordre lockstep substitué — l'extension
+n'introduit aucun nouvel axiome sémantique ; ses prémisses sont celles que le
+fichier exige déjà.
+
+### 3.8 Sémantique d'exécution — ce que veut dire « le même son »
 
 Des modèles abstraits, indépendants du backend, des délais (`delayRead`,
 `historyStep`), de l'exécution pas à pas (`iterate`) et des résultats d'exécution
@@ -242,7 +272,8 @@ règle de séparation venaient à dériver.
 | le typage attribue une décoration (`hasType_functional`)          | `ScheduleIndependent`                            |
 | vérificateur d'ordre correct **et** complet (`validScheduleB_iff`)| correction/complétude de `Scheduler`             |
 | l'indice de transport reste borné (`chunkIndex_lt`)               | raffinements délais/récursion/horloge/AD         |
-| règle de séparation exhaustive (`separateLoop_complete`)          | —                                                |
+| règle de séparation exhaustive (`separateLoop_complete`)          | `LockstepSafe` (une instance de `FissionSafe`)   |
+| lanes isomorphes : mêmes type/taux/vectorisabilité/horloge (`iso_decorations_agree`) | —                             |
 
 Le motif est délibéré : les petits morceaux réutilisables et exposés à des entrées
 adverses sont prouvés ; les équivalences sémantiques profondes sont énoncées et,
