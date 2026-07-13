@@ -379,6 +379,14 @@ struct SignalToFirLower<'a> {
     rad_reverse: build::RadReverseState,
     /// Grouped BRA (Block Reverse AD) lowering state.
     bra: bra::BraState,
+    /// Demand-driven first-lowering order: every `SigId` in the order it is
+    /// first materialized (first cache insertion in
+    /// [`Self::lower_signal`]). Observation-only — never read by lowering,
+    /// only exported through [`crate::signal_fir::SignalFirOutput`] for the
+    /// P3 shadow-mode comparison (`crate::signal_fir::shadow`) against a
+    /// selected `Hsched`. Recording it costs one `Vec::push` per distinct
+    /// signal and changes no emitted FIR.
+    emission_order: Vec<SigId>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.

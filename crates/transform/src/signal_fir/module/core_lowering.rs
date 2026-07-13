@@ -276,7 +276,13 @@ impl<'a> SignalToFirLower<'a> {
         };
 
         if !self.is_recursive_projection(sig) {
-            self.cache.insert(sig, lowered);
+            // First materialization of `sig`: the sole cache-insertion site,
+            // so this is exactly the demand-driven emission order the P3
+            // shadow-mode diagnostic compares against a selected `Hsched`
+            // (`crate::signal_fir::shadow`). Observation-only.
+            if self.cache.insert(sig, lowered).is_none() {
+                self.emission_order.push(sig);
+            }
         }
         Ok(lowered)
     }

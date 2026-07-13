@@ -68,6 +68,7 @@ mod placement;
 mod planner;
 pub mod pv_slice;
 mod recursion;
+pub mod shadow;
 mod siggen;
 
 pub use error::{SignalFirError, SignalFirErrorCode};
@@ -231,6 +232,19 @@ pub struct SignalFirOutput {
     pub store: FirStore,
     /// Root node id of the generated FIR module.
     pub module: FirId,
+    /// Demand-driven first-lowering order of every distinct materialized
+    /// `SigId` (P3 shadow-mode diagnostic input, plan §P3 "record
+    /// statement-order... differences for `-ss 0` before making it
+    /// authoritative"). Observation-only: nothing in lowering or codegen
+    /// reads it, and it never affects the emitted FIR. Compare it against a
+    /// selected `hgraph::Hsched` with [`shadow::compare_emission_order`].
+    pub emission_order: Vec<SigId>,
+    /// P3 shadow-mode report: how the demand-driven [`Self::emission_order`]
+    /// relates to the causality gate's selected `Hsched` (`-ss 0`). `None`
+    /// when no hierarchical graph was built (a wrapper program compiled
+    /// through the clock-unaware entry point). Observation-only; the FIR is
+    /// identical whether or not this is computed.
+    pub shadow_report: Option<shadow::ShadowReport>,
 }
 
 /// Compiles propagated signals plus canonical grouped UI into a FIR module.
@@ -317,8 +331,15 @@ fn compile_fastlane_inner(
         )
     })?;
 
-    // Clocked programs: infer domains and validate the hierarchical graph
-    // before lowering (roadmap P1 analyses as the pre-lowering gate).
+    // Causality gate (P3): build the hierarchical dependency graph and a
+    // schedule for every prepared forest before lowering. `gate_graphs`
+    // captures the `(Hgraph, Hsched)` when one is built, so the P3
+    // shadow-mode diagnostic below can compare the selected schedule against
+    // the demand-driven emission order — over the same prepared arena. The
+    // schedule itself is still *not* authoritative over lowering: only its
+    // acceptance (causality) gates, so `-ss` remains behaviorally
+    // unobservable.
+    let mut gate_graphs: Option<(crate::hgraph::Hgraph, crate::hgraph::Hsched)> = None;
     let clocked = match clock_domains {
         Some(domains) if !domains.is_empty() => {
             let envs = crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs())
@@ -341,35 +362,28 @@ fn compile_fastlane_inner(
                     format!("hierarchical dependency graph failed: {err}"),
                 )
             })?;
-            // -ss default: this gate only checks causality (its Hsched
-            // value is not yet consumed by lowering, see the schedule()
-            // doc); the strategy choice is therefore not yet observable.
-            crate::hgraph::schedule(&hgraph, crate::schedule::SchedulingStrategy::DepthFirst)
-                .map_err(|err| {
+            let hsched =
+                crate::hgraph::schedule(&hgraph, crate::schedule::SchedulingStrategy::DepthFirst)
+                    .map_err(|err| {
                     SignalFirError::new(
                         SignalFirErrorCode::ClockAnalysis,
                         format!("clock-domain scheduling failed: {err}"),
                     )
                 })?;
+            gate_graphs = Some((hgraph, hsched));
             Some(module::ClockedPlan { domains, envs })
         }
         _ => {
-            // Signal dependency graph construction runs for every prepared
-            // forest, not only when clock domains exist (P3, port plan
-            // "make signal dependency graph construction available for
-            // every prepared forest"). But a program reaching this branch
-            // with an actual OD/US/DS wrapper node was compiled through a
-            // clock-unaware entry point (no `ClockDomainTable` was ever
-            // supplied): `clk_env::annotate` cannot resolve a real
-            // wrapper's clock relationship from an empty table, and
-            // reports a confusing `ClockedViolation`-family error instead
-            // of letting `module::build_module`'s own, specific
-            // `FRS-SFIR-0007` ("clocked node reached without a domain
-            // table") rejection fire, exactly as before this gate existed.
-            // Ordinary (wrapper-free) programs are unaffected: this is
-            // purely a causality gate (its `Hsched` value is not yet
-            // consumed by lowering) whose discarded `envs`/`Hgraph` never
-            // escape it — `-ss` default is therefore not yet observable.
+            // A program reaching this branch with an actual OD/US/DS wrapper
+            // node was compiled through a clock-unaware entry point (no
+            // `ClockDomainTable` was ever supplied): `clk_env::annotate`
+            // cannot resolve a real wrapper's clock relationship from an
+            // empty table, and would report a confusing
+            // `ClockedViolation`-family error instead of letting
+            // `module::build_module`'s own, specific `FRS-SFIR-0007`
+            // ("clocked node reached without a domain table") rejection
+            // fire, exactly as before this gate existed. So skip the gate
+            // for those; ordinary wrapper-free programs run it.
             let has_wrapper = crate::hgraph::contains_wrapper(prepared.arena(), prepared.outputs())
                 .map_err(|err| {
                     SignalFirError::new(
@@ -400,19 +414,23 @@ fn compile_fastlane_inner(
                         format!("hierarchical dependency graph failed: {err}"),
                     )
                 })?;
-                crate::hgraph::schedule(&hgraph, crate::schedule::SchedulingStrategy::DepthFirst)
-                    .map_err(|err| {
+                let hsched = crate::hgraph::schedule(
+                    &hgraph,
+                    crate::schedule::SchedulingStrategy::DepthFirst,
+                )
+                .map_err(|err| {
                     SignalFirError::new(
                         SignalFirErrorCode::ClockAnalysis,
                         format!("clock-domain scheduling failed: {err}"),
                     )
                 })?;
+                gate_graphs = Some((hgraph, hsched));
             }
             None
         }
     };
 
-    module::build_module(
+    let output = module::build_module(
         &plan,
         options.module_name.as_str(),
         prepared.arena(),
@@ -425,7 +443,22 @@ fn compile_fastlane_inner(
         options.delay_line_threshold,
         options.compute_mode,
         clocked,
-    )
+    )?;
+
+    // P3 shadow mode (observation-only): with the demand-driven emission
+    // order and the gate's selected `Hsched` now both available over the
+    // same prepared arena, record how they relate. This never alters the
+    // returned FIR — it only annotates the output for diagnostics/tests, so
+    // activation (making the schedule authoritative) can be judged against
+    // real corpus evidence rather than assumed.
+    let shadow_report = gate_graphs
+        .as_ref()
+        .map(|(hgraph, hsched)| shadow::compare_emission_order(hgraph, hsched, &output));
+
+    Ok(SignalFirOutput {
+        shadow_report,
+        ..output
+    })
 }
 
 #[cfg(test)]

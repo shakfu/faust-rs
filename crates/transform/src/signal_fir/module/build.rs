@@ -935,5 +935,10 @@ pub(crate) fn build_module<'a>(
     Ok(SignalFirOutput {
         store: lower.store,
         module,
+        emission_order: lower.emission_order,
+        // Filled in by `compile_fastlane_inner`, which owns the causality
+        // gate's `Hgraph`/`Hsched`; `build_module` has no schedule to
+        // compare against.
+        shadow_report: None,
     })
 }

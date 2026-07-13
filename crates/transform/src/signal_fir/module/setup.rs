@@ -98,6 +98,7 @@ impl<'a> SignalToFirLower<'a> {
             placement,
             rad_reverse: build::RadReverseState::default(),
             bra: bra::BraState::default(),
+            emission_order: Vec::new(),
         }
     }
 

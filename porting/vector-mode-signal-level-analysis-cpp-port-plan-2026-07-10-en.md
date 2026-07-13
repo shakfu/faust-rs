@@ -1535,6 +1535,26 @@ allowed to drive lowering.
 - Run CSE only after statements have been routed to their lifecycle/domain
   regions.
 
+**Implementation status (2026-07-13).** Structural bullets done and merged,
+all behavior-preserving (`golden-check` unchanged): unconditional
+`Hgraph`/`Hsched` causality gate for every prepared forest; explicit
+`GraphKey::Control` graph with `audit_control_variability`;
+`hgraph::schedule` driven by the shared generic `SchedulingStrategy`
+scheduler. **Shadow mode is implemented and its finding recorded**
+(`signal_fir::shadow`, exported on `SignalFirOutput::shadow_report`; corpus
+evidence in `crates/compiler/tests/p3_shadow_mode.rs`): across the sampled
+scalar programs the demand-driven emission order **respects every same-tick
+(immediate) `Hgraph` edge** (zero inversions — activation is dependency-safe),
+but only ~5/9 already match the `-ss 0` schedule on the comparable
+intersection (activation **would** churn statement order, hence goldens, for
+a real fraction of even trivial programs). Still deferred, and gated on an
+explicit go-ahead per this plan and `AGENTS.md`: making `Hsched` authoritative
+over FIR emission, and CSE-after-routing. These are the only steps that change
+golden output; the shadow finding is their go/no-go input, not a substitute
+for the per-case audit the exit criterion requires. The conservative effect
+classification bullet is also still open (no schedule-dependent emission
+exists yet to need it).
+
 **Exit criterion:** `-ss 0/1/2/3` produce valid distinct scalar schedules and
 bit-exact runtime results. Any textual golden changes for `-ss 0` are individually
 audited and documented rather than assumed absent.
