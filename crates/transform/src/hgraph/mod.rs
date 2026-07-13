@@ -264,6 +264,34 @@ pub fn needs_subgraph(arena: &TreeArena, sig: SigId) -> bool {
     )
 }
 
+/// Whether any signal reachable from `outputs` is an OD/US/DS wrapper.
+///
+/// Pure structural scan — needs no domain table or clock-environment map, so
+/// it is safe to run before either exists. A caller with no
+/// `ClockDomainTable` at all must check this *before* attempting
+/// [`build_hgraph`] with an empty table: `clk_env::annotate` cannot resolve
+/// a real wrapper's clock relationship without real domain data, and will
+/// report a structurally confusing `ClockedViolation`-family error instead
+/// of the specific, intentional "clocked node reached without a domain
+/// table" rejection the caller almost certainly wants (`signal_fir`'s
+/// `FRS-SFIR-0007`).
+pub fn contains_wrapper(arena: &TreeArena, outputs: &[SigId]) -> Result<bool, HgraphError> {
+    let mut visited: AHashSet<SigId> = AHashSet::new();
+    let mut stack: Vec<SigId> = outputs.to_vec();
+    while let Some(sig) = stack.pop() {
+        if !visited.insert(sig) {
+            continue;
+        }
+        if needs_subgraph(arena, sig) {
+            return Ok(true);
+        }
+        for edge in get_signal_dependencies(arena, sig)? {
+            stack.push(edge.to);
+        }
+    }
+    Ok(false)
+}
+
 /// `isExternal(cur_env, sig)` ⇔ the signal's domain is a *strict* ancestor of
 /// the current traversal domain: computed elsewhere, visible here.
 #[must_use]

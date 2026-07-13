@@ -353,7 +353,63 @@ fn compile_fastlane_inner(
                 })?;
             Some(module::ClockedPlan { domains, envs })
         }
-        _ => None,
+        _ => {
+            // Signal dependency graph construction runs for every prepared
+            // forest, not only when clock domains exist (P3, port plan
+            // "make signal dependency graph construction available for
+            // every prepared forest"). But a program reaching this branch
+            // with an actual OD/US/DS wrapper node was compiled through a
+            // clock-unaware entry point (no `ClockDomainTable` was ever
+            // supplied): `clk_env::annotate` cannot resolve a real
+            // wrapper's clock relationship from an empty table, and
+            // reports a confusing `ClockedViolation`-family error instead
+            // of letting `module::build_module`'s own, specific
+            // `FRS-SFIR-0007` ("clocked node reached without a domain
+            // table") rejection fire, exactly as before this gate existed.
+            // Ordinary (wrapper-free) programs are unaffected: this is
+            // purely a causality gate (its `Hsched` value is not yet
+            // consumed by lowering) whose discarded `envs`/`Hgraph` never
+            // escape it — `-ss` default is therefore not yet observable.
+            let has_wrapper = crate::hgraph::contains_wrapper(prepared.arena(), prepared.outputs())
+                .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("wrapper scan failed: {err}"),
+                    )
+                })?;
+            if !has_wrapper {
+                let empty_domains = propagate::ClockDomainTable::new();
+                let envs =
+                    crate::clk_env::annotate(prepared.arena(), &empty_domains, prepared.outputs())
+                        .map_err(|err| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::ClockAnalysis,
+                                format!("clock-environment inference failed: {err}"),
+                            )
+                        })?;
+                let hgraph = crate::hgraph::build_hgraph(
+                    prepared.arena(),
+                    &empty_domains,
+                    &envs,
+                    prepared.outputs(),
+                    prepared.sig_types_map(),
+                )
+                .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("hierarchical dependency graph failed: {err}"),
+                    )
+                })?;
+                crate::hgraph::schedule(&hgraph, crate::schedule::SchedulingStrategy::DepthFirst)
+                    .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("clock-domain scheduling failed: {err}"),
+                    )
+                })?;
+            }
+            None
+        }
     };
 
     module::build_module(

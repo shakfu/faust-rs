@@ -372,3 +372,32 @@ fn audit_control_variability_rejects_a_samp_signal_in_control() {
         "{err}"
     );
 }
+
+// ── contains_wrapper (P3 unconditional-gate guard) ───────────────────────────
+
+#[test]
+fn contains_wrapper_is_false_for_a_flat_program() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let half = b.real(0.5);
+    let s = b.binop(BinOp::Mul, x, half);
+
+    assert!(!super::contains_wrapper(&arena, &[s]).expect("pure structural scan cannot fail here"));
+}
+
+#[test]
+fn contains_wrapper_is_true_when_an_ondemand_node_is_reachable() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let clock = b.button(0);
+    let x = b.input(0);
+    let env = token(&mut arena, 0);
+    let mut b = SigBuilder::new(&mut arena);
+    let lifted = b.clocked(env, x);
+    let (seq, _od, _cc, _held) = make_od_program(&mut arena, 0, clock, lifted);
+
+    assert!(
+        super::contains_wrapper(&arena, &[seq]).expect("pure structural scan cannot fail here")
+    );
+}
