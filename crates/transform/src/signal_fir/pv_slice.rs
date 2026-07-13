@@ -158,6 +158,105 @@ pub struct PvPlan {
     pub transport: PvTransport,
 }
 
+impl PvPlan {
+    /// Projects this slice's plan into the strategy-independent
+    /// [`crate::signal_fir::vector_verify::VectorPlan`] DTO and — by
+    /// construction — a plan that [`crate::signal_fir::vector_verify::verify_vector_plan`]
+    /// accepts. This closes the loop between the executed PV slice and the P5
+    /// vector-plan verifier: the same two-loop, one-transport shape the PV
+    /// test runs bit-exactly is here shown to be a *valid* vector plan, so the
+    /// verifier is exercised on a real produced plan rather than only on
+    /// hand-written fixtures.
+    ///
+    /// Loop `0` (`OwnsX`) materializes `x` and `y`; loop `1`
+    /// (`ConsumesTransport`) materializes `z` and reads `x` through the
+    /// transport. Both are `Vectorizable` and share the single forward epoch.
+    #[must_use]
+    pub fn to_vector_plan(&self) -> crate::signal_fir::vector_verify::VectorPlan {
+        use crate::signal_fir::vector_verify as vv;
+
+        let id = |s: SigId| u64::from(s.as_u32());
+        let elem = value_type_of(self.transport.elem_type.clone());
+        let vec_size = self.transport.max_length as u64;
+
+        let owned = |sig: SigId, loop_id: u64| vv::SignalRecord {
+            signal_id: id(sig),
+            value_type: vv::ValueType::Real,
+            rate: vv::Rate::Samp,
+            vectorability: vv::Vectorability::Vect,
+            clock_id: 0,
+            effects: Vec::new(),
+            placement: vv::Placement::Owned(loop_id),
+            duplicable: false,
+        };
+        // signals array must be strictly ascending by signal_id.
+        let mut signals = vec![owned(self.x, 0), owned(self.y, 0), owned(self.z, 1)];
+        signals.sort_by_key(|s| s.signal_id);
+
+        vv::VectorPlan {
+            vec_size,
+            signals,
+            loops: vec![
+                vv::LoopRecord {
+                    loop_id: 0,
+                    stable_name: "pv_loop_owns_x".to_owned(),
+                    kind: vv::LoopKind::Vectorizable,
+                    roots: vec![id(self.x), id(self.y)],
+                    epoch_id: 0,
+                },
+                vv::LoopRecord {
+                    loop_id: 1,
+                    stable_name: "pv_loop_consumes".to_owned(),
+                    kind: vv::LoopKind::Vectorizable,
+                    roots: vec![id(self.z)],
+                    epoch_id: 0,
+                },
+            ],
+            epochs: vec![vv::EpochRecord {
+                epoch_id: 0,
+                rank: 0,
+                loops: vec![0, 1],
+            }],
+            transports: vec![vv::TransportRecord {
+                transport_id: 0,
+                stable_name: "transportX".to_owned(),
+                signal_id: id(self.transport.signal),
+                producer_loop: 0,
+                consumer_loop: 1,
+                element_type: elem,
+                length: vec_size,
+            }],
+            data_edges: vec![vv::LoopEdge {
+                consumer: 1,
+                dependency: 0,
+            }],
+            effect_edges: Vec::new(),
+            vec_safe_witnesses: vec![
+                vv::VecSafeWitness {
+                    loop_id: 0,
+                    witness_kind: vv::WitnessKind::Pointwise,
+                },
+                vv::VecSafeWitness {
+                    loop_id: 1,
+                    witness_kind: vv::WitnessKind::Pointwise,
+                },
+            ],
+        }
+    }
+}
+
+/// Maps an internal FIR value type to the vector-plan DTO's value-type
+/// vocabulary (`int`/`real`/`tuple`). The PV slice only produces real chunk
+/// transports, but the mapping is spelled out so the bridge does not silently
+/// mislabel an integer carrier if the slice grows.
+fn value_type_of(ty: FirType) -> crate::signal_fir::vector_verify::ValueType {
+    use crate::signal_fir::vector_verify::ValueType;
+    match ty {
+        FirType::Int32 | FirType::Int64 => ValueType::Int,
+        _ => ValueType::Real,
+    }
+}
+
 impl ScheduleDag for PvPlan {
     type Node = PvLoopId;
 
@@ -537,5 +636,24 @@ mod tests {
             verify_schedule(&plan, &inverted).is_err(),
             "a consumer scheduled before its transport's producer must be rejected"
         );
+    }
+
+    #[test]
+    fn pv_plan_projects_to_a_valid_vector_plan() {
+        use crate::signal_fir::vector_verify::verify_vector_plan;
+
+        let (arena, y, z) = build_pv_signals(20);
+        let plan = build_pv_plan(&arena, y, z, 16);
+        let vplan = plan.to_vector_plan();
+
+        // The executed PV plan is a valid strategy-independent vector plan:
+        // this exercises the P5 verifier on a real produced plan, not a
+        // hand-written fixture.
+        verify_vector_plan(&vplan).expect("the PV slice's plan must satisfy verify_vector_plan");
+
+        assert_eq!(vplan.vec_size, 16);
+        assert_eq!(vplan.loops.len(), 2);
+        assert_eq!(vplan.transports.len(), 1);
+        assert_eq!(vplan.transports[0].length, vplan.vec_size);
     }
 }
