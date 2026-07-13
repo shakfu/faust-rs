@@ -66,6 +66,7 @@ mod loop_graph;
 mod module;
 mod placement;
 mod planner;
+pub mod pv_slice;
 mod recursion;
 mod siggen;
 
