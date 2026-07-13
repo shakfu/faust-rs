@@ -72,6 +72,7 @@ mod recursion;
 pub mod shadow;
 mod siggen;
 pub mod vector_analysis;
+pub mod vector_plan;
 pub mod vector_schedule;
 pub mod vector_verify;
 

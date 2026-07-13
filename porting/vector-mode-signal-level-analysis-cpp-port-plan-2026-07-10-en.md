@@ -1760,6 +1760,44 @@ Generator initialization effects, the signal-by-signal C++ oracle, production
 `VectorPlan` snapshots, and `-ss` snapshot independence keep P4's complete exit
 criterion open.
 
+**Implementation status (2026-07-13, P4.4 production `VectorPlan`
+construction).** `signal_fir::vector_plan::build_vector_plan` is now the first
+production consumer of `VerifiedDecorationCertificate`. Its API has no
+`SchedulingStrategy`: loop ids, recursion-group ownership, placements, epoch
+membership, typed transport ids/names, data edges, effect edges, and witness
+kinds are frozen entirely from accepted P4.3b facts plus `vec_size`. The pass
+does not revisit the signal arena or FIR. The C++ `needSeparateLoop` predicate
+consumes the certificate's authoritative variability, `max_delay`, recursive
+projection, `occurrences.multi`, delay-read, and triviality fields; this is the
+production consolidation point for vector placement and delay-use facts.
+
+Inline sample roots receive one deterministic root loop. Recursive projections
+of the same symbolic group share one `Recursive(group)` loop. Other separated
+signals receive stable loops in signal-id order. Pure effects may be recomputed;
+every other effect set forces unique `Owned` materialization in the first
+canonical execution region. Cross-loop immediate/control dependencies allocate
+pre-planned typed chunk transports. Conflicting loop effect sets are made
+comparable by existing data/effect reachability or by a deterministic effect
+edge consistent with canonical data-DAG order. `Vect` roots with no local state
+effect are `Vectorizable`; recursion and every remaining unsafe case are serial
+`Recursive`/`Island` loops.
+
+Construction returns only an opaque `VerifiedVectorPlan` after the independent
+verifier has recomputed effect duplicability, local `VecSafe`, epoch ownership,
+graph acyclicity, typed transports, and pairwise effect ordering. Mutation tests
+reject forged duplicability, epoch, witness, `VecSafe`, and unordered-effect
+claims. Structural tests cover the real prepared PV forest, delay-derived
+separation, typed transports, deterministic rebuilding, all four `-ss`
+strategies leaving the plan unchanged, one-loop-per-recursion-group, unique
+effectful materialization, and zero chunk size.
+
+P4.4 remains additive: no compiler CLI or backend emits from this plan yet. P5
+still owns region-aware FIR routing/cache/CSE, complete routed-FIR verification,
+and backend activation. P6 still owns full delay storage, clock-domain epoch
+semantics, and recursive/AD execution refinement. Canonical JSON/hash and the
+signal-by-signal C++ oracle also remain open, so this status does not claim the
+complete P4/R3 exit criterion.
+
 **Exit criterion:** an independently accepted `DecorationCertificate`,
 deterministic `SignalUseInfo`, and `VectorPlan` snapshots reproduce the P0
 topology cases. A structural test proves that changing the configured `-ss`
@@ -1810,16 +1848,19 @@ lowering, an independent FIR check establishes `R-Type`, `R-Effects`, and
   permitted only for a named unsupported effect/clock/recursion reason captured
   in the snapshot.
 
-**Implementation status (2026-07-13).** The first additive P5 assurance slices
-are implemented: the strategy-independent `VectorPlan` DTO and independent
-`verify_vector_plan`, projection of the executed PV plan into that DTO, and
-`schedule_vector_plan`. The latter verifies the plan first, orders epochs by
-their fixed rank, schedules each induced data/effect DAG with the common P1
-scheduler for all four `-ss` strategies, and checks every result with the
-independent schedule postcondition verifier. Tests prove that strategy changes
-only per-epoch loop order and exercise the real PV projection. Production plan
-construction, effect-commutation proof, region-aware routing/cache, per-region
-CSE, routed-FIR verification, and backend emission remain open.
+**Implementation status (2026-07-13).** The additive P5 assurance slices now
+include the strategy-independent `VectorPlan` DTO, independent
+`verify_vector_plan`, production P4.4 construction from accepted decorations,
+projection of the executed PV plan into the DTO, and `schedule_vector_plan`.
+The scheduler verifies the plan first, orders epochs by fixed rank, schedules
+each induced data/effect DAG with the common P1 scheduler for all four `-ss`
+strategies, and checks every result with the independent schedule postcondition
+verifier. Production construction derives duplicability and local `VecSafe`,
+pre-plans typed transports, and conservatively orders every pair of conflicting
+loop effects; the verifier independently rejects unordered conflicts. Tests
+prove that strategy changes only per-epoch loop order. Region-aware
+routing/cache, per-region CSE, complete transport resolution in routed FIR,
+routed-FIR verification, and backend emission remain open.
 
 **Exit criterion:** shared expressions and pure prefixes/tails are separated
 without inspecting FIR statements; all four strategies execute bit-exactly for

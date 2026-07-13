@@ -226,7 +226,7 @@ mod tests {
                     clock_id: 0,
                     effects: Vec::new(),
                     placement: Placement::Owned(loop_id),
-                    duplicable: false,
+                    duplicable: true,
                 })
                 .collect(),
             loops: (0..loop_count)

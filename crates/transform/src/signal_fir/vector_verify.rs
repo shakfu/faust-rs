@@ -1,7 +1,7 @@
 //! Strategy-independent `VectorPlan` DTO and its independent verifier
 //! (`verify_vector_plan`).
 //!
-//! Vectorization port plan phase P5 (formal gate: "before emission,
+//! Vectorization port plan phases P4.4/P5 (formal gate: "before emission,
 //! `verify_vector_plan` establishes `L-*`, typed transports, region
 //! visibility, `VecSafe`…") and certified plan "R3 - Vector plan certificate
 //! at L2/L3". This is the vector-plan analogue of the R1 schedule certificate
@@ -19,20 +19,23 @@
 //! loop.
 //!
 //! # Scope, deliberately bounded (first P5 slice)
-//! Additive and **not wired into any production path** — nothing constructs a
-//! `VectorPlan` during compilation yet (that is the P4 analysis / P5 routing
-//! work). Deferred, matching the certified plan's own staging:
+//! Additive and **not wired into FIR emission**. P4.4 constructs accepted plans
+//! from verified decorations; P5 will route FIR through those plans. Deferred,
+//! matching the certified plan's own staging:
 //! - **effect commutation** (`L-Effects` for incomparable loops): the DTO
-//!   records each signal's ordered effects and a `duplicable` bit, and the
-//!   verifier checks the `Inline ⇒ Duplicable` implication, but it does not
-//!   yet prove pairwise commutation of independent effectful loops (the plan
-//!   calls this the hard case; effect edges are trusted as producer-supplied
-//!   here);
+//!   retains P4.3a's exact effect identities and the verifier derives
+//!   duplicability and local `VecSafe` instead of trusting producer booleans,
+//!   but it does not yet prove pairwise commutation of independent effectful
+//!   loops (the plan calls this the hard case; effect edges are
+//!   producer-supplied here);
 //! - **JSON (de)serialization / `plan_hash`** (R2 canonical-boundary work): a
 //!   plan is identified by its Rust type, not a runtime tag or hash.
 
 use ahash::{AHashMap, AHashSet};
 use std::fmt;
+
+pub use super::vector_analysis::EffectAtom;
+use super::vector_analysis::{ForeignPurity, effect_sets_conflict};
 
 /// `$defs/signalType`: the v1 value-type vocabulary (matches the Lean
 /// `ValueTy`). FIR widths / `FaustFloat` live in the routed-FIR layer, not
@@ -58,20 +61,6 @@ pub enum Vectorability {
     Vect,
     Scal,
     TrueScal,
-}
-
-/// `$defs/effect` (semantic source order; the verifier keeps it but does not
-/// yet reason about commutation — see the module scope note).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EffectAtom {
-    ReadState(u64),
-    WriteState(u64),
-    ReadTable(u64),
-    WriteTable(u64),
-    WriteUi(u64),
-    WriteOutput(u64),
-    ForeignPure(String),
-    ForeignImpure(String),
 }
 
 /// `$defs/placement`.
@@ -190,12 +179,23 @@ pub enum VectorPlanError {
     RootUnknownSignal { loop_id: u64, signal_id: u64 },
     /// An `Inline`-placed signal is not `duplicable`.
     InlineNotDuplicable { signal_id: u64 },
+    /// The producer-supplied `duplicable` bit disagrees with the effect facts.
+    DuplicabilityMismatch { signal_id: u64 },
+    /// A loop's redundant `epoch_id` disagrees with canonical epoch membership.
+    LoopEpochMismatch {
+        loop_id: u64,
+        declared: u64,
+        actual: u64,
+    },
     /// A data/effect edge references a loop id that is not a plan loop.
     EdgeEndpointUnknown { edge: LoopEdge, missing: u64 },
     /// A loop depends on itself (an instantaneous self-edge).
     LoopSelfEdge { loop_id: u64 },
     /// The induced graph of one epoch contains a cycle.
     EpochNotAcyclic { epoch_id: u64, remaining: Vec<u64> },
+    /// Two loops have conflicting effects but neither is ordered before the
+    /// other by the combined data/effect relation.
+    UnorderedEffectConflict { left: u64, right: u64 },
     /// A transport's producer and consumer loops are the same.
     TransportSelfLoop { transport_id: u64 },
     /// A transport's element type does not equal its signal's value type.
@@ -211,6 +211,8 @@ pub enum VectorPlanError {
     SerialLoopNotSerial { loop_id: u64 },
     /// A `Vectorizable` loop has no `VecSafe` witness.
     VectorizableWithoutWitness { loop_id: u64 },
+    /// A vectorizable loop's roots do not satisfy the concrete `VecSafe` rule.
+    VectorizableNotSafe { loop_id: u64 },
     /// A `VecSafe` witness references a loop id that is not a plan loop.
     WitnessUnknownLoop { loop_id: u64 },
     /// A transport references a signal or loop id that is not in the plan.
@@ -244,6 +246,18 @@ impl fmt::Display for VectorPlanError {
             Self::InlineNotDuplicable { signal_id } => {
                 write!(f, "Inline signal {signal_id} is not duplicable")
             }
+            Self::DuplicabilityMismatch { signal_id } => write!(
+                f,
+                "signal {signal_id} duplicable bit disagrees with its effects"
+            ),
+            Self::LoopEpochMismatch {
+                loop_id,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "loop {loop_id} declares epoch {declared} but belongs to epoch {actual}"
+            ),
             Self::EdgeEndpointUnknown { edge, missing } => {
                 write!(f, "edge {edge:?} references unknown loop {missing}")
             }
@@ -254,6 +268,10 @@ impl fmt::Display for VectorPlanError {
             } => write!(
                 f,
                 "epoch {epoch_id} induced graph has a cycle: {remaining:?}"
+            ),
+            Self::UnorderedEffectConflict { left, right } => write!(
+                f,
+                "loops {left} and {right} have conflicting unordered effects"
             ),
             Self::TransportSelfLoop { transport_id } => {
                 write!(f, "transport {transport_id} producer == consumer")
@@ -276,6 +294,9 @@ impl fmt::Display for VectorPlanError {
             }
             Self::VectorizableWithoutWitness { loop_id } => {
                 write!(f, "vectorizable loop {loop_id} has no VecSafe witness")
+            }
+            Self::VectorizableNotSafe { loop_id } => {
+                write!(f, "vectorizable loop {loop_id} does not satisfy VecSafe")
             }
             Self::WitnessUnknownLoop { loop_id } => {
                 write!(f, "VecSafe witness references unknown loop {loop_id}")
@@ -300,6 +321,31 @@ fn strictly_ascending<T: Ord>(items: &[T]) -> Result<(), usize> {
         }
     }
     Ok(())
+}
+
+/// Concrete Lean `duplicableEffectsB`: only an empty effect set or pure
+/// foreign calls can be recomputed in several loop regions.
+#[must_use]
+pub(crate) fn effects_duplicable(effects: &[EffectAtom]) -> bool {
+    effects.iter().all(|effect| {
+        matches!(
+            effect,
+            EffectAtom::Foreign {
+                purity: ForeignPurity::Pure,
+                ..
+            }
+        )
+    })
+}
+
+/// Concrete Lean `sampleReorderableB`: loop-carried state is the local
+/// per-sample vectorization blocker. Other effect conflicts are ordered or
+/// co-located by the plan's separate effect relation.
+#[must_use]
+pub(crate) fn effects_sample_reorderable(effects: &[EffectAtom]) -> bool {
+    !effects
+        .iter()
+        .any(|effect| matches!(effect, EffectAtom::ReadState(_) | EffectAtom::WriteState(_)))
 }
 
 /// Independent verifier for a [`VectorPlan`] (plan §5.5/§5.10
@@ -339,6 +385,15 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         what: "effect_edges",
         at,
     })?;
+    let witness_ids: Vec<u64> = plan
+        .vec_safe_witnesses
+        .iter()
+        .map(|witness| witness.loop_id)
+        .collect();
+    strictly_ascending(&witness_ids).map_err(|at| VectorPlanError::NotCanonical {
+        what: "vec_safe_witnesses",
+        at,
+    })?;
 
     let signal_set: AHashSet<u64> = signal_ids.iter().copied().collect();
     let loop_set: AHashSet<u64> = loop_ids.iter().copied().collect();
@@ -366,15 +421,32 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
             }
         }
     }
+
     for &l in &loop_ids {
         if !epoch_of_loop.contains_key(&l) {
             return Err(VectorPlanError::EpochCoverageMismatch { loop_id: l });
         }
     }
+    for lp in &plan.loops {
+        let actual = epoch_of_loop[&lp.loop_id];
+        if lp.epoch_id != actual {
+            return Err(VectorPlanError::LoopEpochMismatch {
+                loop_id: lp.loop_id,
+                declared: lp.epoch_id,
+                actual,
+            });
+        }
+    }
 
     // ── Placement / roots agreement (P-Unique, P-Root, P-Duplicate). ─────
     for sig in &plan.signals {
-        if sig.placement == Placement::Inline && !sig.duplicable {
+        let derived_duplicable = effects_duplicable(&sig.effects);
+        if sig.duplicable != derived_duplicable {
+            return Err(VectorPlanError::DuplicabilityMismatch {
+                signal_id: sig.signal_id,
+            });
+        }
+        if sig.placement == Placement::Inline && !derived_duplicable {
             return Err(VectorPlanError::InlineNotDuplicable {
                 signal_id: sig.signal_id,
             });
@@ -462,6 +534,25 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         }
     }
 
+    // ── Effect conflicts: every conflicting loop pair is comparable. ──
+    // Root identities and graph endpoints are known valid at this point, so
+    // this check cannot panic when presented with a hostile DTO.
+    for (index, left) in plan.loops.iter().enumerate() {
+        for right in &plan.loops[index + 1..] {
+            let left_effects = loop_effects(plan, left);
+            let right_effects = loop_effects(plan, right);
+            if effect_sets_conflict(&left_effects, &right_effects)
+                && !loop_reaches(plan, left.loop_id, right.loop_id)
+                && !loop_reaches(plan, right.loop_id, left.loop_id)
+            {
+                return Err(VectorPlanError::UnorderedEffectConflict {
+                    left: left.loop_id,
+                    right: right.loop_id,
+                });
+            }
+        }
+    }
+
     // ── Transports well-typed (T-TRANSPORT). ─────────────────────────────
     for t in &plan.transports {
         if !signal_set.contains(&t.signal_id) {
@@ -506,6 +597,16 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
     for lp in &plan.loops {
         match lp.kind {
             LoopKind::Vectorizable => {
+                let vec_safe = lp.roots.iter().all(|root| {
+                    let signal = signal_by_id[root];
+                    signal.vectorability == Vectorability::Vect
+                        && effects_sample_reorderable(&signal.effects)
+                });
+                if !vec_safe {
+                    return Err(VectorPlanError::VectorizableNotSafe {
+                        loop_id: lp.loop_id,
+                    });
+                }
                 let Some(kind) = witness_of.get(&lp.loop_id) else {
                     return Err(VectorPlanError::VectorizableWithoutWitness {
                         loop_id: lp.loop_id,
@@ -539,6 +640,47 @@ fn rank_of(plan: &VectorPlan, epoch_id: u64) -> u64 {
         .iter()
         .find(|e| e.epoch_id == epoch_id)
         .map_or(u64::MAX, |e| e.rank)
+}
+
+fn loop_effects(plan: &VectorPlan, loop_record: &LoopRecord) -> Vec<EffectAtom> {
+    let signal_by_id = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<AHashMap<_, _>>();
+    let mut effects = loop_record
+        .roots
+        .iter()
+        .flat_map(|root| signal_by_id[root].effects.iter().cloned())
+        .collect::<Vec<_>>();
+    effects.sort();
+    effects.dedup();
+    effects
+}
+
+/// Whether `dependency` is ordered before `consumer` by one or more combined
+/// edges. Edges are stored consumer -> dependency, so traversal follows the
+/// reverse adjacency.
+fn loop_reaches(plan: &VectorPlan, dependency: u64, consumer: u64) -> bool {
+    let mut pending = vec![dependency];
+    let mut seen = AHashSet::new();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        for edge in plan
+            .data_edges
+            .iter()
+            .chain(plan.effect_edges.iter())
+            .filter(|edge| edge.dependency == node)
+        {
+            if edge.consumer == consumer {
+                return true;
+            }
+            pending.push(edge.consumer);
+        }
+    }
+    false
 }
 
 /// Kahn peeling on the induced graph of `members` (edges from both edge
@@ -595,6 +737,7 @@ fn induced_cycle(plan: &VectorPlan, members: &AHashSet<u64>) -> Option<Vec<u64>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signal_fir::vector_analysis::{StateCell, StateResource};
 
     /// A minimal valid two-loop plan mirroring the PV DSP shape: loop 0 owns
     /// `x` (a vectorizable producer), loop 1 consumes it (vectorizable), one
@@ -611,7 +754,7 @@ mod tests {
                     clock_id: 0,
                     effects: vec![],
                     placement: Placement::Owned(0),
-                    duplicable: false,
+                    duplicable: true,
                 },
                 SignalRecord {
                     signal_id: 11,
@@ -621,7 +764,7 @@ mod tests {
                     clock_id: 0,
                     effects: vec![],
                     placement: Placement::Owned(1),
-                    duplicable: false,
+                    duplicable: true,
                 },
             ],
             loops: vec![
@@ -744,6 +887,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_root_before_inspecting_its_effects() {
+        let mut p = valid_plan();
+        p.loops[1].roots.push(99);
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::RootUnknownSignal {
+                loop_id: 1,
+                signal_id: 99
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_inline_signal_not_duplicable() {
         let mut p = valid_plan();
         // Detach signal 10 from loop 0 ownership and make it a non-duplicable
@@ -752,6 +908,10 @@ mod tests {
         p.loops[0].kind = LoopKind::Vectorizable;
         p.signals[0].placement = Placement::Inline;
         p.signals[0].duplicable = false;
+        p.signals[0].effects = vec![EffectAtom::WriteState(StateResource::Signal {
+            owner: 10,
+            cell: StateCell::Delay,
+        })];
         // Give loop 0 a different owned root so it stays valid otherwise.
         p.signals.insert(
             0,
@@ -763,13 +923,75 @@ mod tests {
                 clock_id: 0,
                 effects: vec![],
                 placement: Placement::Owned(0),
-                duplicable: false,
+                duplicable: true,
             },
         );
         p.loops[0].roots = vec![5];
         assert!(matches!(
             verify_vector_plan(&p),
             Err(VectorPlanError::InlineNotDuplicable { signal_id: 10 })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_duplicability_bit_not_derived_from_effects() {
+        let mut p = valid_plan();
+        p.signals[0].duplicable = false;
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::DuplicabilityMismatch { signal_id: 10 })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_loop_epoch_field_not_matching_membership() {
+        let mut p = valid_plan();
+        p.loops[1].epoch_id = 7;
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::LoopEpochMismatch {
+                loop_id: 1,
+                declared: 7,
+                actual: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_noncanonical_vec_safe_witnesses() {
+        let mut p = valid_plan();
+        p.vec_safe_witnesses.reverse();
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::NotCanonical {
+                what: "vec_safe_witnesses",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_vectorizable_loop_whose_root_is_not_vec_safe() {
+        let mut p = valid_plan();
+        p.signals[1].vectorability = Vectorability::Scal;
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::VectorizableNotSafe { loop_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn rejects_unordered_conflicting_effects() {
+        let mut p = valid_plan();
+        let effect = EffectAtom::WriteOutput(0);
+        for signal in &mut p.signals {
+            signal.effects = vec![effect.clone()];
+            signal.duplicable = false;
+        }
+        p.data_edges.clear();
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::UnorderedEffectConflict { left: 0, right: 1 })
         ));
     }
 

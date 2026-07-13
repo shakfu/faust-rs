@@ -516,15 +516,22 @@ all-serial plan even if scalar/vector execution remains bit-exact.
 The Lean checker should initially mirror these finite checks. Deeper semantic
 witnesses can replace enumerated witness tags as the execution model matures.
 
-Implementation status (2026-07-13): the Rust `VectorPlan` DTO,
-`verify_vector_plan`, real PV-plan projection, and strategy-dependent
-per-epoch execution scheduling are implemented as additive L2 candidates.
-Scheduling verifies the plan before use, keeps fixed epoch-rank order, applies
-the common four-strategy scheduler only inside each epoch, and runs the
-independent postcondition checker. The `decoration_hash`, canonical
-serialization/hash, complete transport/effect proof, production planner, Lean
-R3 checker, and vectorization-retention corpus remain open; this status does
-not claim R3 completion.
+Implementation status (2026-07-13, P4.4): the Rust `VectorPlan` DTO,
+`verify_vector_plan`, production construction from an opaque
+`VerifiedDecorationCertificate`, real PV-plan projection, and
+strategy-dependent per-epoch execution scheduling are implemented as additive
+L2 candidates. Construction derives placement, typed transports, effect
+ordering, serial/vectorizable loop kinds, and witnesses without accepting
+`-ss`, then returns only an opaque `VerifiedVectorPlan` after independent
+verification. Scheduling verifies the plan before use, keeps fixed epoch-rank
+order, applies the common four-strategy scheduler only inside each epoch, and
+runs the independent postcondition checker. The verifier now derives effect
+duplicability and local `VecSafe`, checks redundant loop/epoch consistency and
+canonical witnesses, and requires every conflicting loop-effect pair to be
+ordered. The `decoration_hash`, canonical serialization/hash, complete
+cross-language Lean R3 checker, routed-FIR transport proof, and
+vectorization-retention corpus remain open; this status does not claim R3
+completion.
 
 ### R4 - Routed FIR certificate
 

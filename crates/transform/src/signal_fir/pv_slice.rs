@@ -194,7 +194,7 @@ impl PvPlan {
             clock_id: 0,
             effects: Vec::new(),
             placement: vv::Placement::Owned(loop_id),
-            duplicable: false,
+            duplicable: true,
         };
         // signals array must be strictly ascending by signal_id.
         let mut signals = vec![owned(self.x, 0), owned(self.y, 0), owned(self.z, 1)];
