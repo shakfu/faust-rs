@@ -13,8 +13,9 @@
 //! effect decoration without activating either scalar or vector scheduling.
 //! Effects in this table describe compute-time behavior. `Gen` remains a
 //! lifecycle boundary, so table-initialization effects require a separate
-//! decoration before `DecorationCertificate` can establish full coverage.
-//! `DecorationCertificate` and production consumers remain deferred.
+//! decoration before a certificate can establish full lifecycle coverage.
+//! The compute-scoped `DecorationCertificate` lives in the adjacent
+//! `decoration_verify` module; production placement consumers remain deferred.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;

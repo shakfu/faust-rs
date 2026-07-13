@@ -60,6 +60,7 @@
 
 mod block_reverse_ad;
 mod cse;
+pub mod decoration_verify;
 mod delay;
 mod error;
 mod loop_graph;

@@ -457,16 +457,32 @@ table (port plan, section 4.3); both must be produced by the same unified
 traversal and the same `signal_dependencies` child walk, so the exported facts
 cannot drift from the facts the planner actually consumed.
 
-**Status (2026-07-13).** P4.2 now provides the single typed decoder, distinct
-scheduling and occurrence projections, and a deterministic in-memory
+**Status (2026-07-13, P4.2/P4.3a).** P4.2 now provides the single typed decoder,
+distinct scheduling and occurrence projections, and a deterministic in-memory
 `SignalUseTable` over verified prepared signals. Its specialized delay,
 projection, FIR/IIR, table, wrapper, recursive-variability, and sharing rules
 are source-pinned to the C++ implementation, with explicit Rust representation
-adaptations. This remains an R2D input, not an R2D certificate: effect atoms,
-the production execution-condition map, canonical export, independent
-coverage/consistency verification, and a stable signal-by-signal C++ occurrence
-oracle remain to be implemented. No `VectorPlan` may treat the current table as
-accepted decoration evidence yet.
+adaptations. At the P4.2 checkpoint this was only an R2D input: effect atoms,
+the production execution-condition map, canonical export, and independent
+coverage/consistency verification were still missing. The stable
+signal-by-signal C++ occurrence oracle remains open after P4.3b.
+
+**Status (2026-07-13, P4.3b).** Rust now has the real in-memory
+`DecorationCertificate` projection and an independent acceptance boundary.
+The DTO retains exact prepared `SigId` coverage, exact type fields rather than
+the deliberately loose `SigType` inference equality, the complete condition
+table and context-sensitive occurrences, compute effects, delay/projection
+facts, and both labelled dependency views. `verify_decorations` recomputes the
+canonical analysis, consults the authoritative prepared type and clock maps,
+checks canonical order and exact endpoints/facts, and returns an opaque
+`VerifiedDecorationCertificate`. Mutation tests reject every required class of
+tampering before vector planning.
+
+The accepted scope is deliberately `Compute`; visible `Gen` nodes are recorded
+as lifecycle boundaries and `FullLifecycle` certificates are rejected until
+initializer effects are decorated. JSON canonicalization, cross-language
+hashing, and the corresponding executable Lean checker remain R2/RV work, so
+this status does not claim the complete L2/L3 cross-language gate.
 
 Pass criterion: mutating any signal type, clock, effect, delay, occurrence, or
 dependency endpoint makes at least one independent verifier reject the

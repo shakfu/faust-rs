@@ -1722,12 +1722,43 @@ separately before the certificate can claim the section 5.1 Effects property.
 This slice remains behavior-preserving: no scalar/vector scheduler or FIR
 lowerer consumes these facts. It deliberately does not orient final effect
 edges between placed loops; P4.3b's independent `DecorationCertificate`
-checker must first accept coverage, identities, and effect completeness, then
-P5 can preserve semantic order by co-location or loop-level effect edges.
+checker now accepts coverage, identities, and compute-effect completeness
+before P5 preserves semantic order by co-location or loop-level effect edges.
 Sixteen focused vector-analysis tests include DNF joins and absorption,
 condition-sensitive `multi`, stable state/table/output/foreign identities,
 transitive effects, canonical ordering, and rejecting conflict mutations.
 P4's formal gate and exit criterion remain open.
+
+**Implementation status (2026-07-13, P4.3b decoration trust boundary).**
+`signal_fir::decoration_verify` now exports an in-memory schema-versioned
+`DecorationCertificate` directly from the real P4.3a analysis. It records
+prepared roots, explicit compute-visible `Gen` lifecycle boundaries, the full
+canonical DNF condition table, one strictly ordered record per compute-reachable
+prepared `SigId`, and both labelled scheduling and occurrence dependency
+projections with source-local edge keys. Records preserve every planning fact:
+an exact canonical type snapshot, cached variability/vectorability, clock,
+recursiveness, condition, complete context occurrences, delay shape, recursive
+projection identity, triviality, and sorted conservative effects.
+
+The type boundary deliberately does not use `SigType::PartialEq`: the
+certificate includes IEEE interval bits, `lsb`, fixed-point `Res`, and every
+table/tuplet aggregate qualifier that C++-compatible inference equality ignores.
+`verify_decorations` checks schema, compute scope, roots, canonical ordering,
+exact coverage, condition identities, authoritative prepared types and clocks,
+every occurrence/delay/effect fact, lifecycle boundaries, dependency labels,
+and dependency endpoints. It freshly reruns the canonical analysis from the
+verified prepared forest and returns an opaque `VerifiedDecorationCertificate`;
+future `VectorPlan` construction can therefore require accepted evidence rather
+than a raw DTO. Nine focused tests accept the canonical producer and reject
+mutations of each obligation, including ignored type precision, generator
+scope, recursive projection identity, and unknown dependency endpoints.
+
+This closes P4.3b only for compute-time decorations. `FullLifecycle` is an
+explicitly rejected scope, JSON/hash stabilization remains R2 work, and no
+placement, scheduler, FIR lowerer, or backend consumes the certificate yet.
+Generator initialization effects, the signal-by-signal C++ oracle, production
+`VectorPlan` snapshots, and `-ss` snapshot independence keep P4's complete exit
+criterion open.
 
 **Exit criterion:** an independently accepted `DecorationCertificate`,
 deterministic `SignalUseInfo`, and `VectorPlan` snapshots reproduce the P0
