@@ -1602,6 +1602,15 @@ satisfies all `P-*` obligations independently of `-ss`.
 - Allocate loop ids, epoch membership, transport ids, and buffer names before
   scheduling. The plan builder must not accept a `SchedulingStrategy` argument.
 
+**Implementation status (2026-07-13).** The pure `needSeparateLoop` decision
+now follows the exact C++/Lean precedence, including the dominant
+`maxDelay > 0` rule. Rust exhaustively checks all 96 combinations of the two
+delay classes, three variability classes, and four Boolean facts against the
+Lean `separateLoop_complete` characterization. The adapted result also keeps
+recursive projections explicitly serial. The unified `SignalUseInfo`
+traversal, real `DecorationCertificate`, and production `VectorPlan` builder
+remain open; this completed predicate is their P4.0 prerequisite.
+
 **Exit criterion:** an independently accepted `DecorationCertificate`,
 deterministic `SignalUseInfo`, and `VectorPlan` snapshots reproduce the P0
 topology cases. A structural test proves that changing the configured `-ss`
@@ -1651,6 +1660,17 @@ lowering, an independent FIR check establishes `R-Type`, `R-Effects`, and
   or all-island plan even when its output is bit-exact. Conservative fallback is
   permitted only for a named unsupported effect/clock/recursion reason captured
   in the snapshot.
+
+**Implementation status (2026-07-13).** The first additive P5 assurance slices
+are implemented: the strategy-independent `VectorPlan` DTO and independent
+`verify_vector_plan`, projection of the executed PV plan into that DTO, and
+`schedule_vector_plan`. The latter verifies the plan first, orders epochs by
+their fixed rank, schedules each induced data/effect DAG with the common P1
+scheduler for all four `-ss` strategies, and checks every result with the
+independent schedule postcondition verifier. Tests prove that strategy changes
+only per-epoch loop order and exercise the real PV projection. Production plan
+construction, effect-commutation proof, region-aware routing/cache, per-region
+CSE, routed-FIR verification, and backend emission remain open.
 
 **Exit criterion:** shared expressions and pure prefixes/tails are separated
 without inspecting FIR statements; all four strategies execute bit-exactly for

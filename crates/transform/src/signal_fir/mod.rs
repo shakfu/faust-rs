@@ -70,6 +70,7 @@ pub mod pv_slice;
 mod recursion;
 pub mod shadow;
 mod siggen;
+pub mod vector_schedule;
 pub mod vector_verify;
 
 pub use error::{SignalFirError, SignalFirErrorCode};

@@ -290,26 +290,39 @@ impl LoopSeparation {
     }
 }
 
-/// Decides whether `props` requires its own chunk loop (vector doc §2 table).
+/// Decides whether `props` requires its own chunk loop (vector doc §2 table;
+/// C++ `DAGInstructionsCompiler::needSeparateLoop`).
 ///
 /// Precedence (first match wins):
-/// 1. non-`Samp` rate, or a `sigDelay` read → **inline** (control / read-site);
-/// 2. recursive projection → **separate serial** loop;
-/// 3. very-simple leaf → **inline** (free to duplicate);
-/// 4. used delayed (`max_delay > 0`) or shared → **separate vectorizable** loop;
-/// 5. otherwise → **inline** into the consumer.
+/// 1. used delayed (`max_delay > 0`) -> **separate**;
+/// 2. very-simple leaf or non-`Samp` rate -> **inline**;
+/// 3. a `sigDelay` read -> **inline** at the use site;
+/// 4. recursive projection -> **separate serial** loop;
+/// 5. shared value -> **separate vectorizable** loop;
+/// 6. otherwise -> **inline** into the consumer.
+///
+/// The first rule is semantic: even a simple or slow value needs a per-sample
+/// producer when its history is read. The C++ predicate returns only a Boolean;
+/// this adapted Rust result additionally keeps recursive projections serial.
 #[must_use]
 pub(crate) fn needs_separate_loop(props: &SignalLoopProps) -> LoopSeparation {
-    if props.variability != Variability::Samp || props.is_delay_read {
+    if props.max_delay > 0 {
+        return if props.is_recursive_proj {
+            LoopSeparation::SeparateSerial
+        } else {
+            LoopSeparation::SeparateVectorizable
+        };
+    }
+    if props.is_very_simple || props.variability != Variability::Samp {
+        return LoopSeparation::Inline;
+    }
+    if props.is_delay_read {
         return LoopSeparation::Inline;
     }
     if props.is_recursive_proj {
         return LoopSeparation::SeparateSerial;
     }
-    if props.is_very_simple {
-        return LoopSeparation::Inline;
-    }
-    if props.max_delay > 0 || props.is_shared {
+    if props.is_shared {
         return LoopSeparation::SeparateVectorizable;
     }
     LoopSeparation::Inline
@@ -1105,12 +1118,10 @@ mod tests {
     }
 
     #[test]
-    fn non_sample_rate_signals_are_inlined() {
+    fn non_sample_rate_signals_without_delayed_use_are_inlined() {
         for v in [Variability::Konst, Variability::Block] {
             let p = SignalLoopProps {
                 variability: v,
-                // Even if delayed/shared, slower-than-sample stays out of the loop.
-                max_delay: 8,
                 is_shared: true,
                 ..base_props()
             };
@@ -1119,14 +1130,89 @@ mod tests {
     }
 
     #[test]
-    fn delay_reads_are_inlined() {
+    fn positive_max_delay_dominates_slow_simple_and_delay_read_rules() {
+        for p in [
+            SignalLoopProps {
+                variability: Variability::Block,
+                max_delay: 1,
+                ..base_props()
+            },
+            SignalLoopProps {
+                max_delay: 1,
+                is_very_simple: true,
+                ..base_props()
+            },
+            SignalLoopProps {
+                max_delay: 1,
+                is_delay_read: true,
+                ..base_props()
+            },
+        ] {
+            assert_eq!(
+                needs_separate_loop(&p),
+                LoopSeparation::SeparateVectorizable
+            );
+        }
+    }
+
+    #[test]
+    fn delay_reads_without_delayed_use_are_inlined() {
         let p = SignalLoopProps {
             is_delay_read: true,
-            max_delay: 8,
             is_shared: true,
             ..base_props()
         };
         assert_eq!(needs_separate_loop(&p), LoopSeparation::Inline);
+    }
+
+    #[test]
+    fn separation_matches_the_exhaustive_lean_characterization() {
+        let mut cases = 0;
+        for max_delay in [0, 1] {
+            for variability in [Variability::Konst, Variability::Block, Variability::Samp] {
+                for is_very_simple in [false, true] {
+                    for is_delay_read in [false, true] {
+                        for is_recursive_proj in [false, true] {
+                            for is_shared in [false, true] {
+                                let props = SignalLoopProps {
+                                    variability,
+                                    max_delay,
+                                    is_recursive_proj,
+                                    is_shared,
+                                    is_delay_read,
+                                    is_very_simple,
+                                };
+                                let separates = max_delay > 0
+                                    || (!is_very_simple
+                                        && variability == Variability::Samp
+                                        && !is_delay_read
+                                        && (is_recursive_proj || is_shared));
+                                let expected = if !separates {
+                                    LoopSeparation::Inline
+                                } else if is_recursive_proj {
+                                    LoopSeparation::SeparateSerial
+                                } else {
+                                    LoopSeparation::SeparateVectorizable
+                                };
+
+                                assert_eq!(
+                                    needs_separate_loop(&props),
+                                    expected,
+                                    "separateLoop mismatch for {props:?}"
+                                );
+                                assert_eq!(
+                                    needs_separate_loop(&props) != LoopSeparation::Inline,
+                                    separates,
+                                    "Boolean separation mismatch for {props:?}"
+                                );
+                                cases += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 96);
     }
 
     #[test]

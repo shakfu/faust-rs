@@ -1,6 +1,9 @@
 # Lean/Rust Certified Porting Plan and Canonical Certificate Boundary
 
-Status: normative porting plan; implementation not started.
+Status: normative porting plan; implementation in progress. RV and R1 are
+implemented, and the first additive R3/P5 vector-plan verification and
+per-epoch scheduling slices are implemented; production P4/P5 integration is
+not complete (2026-07-13).
 
 Date: 2026-07-11.
 
@@ -485,6 +488,16 @@ all-serial plan even if scalar/vector execution remains bit-exact.
 
 The Lean checker should initially mirror these finite checks. Deeper semantic
 witnesses can replace enumerated witness tags as the execution model matures.
+
+Implementation status (2026-07-13): the Rust `VectorPlan` DTO,
+`verify_vector_plan`, real PV-plan projection, and strategy-dependent
+per-epoch execution scheduling are implemented as additive L2 candidates.
+Scheduling verifies the plan before use, keeps fixed epoch-rank order, applies
+the common four-strategy scheduler only inside each epoch, and runs the
+independent postcondition checker. The `decoration_hash`, canonical
+serialization/hash, complete transport/effect proof, production planner, Lean
+R3 checker, and vectorization-retention corpus remain open; this status does
+not claim R3 completion.
 
 ### R4 - Routed FIR certificate
 
