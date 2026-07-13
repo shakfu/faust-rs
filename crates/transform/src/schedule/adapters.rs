@@ -46,6 +46,8 @@ impl ScheduleDag for Digraph {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use propagate::ClockDomainTable;
     use signals::{BinOp, SigBuilder};
     use tlib::TreeArena;
@@ -72,7 +74,8 @@ mod tests {
 
         let domains = ClockDomainTable::new();
         let envs = annotate(&arena, &domains, &[d]).expect("flat program is well-clocked");
-        let hgraph = build_hgraph(&arena, &domains, &envs, &[d]).expect("hgraph builds");
+        let hgraph =
+            build_hgraph(&arena, &domains, &envs, &[d], &HashMap::new()).expect("hgraph builds");
         let top = hgraph
             .graph(GraphKey::Top)
             .expect("flat program stays in the top graph")
@@ -109,7 +112,8 @@ mod tests {
 
         let domains = ClockDomainTable::new();
         let envs = annotate(&arena, &domains, &[out]).expect("flat program is well-clocked");
-        let hgraph = build_hgraph(&arena, &domains, &envs, &[out]).expect("hgraph builds");
+        let hgraph =
+            build_hgraph(&arena, &domains, &envs, &[out], &HashMap::new()).expect("hgraph builds");
         let g = hgraph
             .graph(GraphKey::Top)
             .expect("flat program stays in the top graph");

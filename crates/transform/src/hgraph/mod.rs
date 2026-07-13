@@ -22,10 +22,10 @@
 //!   the graph holding the wrapper ("the block needs this computed first"),
 //!   and its own computation is placed in the graph of its own domain.
 //!
-//! [`schedule`] then serializes each graph with one deterministic depth-first
-//! toposort on *immediate* edges (C++ `dfschedule`; the pluggable
-//! `bf`/`sp`/`rb` strategies of `-ss` are deferred until a consumer needs
-//! them).
+//! [`schedule`] serializes each graph with the shared generic scheduler
+//! (`crate::schedule`, vectorization port plan phase P1) under a caller-
+//! selected [`crate::schedule::SchedulingStrategy`] — the same four `-ss`
+//! strategies used everywhere else, on *immediate* edges only.
 //!
 //! # Immediate vs delayed dependencies
 //! A `delay ≥ 1` dependency imposes no intra-tick ordering (the value is read
@@ -33,28 +33,54 @@
 //! the right domain. `Seq(od, y)` depends **only on `od`** — reading the held
 //! `PermVar` is free once the block ran (plan §3.7).
 //!
+//! # Control graph (plan §4.6)
+//! [`GraphKey::Control`] holds slower-than-sample (`Konst`/`Block`
+//! [`sigtype::Variability`]) signals reached while traversing the **top**
+//! domain — the global lifecycle/control section, run before `Top` exactly
+//! like C++ `controls` (created lazily, on first use, not eagerly like
+//! `Top`: see [`build_hgraph`]). A reference from `Top` to a `Control` value
+//! is *not* recorded as a same-graph ordering edge: `Control` is an
+//! unconditional precondition of every other graph, not a schedule-dependent
+//! one (plan §4.2 "controls are compiled first as a fixed outer phase").
+//!
+//! Scope, deliberately narrower than full C++ parity: only *top-level*
+//! Konst/Block signals are hoisted to the single global `Control` graph.
+//! Konst/Block-variability signals reached while traversing a **wrapper's**
+//! inner domain keep their existing per-wrapper placement unchanged — C++
+//! has per-domain lifecycle sections too, and unifying those with the global
+//! `Control` graph is deferred (open question, not silently assumed) rather
+//! than guessed at here.
+//!
 //! # Adaptation status
 //! - C++ keys graphs by `Tree` and attaches results as properties; Rust keys
-//!   by [`GraphKey`] (`Top` or the wrapper `SigId`) and returns owned values.
+//!   by [`GraphKey`] (`Control`, `Top`, or the wrapper `SigId`) and returns
+//!   owned values.
 //! - Node membership is partitioned (checked by [`audit_hgraph`], mirroring
 //!   C++ `auditHgraph`, and run as a debug assertion by [`build_hgraph`]);
 //!   edge *targets* may be foreign (externals owned by another graph).
-//! - C++ `controls` (slower-than-sample signals hoisted before the loop) is
-//!   not populated in this slice: variability-driven hoisting stays in
-//!   `signal_fir` placement until backend emission (P3) unifies the two.
+//!   [`audit_control_variability`] additionally checks that `Control` never
+//!   owns a `Samp`-variability signal.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use ahash::{AHashMap, AHashSet};
 use propagate::{ClockDomainId, ClockDomainTable};
 use signals::{SigId, SigMatch, match_sig};
+use sigtype::{SigType, Variability};
 use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
 use crate::clk_env::{ClkEnv, ClkEnvMap, is_ancestor_clk_env};
+use crate::schedule::SchedulingStrategy;
 
 /// Key of one per-domain dependency graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GraphKey {
+    /// The global control/lifecycle graph: slower-than-sample (`Konst`/
+    /// `Block`) signals reached at the top domain (plan §4.6). Declared
+    /// first so the derived [`Ord`] places it before every other key,
+    /// matching its role as an unconditional precondition.
+    Control,
     /// The top-level (audio-rate) graph.
     Top,
     /// Subgraph keyed by its OD/US/DS wrapper node.
@@ -191,6 +217,10 @@ pub enum HgraphError {
     InstantaneousCycle { key: GraphKey, sig: SigId },
     /// Structural error while walking the prepared forest.
     Malformed { sig: SigId, detail: String },
+    /// [`audit_control_variability`]: a `Samp`-variability signal is owned by
+    /// [`GraphKey::Control`] (a per-sample value can never be part of the
+    /// unconditional, once-per-lifecycle control precondition).
+    ControlVariabilityViolated { sig: SigId },
 }
 
 impl fmt::Display for HgraphError {
@@ -214,6 +244,11 @@ impl fmt::Display for HgraphError {
             Self::Malformed { sig, detail } => {
                 write!(f, "malformed signal {}: {detail}", sig.as_u32())
             }
+            Self::ControlVariabilityViolated { sig } => write!(
+                f,
+                "signal {} is Samp-variability but owned by the Control graph",
+                sig.as_u32()
+            ),
         }
     }
 }
@@ -414,6 +449,10 @@ struct Builder<'a> {
     arena: &'a TreeArena,
     domains: &'a ClockDomainTable,
     envs: &'a ClkEnvMap,
+    /// Variability source for the `Control` redirect (plan §4.6). A signal
+    /// missing from this map is conservatively treated as `Samp` (stays
+    /// wherever clock-domain routing would already place it).
+    sig_types: &'a HashMap<SigId, SigType>,
     hgraph: Hgraph,
     /// Which graph owns each domain's signals. `None → Top`; a wrapper's
     /// inner domain maps to its subgraph once the wrapper is visited.
@@ -434,6 +473,23 @@ impl<'a> Builder<'a> {
     /// visited first.
     fn key_for(&self, env: ClkEnv) -> GraphKey {
         self.domain_key.get(&env).copied().unwrap_or(GraphKey::Top)
+    }
+
+    /// Redirects a `Top`-routed, non-`Samp`-variability ordinary signal to
+    /// [`GraphKey::Control`] (plan §4.6). Never redirects out of a wrapper
+    /// subgraph — see the module docs' "Control graph" section for why that
+    /// is deliberately out of scope here.
+    fn effective_key(&self, base: GraphKey, sig: SigId) -> GraphKey {
+        if base == GraphKey::Top {
+            let variability = self
+                .sig_types
+                .get(&sig)
+                .map_or(Variability::Samp, SigType::variability);
+            if variability != Variability::Samp {
+                return GraphKey::Control;
+            }
+        }
+        base
     }
 
     fn visit(&mut self, sig: SigId) -> Result<(), HgraphError> {
@@ -467,7 +523,8 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
 
-        let own_key = self.key_for(env);
+        let base_key = self.key_for(env);
+        let own_key = self.effective_key(base_key, sig);
         self.hgraph.graph_mut(own_key).add_node(sig);
 
         for edge in get_signal_dependencies(self.arena, sig)? {
@@ -475,6 +532,13 @@ impl<'a> Builder<'a> {
             self.visit(edge.to)?;
             let dep_env = self.env_of(edge.to)?;
             if dep_env == env {
+                let dep_key = self.effective_key(base_key, edge.to);
+                if own_key != GraphKey::Control && dep_key == GraphKey::Control {
+                    // Control is an unconditional precondition of every other
+                    // graph, not a schedule-dependent same-graph ordering
+                    // edge (module docs, "Control graph").
+                    continue;
+                }
                 // Same-domain: ordering edge (immediate) or placement-only
                 // edge (delayed) inside the same graph.
                 self.hgraph
@@ -521,21 +585,37 @@ fn wrapper_inner_env(arena: &TreeArena, sig: SigId) -> ClkEnv {
 }
 
 /// Builds the hierarchical dependency graph from the prepared outputs.
+///
+/// `sig_types` drives the [`GraphKey::Control`] redirect (plan §4.6): pass
+/// the prepared forest's full `SigType` map (e.g.
+/// `PreparedSignals::sig_types_map`) so control/lifecycle signals separate
+/// from the top graph. An empty map is safe — every signal is then
+/// conservatively treated as `Samp` and routing degrades to the pre-P3
+/// behavior (no `Control` graph populated).
 pub fn build_hgraph(
     arena: &TreeArena,
     domains: &ClockDomainTable,
     envs: &ClkEnvMap,
     outputs: &[SigId],
+    sig_types: &HashMap<SigId, SigType>,
 ) -> Result<Hgraph, HgraphError> {
     let mut builder = Builder {
         arena,
         domains,
         envs,
+        sig_types,
         hgraph: Hgraph::default(),
         domain_key: AHashMap::from_iter([(None, GraphKey::Top)]),
         visited: AHashSet::new(),
     };
-    // Materialize the top graph first for deterministic ordering.
+    // Materialize the top graph first for deterministic ordering, matching
+    // pre-P3 behavior. `Control` is deliberately *not* eagerly materialized
+    // here: unlike `Top`, most programs redirect nothing to it, and an
+    // always-present (possibly empty) `Control` entry would silently change
+    // `Hgraph::graphs().len()` for every caller — including ones with no
+    // Konst/Block top-level signal at all. `Builder::graph_mut` creates it
+    // lazily on the first redirect, so `graphs()` only gains an entry when
+    // `Control` genuinely owns something.
     let _ = builder.hgraph.graph_mut(GraphKey::Top);
     for &out in outputs {
         builder.visit(out)?;
@@ -545,6 +625,11 @@ pub fn build_hgraph(
         audit_hgraph(&hgraph).is_ok(),
         "hgraph partition property violated: {:?}",
         audit_hgraph(&hgraph)
+    );
+    debug_assert!(
+        audit_control_variability(&hgraph, sig_types).is_ok(),
+        "hgraph control-variability property violated: {:?}",
+        audit_control_variability(&hgraph, sig_types)
     );
     Ok(hgraph)
 }
@@ -557,6 +642,29 @@ pub fn audit_hgraph(hgraph: &Hgraph) -> Result<(), HgraphError> {
             if !seen.insert(sig) {
                 return Err(HgraphError::PartitionViolated { sig });
             }
+        }
+    }
+    Ok(())
+}
+
+/// Extended audit (plan §4.6): [`GraphKey::Control`] never owns a
+/// `Samp`-variability signal. A signal absent from `sig_types` cannot
+/// violate this (the builder's redirect only ever *adds to* `Control` when
+/// it positively knows a non-`Samp` variability; a missing entry keeps a
+/// signal at its clock-domain-routed graph).
+pub fn audit_control_variability(
+    hgraph: &Hgraph,
+    sig_types: &HashMap<SigId, SigType>,
+) -> Result<(), HgraphError> {
+    let Some(control) = hgraph.graph(GraphKey::Control) else {
+        return Ok(());
+    };
+    for &sig in control.nodes() {
+        if sig_types
+            .get(&sig)
+            .is_some_and(|ty| ty.variability() == Variability::Samp)
+        {
+            return Err(HgraphError::ControlVariabilityViolated { sig });
         }
     }
     Ok(())
@@ -582,43 +690,35 @@ impl Hsched {
     }
 }
 
-/// Serializes each per-domain graph with a deterministic depth-first
-/// toposort on immediate edges (C++ `dfschedule` strategy).
+/// Serializes each per-domain graph independently under `strategy`, using
+/// the shared generic scheduler (`crate::schedule`, plan phase P1) through
+/// the [`Digraph`] [`crate::schedule::ScheduleDag`] adapter — the same four
+/// `-ss` strategies as everywhere else, replacing this module's former
+/// hand-rolled depth-first walk (C++ `dfschedule` was the only strategy
+/// available here before P1 existed).
 ///
 /// Instantaneous in-graph cycles are causality errors, reported per graph.
-pub fn schedule(hgraph: &Hgraph) -> Result<Hsched, HgraphError> {
-    fn dfs(
-        graph: &Digraph,
-        sig: SigId,
-        key: GraphKey,
-        state: &mut AHashMap<SigId, u8>,
-        order: &mut Vec<SigId>,
-    ) -> Result<(), HgraphError> {
-        match state.get(&sig) {
-            Some(2) => return Ok(()),
-            Some(1) => return Err(HgraphError::InstantaneousCycle { key, sig }),
-            _ => {}
-        }
-        state.insert(sig, 1);
-        for edge in graph.edges(sig) {
-            // Only immediate edges order the tick; only owned targets
-            // participate (externals are preconditions handled upstream).
-            if !edge.delayed && graph.contains(edge.to) {
-                dfs(graph, edge.to, key, state, order)?;
-            }
-        }
-        state.insert(sig, 2);
-        order.push(sig);
-        Ok(())
-    }
-
+/// [`crate::schedule::ScheduleError::SelfEdge`] and
+/// [`crate::schedule::ScheduleError::Cycle`] both fold into
+/// [`HgraphError::InstantaneousCycle`] (a self-edge is a length-1 cycle);
+/// `sig` is the cycle's first stable-sorted member for a multi-node cycle,
+/// matching this module's existing single-node error shape rather than
+/// widening it to carry the whole cycle.
+pub fn schedule(hgraph: &Hgraph, strategy: SchedulingStrategy) -> Result<Hsched, HgraphError> {
     let mut out = Hsched::default();
     for (key, graph) in hgraph.graphs() {
-        let mut order = Vec::with_capacity(graph.len());
-        let mut state: AHashMap<SigId, u8> = AHashMap::new();
-        for &sig in graph.nodes() {
-            dfs(graph, sig, *key, &mut state, &mut order)?;
-        }
+        let order = crate::schedule::schedule(strategy, graph).map_err(|err| match err {
+            crate::schedule::ScheduleError::SelfEdge { node } => HgraphError::InstantaneousCycle {
+                key: *key,
+                sig: node,
+            },
+            crate::schedule::ScheduleError::Cycle { remaining } => {
+                HgraphError::InstantaneousCycle {
+                    key: *key,
+                    sig: remaining[0],
+                }
+            }
+        })?;
         out.schedules.push((*key, order));
     }
     Ok(out)

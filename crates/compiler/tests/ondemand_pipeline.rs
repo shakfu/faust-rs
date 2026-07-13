@@ -161,6 +161,7 @@ fn structurally_identical_ondemand_instances_get_distinct_domains() {
 fn clock_inference_and_hgraph_run_on_prepared_ondemand_program() {
     use transform::clk_env::annotate;
     use transform::hgraph::{GraphKey, audit_hgraph, build_hgraph, schedule};
+    use transform::schedule::SchedulingStrategy;
 
     let out = compile_inline(
         "od_p1_end_to_end",
@@ -183,16 +184,32 @@ fn clock_inference_and_hgraph_run_on_prepared_ondemand_program() {
         &out.clock_domains,
         &envs,
         prepared.outputs(),
+        prepared.sig_types_map(),
     )
     .expect("hgraph builds on the prepared forest");
     audit_hgraph(&hgraph).expect("partition property");
 
-    // One top graph + one wrapper subgraph, both scheduled deterministically.
-    assert_eq!(hgraph.graphs().len(), 2);
-    let sched = schedule(&hgraph).expect("per-domain graphs are acyclic");
+    // Control (the button's Konst/Block-variability UI plumbing, plan §4.6)
+    // + one top graph + one wrapper subgraph, all scheduled deterministically.
+    assert_eq!(hgraph.graphs().len(), 3);
+    let control = hgraph
+        .graph(GraphKey::Control)
+        .expect("this DSP has a top-level Konst/Block signal (the gate button)");
+    assert!(
+        !control.is_empty(),
+        "Control must own at least the signal that triggered its creation"
+    );
+    transform::hgraph::audit_control_variability(&hgraph, prepared.sig_types_map())
+        .expect("Control never owns a Samp-variability signal");
+    let sched =
+        schedule(&hgraph, SchedulingStrategy::DepthFirst).expect("per-domain graphs are acyclic");
     let top = sched.schedule(GraphKey::Top).expect("top schedule");
     assert!(!top.is_empty());
-    let (wrapper_key, _) = hgraph.graphs()[1];
+    let wrapper_key = hgraph
+        .graphs()
+        .iter()
+        .find_map(|(k, _)| matches!(k, GraphKey::Wrapper(_)).then_some(*k))
+        .expect("exactly one wrapper subgraph");
     let sub = sched.schedule(wrapper_key).expect("subgraph schedule");
     assert!(!sub.is_empty(), "the block body must be scheduled");
 }

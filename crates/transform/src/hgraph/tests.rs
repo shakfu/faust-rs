@@ -3,12 +3,18 @@
 //! Fixtures mirror the shapes `propagate_clocked_wrapper` emits:
 //! `Seq(OnDemand([Clocked(env, clock), PermVar(Clocked(env, body))...]), permvar_i)`.
 
+use std::collections::HashMap;
+
 use propagate::{ClockDomain, ClockDomainId, ClockDomainKind, ClockDomainTable};
 use signals::{BinOp, SigBuilder, SigId};
 use tlib::TreeArena;
 
-use super::{GraphKey, HgraphError, audit_hgraph, build_hgraph, needs_subgraph, schedule};
+use super::{
+    Digraph, GraphKey, Hgraph, HgraphError, audit_control_variability, audit_hgraph, build_hgraph,
+    needs_subgraph, schedule,
+};
 use crate::clk_env::annotate;
+use crate::schedule::SchedulingStrategy;
 
 fn make_domains(parents: &[Option<usize>], arena: &mut TreeArena) -> ClockDomainTable {
     let placeholder_clock = SigBuilder::new(arena).int(1);
@@ -71,7 +77,8 @@ fn ondemand_partitions_top_and_subgraph() {
     let (seq, od, _clocked_clock, held) = make_od_program(&mut arena, 0, clock, body_in_domain);
 
     let envs = annotate(&arena, &domains, &[seq]).expect("well-clocked fixture");
-    let hgraph = build_hgraph(&arena, &domains, &envs, &[seq]).expect("hgraph builds");
+    let hgraph =
+        build_hgraph(&arena, &domains, &envs, &[seq], &HashMap::new()).expect("hgraph builds");
 
     // Partition property holds.
     audit_hgraph(&hgraph).expect("every signal owned by exactly one graph");
@@ -118,8 +125,10 @@ fn schedule_orders_clock_before_wrapper_before_seq() {
     let (seq, od, _clocked_clock, _held) = make_od_program(&mut arena, 0, clock, lifted);
 
     let envs = annotate(&arena, &domains, &[seq]).expect("well-clocked fixture");
-    let hgraph = build_hgraph(&arena, &domains, &envs, &[seq]).expect("hgraph builds");
-    let sched = schedule(&hgraph).expect("acyclic per-domain graphs");
+    let hgraph =
+        build_hgraph(&arena, &domains, &envs, &[seq], &HashMap::new()).expect("hgraph builds");
+    let sched =
+        schedule(&hgraph, SchedulingStrategy::DepthFirst).expect("acyclic per-domain graphs");
 
     let top_order = sched.schedule(GraphKey::Top).expect("top schedule");
     let pos = |sig: SigId| {
@@ -135,8 +144,9 @@ fn schedule_orders_clock_before_wrapper_before_seq() {
     );
 
     // Determinism: rebuilding gives the identical schedule.
-    let hgraph2 = build_hgraph(&arena, &domains, &envs, &[seq]).expect("hgraph rebuilds");
-    let sched2 = schedule(&hgraph2).expect("still acyclic");
+    let hgraph2 =
+        build_hgraph(&arena, &domains, &envs, &[seq], &HashMap::new()).expect("hgraph rebuilds");
+    let sched2 = schedule(&hgraph2, SchedulingStrategy::DepthFirst).expect("still acyclic");
     assert_eq!(sched.schedules.len(), sched2.schedules.len());
     for ((k1, s1), (k2, s2)) in sched.schedules.iter().zip(sched2.schedules.iter()) {
         assert_eq!(k1, k2);
@@ -164,7 +174,8 @@ fn external_dependency_becomes_wrapper_precondition() {
     let (seq, od, _cc, _held) = make_od_program(&mut arena, 0, clock, boundary);
 
     let envs = annotate(&arena, &domains, &[seq]).expect("well-clocked fixture");
-    let hgraph = build_hgraph(&arena, &domains, &envs, &[seq]).expect("hgraph builds");
+    let hgraph =
+        build_hgraph(&arena, &domains, &envs, &[seq], &HashMap::new()).expect("hgraph builds");
     audit_hgraph(&hgraph).expect("partition holds");
 
     // `g` and its temp-var snapshot are owned by the top graph.
@@ -201,7 +212,8 @@ fn instantaneous_cycle_is_reported_as_causality_error() {
     let slot = hgraph.graph_mut(GraphKey::Top);
     *slot = graph;
 
-    let err = schedule(&hgraph).expect_err("cycle must be a causality error");
+    let err = schedule(&hgraph, SchedulingStrategy::DepthFirst)
+        .expect_err("cycle must be a causality error");
     assert!(
         matches!(err, HgraphError::InstantaneousCycle { .. }),
         "{err}"
@@ -227,7 +239,136 @@ fn delayed_edges_do_not_order_the_tick() {
     let out = SigBuilder::new(&mut arena).proj(0, group);
 
     let envs = annotate(&arena, &domains, &[out]).expect("well-clocked fixture");
-    let hgraph = build_hgraph(&arena, &domains, &envs, &[out]).expect("hgraph builds");
+    let hgraph =
+        build_hgraph(&arena, &domains, &envs, &[out], &HashMap::new()).expect("hgraph builds");
     // The recursion is broken by the delayed edge: scheduling must succeed.
-    schedule(&hgraph).expect("state-breaking recursion is acyclic on immediate edges");
+    schedule(&hgraph, SchedulingStrategy::DepthFirst)
+        .expect("state-breaking recursion is acyclic on immediate edges");
+}
+
+// ── Control graph (plan §4.6) ────────────────────────────────────────────────
+
+fn sig_type(variability: sigtype::Variability) -> sigtype::SigType {
+    sigtype::SigType::Simple(sigtype::SimpleType {
+        nature: sigtype::Nature::Real,
+        variability,
+        computability: sigtype::Computability::Comp,
+        vectorability: sigtype::Vectorability::Vect,
+        boolean: sigtype::Boolean::Num,
+        interval: interval::Interval::new_default(),
+        res: sigtype::Res::default(),
+    })
+}
+
+#[test]
+fn control_owns_top_level_konst_signal_and_precondition_edge_is_implicit() {
+    let mut arena = TreeArena::new();
+    let domains = make_domains(&[], &mut arena);
+
+    // s = input(0) + k, a flat (non-clocked) program. `k` is declared Konst
+    // in sig_types even though nothing here enforces that at the type-system
+    // level: build_hgraph's redirect only consumes the supplied map, which
+    // lets this test exercise the mechanism directly.
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let k = b.real(0.5);
+    let s = b.binop(BinOp::Add, x, k);
+
+    let mut sig_types = HashMap::new();
+    sig_types.insert(k, sig_type(sigtype::Variability::Konst));
+    sig_types.insert(x, sig_type(sigtype::Variability::Samp));
+    sig_types.insert(s, sig_type(sigtype::Variability::Samp));
+
+    let envs = annotate(&arena, &domains, &[s]).expect("well-clocked fixture");
+    let hgraph = build_hgraph(&arena, &domains, &envs, &[s], &sig_types).expect("hgraph builds");
+    audit_hgraph(&hgraph).expect("partition property");
+    audit_control_variability(&hgraph, &sig_types).expect("Control owns no Samp signal");
+
+    let control = hgraph
+        .graph(GraphKey::Control)
+        .expect("Control was created");
+    assert!(
+        control.contains(k),
+        "the Konst signal must be redirected to Control"
+    );
+    let top = hgraph.graph(GraphKey::Top).expect("top graph exists");
+    assert!(
+        !top.contains(k),
+        "Control ownership must not also appear in Top"
+    );
+    assert!(top.contains(s), "the Samp signal stays in Top");
+    assert!(top.contains(x));
+
+    // The precondition on `k` is implicit: Top's edge list for `s` only
+    // names `x`, never `k` (module docs, "Control graph").
+    let s_edges = top.edges(s);
+    assert_eq!(s_edges.len(), 1, "got {s_edges:?}");
+    assert_eq!(s_edges[0].to, x);
+
+    // Every strategy still schedules Top and Control independently and
+    // validly (P1 integration, not just the literal DFS this module used to
+    // hand-roll).
+    for strategy in [
+        SchedulingStrategy::DepthFirst,
+        SchedulingStrategy::BreadthFirst,
+        SchedulingStrategy::Special,
+        SchedulingStrategy::ReverseBreadthFirst,
+    ] {
+        let sched = schedule(&hgraph, strategy)
+            .unwrap_or_else(|e| panic!("{strategy:?} must schedule an acyclic hgraph: {e}"));
+        let control_order = sched.schedule(GraphKey::Control).expect("control schedule");
+        assert_eq!(control_order, &[k]);
+        let top_order = sched.schedule(GraphKey::Top).expect("top schedule");
+        let pos = |sig: SigId| top_order.iter().position(|&n| n == sig).unwrap();
+        assert!(pos(x) < pos(s), "{strategy:?}: x must precede s");
+    }
+}
+
+#[test]
+fn missing_sig_types_entry_conservatively_stays_out_of_control() {
+    // A signal absent from sig_types must never be silently redirected: the
+    // conservative default is Samp (module docs on `Builder::effective_key`).
+    let mut arena = TreeArena::new();
+    let domains = make_domains(&[], &mut arena);
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let k = b.real(0.5);
+    let s = b.binop(BinOp::Add, x, k);
+
+    let envs = annotate(&arena, &domains, &[s]).expect("well-clocked fixture");
+    let hgraph =
+        build_hgraph(&arena, &domains, &envs, &[s], &HashMap::new()).expect("hgraph builds");
+    assert!(
+        hgraph.graph(GraphKey::Control).is_none(),
+        "Control must not be created when sig_types has no non-Samp entry"
+    );
+    let top = hgraph.graph(GraphKey::Top).expect("top graph exists");
+    assert!(top.contains(k), "k stays in Top without a sig_types entry");
+}
+
+#[test]
+fn audit_control_variability_rejects_a_samp_signal_in_control() {
+    // Hand-build a malformed Hgraph the same way
+    // `instantaneous_cycle_is_reported_as_causality_error` does, bypassing
+    // the builder's own invariant to prove the audit is a genuine, separate
+    // trust boundary — not just "the builder never produces this."
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let a = b.input(0);
+
+    let mut graph = Digraph::default();
+    graph.add_node(a);
+    let mut hgraph = Hgraph::default();
+    let slot = hgraph.graph_mut(GraphKey::Control);
+    *slot = graph;
+
+    let mut sig_types = HashMap::new();
+    sig_types.insert(a, sig_type(sigtype::Variability::Samp));
+
+    let err = audit_control_variability(&hgraph, &sig_types)
+        .expect_err("a Samp signal must never validate inside Control");
+    assert!(
+        matches!(err, HgraphError::ControlVariabilityViolated { sig } if sig == a),
+        "{err}"
+    );
 }

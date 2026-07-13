@@ -18,3 +18,6 @@ signals = { path = "../signals" }
 sigtype = { path = "../sigtype" }
 tlib    = { path = "../tlib" }
 ui      = { path = "../ui" }
+
+[dev-dependencies]
+interval = { path = "../interval" }

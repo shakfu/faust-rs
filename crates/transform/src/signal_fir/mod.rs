@@ -328,20 +328,29 @@ fn compile_fastlane_inner(
                         format!("clock-environment inference failed: {err}"),
                     )
                 })?;
-            let hgraph =
-                crate::hgraph::build_hgraph(prepared.arena(), domains, &envs, prepared.outputs())
-                    .map_err(|err| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::ClockAnalysis,
-                        format!("hierarchical dependency graph failed: {err}"),
-                    )
-                })?;
-            crate::hgraph::schedule(&hgraph).map_err(|err| {
+            let hgraph = crate::hgraph::build_hgraph(
+                prepared.arena(),
+                domains,
+                &envs,
+                prepared.outputs(),
+                prepared.sig_types_map(),
+            )
+            .map_err(|err| {
                 SignalFirError::new(
                     SignalFirErrorCode::ClockAnalysis,
-                    format!("clock-domain scheduling failed: {err}"),
+                    format!("hierarchical dependency graph failed: {err}"),
                 )
             })?;
+            // -ss default: this gate only checks causality (its Hsched
+            // value is not yet consumed by lowering, see the schedule()
+            // doc); the strategy choice is therefore not yet observable.
+            crate::hgraph::schedule(&hgraph, crate::schedule::SchedulingStrategy::DepthFirst)
+                .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("clock-domain scheduling failed: {err}"),
+                    )
+                })?;
             Some(module::ClockedPlan { domains, envs })
         }
         _ => None,
