@@ -49,16 +49,22 @@
 //! | [`schedule`] | `adapted` | Literal port of the four algorithms, plus typed, total cycle/self-edge detection that C++ does not perform (C++ assumes a DAG and recurses/loops unconditionally). |
 //! | [`verify_schedule`] | `adapted` | No C++ equivalent; mirrors the Lean `verifySchedule` as an independent postcondition checker (plan §5.10) never reusing a scheduling algorithm. |
 //!
+//! [`certificate`] adds the canonical, hashable `GraphSnapshot` /
+//! `ScheduleCertificate` artifact layer around [`schedule`] /
+//! [`verify_schedule`] (certified plan "R1 - Schedule certificate at L2").
+//!
 //! # Status
 //! Purely additive: nothing in the production compile path constructs a
-//! [`ScheduleDag`] or calls [`schedule`] yet — phase P2 threads the public
-//! `-ss` / `--scheduling-strategy` option through the compiler, and phase P3
-//! activates scalar scheduling. `hgraph::schedule` keeps its own literal
+//! [`ScheduleDag`] or calls [`schedule`] yet. Phase P2 (done) threads the
+//! public `-ss` / `--scheduling-strategy` option through the compiler down
+//! to `SignalFirOptions`, but no lowering path invokes this scheduler; phase
+//! P3 activates scalar scheduling. `hgraph::schedule` keeps its own literal
 //! depth-first walk unchanged; it is not yet expressed in terms of this
 //! module.
 
 mod adapters;
 mod breadth_first;
+pub mod certificate;
 mod common;
 mod dag;
 mod depth_first;
