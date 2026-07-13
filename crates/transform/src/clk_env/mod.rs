@@ -445,8 +445,19 @@ impl<'a> Inference<'a> {
             | SigMatch::VSlider(_)
             | SigMatch::HSlider(_)
             | SigMatch::NumEntry(_)
-            | SigMatch::Soundfile(_)
-            | SigMatch::Waveform(_) => Ok(None),
+            | SigMatch::Soundfile(_) => Ok(None),
+
+            // C++ reaches waveform branches through the generic composite
+            // rule. Visiting every table element makes the annotation total
+            // for Hgraph and retains the generic deepest-domain join.
+            SigMatch::Waveform(children) => {
+                let mut result = None;
+                for &child in children {
+                    let child_env = self.infer(child)?;
+                    result = self.max(sig, result, child_env)?;
+                }
+                Ok(result)
+            }
 
             // `R_CLOCKED(c, s)`: require `C⟦s⟧ ⊆ c`; result `c`.
             SigMatch::Clocked(env_child, inner) => {

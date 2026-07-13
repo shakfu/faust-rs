@@ -1,98 +1,76 @@
 # Session Handoff
 
-Date: 2026-06-09
+Date: 2026-07-13
 
 ## Repo State
 
-- Branch: `autodiff2`
-- HEAD: `6aa549cd472660a9189ce1d0acc4e0da2db24f9f`
-
-Recent commits (most recent first):
-
-- `6aa549cd` Add libfaust export verification
-- `4367a107` Add Signal C++ API header
-- `736c567c` Add Signal C API header
-- `4f258950` Add Signal normal form and source helpers
-- `c9d3b3ca` Add Signal foreign constructors
-- `c59ee151` Add Signal structural predicates
-- `8b407464` Add Signal recursion constructors
-- `ba381fd0` Add Signal table soundfile and UI constructors
+- Branch: `ondemand-vec-fad-synthesis`
+- HEAD: the commit containing this handoff
+- Latest task commit: P4.1/P4.2 unified signal-use analysis
+- P4.1 and P4.2 changes are validated and committed together.
 
 ## Working Tree
 
-- Tracked changes:
-  - none after the latest committed step
-- Untracked local files/directories:
-  - many pre-existing local scratch files remain untracked at the repository
-    root; they were left untouched
+- Committed changes: `signal_fir::vector_analysis`, Hgraph/loop/PV dependency-walk
+  adapters, the vector and certified porting plans, today's journal/index, and
+  this handoff.
+- Many pre-existing untracked scratch files remain at the repository root and
+  were left untouched.
 
-## Current Goal(s)
+## What Changed
 
-- Execute `porting/libfaust-box-signal-api-parity-plan-2026-06-09-en.md`.
-- Keep documentation, journal entries, and commits split per completed step.
+- Added one typed signal decoder with separate scheduling and occurrence views,
+  shared by Hgraph, LoopGraph/PV, and `SignalUseTable`.
+- Ported P4.2 delay, prefix, projection, FIR, IIR, table, wrapper, generator,
+  recursive-variability, and `-1 * y` rules from the pinned C++ sources.
+- Aggregated `multi` through the four C++ extended-variability buckets and
+  retained exact first-visit occurrence expansion.
+- Added explicit Rust adaptations for symbolic recursion back-edges, AD tuple
+  carriers, wrapper clock boundaries, and the existing permissive variable-
+  delay interval contract.
+- Made clock inference total for waveform elements after the workspace suite
+  exposed a clocked-waveform regression.
+- Expanded the focused vector-analysis suite from six to twelve tests.
 
-## What Changed This Session
+## Decisions And Constraints
 
-- Planned and committed the libfaust Box/Signal parity roadmap.
-- Generated Box and Signal API matrices under `porting/generated/`.
-- Extracted shared tree FFI context support into `tree-ffi`.
-- Completed Box API parity fixes for right shift, `exp10`, soundfile wrappers,
-  Box-to-Signal arrays, and Box source generation contracts.
-- Added the maintained Signal FFI surface, including constructors, recursion,
-  predicates, foreign nodes, normal-form helpers, source generation, and C/C++
-  headers.
-- Added `cargo run -p xtask -- libfaust-export-check` to build `faust-ffi`,
-  compare exported symbols against maintained headers, and syntax-check C/C++
-  clients.
+- `Proj(i, SYMREC)` selects definition `i` immediately;
+  `Proj(i, SYMREF)` selects it through an explicit one-sample delayed edge.
+- BlockReverseAD and ReverseTimeRec projections depend on their Rust-only tuple
+  carrier rather than being misclassified as malformed recursion.
+- faust-rs keeps accepting bounded variable-delay intervals with negative
+  lower bounds when `hi >= 0`; narrowing that scalar contract is out of P4.2.
+- Effects and the real execution-condition producer are deferred; no invented
+  empty effect certificate is accepted as evidence.
+- The current table is additive and has no production placement or VectorPlan
+  consumer.
+- The C++ compiler has no stable machine-readable occurrence exporter. P4.2
+  tests pin rules directly from source; the signal-by-signal differential gate
+  remains open.
 
-## Decisions / Constraints (important for resume)
+## Validation
 
-- `tree-ffi` owns shared C tree handle encoding and the process-global
-  `TreeFfiContext`.
-- Signal recursion uses Rust's canonical external `SIGREC(body)` shape; `CisRec`
-  reports a deterministic adapted mapping.
-- Signal doc-table predicate wrappers currently return deterministic false until
-  Rust has explicit doc-table IR nodes.
-- Header wrappers stay thin over the C ABI; no separate C++ object model was
-  introduced.
-- `JOURNAL.md` remains an index; detailed entries stay in
-  `porting/journal/YYYY-MM-DD.md` with newest commit first inside the day file.
+- `cargo fmt --all` passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- `cargo test --workspace --all-targets` passed.
+- `cargo run -p xtask -- golden-check` passed all 190 snapshots.
 
-## Validation Run
+## Next Steps
 
-- `cargo run -p xtask -- libfaust-export-check` -> passed; 269 header symbols
-  exported by `target/debug/libfaust.dylib`
-- `cargo fmt --all` -> passed
-- `cargo clippy --workspace --all-targets -- -D warnings` -> passed
-- `cargo test --workspace --all-targets` -> passed
+1. Add the production execution-condition and conservative effect producers
+   (P4.3), including stable resource identities and conflict edges.
+2. Export and independently verify `DecorationCertificate` before allowing the
+   table to feed production `VectorPlan` construction.
+3. Consolidate placement and delay consumers onto accepted decoration facts.
+4. Add a stable C++ occurrence oracle or a purpose-built debug exporter before
+   claiming the signal-by-signal differential exit criterion.
 
-## Open Issues / Blockers
+## Useful Commands
 
-- None for the planned Box/Signal API parity work items in this session.
-- Longer-term parity work still needs differential tests against the C++ libfaust
-  behavior for representative Box/Signal construction and source-generation
-  cases.
-
-## Next Steps (ordered)
-
-1. Consider wiring `cargo run -p xtask -- libfaust-export-check` into CI next to
-   existing golden/API guardrails.
-2. Add C++ differential tests for selected Box and Signal wrapper cases once the
-   reference fixture strategy is settled.
-3. Continue toward runtime/source-generation parity beyond the maintained
-   libfaust Box/Signal API surface.
-
-## Useful Commands to Resume
-
-- `cargo run -p xtask -- libfaust-export-check`
-- `cargo run -p xtask -- libfaust-api-matrix --cpp-root /Users/letz/Developpements/RUST/faust --out porting/generated`
-- `cargo fmt --all`
+- `cargo test -p transform signal_fir::vector_analysis --lib`
+- `cargo test -p transform hgraph --lib`
+- `cargo test -p transform signal_fir::loop_graph --lib`
+- `cargo test -p compiler --test pv_vector_slice`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`
-- `git status --short`
-
-## Notes
-
-- The plan file is
-  `porting/libfaust-box-signal-api-parity-plan-2026-06-09-en.md`.
-- The day journal is `porting/journal/2026-06-09.md`.
+- `cargo run -p xtask -- golden-check`

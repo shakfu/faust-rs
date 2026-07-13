@@ -572,10 +572,13 @@ struct OccInfo {
 
 `multi` is derived exactly as `hasMultiOccurrences()`: more than one occurrence
 in one context, or occurrences from a faster context than the signal's own
-variability, or occurrences under different execution conditions. Parents push
-their context onto each child visit; delayed edges contribute to `max_delay`
-and `delay_reads` of the *carried* signal but not to same-tick occurrence
-contexts.
+variability, or occurrences under different execution conditions. As in C++
+`OccMarkup::incOcc`, every use increments the target's occurrence facts, but a
+signal expands its children only on its first visit. That expansion passes the
+current signal's inferred variability and execution condition to each child;
+it does not forward the variability inherited by the current use. Delayed
+edges contribute to `max_delay` and `delay_reads` of the *carried* signal,
+while `is_delay_read` describes the `sigDelay` node itself.
 
 **Ownership consolidation.** `placement.rs` reference counting and
 `delay/plan.rs` delay analysis stop recomputing these facts: the delay plan
@@ -1602,14 +1605,92 @@ satisfies all `P-*` obligations independently of `-ss`.
 - Allocate loop ids, epoch membership, transport ids, and buffer names before
   scheduling. The plan builder must not accept a `SchedulingStrategy` argument.
 
-**Implementation status (2026-07-13).** The pure `needSeparateLoop` decision
+**Implementation status (2026-07-13, P4.0).** The pure `needSeparateLoop` decision
 now follows the exact C++/Lean precedence, including the dominant
 `maxDelay > 0` rule. Rust exhaustively checks all 96 combinations of the two
 delay classes, three variability classes, and four Boolean facts against the
 Lean `separateLoop_complete` characterization. The adapted result also keeps
-recursive projections explicitly serial. The unified `SignalUseInfo`
-traversal, real `DecorationCertificate`, and production `VectorPlan` builder
-remain open; this completed predicate is their P4.0 prerequisite.
+recursive projections explicitly serial.
+
+**Implementation status (2026-07-13, P4.1 additive spine).**
+`signal_fir::vector_analysis` now owns one deterministic decoded dependency
+walk consumed by Hgraph and the loop/PV adapters, replacing their divergent
+`SigMatch` child enumerations. It also builds a sorted `SignalUseTable` from the
+verified prepared forest with full `SigType`, variability, vectorability,
+`ClkEnv`, context-grouped counts and aggregate `multi`, fixed-delay facts,
+general-delay shape, symbolic projection identity, and the exact C++
+`verySimple = Int | Real | Input | FConst` predicate. The worklist reproduces
+the C++ first-visit rule: every use is counted, but children are expanded once;
+child contexts use the current parent's inferred variability. Missing type,
+clock, malformed-list, negative-projection, and unsupported dynamic-delay
+cases fail through typed errors. Focused tests cover deterministic output,
+duplicate uses, faster and distinct-condition contexts, first-visit expansion,
+fixed delays, projections, triviality, and every current error class.
+
+P4.1 deliberately preserves the prior Rust Hgraph dependency behavior while
+centralizing it. It does **not** yet claim full C++ parity for projection
+definition selection, FIR/IIR occurrence expansion, table/effect dependencies,
+`checkDelayInterval` on interval-bounded non-literal delays, recursive extended
+variability, the C++ `-1 * y` sharing propagation exception, or the differing
+clock-wrapper child contract (C++ excludes the clock child while Rust Hgraph
+currently interprets the wrapper's first returned edge as that clock). Effects,
+the real execution-condition producer, independent decoration verification,
+placement/delay ownership consolidation, certificate export, and production
+`VectorPlan` construction remain open. Therefore P4's formal gate and exit
+criterion are not yet satisfied.
+
+**Implementation status (2026-07-13, P4.2 typed semantic rules).** The shared
+decoder now produces two projections from one `SigMatch` dispatch instead of
+forcing scheduling and occurrence semantics into one edge list:
+`SignalDependencies::scheduling` follows
+`DependenciesUtils.cpp::getSignalDependencies`, while
+`SignalDependencies::occurrences` follows
+`occurrences.cpp::OccMarkup::incOcc`. Hgraph consumes the scheduling view;
+LoopGraph/PV reachability and `SignalUseTable` consume the appropriate shared
+view. There is still one owner of signal-shape decoding.
+
+The typed rules now cover bounded variable delays (`[0,N]` immediate and
+`[1,N]` delayed for scheduling, both carrying rounded maximum `N` into
+occurrences), `prefix`'s immediate scheduling versus one-sample occurrence,
+selected recursive projection definitions, FIR sparse-tap delays and the
+all-zero fallback, compact IIR input/coefficient/self-delay rules, writable and
+read-only tables, clock wrappers, generator leaves, recursive extended
+variability, and the repeated `-1 * y` propagation exception. `multi` is
+aggregated by the four C++ extended-variability buckets, not by raw Rust
+contexts, so two distinct contexts mapping to the same bucket still count as
+multiple occurrences. `sigtype::check_delay_interval` now rounds the upper
+bound as C++ does.
+
+Four representation adaptations are explicit and tested:
+
+- `Proj(i, SYMREC)` has an immediate edge to body `i`, while
+  `Proj(i, SYMREF)` has a delayed edge to the same body because the acyclic Rust
+  symbolic encoding makes the implicit recursion back-edge explicit;
+- projections of Rust-only tuple carriers (`BlockReverseAD`,
+  `ReverseTimeRec`) retain an immediate dependency on the carrier itself;
+- one tagged wrapper result contains both `ClockBoundary(clock)` and immediate
+  payload edges, allowing Hgraph to reproduce its outer-clock rule while the
+  occurrence view still visits all wrapper branches;
+- faust-rs preserves its existing scalar variable-delay contract: a bounded
+  interval with negative `lo` is accepted when `hi >= 0` and runtime lowering
+  clamps the index. C++ rejects `lo < 0`. P4.2 does not narrow that established
+  scalar API while adding exact tests for the common `[0,N]` and `[1,N]`
+  domains.
+
+Twelve source-backed unit tests pin every specialized rule and typed failure,
+including a structural SYMREF back-edge test. The complete 246-test transform
+suite passes, including recursion, BlockReverseAD, ReverseTimeRec, table, and
+variable-delay regressions. The C++ compiler has no stable machine-readable
+`Occurrences` exporter, so these rule tests are derived directly from the two
+pinned C++ functions; the P0 `-phs` and generated-code captures remain the
+behavioral oracle. P4's signal-by-signal differential exit test is therefore
+still open rather than being claimed from text-output heuristics.
+
+Still open after P4.2: the production execution-condition producer,
+conservative effect atoms/edges, independent `DecorationCertificate`
+verification, placement/delay consumer consolidation, and production
+`VectorPlan` construction. These are P4.3 and later work; P4's formal gate and
+exit criterion remain unsatisfied.
 
 **Exit criterion:** an independently accepted `DecorationCertificate`,
 deterministic `SignalUseInfo`, and `VectorPlan` snapshots reproduce the P0

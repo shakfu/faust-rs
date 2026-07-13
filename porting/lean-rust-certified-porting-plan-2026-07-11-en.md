@@ -457,6 +457,17 @@ table (port plan, section 4.3); both must be produced by the same unified
 traversal and the same `signal_dependencies` child walk, so the exported facts
 cannot drift from the facts the planner actually consumed.
 
+**Status (2026-07-13).** P4.2 now provides the single typed decoder, distinct
+scheduling and occurrence projections, and a deterministic in-memory
+`SignalUseTable` over verified prepared signals. Its specialized delay,
+projection, FIR/IIR, table, wrapper, recursive-variability, and sharing rules
+are source-pinned to the C++ implementation, with explicit Rust representation
+adaptations. This remains an R2D input, not an R2D certificate: effect atoms,
+the production execution-condition map, canonical export, independent
+coverage/consistency verification, and a stable signal-by-signal C++ occurrence
+oracle remain to be implemented. No `VectorPlan` may treat the current table as
+accepted decoration evidence yet.
+
 Pass criterion: mutating any signal type, clock, effect, delay, occurrence, or
 dependency endpoint makes at least one independent verifier reject the
 certificate before `VectorPlan` construction.

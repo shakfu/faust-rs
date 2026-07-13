@@ -50,9 +50,7 @@ use sigtype::Variability;
 use tlib::TreeArena;
 
 use crate::schedule::{ScheduleDag, SchedulingStrategy, schedule, verify_schedule};
-use crate::signal_fir::loop_graph::{
-    LoopSeparation, SignalLoopProps, needs_separate_loop, signal_value_children,
-};
+use crate::signal_fir::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_loop};
 
 /// Builds the PV DSP signal forest and returns `(arena, y, z)`, the two
 /// output roots. `x` (the shared, delayed, separated signal) is recovered
@@ -86,12 +84,19 @@ struct PvFacts {
 }
 
 fn compute_pv_facts(arena: &TreeArena, roots: &[SigId]) -> PvFacts {
+    let sig_types = sigtype::TypeAnnotator::new(arena, &ui::UiProgram::empty())
+        .annotate(roots)
+        .expect("PV signals have valid types");
+    let analysis = super::vector_analysis::SignalAnalysisContext::new(arena, &sig_types, roots)
+        .expect("PV symbolic recursion index is valid");
     let mut reachable: HashSet<SigId> = HashSet::new();
     let mut stack: Vec<SigId> = roots.to_vec();
     while let Some(sig) = stack.pop() {
         if reachable.insert(sig) {
-            for child in signal_value_children(arena, sig) {
-                stack.push(child);
+            let dependencies = super::vector_analysis::signal_dependencies(&analysis, sig)
+                .expect("PV signals are canonical");
+            for occurrence in dependencies.occurrences() {
+                stack.push(occurrence.to);
             }
         }
     }
@@ -102,15 +107,17 @@ fn compute_pv_facts(arena: &TreeArena, roots: &[SigId]) -> PvFacts {
         *occurrences.entry(r).or_insert(0) += 1;
     }
     for &sig in &reachable {
-        for child in signal_value_children(arena, sig) {
-            *occurrences.entry(child).or_insert(0) += 1;
-        }
-        if let SigMatch::Delay(value, amount) = match_sig(arena, sig)
-            && let SigMatch::Int(n) = match_sig(arena, amount)
+        for occurrence in super::vector_analysis::signal_dependencies(&analysis, sig)
+            .expect("PV signals are canonical")
+            .occurrences()
         {
-            let entry = max_delay.entry(value).or_insert(0);
-            if n > *entry {
-                *entry = n;
+            *occurrences.entry(occurrence.to).or_insert(0) += 1;
+            if occurrence.delay > 0 {
+                let amount = i32::try_from(occurrence.delay).expect("P4.2 delay fits i32");
+                let entry = max_delay.entry(occurrence.to).or_insert(0);
+                if amount > *entry {
+                    *entry = amount;
+                }
             }
         }
     }

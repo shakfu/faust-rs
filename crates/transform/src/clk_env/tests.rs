@@ -278,6 +278,24 @@ fn r_composite_takes_deepest_comparable_child() {
 }
 
 #[test]
+fn waveform_elements_receive_total_clock_annotations() {
+    let mut arena = TreeArena::new();
+    let domains = ClockDomainTable::new();
+    let (first, second, waveform) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let first = b.int(1);
+        let second = b.real(2.0);
+        let waveform = b.waveform(&[first, second]);
+        (first, second, waveform)
+    };
+
+    let map = annotate(&arena, &domains, &[waveform]).expect("waveform must be annotatable");
+    assert_eq!(map.env(waveform), Some(None));
+    assert_eq!(map.env(first), Some(None));
+    assert_eq!(map.env(second), Some(None));
+}
+
+#[test]
 fn sibling_domains_cannot_mix_without_annotation() {
     let mut arena = TreeArena::new();
     // d0 and d1 are both top-level: siblings.

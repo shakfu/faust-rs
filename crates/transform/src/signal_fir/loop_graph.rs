@@ -26,9 +26,8 @@ use std::collections::BTreeSet;
 
 use ahash::AHashMap;
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType, match_fir};
-use signals::{SigId, SigMatch, match_sig};
+use signals::SigId;
 use sigtype::Variability;
-use tlib::TreeArena;
 
 use crate::schedule::ScheduleDag;
 
@@ -417,61 +416,20 @@ impl LoopAssignment {
 /// (which include the op-code atom and constant indices — following those, since
 /// `int(0)` is hash-consed, would fabricate a spurious cross-loop edge).
 ///
-/// Unhandled variants (constants, inputs, controls, soundfiles, waveforms,
-/// `FConst`/`FVar`/`FFun`, and the whole clock-domain boundary
-/// `Clocked`/`OnDemand`/`Seq`/`TempVar`/…) return no children: a **conservative**
-/// leaf, which can only *under*-separate (never add a wrong edge). The boundary
-/// is a scalar island (vector doc §6, D1) handled by a later slice.
-#[must_use]
-pub(crate) fn signal_value_children(arena: &TreeArena, sig: SigId) -> Vec<SigId> {
-    match match_sig(arena, sig) {
-        SigMatch::BinOp(_, x, y)
-        | SigMatch::Pow(x, y)
-        | SigMatch::Min(x, y)
-        | SigMatch::Max(x, y)
-        | SigMatch::Fmod(x, y)
-        | SigMatch::Remainder(x, y)
-        | SigMatch::Atan2(x, y)
-        | SigMatch::Prefix(x, y)
-        | SigMatch::Attach(x, y)
-        | SigMatch::Enable(x, y)
-        | SigMatch::Control(x, y)
-        | SigMatch::Delay(x, y) => vec![x, y],
-        SigMatch::Delay1(x)
-        | SigMatch::IntCast(x)
-        | SigMatch::BitCast(x)
-        | SigMatch::FloatCast(x)
-        | SigMatch::Gen(x)
-        | SigMatch::Acos(x)
-        | SigMatch::Asin(x)
-        | SigMatch::Atan(x)
-        | SigMatch::Cos(x)
-        | SigMatch::Sin(x)
-        | SigMatch::Tan(x)
-        | SigMatch::Exp(x)
-        | SigMatch::Exp10(x)
-        | SigMatch::Log(x)
-        | SigMatch::Log10(x)
-        | SigMatch::Sqrt(x)
-        | SigMatch::Abs(x)
-        | SigMatch::Floor(x)
-        | SigMatch::Ceil(x)
-        | SigMatch::Rint(x)
-        | SigMatch::Round(x)
-        | SigMatch::Lowest(x)
-        | SigMatch::Highest(x)
-        | SigMatch::Output(_, x)
-        | SigMatch::VBargraph(_, x)
-        | SigMatch::HBargraph(_, x)
-        | SigMatch::Proj(_, x)
-        | SigMatch::Rec(x)
-        | SigMatch::ReverseTimeRec(x) => vec![x],
-        SigMatch::Select2(a, b, c) | SigMatch::AssertBounds(a, b, c) => vec![a, b, c],
-        SigMatch::RdTbl(t, i) => vec![t, i],
-        SigMatch::WrTbl(t, s, wi, ws) => vec![t, s, wi, ws],
-        SigMatch::Fir(xs) | SigMatch::Iir(xs) => xs.to_vec(),
-        _ => Vec::new(),
-    }
+/// The decoded rules are shared with Hgraph and PV through
+/// [`super::vector_analysis::signal_dependencies`]. Malformed list payloads and
+/// unsupported legacy recursion are reported instead of becoming silent leaves.
+pub(crate) fn signal_value_children(
+    analysis: &super::vector_analysis::SignalAnalysisContext<'_>,
+    sig: SigId,
+) -> Result<Vec<SigId>, super::vector_analysis::AnalysisError> {
+    super::vector_analysis::signal_dependencies(analysis, sig).map(|dependencies| {
+        dependencies
+            .scheduling()
+            .iter()
+            .map(|dependency| dependency.to)
+            .collect()
+    })
 }
 
 /// Assigns every sample signal reachable from `outputs` to a loop.
@@ -1102,6 +1060,8 @@ pub(crate) fn rewrite_var_loads(
 
 #[cfg(test)]
 mod tests {
+    use tlib::TreeArena;
+
     use super::*;
 
     /// A sample-rate, non-shared, non-delayed, non-recursive, non-trivial signal
@@ -1497,17 +1457,26 @@ mod tests {
         let sum = SigBuilder::new(&mut arena).add(in0, in1);
         let s = SigBuilder::new(&mut arena).sin(in0);
         let out = SigBuilder::new(&mut arena).mul(sum, s);
+        let sig_types = sigtype::TypeAnnotator::new(&arena, &ui::UiProgram::empty())
+            .annotate(&[out])
+            .unwrap();
+        let analysis =
+            super::super::vector_analysis::SignalAnalysisContext::new(&arena, &sig_types, &[out])
+                .unwrap();
 
         // Only value operands — no op-code atom, no input index.
-        assert_eq!(signal_value_children(&arena, out), vec![sum, s]);
-        assert_eq!(signal_value_children(&arena, sum), vec![in0, in1]);
-        assert_eq!(signal_value_children(&arena, s), vec![in0]);
-        assert!(signal_value_children(&arena, in0).is_empty());
+        assert_eq!(signal_value_children(&analysis, out).unwrap(), vec![sum, s]);
+        assert_eq!(
+            signal_value_children(&analysis, sum).unwrap(),
+            vec![in0, in1]
+        );
+        assert_eq!(signal_value_children(&analysis, s).unwrap(), vec![in0]);
+        assert!(signal_value_children(&analysis, in0).unwrap().is_empty());
 
         // All-inline on the real graph: one loop, and — the S-A bug — no cycle.
         let asn = assign_loops(
             &[out],
-            |sig| signal_value_children(&arena, sig),
+            |sig| signal_value_children(&analysis, sig).unwrap(),
             |_| base_props(),
         );
         assert_eq!(asn.graph.len(), 1);
@@ -1517,7 +1486,7 @@ mod tests {
         // still acyclic.
         let asn = assign_loops(
             &[out],
-            |sig| signal_value_children(&arena, sig),
+            |sig| signal_value_children(&analysis, sig).unwrap(),
             |sig| {
                 if sig == in0 {
                     SignalLoopProps {

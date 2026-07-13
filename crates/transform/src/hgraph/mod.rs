@@ -68,7 +68,7 @@ use ahash::{AHashMap, AHashSet};
 use propagate::{ClockDomainId, ClockDomainTable};
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::{SigType, Variability};
-use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
+use tlib::TreeArena;
 
 use crate::clk_env::{ClkEnv, ClkEnvMap, is_ancestor_clk_env};
 use crate::schedule::SchedulingStrategy;
@@ -285,8 +285,8 @@ pub fn contains_wrapper(arena: &TreeArena, outputs: &[SigId]) -> Result<bool, Hg
         if needs_subgraph(arena, sig) {
             return Ok(true);
         }
-        for edge in get_signal_dependencies(arena, sig)? {
-            stack.push(edge.to);
+        if let Some(children) = arena.children(sig) {
+            stack.extend(children.iter().copied());
         }
     }
     Ok(false)
@@ -311,170 +311,58 @@ pub fn is_external(
 ///
 /// Returns the dependency targets of `sig` in deterministic child order. The
 /// opaque clock-env child of `Clocked` is never a dependency.
-pub fn get_signal_dependencies(arena: &TreeArena, sig: SigId) -> Result<Vec<Edge>, HgraphError> {
-    let imm = |to: SigId| Edge { to, delayed: false };
-    let del = |to: SigId| Edge { to, delayed: true };
+pub fn get_signal_dependencies(
+    analysis: &crate::signal_fir::vector_analysis::SignalAnalysisContext<'_>,
+    sig: SigId,
+) -> Result<Vec<Edge>, HgraphError> {
+    crate::signal_fir::vector_analysis::signal_dependencies(analysis, sig)
+        .map_err(analysis_error_to_hgraph)
+        .map(|dependencies| {
+            dependencies
+                .scheduling()
+                .iter()
+                .map(|dependency| Edge {
+                    to: dependency.to,
+                    delayed: matches!(
+                        dependency.kind,
+                        crate::signal_fir::vector_analysis::DepKind::Delayed { .. }
+                    ),
+                })
+                .collect()
+        })
+}
 
-    if let Some((_, body_list)) = match_sym_rec(arena, sig) {
-        // The group's projections read state: the definitions impose no
-        // same-tick ordering but still need placement.
-        let defs = list_to_vec(arena, body_list).ok_or_else(|| HgraphError::Malformed {
-            sig,
-            detail: "malformed SYMREC body list".to_owned(),
-        })?;
-        return Ok(defs.into_iter().map(del).collect());
-    }
-    if match_sym_ref(arena, sig).is_some() {
-        return Ok(Vec::new());
-    }
-
-    Ok(match match_sig(arena, sig) {
-        // Leaves.
-        SigMatch::Int(_)
-        | SigMatch::Real(_)
-        | SigMatch::Input(_)
-        | SigMatch::Button(_)
-        | SigMatch::Checkbox(_)
-        | SigMatch::VSlider(_)
-        | SigMatch::HSlider(_)
-        | SigMatch::NumEntry(_)
-        | SigMatch::Soundfile(_)
-        | SigMatch::Waveform(_)
-        | SigMatch::FConst(_, _, _)
-        | SigMatch::FVar(_, _, _)
-        | SigMatch::ClockEnvToken(_)
-        | SigMatch::Unknown => Vec::new(),
-
-        // `Seq(od, y)` depends only on `od`: once the block ran, reading the
-        // held perm var is free.
-        SigMatch::Seq(x, _) => vec![imm(x)],
-
-        // One-sample delay: state read.
-        SigMatch::Delay1(x) => vec![del(x)],
-        // General delay: state read when the amount is a constant ≥ 1; the
-        // amount itself is an immediate dependency.
-        SigMatch::Delay(x, amount) => {
-            let x_edge = match match_sig(arena, amount) {
-                SigMatch::Int(n) if n >= 1 => del(x),
-                _ => imm(x),
-            };
-            vec![x_edge, imm(amount)]
+fn analysis_error_to_hgraph(
+    error: crate::signal_fir::vector_analysis::AnalysisError,
+) -> HgraphError {
+    match error {
+        crate::signal_fir::vector_analysis::AnalysisError::Malformed { sig, detail } => {
+            HgraphError::Malformed { sig, detail }
         }
-        // Prefix reads its own state after the first sample; init immediate.
-        SigMatch::Prefix(init, x) => vec![imm(init), del(x)],
-
-        // Annotation: depend on the wrapped signal only.
-        SigMatch::Clocked(_, y) => vec![imm(y)],
-
-        // Boundary glue.
-        SigMatch::TempVar(x) | SigMatch::PermVar(x) => vec![imm(x)],
-        SigMatch::ZeroPad(x, h) => vec![imm(x), imm(h)],
-
-        // Wrapper: all children immediate — the builder dispatches the clock
-        // to the outer graph and the held outputs to the subgraph.
-        SigMatch::OnDemand(children)
-        | SigMatch::Upsampling(children)
-        | SigMatch::Downsampling(children) => children.iter().copied().map(imm).collect(),
-
-        // Projections resolve through their group.
-        SigMatch::Proj(_, group) => vec![imm(group)],
-
-        // Unary pass-throughs.
-        SigMatch::Output(_, x)
-        | SigMatch::IntCast(x)
-        | SigMatch::BitCast(x)
-        | SigMatch::FloatCast(x)
-        | SigMatch::Gen(x)
-        | SigMatch::Lowest(x)
-        | SigMatch::Highest(x)
-        | SigMatch::Acos(x)
-        | SigMatch::Asin(x)
-        | SigMatch::Atan(x)
-        | SigMatch::Cos(x)
-        | SigMatch::Sin(x)
-        | SigMatch::Tan(x)
-        | SigMatch::Exp(x)
-        | SigMatch::Exp10(x)
-        | SigMatch::Log(x)
-        | SigMatch::Log10(x)
-        | SigMatch::Sqrt(x)
-        | SigMatch::Abs(x)
-        | SigMatch::Floor(x)
-        | SigMatch::Ceil(x)
-        | SigMatch::Rint(x)
-        | SigMatch::Round(x)
-        | SigMatch::VBargraph(_, x)
-        | SigMatch::HBargraph(_, x)
-        | SigMatch::ReverseTimeRec(x) => vec![imm(x)],
-
-        // Binary and ternary composites.
-        SigMatch::RdTbl(x, y)
-        | SigMatch::Pow(x, y)
-        | SigMatch::Min(x, y)
-        | SigMatch::Max(x, y)
-        | SigMatch::Atan2(x, y)
-        | SigMatch::Fmod(x, y)
-        | SigMatch::Remainder(x, y)
-        | SigMatch::Attach(x, y)
-        | SigMatch::Enable(x, y)
-        | SigMatch::Control(x, y)
-        | SigMatch::SoundfileLength(x, y)
-        | SigMatch::SoundfileRate(x, y) => vec![imm(x), imm(y)],
-        SigMatch::BinOp(_, x, y) => vec![imm(x), imm(y)],
-        SigMatch::Select2(a, b, c) | SigMatch::AssertBounds(a, b, c) => {
-            vec![imm(a), imm(b), imm(c)]
-        }
-        SigMatch::SoundfileBuffer(a, b, c, d) => vec![imm(a), imm(b), imm(c), imm(d)],
-
-        SigMatch::WrTbl(size, generator, wi, ws) => {
-            let mut deps = vec![imm(size), imm(generator)];
-            if !arena.is_nil(wi) {
-                deps.push(imm(wi));
-            }
-            if !arena.is_nil(ws) {
-                deps.push(imm(ws));
-            }
-            deps
-        }
-
-        SigMatch::FFun(_, largs) => {
-            let args = list_to_vec(arena, largs).ok_or_else(|| HgraphError::Malformed {
-                sig,
-                detail: "malformed FFUN argument list".to_owned(),
-            })?;
-            args.into_iter().map(imm).collect()
-        }
-
-        SigMatch::Fir(coefs) | SigMatch::Iir(coefs) => coefs.iter().copied().map(imm).collect(),
-
-        SigMatch::BlockReverseAD {
-            body,
-            seeds,
-            cotangents,
-            ..
-        } => {
-            let mut deps = Vec::new();
-            for list in [body, seeds, cotangents] {
-                let items = list_to_vec(arena, list).ok_or_else(|| HgraphError::Malformed {
+        other => HgraphError::Malformed {
+            sig: match &other {
+                crate::signal_fir::vector_analysis::AnalysisError::MissingType { sig }
+                | crate::signal_fir::vector_analysis::AnalysisError::MissingClock { sig }
+                | crate::signal_fir::vector_analysis::AnalysisError::InvalidRecursiveProjection {
                     sig,
-                    detail: "malformed BlockReverseAD child list".to_owned(),
-                })?;
-                deps.extend(items.into_iter().map(imm));
-            }
-            deps
-        }
-
-        SigMatch::Rec(_) => {
-            return Err(HgraphError::Malformed {
-                sig,
-                detail: "legacy SIGREC form is not supported by hgraph".to_owned(),
-            });
-        }
-    })
+                    ..
+                }
+                | crate::signal_fir::vector_analysis::AnalysisError::InvalidDelayInterval {
+                    sig,
+                    ..
+                } => *sig,
+                crate::signal_fir::vector_analysis::AnalysisError::Malformed { .. } => {
+                    unreachable!("handled above")
+                }
+            },
+            detail: other.to_string(),
+        },
+    }
 }
 
 struct Builder<'a> {
     arena: &'a TreeArena,
+    analysis: crate::signal_fir::vector_analysis::SignalAnalysisContext<'a>,
     domains: &'a ClockDomainTable,
     envs: &'a ClkEnvMap,
     /// Variability source for the `Control` redirect (plan §4.6). A signal
@@ -536,16 +424,28 @@ impl<'a> Builder<'a> {
             let inner_env = wrapper_inner_env(self.arena, sig);
             self.domain_key.insert(inner_env, sub_key);
 
-            let deps = get_signal_dependencies(self.arena, sig)?;
-            let Some((clock_edge, outputs)) = deps.split_first() else {
+            let projection =
+                crate::signal_fir::vector_analysis::signal_dependencies(&self.analysis, sig)
+                    .map_err(analysis_error_to_hgraph)?;
+            let Some(clock_edge) = projection.scheduling().iter().find(|edge| {
+                matches!(
+                    edge.kind,
+                    crate::signal_fir::vector_analysis::DepKind::ClockBoundary
+                )
+            }) else {
                 return Ok(());
             };
             // The clock stays outside: block precondition in the outer graph.
             self.hgraph
                 .graph_mut(outer_key)
-                .add_edge(sig, clock_edge.to, clock_edge.delayed);
+                .add_edge(sig, clock_edge.to, false);
             self.visit(clock_edge.to)?;
-            for edge in outputs {
+            for edge in projection.scheduling().iter().filter(|edge| {
+                !matches!(
+                    edge.kind,
+                    crate::signal_fir::vector_analysis::DepKind::ClockBoundary
+                )
+            }) {
                 self.visit(edge.to)?;
             }
             return Ok(());
@@ -555,7 +455,7 @@ impl<'a> Builder<'a> {
         let own_key = self.effective_key(base_key, sig);
         self.hgraph.graph_mut(own_key).add_node(sig);
 
-        for edge in get_signal_dependencies(self.arena, sig)? {
+        for edge in get_signal_dependencies(&self.analysis, sig)? {
             // Wrapper deps carry the parent env; ordinary deps their own.
             self.visit(edge.to)?;
             let dep_env = self.env_of(edge.to)?;
@@ -627,8 +527,12 @@ pub fn build_hgraph(
     outputs: &[SigId],
     sig_types: &HashMap<SigId, SigType>,
 ) -> Result<Hgraph, HgraphError> {
+    let analysis =
+        crate::signal_fir::vector_analysis::SignalAnalysisContext::new(arena, sig_types, outputs)
+            .map_err(analysis_error_to_hgraph)?;
     let mut builder = Builder {
         arena,
+        analysis,
         domains,
         envs,
         sig_types,
