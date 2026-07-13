@@ -1692,6 +1692,43 @@ verification, placement/delay consumer consolidation, and production
 `VectorPlan` construction. These are P4.3 and later work; P4's formal gate and
 exit criterion remain unsatisfied.
 
+**Implementation status (2026-07-13, P4.3a conditions and effects).** The
+canonical `analyze_vector_signals` entry point now computes C++-compatible
+execution conditions before occurrence aggregation. Conditions are positive
+DNF values with deterministic interning, `true` represented by the C++ `nil`
+case, conjunction/disjunction normalized by subset absorption, and a monotone
+fixed point for shared nodes. Only surviving `SigControl(x,g)` refines
+execution: `g` inherits the ambient condition and `x` receives
+`ambient AND g`; `Select2` and `Enable` remain ordinary data nodes. The shared
+decoder owns a third child projection for condition propagation and labels the
+guard edge `Control` while Hgraph continues to treat it as a same-tick edge.
+
+`SignalUseInfo` now also carries a sorted transitive conservative effect set.
+Stable resources are prepared `SigId` plus a state-cell discriminator,
+`(recursion group SigId, projection)`, table-creation `SigId`, dense
+`ControlId` (an adapted UI-zone identity), output channel, or the full raw
+foreign name/signature. Delay/prefix/FIR/IIR/waveform/hold/clock/recursive
+state, table reads/writes, bargraphs, outputs, foreign calls, and external
+foreign variables are classified. Faust has no foreign purity declaration, so
+calls and external variables default to `Unknown`; `count` remains the known
+compute argument and is not classified as external. Conflict rules implement
+same-resource read/write exclusion and global barriers for `Impure`/`Unknown`
+foreign effects. Zero-history and other discharge optimizations are
+intentionally not applied yet, so the result is an over-approximation.
+These are compute-time effects: C++/Rust `Gen` nodes remain lifecycle
+boundaries, and table-initialization effects must be decorated and checked
+separately before the certificate can claim the section 5.1 Effects property.
+
+This slice remains behavior-preserving: no scalar/vector scheduler or FIR
+lowerer consumes these facts. It deliberately does not orient final effect
+edges between placed loops; P4.3b's independent `DecorationCertificate`
+checker must first accept coverage, identities, and effect completeness, then
+P5 can preserve semantic order by co-location or loop-level effect edges.
+Sixteen focused vector-analysis tests include DNF joins and absorption,
+condition-sensitive `multi`, stable state/table/output/foreign identities,
+transitive effects, canonical ordering, and rejecting conflict mutations.
+P4's formal gate and exit criterion remain open.
+
 **Exit criterion:** an independently accepted `DecorationCertificate`,
 deterministic `SignalUseInfo`, and `VectorPlan` snapshots reproduce the P0
 topology cases. A structural test proves that changing the configured `-ss`

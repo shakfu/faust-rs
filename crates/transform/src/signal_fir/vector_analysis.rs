@@ -1,4 +1,4 @@
-//! Typed vector-analysis spine (P4.2).
+//! Typed vector-analysis spine (P4.2/P4.3a).
 //!
 //! # C++ provenance
 //! The dependency projection centralizes the dependency rules previously
@@ -9,17 +9,21 @@
 //! intentionally differ for FIR/IIR carriers, tables, `seq`, generators, and
 //! clock wrappers.
 //!
-//! P4.2 deliberately defers effects, the full execution-condition producer,
-//! `DecorationCertificate`, and all production consumers.  The reserved
-//! dependency kinds below make those later additions explicit without
-//! inventing effect semantics in this phase.
+//! P4.3a adds the C++ `conditionAnnotation` DNF producer and conservative
+//! effect decoration without activating either scalar or vector scheduling.
+//! Effects in this table describe compute-time behavior. `Gen` remains a
+//! lifecycle boundary, so table-initialization effects require a separate
+//! decoration before `DecorationCertificate` can establish full coverage.
+//! `DecorationCertificate` and production consumers remain deferred.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
 use signals::{BinOp, SigId, SigMatch, match_sig};
 use sigtype::{SigType, Variability, Vectorability, check_delay_interval};
-use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
+use tlib::{
+    NodeKind, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int, tree_to_str,
+};
 
 use crate::clk_env::{ClkEnv, ClkEnvMap};
 use crate::signal_prepare::VerifiedPreparedSignals;
@@ -47,6 +51,152 @@ pub trait ExecutionConditions {
 
     /// Condition at which one output root is demanded.
     fn root_condition(&self, root: SigId) -> CondId;
+}
+
+/// Canonical positive DNF used by C++ `dcond` condition annotation.
+///
+/// An empty `clauses` vector denotes `true`, matching the C++ use of `nil`.
+/// Every non-empty inner vector is a sorted conjunction of signal identities;
+/// the outer vector is a sorted disjunction with absorbed supersets removed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExecutionCondition {
+    clauses: Vec<Vec<u32>>,
+}
+
+impl ExecutionCondition {
+    /// Unconditional execution (`true`).
+    #[must_use]
+    pub const fn unconditional() -> Self {
+        Self {
+            clauses: Vec::new(),
+        }
+    }
+
+    /// Returns whether this condition is unconditional.
+    #[must_use]
+    pub fn is_unconditional(&self) -> bool {
+        self.clauses.is_empty()
+    }
+
+    /// Canonical DNF clauses as numeric prepared-signal identities.
+    #[must_use]
+    pub fn clauses(&self) -> &[Vec<u32>] {
+        &self.clauses
+    }
+
+    fn atom(sig: SigId) -> Self {
+        Self {
+            clauses: vec![vec![sig.as_u32()]],
+        }
+    }
+
+    fn or(&self, other: &Self) -> Self {
+        if self.is_unconditional() || other.is_unconditional() {
+            return Self::unconditional();
+        }
+        Self::normalize(self.clauses.iter().chain(&other.clauses).cloned())
+    }
+
+    fn and(&self, other: &Self) -> Self {
+        if self.is_unconditional() {
+            return other.clone();
+        }
+        if other.is_unconditional() {
+            return self.clone();
+        }
+        Self::normalize(self.clauses.iter().flat_map(|left| {
+            other.clauses.iter().map(move |right| {
+                let mut clause = left.clone();
+                clause.extend(right);
+                clause
+            })
+        }))
+    }
+
+    fn normalize(clauses: impl IntoIterator<Item = Vec<u32>>) -> Self {
+        let mut clauses = clauses
+            .into_iter()
+            .map(|mut clause| {
+                clause.sort_unstable();
+                clause.dedup();
+                clause
+            })
+            .collect::<Vec<_>>();
+        clauses.sort();
+        clauses.dedup();
+        let mut minimal = Vec::<Vec<u32>>::new();
+        for clause in clauses {
+            if minimal
+                .iter()
+                .any(|candidate| is_sorted_subset(candidate, &clause))
+            {
+                continue;
+            }
+            minimal.retain(|candidate| !is_sorted_subset(&clause, candidate));
+            minimal.push(clause);
+            minimal.sort();
+        }
+        Self { clauses: minimal }
+    }
+}
+
+fn is_sorted_subset(left: &[u32], right: &[u32]) -> bool {
+    let mut right_index = 0;
+    for &item in left {
+        while right.get(right_index).is_some_and(|&other| other < item) {
+            right_index += 1;
+        }
+        if right.get(right_index) != Some(&item) {
+            return false;
+        }
+        right_index += 1;
+    }
+    true
+}
+
+/// Deterministic forest-scoped execution-condition interning table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionConditionTable {
+    conditions: Vec<ExecutionCondition>,
+    by_signal: BTreeMap<u32, CondId>,
+    unconditional: CondId,
+}
+
+impl ExecutionConditionTable {
+    /// Builds the C++ `conditionAnnotation` fixed point for a prepared forest.
+    pub fn build(prepared: &VerifiedPreparedSignals) -> Result<Self, AnalysisError> {
+        let analysis = SignalAnalysisContext::new(
+            prepared.arena(),
+            prepared.sig_types_map(),
+            prepared.outputs(),
+        )?;
+        build_execution_conditions(&analysis, prepared.outputs())
+    }
+
+    /// Returns the canonical expression interned at `id`.
+    #[must_use]
+    pub fn condition(&self, id: CondId) -> Option<&ExecutionCondition> {
+        self.conditions.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// All canonical conditions in deterministic identity order.
+    #[must_use]
+    pub fn conditions(&self) -> &[ExecutionCondition] {
+        &self.conditions
+    }
+}
+
+impl ExecutionConditions for ExecutionConditionTable {
+    fn signal_condition(&self, sig: SigId) -> CondId {
+        self.by_signal
+            .get(&sig.as_u32())
+            .copied()
+            .expect("execution-condition table queried outside its prepared forest")
+    }
+
+    fn root_condition(&self, _root: SigId) -> CondId {
+        self.unconditional
+    }
 }
 
 /// Constant condition provider for unconditioned prepared forests.
@@ -125,6 +275,7 @@ pub struct OccurrenceUse {
 pub struct SignalDependencies {
     scheduling: Vec<AnalysisDependency>,
     occurrences: Vec<OccurrenceUse>,
+    condition_children: Vec<SigId>,
 }
 
 impl SignalDependencies {
@@ -138,6 +289,13 @@ impl SignalDependencies {
     #[must_use]
     pub fn occurrences(&self) -> &[OccurrenceUse] {
         &self.occurrences
+    }
+
+    /// Children receiving execution conditions through C++
+    /// `conditionAnnotation`; generators intentionally have no children here.
+    #[must_use]
+    pub fn condition_children(&self) -> &[SigId] {
+        &self.condition_children
     }
 }
 
@@ -295,6 +453,111 @@ pub struct RecursiveProjection {
     pub group: SigId,
 }
 
+/// Stable cell discriminator for signal-owned persistent state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StateCell {
+    Delay,
+    Prefix,
+    Fir,
+    Iir,
+    WaveformIndex,
+    Hold,
+    Clock,
+    ReverseTime,
+    ReverseAd,
+}
+
+/// Stable abstract identity of one persistent state resource.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StateResource {
+    /// State owned by one prepared signal plus a semantic cell discriminator.
+    Signal { owner: u32, cell: StateCell },
+    /// State owned by one symbolic recursion projection.
+    Recursion { group: u32, projection: u32 },
+}
+
+/// Raw Faust foreign type code preserved independently from backend precision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ForeignTypeCode(pub i64);
+
+/// Stable identity of one declared foreign function signature.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ForeignSignature {
+    pub names: Vec<String>,
+    pub return_type: ForeignTypeCode,
+    pub arguments: Vec<ForeignTypeCode>,
+}
+
+/// Stable foreign resource identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ForeignResource {
+    Function(ForeignSignature),
+    Variable {
+        name: String,
+        value_type: ForeignTypeCode,
+    },
+}
+
+/// Declared foreign purity. Faust currently supplies no declaration, so
+/// analysis-produced foreign effects use [`ForeignPurity::Unknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ForeignPurity {
+    Pure,
+    Impure,
+    Unknown,
+}
+
+/// Conservative signal-level effect atom with stable resource identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EffectAtom {
+    ReadState(StateResource),
+    WriteState(StateResource),
+    ReadTable(u32),
+    WriteTable(u32),
+    WriteUi(u32),
+    WriteOutput(u32),
+    Foreign {
+        resource: ForeignResource,
+        purity: ForeignPurity,
+    },
+}
+
+/// Returns whether two atoms cannot be freely reordered.
+#[must_use]
+pub fn effects_conflict(left: &EffectAtom, right: &EffectAtom) -> bool {
+    use EffectAtom::{Foreign, ReadState, ReadTable, WriteOutput, WriteState, WriteTable, WriteUi};
+
+    let foreign_barrier = |effect: &EffectAtom| {
+        matches!(
+            effect,
+            Foreign {
+                purity: ForeignPurity::Impure | ForeignPurity::Unknown,
+                ..
+            }
+        )
+    };
+    if foreign_barrier(left) || foreign_barrier(right) {
+        return true;
+    }
+    match (left, right) {
+        (ReadState(a), WriteState(b))
+        | (WriteState(a), ReadState(b))
+        | (WriteState(a), WriteState(b)) => a == b,
+        (ReadTable(a), WriteTable(b))
+        | (WriteTable(a), ReadTable(b))
+        | (WriteTable(a), WriteTable(b)) => a == b,
+        (WriteUi(a), WriteUi(b)) | (WriteOutput(a), WriteOutput(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Returns whether any pair of atoms in two effect sets conflicts.
+#[must_use]
+pub fn effect_sets_conflict(left: &[EffectAtom], right: &[EffectAtom]) -> bool {
+    left.iter()
+        .any(|a| right.iter().any(|b| effects_conflict(a, b)))
+}
+
 /// P4.2 facts for one reachable prepared signal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignalUseInfo {
@@ -324,6 +587,8 @@ pub struct SignalUseInfo {
     pub recursive_projection: Option<RecursiveProjection>,
     /// Exactly `Int | Real | Input | FConst`.
     pub very_simple: bool,
+    /// Sorted conservative compute-time effects, including non-`Gen` children.
+    pub effects: Vec<EffectAtom>,
 }
 
 /// Deterministic record pairing a `SigId` with its P4.2 facts.
@@ -371,6 +636,14 @@ impl SignalUseTable {
             .ok()
             .map(|index| &self.records[index].info)
     }
+}
+
+/// Canonical P4.3a result coupling real execution conditions with decorated
+/// signal-use facts from the same prepared forest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VectorSignalAnalysis {
+    pub conditions: ExecutionConditionTable,
+    pub uses: SignalUseTable,
 }
 
 /// Typed P4.2 analysis errors.
@@ -449,6 +722,7 @@ pub fn signal_dependencies(
             })?;
         for definition in definitions {
             push_occurrence(&mut result, sig, definition, 0);
+            push_condition(&mut result, definition);
         }
         return Ok(result);
     }
@@ -477,10 +751,13 @@ pub fn signal_dependencies(
             push_schedule(&mut result, sig, block, DepKind::Immediate);
             push_occurrence(&mut result, sig, block, 0);
             push_occurrence(&mut result, sig, held, 0);
+            push_condition(&mut result, block);
+            push_condition(&mut result, held);
         }
         SigMatch::Delay1(value) => {
             push_schedule(&mut result, sig, value, DepKind::Delayed { amount: 1 });
             push_occurrence(&mut result, sig, value, 1);
+            push_condition(&mut result, value);
         }
         SigMatch::Delay(x, amount) => {
             let amount_type = context.sig_type(amount)?;
@@ -511,12 +788,16 @@ pub fn signal_dependencies(
             push_schedule(&mut result, sig, amount, DepKind::Immediate);
             push_occurrence(&mut result, sig, x, max_delay);
             push_occurrence(&mut result, sig, amount, 0);
+            push_condition(&mut result, x);
+            push_condition(&mut result, amount);
         }
         SigMatch::Prefix(init, x) => {
             push_schedule(&mut result, sig, init, DepKind::Immediate);
             push_schedule(&mut result, sig, x, DepKind::Immediate);
             push_occurrence(&mut result, sig, init, 0);
             push_occurrence(&mut result, sig, x, 1);
+            push_condition(&mut result, init);
+            push_condition(&mut result, x);
         }
         SigMatch::Clocked(_, y)
         | SigMatch::TempVar(y)
@@ -553,6 +834,7 @@ pub fn signal_dependencies(
             let (definition, kind) = context.projection_dependency(sig, index, group)?;
             push_schedule(&mut result, sig, definition, kind);
             push_occurrence(&mut result, sig, group, 0);
+            push_condition(&mut result, group);
         }
         SigMatch::RdTbl(table, read_index) => {
             push_schedule(&mut result, sig, read_index, DepKind::Immediate);
@@ -564,6 +846,14 @@ pub fn signal_dependencies(
             }
             push_occurrence(&mut result, sig, table, 0);
             push_occurrence(&mut result, sig, read_index, 0);
+            push_condition(&mut result, table);
+            push_condition(&mut result, read_index);
+        }
+        SigMatch::Control(value, gate) => {
+            push_both(&mut result, sig, value);
+            push_schedule(&mut result, sig, gate, DepKind::Control);
+            push_occurrence(&mut result, sig, gate, 0);
+            push_condition(&mut result, gate);
         }
         SigMatch::ZeroPad(x, h)
         | SigMatch::Pow(x, h)
@@ -574,7 +864,6 @@ pub fn signal_dependencies(
         | SigMatch::Remainder(x, h)
         | SigMatch::Attach(x, h)
         | SigMatch::Enable(x, h)
-        | SigMatch::Control(x, h)
         | SigMatch::SoundfileLength(x, h)
         | SigMatch::SoundfileRate(x, h)
         | SigMatch::BinOp(_, x, h) => {
@@ -606,11 +895,24 @@ pub fn signal_dependencies(
                 }
                 for &child in children {
                     push_occurrence(&mut result, sig, child, 0);
+                    push_condition(&mut result, child);
                 }
             }
         }
-        SigMatch::Fir(children) => decode_fir(context, sig, children, &mut result)?,
-        SigMatch::Iir(children) => decode_iir(context, sig, children, &mut result)?,
+        SigMatch::Fir(children) => {
+            decode_fir(context, sig, children, &mut result)?;
+            for &child in children {
+                push_condition(&mut result, child);
+            }
+        }
+        SigMatch::Iir(children) => {
+            decode_iir(context, sig, children, &mut result)?;
+            for &child in children {
+                if !arena.is_nil(child) {
+                    push_condition(&mut result, child);
+                }
+            }
+        }
         SigMatch::FFun(_, args) => {
             let args = list_to_vec(arena, args).ok_or_else(|| AnalysisError::Malformed {
                 sig,
@@ -642,6 +944,68 @@ pub fn signal_dependencies(
     Ok(result)
 }
 
+fn build_execution_conditions(
+    analysis: &SignalAnalysisContext<'_>,
+    roots: &[SigId],
+) -> Result<ExecutionConditionTable, AnalysisError> {
+    let unconditional = ExecutionCondition::unconditional();
+    let mut by_signal = BTreeMap::<u32, ExecutionCondition>::new();
+    let mut work = VecDeque::<(SigId, ExecutionCondition)>::new();
+    for &root in roots {
+        work.push_back((root, unconditional.clone()));
+    }
+
+    while let Some((sig, incoming)) = work.pop_front() {
+        let condition = if let Some(current) = by_signal.get(&sig.as_u32()) {
+            let joined = current.or(&incoming);
+            if joined == *current {
+                continue;
+            }
+            joined
+        } else {
+            incoming
+        };
+        by_signal.insert(sig.as_u32(), condition.clone());
+
+        let dependencies = signal_dependencies(analysis, sig)?;
+        if let SigMatch::Control(value, gate) = match_sig(analysis.arena, sig) {
+            work.push_back((gate, condition.clone()));
+            work.push_back((value, condition.and(&ExecutionCondition::atom(gate))));
+        } else {
+            for &child in dependencies.condition_children() {
+                work.push_back((child, condition.clone()));
+            }
+        }
+    }
+
+    let mut conditions = by_signal.values().cloned().collect::<Vec<_>>();
+    conditions.push(unconditional.clone());
+    conditions.sort();
+    conditions.dedup();
+    let ids = conditions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, condition)| {
+            (
+                condition,
+                CondId(u64::try_from(index).expect("condition count fits u64")),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let unconditional = ids[&unconditional];
+    let by_signal = by_signal
+        .into_iter()
+        .map(|(sig, condition)| (sig, ids[&condition]))
+        .collect();
+
+    Ok(ExecutionConditionTable {
+        conditions,
+        by_signal,
+        unconditional,
+    })
+}
+
 fn push_schedule(result: &mut SignalDependencies, from: SigId, to: SigId, kind: DepKind) {
     let edge_key = result.scheduling.len();
     result.scheduling.push(AnalysisDependency {
@@ -665,6 +1029,7 @@ fn push_occurrence(result: &mut SignalDependencies, from: SigId, to: SigId, dela
 fn push_both(result: &mut SignalDependencies, from: SigId, to: SigId) {
     push_schedule(result, from, to, DepKind::Immediate);
     push_occurrence(result, from, to, 0);
+    push_condition(result, to);
 }
 
 fn push_both_many(
@@ -677,9 +1042,232 @@ fn push_both_many(
     }
 }
 
+fn push_condition(result: &mut SignalDependencies, child: SigId) {
+    result.condition_children.push(child);
+}
+
 fn is_zero_signal(arena: &TreeArena, sig: SigId) -> bool {
     matches!(match_sig(arena, sig), SigMatch::Int(0))
         || matches!(match_sig(arena, sig), SigMatch::Real(value) if value == 0.0)
+}
+
+fn state_effects(sig: SigId, cell: StateCell) -> BTreeSet<EffectAtom> {
+    let resource = StateResource::Signal {
+        owner: sig.as_u32(),
+        cell,
+    };
+    BTreeSet::from([
+        EffectAtom::ReadState(resource.clone()),
+        EffectAtom::WriteState(resource),
+    ])
+}
+
+fn match_ffunction_descriptor(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, SigId)> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = node.kind else {
+        return None;
+    };
+    if arena.tag_name(tag_id)? != "FFUN" {
+        return None;
+    }
+    let [signature, include_file, library_file] = node.children.as_slice() else {
+        return None;
+    };
+    Some((*signature, *include_file, *library_file))
+}
+
+fn decode_foreign_signature(
+    arena: &TreeArena,
+    owner: SigId,
+    descriptor: SigId,
+) -> Result<ForeignSignature, AnalysisError> {
+    let Some((signature, _, _)) = match_ffunction_descriptor(arena, descriptor) else {
+        return Err(AnalysisError::Malformed {
+            sig: owner,
+            detail: "FFUN call has a malformed foreign-function descriptor".to_owned(),
+        });
+    };
+    let items = list_to_vec(arena, signature).ok_or_else(|| AnalysisError::Malformed {
+        sig: owner,
+        detail: "FFUN signature is not a list".to_owned(),
+    })?;
+    if items.len() < 2 {
+        return Err(AnalysisError::Malformed {
+            sig: owner,
+            detail: "FFUN signature needs a return type and name list".to_owned(),
+        });
+    }
+    let return_type = tree_to_int(arena, items[0]).ok_or_else(|| AnalysisError::Malformed {
+        sig: owner,
+        detail: "FFUN return type is not an integer code".to_owned(),
+    })?;
+    let names = list_to_vec(arena, items[1])
+        .ok_or_else(|| AnalysisError::Malformed {
+            sig: owner,
+            detail: "FFUN names are not a list".to_owned(),
+        })?
+        .into_iter()
+        .map(|name| {
+            tree_to_str(arena, name)
+                .map(str::to_owned)
+                .ok_or_else(|| AnalysisError::Malformed {
+                    sig: owner,
+                    detail: "FFUN name slot is not a symbol".to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let arguments = items[2..]
+        .iter()
+        .map(|&item| {
+            tree_to_int(arena, item)
+                .map(ForeignTypeCode)
+                .ok_or_else(|| AnalysisError::Malformed {
+                    sig: owner,
+                    detail: "FFUN argument type is not an integer code".to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ForeignSignature {
+        names,
+        return_type: ForeignTypeCode(return_type),
+        arguments,
+    })
+}
+
+fn direct_effects(
+    analysis: &SignalAnalysisContext<'_>,
+    sig: SigId,
+) -> Result<BTreeSet<EffectAtom>, AnalysisError> {
+    let arena = analysis.arena;
+    if let Some((_, body)) = match_sym_rec(arena, sig) {
+        let definitions = list_to_vec(arena, body).ok_or_else(|| AnalysisError::Malformed {
+            sig,
+            detail: "malformed SYMREC body list while deriving effects".to_owned(),
+        })?;
+        let mut effects = BTreeSet::new();
+        for index in 0..definitions.len() {
+            let projection = u32::try_from(index).map_err(|_| AnalysisError::Malformed {
+                sig,
+                detail: "SYMREC projection index does not fit u32".to_owned(),
+            })?;
+            let resource = StateResource::Recursion {
+                group: sig.as_u32(),
+                projection,
+            };
+            effects.insert(EffectAtom::ReadState(resource.clone()));
+            effects.insert(EffectAtom::WriteState(resource));
+        }
+        return Ok(effects);
+    }
+
+    let effects = match match_sig(arena, sig) {
+        // Delay storage is allocated for the carried signal and shared by all
+        // of its readers, regardless of the requested history depth.
+        SigMatch::Delay1(value) | SigMatch::Delay(value, _) => {
+            state_effects(value, StateCell::Delay)
+        }
+        SigMatch::Prefix(_, _) => state_effects(sig, StateCell::Prefix),
+        SigMatch::Fir(_) => state_effects(sig, StateCell::Fir),
+        SigMatch::Iir(_) => state_effects(sig, StateCell::Iir),
+        SigMatch::Waveform(_) => state_effects(sig, StateCell::WaveformIndex),
+        SigMatch::Seq(_, _) => state_effects(sig, StateCell::Hold),
+        SigMatch::Clocked(_, _)
+        | SigMatch::OnDemand(_)
+        | SigMatch::Upsampling(_)
+        | SigMatch::Downsampling(_) => state_effects(sig, StateCell::Clock),
+        SigMatch::ReverseTimeRec(_) => state_effects(sig, StateCell::ReverseTime),
+        SigMatch::BlockReverseAD { .. } => state_effects(sig, StateCell::ReverseAd),
+        SigMatch::Proj(index, group_ref) if index >= 0 => {
+            let group = analysis.resolve_rec_group(group_ref).unwrap_or(group_ref);
+            let resource = StateResource::Recursion {
+                group: group.as_u32(),
+                projection: u32::try_from(index).expect("nonnegative i32 fits u32"),
+            };
+            BTreeSet::from([
+                EffectAtom::ReadState(resource.clone()),
+                EffectAtom::WriteState(resource),
+            ])
+        }
+        SigMatch::WrTbl(_, _, _, _) => BTreeSet::from([EffectAtom::WriteTable(sig.as_u32())]),
+        SigMatch::RdTbl(table, _) => BTreeSet::from([EffectAtom::ReadTable(table.as_u32())]),
+        SigMatch::VBargraph(control, _) | SigMatch::HBargraph(control, _) => {
+            BTreeSet::from([EffectAtom::WriteUi(control)])
+        }
+        SigMatch::Output(channel, _) if channel >= 0 => BTreeSet::from([EffectAtom::WriteOutput(
+            u32::try_from(channel).expect("nonnegative i32 fits u32"),
+        )]),
+        SigMatch::Output(channel, _) => {
+            return Err(AnalysisError::Malformed {
+                sig,
+                detail: format!("negative output channel {channel}"),
+            });
+        }
+        SigMatch::FFun(descriptor, _) => BTreeSet::from([EffectAtom::Foreign {
+            resource: ForeignResource::Function(decode_foreign_signature(arena, sig, descriptor)?),
+            purity: ForeignPurity::Unknown,
+        }]),
+        SigMatch::FVar(value_type, name, _) => {
+            let name = tree_to_str(arena, name).ok_or_else(|| AnalysisError::Malformed {
+                sig,
+                detail: "foreign variable name is not a symbol".to_owned(),
+            })?;
+            if name == "count" {
+                BTreeSet::new()
+            } else {
+                let value_type =
+                    tree_to_int(arena, value_type).ok_or_else(|| AnalysisError::Malformed {
+                        sig,
+                        detail: "foreign variable type is not an integer code".to_owned(),
+                    })?;
+                BTreeSet::from([EffectAtom::Foreign {
+                    resource: ForeignResource::Variable {
+                        name: name.to_owned(),
+                        value_type: ForeignTypeCode(value_type),
+                    },
+                    purity: ForeignPurity::Unknown,
+                }])
+            }
+        }
+        _ => BTreeSet::new(),
+    };
+    Ok(effects)
+}
+
+fn decorate_effects(
+    analysis: &SignalAnalysisContext<'_>,
+    records: &mut BTreeMap<u32, SignalUseRecord>,
+    dependencies: &BTreeMap<u32, SignalDependencies>,
+) -> Result<(), AnalysisError> {
+    let mut direct = BTreeMap::<u32, BTreeSet<EffectAtom>>::new();
+    for record in records.values() {
+        direct.insert(record.sig.as_u32(), direct_effects(analysis, record.sig)?);
+    }
+    let mut accumulated = direct.clone();
+    loop {
+        let previous = accumulated.clone();
+        for (&sig, own) in &direct {
+            let mut effects = own.clone();
+            if let Some(children) = dependencies.get(&sig) {
+                for child in children.condition_children() {
+                    if let Some(child_effects) = previous.get(&child.as_u32()) {
+                        effects.extend(child_effects.iter().cloned());
+                    }
+                }
+            }
+            accumulated.insert(sig, effects);
+        }
+        if accumulated == previous {
+            break;
+        }
+    }
+    for (&sig, effects) in &accumulated {
+        records
+            .get_mut(&sig)
+            .expect("effect record has matching signal record")
+            .info
+            .effects = effects.iter().cloned().collect();
+    }
+    Ok(())
 }
 
 fn decode_fir(
@@ -879,7 +1467,19 @@ fn compute_recursiveness(
     Ok(by_signal)
 }
 
-/// Builds deterministic P4.2 occurrence facts from a verified prepared forest.
+/// Builds the canonical P4.3a condition/effect analysis for a verified forest.
+pub fn analyze_vector_signals(
+    prepared: &VerifiedPreparedSignals,
+    clk_envs: &ClkEnvMap,
+) -> Result<VectorSignalAnalysis, AnalysisError> {
+    let conditions = ExecutionConditionTable::build(prepared)?;
+    let uses = analyze_signal_uses(prepared, clk_envs, &conditions)?;
+    Ok(VectorSignalAnalysis { conditions, uses })
+}
+
+/// Builds deterministic occurrence/effect facts with an injected condition
+/// provider. Production clients should prefer [`analyze_vector_signals`]; this
+/// lower-level entry point remains useful for rule tests and formal mutations.
 pub fn analyze_signal_uses(
     prepared: &VerifiedPreparedSignals,
     clk_envs: &ClkEnvMap,
@@ -974,6 +1574,8 @@ fn analyze_forest(
         }
     }
 
+    decorate_effects(analysis, &mut records, &dependency_cache)?;
+
     let mut dependencies = dependency_cache
         .values()
         .flat_map(|projection| projection.scheduling.iter().copied())
@@ -1043,6 +1645,7 @@ fn ensure_record(
                 is_delay_read: matches!(match_sig(analysis.arena, sig), SigMatch::Delay(_, _)),
                 recursive_projection,
                 very_simple,
+                effects: Vec::new(),
             },
         },
     );
@@ -1355,6 +1958,11 @@ mod tests {
             ]
         );
         assert!(!deps.occurrences().iter().any(|usage| usage.to == state));
+        assert_eq!(
+            deps.condition_children(),
+            [state, input, c0, c1, c2],
+            "condition propagation follows every non-nil structural IIR child"
+        );
     }
 
     #[test]
@@ -1429,6 +2037,7 @@ mod tests {
         let generator_deps = signal_dependencies(&context, generator).unwrap();
         assert!(generator_deps.scheduling().is_empty());
         assert!(generator_deps.occurrences().is_empty());
+        assert!(generator_deps.condition_children().is_empty());
         assert!(matches!(
             signal_dependencies(&context, malformed_iir),
             Err(AnalysisError::Malformed { .. })
@@ -1755,5 +2364,228 @@ mod tests {
             signal_dependencies(&analysis, dynamic_delay),
             Err(AnalysisError::InvalidDelayInterval { .. })
         ));
+    }
+
+    #[test]
+    fn execution_conditions_match_control_dnf_and_occurrence_multi() {
+        let mut arena = TreeArena::new();
+        let root = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input = b.input(0);
+            let left_gate = b.input(1);
+            let right_gate = b.input(2);
+            let value = b.sin(input);
+            let guarded_left = b.control(value, left_gate);
+            let guarded_right = b.control(value, right_gate);
+            b.add(guarded_left, guarded_right)
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[root], &ui::UiProgram::empty()).unwrap();
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .unwrap();
+        let VectorSignalAnalysis { conditions, uses } =
+            analyze_vector_signals(&prepared, &clocks).unwrap();
+        for control in uses.records().iter().filter(|record| {
+            matches!(
+                match_sig(prepared.arena(), record.sig),
+                SigMatch::Control(_, _)
+            )
+        }) {
+            let dependencies = uses
+                .dependencies()
+                .iter()
+                .filter(|dependency| dependency.from == control.sig)
+                .collect::<Vec<_>>();
+            assert_eq!(dependencies.len(), 2);
+            assert!(
+                dependencies
+                    .iter()
+                    .any(|edge| edge.kind == DepKind::Control)
+            );
+            assert!(
+                dependencies
+                    .iter()
+                    .any(|edge| edge.kind == DepKind::Immediate)
+            );
+        }
+        let (value, value_info) = uses
+            .records()
+            .iter()
+            .find_map(|record| {
+                matches!(match_sig(prepared.arena(), record.sig), SigMatch::Sin(_))
+                    .then_some((record.sig, &record.info))
+            })
+            .expect("prepared graph retains the shared sine value");
+        let condition = conditions
+            .condition(value_info.execution_condition)
+            .expect("condition id is interned");
+
+        assert_eq!(condition.clauses().len(), 2);
+        assert!(condition.clauses().iter().all(|clause| clause.len() == 1));
+        assert!(value_info.occurrences.multi);
+        assert_eq!(
+            conditions.signal_condition(value),
+            value_info.execution_condition
+        );
+        assert_eq!(
+            ExecutionConditionTable::build(&prepared).unwrap(),
+            conditions
+        );
+    }
+
+    #[test]
+    fn unconditional_use_absorbs_a_guarded_condition() {
+        let mut arena = TreeArena::new();
+        let root = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input = b.input(0);
+            let gate = b.input(1);
+            let value = b.sin(input);
+            let guarded = b.control(value, gate);
+            b.add(value, guarded)
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[root], &ui::UiProgram::empty()).unwrap();
+        let conditions = ExecutionConditionTable::build(&prepared).unwrap();
+        let value = prepared
+            .sig_types_map()
+            .keys()
+            .copied()
+            .find(|&sig| matches!(match_sig(prepared.arena(), sig), SigMatch::Sin(_)))
+            .expect("prepared graph retains sine");
+        assert!(
+            conditions
+                .condition(conditions.signal_condition(value))
+                .unwrap()
+                .is_unconditional()
+        );
+    }
+
+    #[test]
+    fn effects_use_stable_resources_and_propagate_to_the_root() {
+        let mut arena = TreeArena::new();
+        let (input, delay, delay_long, table, read, output) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input = b.input(0);
+            let delay = b.delay1(input);
+            let two = b.int(2);
+            let delay_long = b.delay(input, two);
+            let size = b.int(16);
+            let write_index = b.input(1);
+            let table = b.wrtbl(size, delay, write_index, delay_long);
+            let read_index = b.input(2);
+            let read = b.rdtbl(table, read_index);
+            let output = b.output(3, read);
+            (input, delay, delay_long, table, read, output)
+        };
+        let types = sigtype::TypeAnnotator::new(&arena, &ui::UiProgram::empty())
+            .annotate(&[output])
+            .unwrap();
+        let analysis = SignalAnalysisContext::new(&arena, &types, &[output]).unwrap();
+        let uses = analyze_forest(
+            &analysis,
+            &[output],
+            |_| Some(None),
+            &ConstantExecutionConditions::default(),
+        )
+        .unwrap();
+
+        let delay_resource = StateResource::Signal {
+            owner: input.as_u32(),
+            cell: StateCell::Delay,
+        };
+        assert!(
+            uses.get(delay)
+                .unwrap()
+                .effects
+                .contains(&EffectAtom::WriteState(delay_resource.clone()))
+        );
+        assert_eq!(
+            direct_effects(&analysis, delay).unwrap(),
+            direct_effects(&analysis, delay_long).unwrap(),
+            "all history readers of one signal share its delay resource"
+        );
+        assert_eq!(
+            direct_effects(&analysis, table).unwrap(),
+            BTreeSet::from([EffectAtom::WriteTable(table.as_u32())])
+        );
+        assert_eq!(
+            direct_effects(&analysis, read).unwrap(),
+            BTreeSet::from([EffectAtom::ReadTable(table.as_u32())])
+        );
+        let root_effects = &uses.get(output).unwrap().effects;
+        for expected in [
+            EffectAtom::ReadState(delay_resource.clone()),
+            EffectAtom::WriteState(delay_resource),
+            EffectAtom::ReadTable(table.as_u32()),
+            EffectAtom::WriteTable(table.as_u32()),
+            EffectAtom::WriteOutput(3),
+        ] {
+            assert!(root_effects.contains(&expected), "missing {expected:?}");
+        }
+        assert!(root_effects.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn foreign_identity_and_effect_conflicts_are_conservative() {
+        let mut arena = TreeArena::new();
+        let call = {
+            let int_type = arena.int(0);
+            let real_type = arena.int(1);
+            let name_f32 = arena.symbol("probe_f");
+            let name_f64 = arena.symbol("probe");
+            let names = vec_to_list(&mut arena, &[name_f32, name_f64]);
+            let signature = vec_to_list(&mut arena, &[int_type, names, real_type]);
+            let include = arena.symbol("<probe.h>");
+            let library = arena.symbol("");
+            let tag = arena.intern_tag("FFUN");
+            let descriptor = arena.intern(NodeKind::Tag(tag), &[signature, include, library]);
+            let input = SigBuilder::new(&mut arena).input(0);
+            let args = vec_to_list(&mut arena, &[input]);
+            SigBuilder::new(&mut arena).ffun(descriptor, args)
+        };
+        let types = sigtype::TypeAnnotator::new(&arena, &ui::UiProgram::empty())
+            .annotate(&[call])
+            .unwrap();
+        let analysis = SignalAnalysisContext::new(&arena, &types, &[call]).unwrap();
+        let effects = direct_effects(&analysis, call).unwrap();
+        let foreign = effects.iter().next().expect("one foreign effect");
+        let EffectAtom::Foreign {
+            resource: ForeignResource::Function(signature),
+            purity: ForeignPurity::Unknown,
+        } = foreign
+        else {
+            panic!("foreign call must remain an unknown-purity effect");
+        };
+        assert_eq!(signature.names, ["probe_f", "probe"]);
+        assert_eq!(signature.return_type, ForeignTypeCode(0));
+        assert_eq!(signature.arguments, [ForeignTypeCode(1)]);
+        assert!(effects_conflict(foreign, &EffectAtom::WriteOutput(0)));
+
+        let state = StateResource::Signal {
+            owner: 10,
+            cell: StateCell::Delay,
+        };
+        assert!(!effects_conflict(
+            &EffectAtom::ReadState(state.clone()),
+            &EffectAtom::ReadState(state.clone())
+        ));
+        assert!(effects_conflict(
+            &EffectAtom::ReadState(state.clone()),
+            &EffectAtom::WriteState(state)
+        ));
+        assert!(!effects_conflict(
+            &EffectAtom::WriteTable(1),
+            &EffectAtom::ReadTable(2)
+        ));
+        let pure = EffectAtom::Foreign {
+            resource: ForeignResource::Function(signature.clone()),
+            purity: ForeignPurity::Pure,
+        };
+        assert!(!effects_conflict(&pure, &EffectAtom::WriteOutput(0)));
     }
 }
