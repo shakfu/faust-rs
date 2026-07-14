@@ -1450,6 +1450,7 @@ dependencies = [
  "fir",
  "serde",
  "serde_json",
+ "sha2",
  "wasmparser 0.240.0",
  "wat",
 ]

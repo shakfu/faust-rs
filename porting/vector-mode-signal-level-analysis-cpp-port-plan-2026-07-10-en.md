@@ -2282,11 +2282,22 @@ accepted all 216 generated responses against the C++ oracle. This is L1/L2
 translation-validation evidence, not `V-Simulation` proof and not the P7 exit
 gate.
 
-P7.2 must execute the same 72 combinations over all 92 supported impulse DSPs
-and retain an auditable result summary. Subsequent P7 work still includes the
-FIR/WAST/Julia artifact matrix, single-precision coverage where supported,
-optimized/unoptimized and final-state/effect parity, the versioned coverage
-baseline, cost measurements/model, and transitional-path removal.
+**P7.2 status (2026-07-14): the full executable matrix passes.** A clean run
+executed all 72 combinations over the 92 supported impulse DSPs and accepted
+all 6,624 responses against the existing C++ oracle. The versioned report
+`porting/generated/p7-executable-backend-matrix-2026-07-14-en.md` records one
+row per backend/mode/strategy combination, exact response byte counts, and a
+SHA-256 aggregate binding the sorted DSP names and response bytes. The run
+exposed and fixed a non-canonical bare `StoreTable` body in vector copy/clear
+loops; their producer and independent checker now require a one-statement FIR
+`Block`, with C/C++ production regression coverage. WASM and AssemblyScript
+runners use a validated configurable timeout (600 seconds by default) so full
+matrix contention does not inherit the former 120-second smoke limit.
+
+P7.3 must add the FIR/WAST/Julia artifact matrix and single-precision coverage
+where supported. Subsequent P7 work still includes optimized/unoptimized and
+final-state/effect parity, the versioned coverage baseline, cost
+measurements/model, and transitional-path removal.
 
 **Exit criterion:** every emitter passes its artifact gate; every executable
 impulse backend passes scalar `-ss 0/1/2/3` and `vec0`/`vec1` crossed with

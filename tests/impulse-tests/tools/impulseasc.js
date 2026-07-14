@@ -157,7 +157,9 @@ function createSoundfileHost(soundfiles) {
 
 function compileAsc(faustRs, input, importDirs, tmpDir, doublePrecision, compilerArgs) {
   const ascPath = path.join(tmpDir, `${path.basename(input, ".dsp")}.ts`);
-  const args = ["-lang", "asc", doublePrecision ? "-double" : "-single", "--json", input, "-o", ascPath];
+  const timeout = process.env.FAUST_RS_TIMEOUT_SECONDS || "600";
+  if (!/^[1-9]\d*$/.test(timeout)) throw new Error(`invalid FAUST_RS_TIMEOUT_SECONDS: ${timeout}`);
+  const args = ["-lang", "asc", doublePrecision ? "-double" : "-single", "--timeout", timeout, "--json", input, "-o", ascPath];
   args.push(...compilerArgs);
   for (const dir of importDirs) args.push("-I", dir);
   const result = spawnSync(faustRs, args, { encoding: "utf8" });

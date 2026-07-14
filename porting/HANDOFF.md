@@ -6,20 +6,30 @@ Date: 2026-07-14
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff
-- Current task: P7.1 executable scheduling backend matrix, completed in this
-  commit.
+- Current task: P7.2 full executable scheduling backend matrix, completed in
+  this commit.
 - The checked path now covers pure graphs, fixed and bounded-variable delays,
   symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
 
 ## Working Tree
 
-- This commit adds `-ss` propagation through all executable impulse runners,
-  72 isolated scheduling-matrix targets, and a representative differential
-  smoke gate.
+- This commit executes the 72-target scheduling matrix over all 92 supported
+  impulse DSPs, adds a versioned SHA-256 report, and fixes the vector FIR shape
+  defect exposed by the run.
 - Many unrelated pre-existing untracked scratch files remain untouched.
 
 ## What Changed
 
+- Added `p7-full`/`p7-report` orchestration and an xtask report checker that
+  requires all 6,624 non-empty responses and binds each combination by exact
+  byte count and SHA-256.
+- Completed all 72 backend/mode/strategy combinations over the 92-DSP corpus;
+  the versioned report records 6,624 accepted differential comparisons.
+- Canonicalized vector copy-in, copy-out, and table-clear loop bodies as
+  one-statement FIR blocks; strengthened the independent checker and added a
+  C/C++ `noiseabs` regression for both loop variants.
+- Made WASM and AssemblyScript compilation timeouts configurable through
+  validated `FAUST_RS_TIMEOUT_SECONDS`, with a 600-second full-matrix default.
 - Added scalar `-ss 0..3` and vector `-lv 0/1 x -ss 0..3` targets for all six
   executable backends, with aggregate `p7-matrix` and `p7-smoke` targets.
 - Added validated scheduling-option handling to the interpreter, Cranelift,
@@ -87,10 +97,10 @@ Date: 2026-07-14
 
 ## Decisions And Constraints
 
-- P7.1 is a representative matrix-plumbing gate, not the P7 exit gate and not
-  a proof of `V-Simulation`.
-- P7.2 must run all 72 combinations over the 92 supported impulse DSPs and
-  retain an auditable summary before artifact/cost-model work proceeds.
+- P7.2 is complete translation-validation evidence for the executable impulse
+  contracts, not the P7 exit gate and not a proof of `V-Simulation`.
+- P7.3 must add FIR/WAST/Julia artifact gates and supported single-precision
+  coverage before final-state/effect, coverage-baseline, and cost-model work.
 - Only exact delay/recursion resources covered by the P6.1 artifact replace
   conservative P5.3 effects; all other state remains rejected or serial.
 - Exhaustive bounded simulation is executable evidence, not an unbounded proof.
@@ -109,6 +119,12 @@ Date: 2026-07-14
 
 ## Validation
 
+- `make -C tests/impulse-tests -j16 p7-matrix` passes all 6,624 differential
+  comparisons across the complete 72-combination matrix.
+- `make -C tests/impulse-tests p7-report` verifies 72 x 92 non-empty responses
+  and emits the versioned 10,958,514,432-byte SHA-256 inventory.
+- Focused vector assembly, C/C++ production lowering, and xtask report tests
+  pass.
 - `make -C tests/impulse-tests -j8 p7-smoke` passes 216/216 comparisons across
   72 backend/mode/strategy combinations.
 - Focused unit tests for both Rust impulse runners pass; Node syntax and
@@ -127,10 +143,9 @@ Date: 2026-07-14
 
 ## Next Steps
 
-1. Execute P7.2: run `make -C tests/impulse-tests -j8 p7-matrix` over the full
-   92-DSP supported corpus and store an auditable per-combination summary.
-2. Add the FIR/WAST/Julia artifact matrix and supported single-precision gates.
-3. Add optimized/unoptimized final-state/effect parity and the versioned
+1. Execute P7.3: add the FIR/WAST/Julia artifact matrix and supported
+   single-precision gates.
+2. Add optimized/unoptimized final-state/effect parity and the versioned
    vectorization-coverage baseline before cost-model work or fallback removal.
 
 ## Useful Commands
@@ -144,7 +159,7 @@ Date: 2026-07-14
 - `cargo test -p compiler --test vector_mode`
 - `cargo test -p compiler --test vector_clock_ad`
 - `make -C tests/impulse-tests -j8 p7-smoke`
-- `make -C tests/impulse-tests -j8 p7-matrix`
+- `make -C tests/impulse-tests -j16 p7-full`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`
 - `cargo run -p xtask -- golden-check`

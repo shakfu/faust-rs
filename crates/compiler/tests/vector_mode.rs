@@ -298,3 +298,39 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
     );
     assert_eq!(VectorFallbackReason::ReverseAd.code(), "FRS-VEC-RAD-SCALAR");
 }
+
+#[test]
+fn vector_copy_delay_loops_reach_c_family_backends() {
+    let source = include_str!("../../../tests/impulse-tests/dsp/noiseabs.dsp");
+    for loop_variant in [0_u8, 1] {
+        let compiler = Compiler::new()
+            .with_compute_mode(ComputeMode::Vector {
+                vec_size: 32,
+                loop_variant,
+            })
+            .with_scheduling_strategy(SchedulingStrategy::DepthFirst);
+        let cpp = compiler
+            .compile_source_to_cpp_with_lane(
+                "noiseabs.dsp",
+                source,
+                &codegen::backends::cpp::CppOptions::default(),
+                SignalFirLane::TransformFastLane,
+            )
+            .unwrap_or_else(|error| {
+                panic!("noiseabs C++ -vec -lv {loop_variant} lowering failed: {error}")
+            });
+        assert!(cpp.contains("vstate_s21_perm"));
+
+        let c = compiler
+            .compile_source_to_c_with_lane(
+                "noiseabs.dsp",
+                source,
+                &codegen::backends::c::COptions::default(),
+                SignalFirLane::TransformFastLane,
+            )
+            .unwrap_or_else(|error| {
+                panic!("noiseabs C -vec -lv {loop_variant} lowering failed: {error}")
+            });
+        assert!(c.contains("vstate_s21_perm"));
+    }
+}

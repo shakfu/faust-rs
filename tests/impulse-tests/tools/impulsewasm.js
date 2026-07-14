@@ -226,7 +226,9 @@ function mathImports() {
 
 function compileWasm(faustRs, input, importDirs, doublePrecision, compilerArgs, tmpDir) {
   const wasmPath = path.join(tmpDir, `${path.basename(input, ".dsp")}.wasm`);
-  const args = ["-lang", "wasm", doublePrecision ? "-double" : "-single", input, "-o", wasmPath];
+  const timeout = process.env.FAUST_RS_TIMEOUT_SECONDS || "600";
+  if (!/^[1-9]\d*$/.test(timeout)) throw new Error(`invalid FAUST_RS_TIMEOUT_SECONDS: ${timeout}`);
+  const args = ["-lang", "wasm", doublePrecision ? "-double" : "-single", "--timeout", timeout, input, "-o", wasmPath];
   args.push(...compilerArgs);
   for (const dir of importDirs) args.push("-I", dir);
   const result = spawnSync(faustRs, args, { encoding: "utf8" });

@@ -945,7 +945,8 @@ fn materialize_action(
             let value = builder.load_table(permanent_name, AccessType::Struct, index, typ);
             let store = builder.store_table(temporary_name, AccessType::Stack, index, value);
             let upper = fir_i32(builder, "copy history", *history_length)?;
-            builder.simple_for_loop("vdelay_copy", upper, store, false)
+            let body = builder.block(&[store]);
+            builder.simple_for_loop("vdelay_copy", upper, body, false)
         }
         VectorStateAction::DelayRingAdvance { signal_id } => {
             let delay = delays[signal_id];
@@ -1084,7 +1085,8 @@ fn materialize_action(
             let value = builder.load_table(temporary_name, AccessType::Stack, source_index, typ);
             let store = builder.store_table(permanent_name, AccessType::Struct, index, value);
             let upper = fir_i32(builder, "copy history", *history_length)?;
-            builder.simple_for_loop("vdelay_copy", upper, store, false)
+            let body = builder.block(&[store]);
+            builder.simple_for_loop("vdelay_copy", upper, body, false)
         }
         VectorStateAction::DelayRingSaveAdvance { signal_id } => {
             let delay = delays[signal_id];
@@ -1633,12 +1635,18 @@ fn simple_copy_matches(
     {
         return false;
     }
+    let FirMatch::Block(body) = match_fir(store, body) else {
+        return false;
+    };
+    let [statement] = body.as_slice() else {
+        return false;
+    };
     let FirMatch::StoreTable {
         name,
         access,
         value,
         ..
-    } = match_fir(store, body)
+    } = match_fir(store, *statement)
     else {
         return false;
     };
@@ -1787,7 +1795,8 @@ fn clear_table(
     let zero = zero_value(builder, typ);
     let store = builder.store_table(name, access, index, zero);
     let upper = fir_i32(builder, "clear length", length)?;
-    Ok(builder.simple_for_loop("vclear", upper, store, false))
+    let body = builder.block(&[store]);
+    Ok(builder.simple_for_loop("vclear", upper, body, false))
 }
 
 fn sample_loop(builder: &mut FirBuilder<'_>, body: FirId) -> FirId {
@@ -1995,6 +2004,41 @@ mod tests {
         assert!(matches!(
             match_fir(&store, assembled.loops[0].exec_actions[0].statement),
             FirMatch::Block(body) if body.len() == 1
+        ));
+        for action in [&assembled.loops[0].pre[0], &assembled.loops[0].post[0]] {
+            let FirMatch::SimpleForLoop { body, .. } = match_fir(&store, action.statement) else {
+                panic!("copy transition must materialize as a simple loop");
+            };
+            assert!(matches!(match_fir(&store, body), FirMatch::Block(words) if words.len() == 1));
+        }
+        assert!(assembled.clear_statements.iter().all(|statement| {
+            let FirMatch::SimpleForLoop { body, .. } = match_fir(&store, *statement) else {
+                return true;
+            };
+            matches!(match_fir(&store, body), FirMatch::Block(words) if words.len() == 1)
+        }));
+
+        let mut forged = assembled.clone();
+        let FirMatch::SimpleForLoop {
+            var,
+            upper,
+            body,
+            is_reverse,
+        } = match_fir(&store, forged.loops[0].pre[0].statement)
+        else {
+            panic!("copy-in loop");
+        };
+        let FirMatch::Block(words) = match_fir(&store, body) else {
+            panic!("canonical copy-in body");
+        };
+        forged.loops[0].pre[0].statement =
+            FirBuilder::new(&mut store).simple_for_loop(var, upper, words[0], is_reverse);
+        assert!(matches!(
+            verify_vector_fir_assembly(&routed, Some(&state), None, &forged, &store),
+            Err(VectorFirAssemblyError::ActionShape {
+                action: VectorStateAction::DelayCopyIn { signal_id: 11 },
+                ..
+            })
         ));
 
         let mut forged = assembled.clone();
