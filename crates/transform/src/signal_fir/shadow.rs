@@ -8,8 +8,9 @@
 //! An empty inversion set proves that every materialized same-tick dependency
 //! was emitted first. Exact intersection equality additionally proves that a
 //! non-recursive graph was driven directly by the selected strategy. Recursive
-//! bodies may differ because Rust must expand them inside their `SYMREC`
-//! binder; that context-bound expansion is a fixed execution unit.
+//! graphs can have a smaller comparable intersection because carrier
+//! projections are deliberately not inserted into the ordinary value cache;
+//! their body nodes are nevertheless visited by the global schedule.
 //!
 //! The comparison never mutates FIR and never panics. `Hgraph` includes inline
 //! nodes that need not receive a separate FIR materialization, so exact order

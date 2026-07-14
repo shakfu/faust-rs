@@ -136,8 +136,8 @@ use super::planner::SignalFirPlan;
 use super::recursion::{
     RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionCurrentValueBinding,
     RecursionDelayRef, RecursionGroupProjection, RecursionLoweringCtx, RecursionState,
-    RecursionStorageStrategy, decode_group_projection, match_recursion_delay_key,
-    resolve_active_recursion_carrier,
+    RecursionStorageStrategy, decode_group_projection, decode_symbolic_group_bodies,
+    match_recursion_delay_key, resolve_active_recursion_carrier,
 };
 use super::siggen::interpret_generator;
 
@@ -309,27 +309,6 @@ fn fixed_ad_internal_signals(arena: &TreeArena, signals: &[SigId]) -> HashSet<Si
     internal
 }
 
-/// Collects every expression owned by a symbolic-recursion body. The owning
-/// `Proj(SYMREC)` remains schedulable and lowers this closure with its binder
-/// active; individual descendants are not valid standalone lowering roots.
-fn symrec_internal_signals(arena: &TreeArena, signals: &[SigId]) -> HashSet<SigId> {
-    let mut stack = signals.to_vec();
-    let mut visited = HashSet::new();
-    let mut internal = HashSet::new();
-    while let Some(sig) = stack.pop() {
-        if !visited.insert(sig) {
-            continue;
-        }
-        if let Some((_, bodies)) = match_sym_rec(arena, sig) {
-            collect_descendants(arena, &[bodies], &mut internal);
-        }
-        if let Some(children) = arena.children(sig) {
-            stack.extend(children.iter().copied());
-        }
-    }
-    internal
-}
-
 fn collect_descendants(arena: &TreeArena, roots: &[SigId], output: &mut HashSet<SigId>) {
     let mut stack = roots.to_vec();
     while let Some(sig) = stack.pop() {
@@ -450,8 +429,6 @@ struct SignalToFirLower<'a> {
     clocked_payload_signals: HashSet<SigId>,
     /// Signals expanded only inside their owning reverse-AD carrier context.
     fixed_ad_internal_signals: HashSet<SigId>,
-    /// Signals expanded only inside their owning symbolic-recursion binder.
-    symrec_internal_signals: HashSet<SigId>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.

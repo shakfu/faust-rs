@@ -242,11 +242,8 @@ pub struct CliArgs {
     /// (interleaved), `n >= 3` = reverse breadth-first. Decoded through
     /// [`compiler::SchedulingStrategy::decode`].
     ///
-    /// Independent of `-vec`/`-vs`/`-lv`: it applies to the scalar
-    /// control/signal schedule and, once the vectorization port lands
-    /// scheduling, to the vector loop schedule as well. Vectorization port
-    /// plan phase P2: plumbing only — the value is parsed, stored, and
-    /// reported, but no compile path invokes the scheduler yet.
+    /// Independent of `-vec`/`-vs`/`-lv`: it drives the scalar control/signal
+    /// schedule and the checked vector loop schedule.
     ///
     /// `adapted` API mapping vs C++ `atoi`: a missing value, a non-integer
     /// value, or a negative value is a hard parse error here instead of

@@ -52,8 +52,8 @@ impl<'a> SignalToFirLower<'a> {
     /// - `Delay1(Delay1(Proj(i, group)))` → delay chain `2`
     ///
     /// Pure state-based resolution lives in `recursion.rs`; this wrapper only
-    /// falls back to `lower_proj(...)` when a top-level `SYMREC` group still
-    /// needs to be materialized in the current lowering pass.
+    /// allocates missing carrier storage. Recursion-body computation remains
+    /// controlled by the global signal schedule.
     pub(super) fn resolve_recursion_delay_ref(
         &mut self,
         value: SigId,
@@ -80,10 +80,13 @@ impl<'a> SignalToFirLower<'a> {
     /// the materialized top-level recursion group (`SYMREC`).
     ///
     /// Pure active/materialized lookup lives in `recursion.rs`; this wrapper
-    /// only performs top-level materialization when needed.
+    /// only performs allocation-only materialization when needed. In
+    /// particular, it must not emit recursion-body stores: delayed edges do not
+    /// constrain the C++ loop DAG, so a delay read may be lowered before the
+    /// corresponding projection node.
     pub(super) fn resolve_recursion_carrier(
         &mut self,
-        proj_node: SigId,
+        _proj_node: SigId,
         index: i32,
         group: SigId,
     ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
@@ -99,15 +102,20 @@ impl<'a> SignalToFirLower<'a> {
         {
             return Ok(Some(info));
         }
-        if match_sym_rec(self.arena, group).is_none() {
+        let Some(canonical_group) = self.recursion.canonical_group(self.arena, group) else {
+            return Ok(None);
+        };
+        if match_sym_rec(self.arena, canonical_group).is_none() {
             return Ok(None);
         }
 
-        // Ensure the group's recursion arrays and body stores are scheduled,
-        // then read back the canonical carrier metadata allocated by `lower_proj`.
-        let _ = self.lower_proj(proj_node, index, group)?;
+        // Reserve the canonical carrier name and storage without compiling the
+        // recurrence body. This mirrors C++ `ensureVectorNameProperty`: delayed
+        // reads may reserve a carrier before the scheduled projection computes
+        // and stores its next value.
+        let _ = self.ensure_recursion_group_carriers(canonical_group)?;
         self.recursion
-            .resolve_carrier(self.arena, group, index_usize)
+            .resolve_carrier(self.arena, canonical_group, index_usize)
     }
 
     /// Declares a stack-local current-sample binding for one scalar recursion

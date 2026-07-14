@@ -5,24 +5,32 @@ Date: 2026-07-14
 ## Repo State
 
 - Branch: `ondemand-vec-fad-synthesis`
-- HEAD: the commit containing this handoff
-- Current task: P3 authoritative scalar scheduling, completed in this commit.
+- HEAD: the commit containing this handoff.
+- Current task: C++ scheduling inside symbolic recursion, completed in this
+  commit.
 - The checked path now covers pure graphs, fixed and bounded-variable delays,
   symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
 
 ## Working Tree
 
-- This commit makes the selected `Hsched` authoritative for scalar lowering,
-  closes recursion/clock/AD context boundaries, and removes exponential
-  `-ss 2` path-list materialization.
+- This commit removes the former context-bound `SYMREC` exception and makes
+  scheduled shared sample materialization observable in generated code.
 - Many unrelated pre-existing untracked scratch files remain untouched.
+- `tests/impulse-tests` P7 generated directories were cleaned before the APF
+  validation; only the 24 scalar APF combinations were regenerated. Run the
+  full matrix again before attempting `p7-report` from local artifacts.
 
 ## What Changed
 
 - Activated selected scalar schedules in control, top, and wrapper regions.
+- Registered symbolic recursion binders globally and scheduled ordinary
+  recurrence-body nodes through the same Hgraph as C++.
+- Separated recursion-carrier reservation from simultaneous body commit so
+  delayed scheduled reads can precede the owning projection.
+- Materialized shared sample-rate signals at their Hsched positions; APF now
+  produces four distinct `compute` bodies under `-ss 0/1/2/3`.
 - Oriented direct conflicting signal effects before strategy selection.
-- Kept complete symbolic-recursion descendants under their owning binder and
-  held clock payloads under the correct guarded region.
+- Kept held clock payloads under the correct guarded region.
 - Preserved fixed forward/reverse epochs for reverse-time and BRA carriers.
 - Replaced literal exponential special-schedule expansion with an
   order-equivalent memoized last-position summary and retained the literal
@@ -132,6 +140,11 @@ Date: 2026-07-14
 
 ## Validation
 
+- `make -C tests/impulse-tests -j8 all-ss dspfiles=dsp/APF.dsp` passes all 24
+  scalar APF comparisons across six executable backends and four strategies.
+- `cargo test -p transform signal_fir --lib` passes all 220 selected tests.
+- `cargo test -p compiler --test p3_shadow_mode` and
+  `cargo test -p compiler --test vector_mode` pass.
 - `make -C tests/impulse-tests all-ss` passes all 2,208 scalar comparisons:
   92 DSPs x 6 executable backends x 4 scheduling strategies.
 - Authoritative-order, direct-effect, compact-special-schedule, ondemand,

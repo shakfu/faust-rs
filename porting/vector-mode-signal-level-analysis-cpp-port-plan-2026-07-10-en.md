@@ -1579,14 +1579,23 @@ materializing an exponential list. If the logical length exceeds `u128`, Rust
 falls back to verified deterministic DFS: the C++ list cannot be represented
 on a `usize` machine in that case, while the Rust scheduling API remains total.
 
-The Rust lowerer retains two explicit fixed-granularity rules outside `-ss`.
-A `SYMREC` body is expanded as one context-bound unit when its owning
-projection opens the recursion binder; scheduling its unbound `SYMREF`
-children independently would be ill-formed. `BlockReverseAD` and
-`ReverseTimeRec` retain the P6 fixed forward/reverse epoch driver and are not
-flattened into the same-tick scalar DAG. These are semantic barriers, not a
-second scheduling option. Ordinary expanded FAD remains an ordinary scheduled
-signal graph.
+The Rust lowerer retains the fixed reverse-AD epoch rule outside `-ss`:
+`BlockReverseAD` and `ReverseTimeRec` keep the P6 forward/reverse driver and
+are not flattened into the same-tick scalar DAG. Ordinary symbolic recursion
+is now scheduled globally, matching C++ `DependenciesUtils`: every reachable
+recurrence-body node remains in its owning same-tick graph; a
+`Proj(i, SYMREC)` has an immediate edge to body `i`; strict delay sources are
+membership-only and do not add a same-tick edge. A binder table resolves
+scheduled `SYMREF` projections to their canonical group. Delayed reads may
+reserve carrier storage before the owning projection, but only the scheduled
+top projection commits the simultaneous recurrence update.
+
+As in C++ `InstructionsCompiler::CS` plus `generateCacheCode`, shared
+sample-rate signals are materialized immediately at their selected schedule
+position. The later FIR CSE remains responsible for residual expression-level
+sharing and starts after the scheduled `fTemp*`/`iTemp*` namespace. This makes
+`-ss` visible in production `compute` code even for recursive filters, rather
+than merely changing an internal visitation trace or declaration order.
 
 Clocked scalar regions are authoritative as well. The prepass preserves the
 C++ `generatePermVar` rule: the complete held-payload closure is lowered inside
@@ -1597,7 +1606,9 @@ outside strategy order. CSE already runs after constants, control, and routed
 sample regions have been assembled.
 
 Structural tests prove that all four strategies drive the actual first-lowering
-order and that an asymmetric signal DAG yields distinct orders. A separate
+order, that an asymmetric signal DAG yields distinct orders, and that a
+self-contained RBJ all-pass recurrence produces four distinct C++ `compute`
+bodies. A separate
 effect fixture proves that unknown foreign effects retain one common relative
 order under every strategy. Interpreter execution is bit-exact across all four
 scalar strategies; the complete ondemand suite and C++ clocked differential

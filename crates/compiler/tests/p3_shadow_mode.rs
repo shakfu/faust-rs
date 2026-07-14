@@ -6,8 +6,9 @@
 //! four public strategies do not collapse to one actual emission order.
 //!
 //! Exact schedule equality is checked on the comparable materialized subset.
-//! Recursive bodies remain context-bound units, so their internal first-cache
-//! trace may differ while still respecting every dependency.
+//! Recursive carrier projections are intentionally absent from the ordinary
+//! first-cache trace, so its intersection may be incomplete even though the
+//! recurrence body itself follows the accepted global schedule.
 //!
 //! Scope: deliberately plain, forward-time scalar programs (recursion,
 //! delays, UI, fork/join). RAD/BRA/clocked programs have a different,
@@ -17,7 +18,8 @@
 
 use std::collections::BTreeSet;
 
-use compiler::{Compiler, SchedulingStrategy};
+use codegen::backends::cpp::CppOptions;
+use compiler::{Compiler, SchedulingStrategy, SignalFirLane};
 use transform::signal_fir::shadow::ShadowReport;
 use transform::signal_fir::{
     RealType, SignalFirOptions, SignalFirOutput, compile_signals_to_fir_fastlane_with_ui,
@@ -95,8 +97,8 @@ fn authoritative_order_respects_immediate_edges_across_the_scalar_corpus() {
             report.matches_schedule_everywhere()
         );
     }
-    // Diagnostic only: recursive context bundling can make the first-cache
-    // trace differ from the abstract per-node schedule.
+    // Diagnostic only: uncached recursion-carrier projections can make the
+    // first-cache trace differ from the abstract per-node schedule.
     eprintln!(
         "P3 conformance: {matched}/{} sampled scalar programs exactly match \
          the -ss 0 schedule on the comparable materialized intersection",
@@ -139,5 +141,62 @@ fn selected_strategy_is_authoritative_and_changes_an_asymmetric_scalar_dag() {
     assert!(
         distinct_orders.len() >= 2,
         "the four strategies must not collapse to one emission order on an asymmetric DAG"
+    );
+}
+
+#[test]
+fn recursive_apf_compute_body_reflects_all_four_cpp_schedules() {
+    // Self-contained form of the RBJ all-pass filter used by
+    // tests/impulse-tests/dsp/APF.dsp. Keeping the recurrence and its two taps
+    // local makes this regression independent of an installed Faust library.
+    let source = r#"
+        pi = 3.141592653589793;
+        freq = hslider("Freq", 1000, 100, 10000, 1);
+        q = hslider("Q", 1, 0.01, 100, 0.01);
+        sr = fconstant(int fSamplingFreq, <math.h>);
+        w0 = 2 * pi * max(0, freq) / sr;
+        alpha = sin(w0) / (2 * max(0.001, q));
+        den = 1 + alpha;
+        c0 = (1 - alpha) / den;
+        c1 = (-2 * cos(w0)) / den;
+        biquad(x, a0, a1, a2, b1, b2) =
+            x : + ~ ((-1) * conv2(b1, b2)) : conv3(a0, a1, a2)
+        with {
+            conv2(k0, k1, v) = k0 * v + k1 * v';
+            conv3(k0, k1, k2, v) = k0 * v + k1 * v' + k2 * v'';
+        };
+        process(x) = biquad(x, c0, c1, 1, c1, c0);
+    "#;
+    let strategies = [
+        SchedulingStrategy::DepthFirst,
+        SchedulingStrategy::BreadthFirst,
+        SchedulingStrategy::Special,
+        SchedulingStrategy::ReverseBreadthFirst,
+    ];
+    let mut compute_bodies = BTreeSet::new();
+    for strategy in strategies {
+        let cpp = Compiler::new()
+            .with_scheduling_strategy(strategy)
+            .compile_source_to_cpp_with_lane(
+                "p3_recursive_apf.dsp",
+                source,
+                &CppOptions::default(),
+                SignalFirLane::TransformFastLane,
+            )
+            .unwrap_or_else(|error| panic!("APF lowering failed under {strategy:?}: {error}"));
+        let compute = cpp
+            .split_once("void compute(")
+            .map(|(_, body)| body)
+            .unwrap_or_else(|| panic!("missing compute method under {strategy:?}:\n{cpp}"));
+        assert!(
+            compute.contains("fRec") && compute.contains("fTemp"),
+            "APF must expose scheduled recursion snapshots under {strategy:?}:\n{compute}"
+        );
+        compute_bodies.insert(compute.to_owned());
+    }
+    assert_eq!(
+        compute_bodies.len(),
+        4,
+        "the four C++ scheduling strategies must remain visible in recursive APF code"
     );
 }

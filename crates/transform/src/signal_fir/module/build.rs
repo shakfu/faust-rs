@@ -430,7 +430,7 @@ pub(crate) fn build_module<'a>(
     lower.clocked = clocked.map(clocked::ClockedState::new);
     lower.scalar_schedule = scalar_schedule.cloned();
     lower.fixed_ad_internal_signals = fixed_ad_internal_signals(lower.arena, signals);
-    lower.symrec_internal_signals = symrec_internal_signals(lower.arena, signals);
+    lower.register_symbolic_recursion_groups(signals)?;
     if lower.clocked.is_some() && lower.scalar_schedule.is_some() {
         lower.prepare_clocked_payload_schedule(signals);
     }
@@ -603,9 +603,9 @@ pub(crate) fn build_module<'a>(
                 &mut lower.store,
                 sample_loop_statements,
                 "fTemp",
-                0,
+                lower.name_gen.ftemp_counter,
                 "iTemp",
-                0,
+                lower.name_gen.itemp_counter,
             );
         }
     }

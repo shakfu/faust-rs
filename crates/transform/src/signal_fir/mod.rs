@@ -329,9 +329,10 @@ pub struct SignalFirOutput {
     /// Root node id of the generated FIR module.
     pub module: FirId,
     /// First-lowering order of every distinct materialized `SigId`. On the
-    /// scalar forward path this is driven by the selected `Hsched`; recursive
-    /// bodies remain context-bound units. The trace is exported only for
-    /// conformance diagnostics via [`shadow::compare_emission_order`].
+    /// scalar forward path this is driven by the selected `Hsched`. Recursion
+    /// carrier projections are omitted because they are not ordinary cached
+    /// values. The trace is exported only for conformance diagnostics via
+    /// [`shadow::compare_emission_order`].
     pub emission_order: Vec<SigId>,
     /// P3 schedule-conformance report comparing [`Self::emission_order`] with
     /// the selected `Hsched`. `None` when no hierarchical graph was built.

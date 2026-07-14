@@ -27,7 +27,10 @@ impl<'a> SignalToFirLower<'a> {
             .to_vec();
         for sig in schedule {
             if self.fixed_ad_internal_signals.contains(&sig)
-                || self.symrec_internal_signals.contains(&sig)
+                || matches!(
+                    match_sig(self.arena, sig),
+                    SigMatch::BlockReverseAD { .. } | SigMatch::ReverseTimeRec(_)
+                )
             {
                 continue;
             }
@@ -36,14 +39,6 @@ impl<'a> SignalToFirLower<'a> {
                 crate::hgraph::GraphKey::Control | crate::hgraph::GraphKey::Top
             ) && self.clocked_payload_signals.contains(&sig)
             {
-                continue;
-            }
-            // A prepared SYMREC body may appear before its owning projection
-            // in the abstract dependency schedule, but the Rust lowerer must
-            // open that projection's recursion context before resolving a
-            // SYMREF. The projection remains scheduled normally and lowers
-            // the skipped body as one context-bound unit.
-            if self.requires_active_recursion(sig) {
                 continue;
             }
             if matches!(key, crate::hgraph::GraphKey::Wrapper(_))
@@ -59,36 +54,6 @@ impl<'a> SignalToFirLower<'a> {
             }
         }
         Ok(())
-    }
-
-    fn requires_active_recursion(&self, root: SigId) -> bool {
-        let mut stack = vec![root];
-        let mut visited = std::collections::HashSet::new();
-        while let Some(sig) = stack.pop() {
-            if !visited.insert(sig) {
-                continue;
-            }
-            if let SigMatch::Proj(_, group) = match_sig(self.arena, sig) {
-                let group = match match_sig(self.arena, group) {
-                    SigMatch::ReverseTimeRec(body) => body,
-                    _ => group,
-                };
-                if match_sym_ref(self.arena, group).is_some()
-                    || tlib::match_de_bruijn_ref(self.arena, group).is_some()
-                {
-                    return true;
-                }
-                if match_sym_rec(self.arena, group).is_some() {
-                    // This projection is the binder that makes every SYMREF
-                    // below its group legal; do not inspect through it.
-                    continue;
-                }
-            }
-            if let Some(children) = self.arena.children(sig) {
-                stack.extend(children.iter().copied());
-            }
-        }
-        false
     }
 
     /// Central dispatcher: lowers one signal node to a FIR value expression.
@@ -299,7 +264,7 @@ impl<'a> SignalToFirLower<'a> {
         // rate are hoisted into the appropriate execution-tier bucket:
         //   Konst → constants_statements (instanceConstants, once at init)
         //   Block → control_statements   (compute preamble, once per call)
-        //   Samp  → stays inline in the sample loop (no action needed)
+        //   Samp  → shared nodes are materialized at their Hsched position
         //
         // To avoid creating unnecessary temporaries for intermediate
         // sub-expressions, only nodes referenced ≥ 2 times in the signal
@@ -348,6 +313,9 @@ impl<'a> SignalToFirLower<'a> {
                 }
                 Some(Variability::Block) => {
                     self.materialize_in_bucket(sig, lowered, Bucket::Control)
+                }
+                Some(Variability::Samp) if self.scalar_schedule.is_some() => {
+                    self.materialize_scheduled_sample(lowered)
                 }
                 _ => lowered,
             }
