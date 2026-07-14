@@ -49,7 +49,12 @@
 //!   and ring delay words, simultaneous recursive projection steps, nested
 //!   OD/US/DS guards, and the three P6.2 transport lifetimes. The independent
 //!   checker requires exact loop/action/island coverage. Final output/module
-//!   placement and `build_module` activation remain deferred.
+//!   placement is supplied by P6.4.
+//! - **Vector P6.4 final module integration**: add checked output stores,
+//!   `-lv 0/1` chunk drivers, lifecycle section placement, generic FIR module
+//!   verification, and production selection after P5.3/P6 acceptance. Pure
+//!   programs activate this path; named state/UI/clock gaps retain the
+//!   transitional vector builder and are observable in `VectorPipelineStatus`.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
@@ -103,6 +108,7 @@ pub mod vector_assemble;
 pub mod vector_clock_ad;
 pub mod vector_events;
 pub mod vector_lower;
+mod vector_module;
 pub mod vector_plan;
 pub mod vector_route;
 pub mod vector_schedule;
@@ -160,11 +166,10 @@ impl RealType {
 /// the non-recursive ones (SIMD); recursive computations stay in serial loops.
 ///
 /// Roadmap P6, vector doc V1
-/// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). **V1 plumbs the
-/// option/CLI surface only**: `Scalar` is the sole lowering acted on today, and
-/// selecting `Vector` currently falls back to scalar codegen until the
-/// `LoopGraph` lowering (V2+) lands. It is threaded now so later slices have a
-/// stable configuration point and CLI contract.
+/// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). P6.4 activates
+/// the independently checked signal-level path for the pure supported subset.
+/// Other shapes retain the transitional vector builder with an observable
+/// [`VectorPipelineStatus::Fallback`] reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComputeMode {
     /// One scalar loop over the whole block (`for i in 0..count`).
@@ -191,6 +196,54 @@ impl ComputeMode {
     pub fn is_vector(self) -> bool {
         matches!(self, Self::Vector { .. })
     }
+}
+
+/// Stable reason why a requested vector compile used the transitional module
+/// builder instead of the independently checked signal-level pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorFallbackReason {
+    UiProgram,
+    ClockAnalysis,
+    Decorations,
+    VectorPlan,
+    StatePlan,
+    ClockAdPlan,
+    PureLowering,
+    EventCertificate,
+    FirAssembly,
+    OutputAssembly,
+    ModuleVerification,
+}
+
+impl VectorFallbackReason {
+    /// Stable snapshot/diagnostic code used by vectorization-retention gates.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::UiProgram => "FRS-VEC-FALLBACK-UI",
+            Self::ClockAnalysis => "FRS-VEC-FALLBACK-CLOCK",
+            Self::Decorations => "FRS-VEC-FALLBACK-DECORATIONS",
+            Self::VectorPlan => "FRS-VEC-FALLBACK-PLAN",
+            Self::StatePlan => "FRS-VEC-FALLBACK-STATE",
+            Self::ClockAdPlan => "FRS-VEC-FALLBACK-CLOCK-AD",
+            Self::PureLowering => "FRS-VEC-FALLBACK-PURE",
+            Self::EventCertificate => "FRS-VEC-FALLBACK-EVENTS",
+            Self::FirAssembly => "FRS-VEC-FALLBACK-ASSEMBLY",
+            Self::OutputAssembly => "FRS-VEC-FALLBACK-OUTPUT",
+            Self::ModuleVerification => "FRS-VEC-FALLBACK-MODULE",
+        }
+    }
+}
+
+/// Which vector-module path produced a [`SignalFirOutput`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorPipelineStatus {
+    #[default]
+    NotRequested,
+    /// The P4/P5/P6 producer/checker chain accepted the emitted module.
+    Certified,
+    /// A named unsupported shape retained the transitional vector builder.
+    Fallback(VectorFallbackReason),
 }
 
 /// Configuration options for [`compile_signals_to_fir_fastlane_with_ui`].
@@ -233,16 +286,13 @@ pub struct SignalFirOptions {
     /// or above `max_copy_delay` use circular-pow2).
     pub delay_line_threshold: u32,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
-    /// (`-vec`). Roadmap P6 (V1 plumbing; `Vector` still lowers as `Scalar`
-    /// until the `LoopGraph` slices land).
+    /// (`-vec`). Accepted pure programs use the checked P4/P5/P6 path; named
+    /// unsupported shapes retain the transitional vector builder.
     pub compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
-    /// `--scheduling-strategy`). Vectorization port plan phase P2: plumbing
-    /// only — the selected strategy is stored and reported but no lowering
-    /// path calls [`crate::schedule::schedule`] yet (P3 activates scalar
-    /// scheduling). Deliberately independent of [`ComputeMode`]: the same
-    /// strategy applies to the scalar control/signal DAG and, once P5 lands,
-    /// to the vector `LoopGraph` schedule (plan §2.5).
+    /// `--scheduling-strategy`). Deliberately independent of [`ComputeMode`]:
+    /// the checked vector path applies it to every induced epoch schedule;
+    /// scalar activation remains tracked separately (plan §2.5).
     pub scheduling_strategy: SchedulingStrategy,
 }
 
@@ -283,6 +333,8 @@ pub struct SignalFirOutput {
     /// through the clock-unaware entry point). Observation-only; the FIR is
     /// identical whether or not this is computed.
     pub shadow_report: Option<shadow::ShadowReport>,
+    /// Observable activation/fallback state for the signal-level vector path.
+    pub vector_pipeline_status: VectorPipelineStatus,
 }
 
 /// Compiles propagated signals plus canonical grouped UI into a FIR module.
@@ -468,7 +520,28 @@ fn compile_fastlane_inner(
         }
     };
 
-    let output = module::build_module(
+    let mut vector_fallback = None;
+    if options.compute_mode.is_vector() {
+        let empty_domains = propagate::ClockDomainTable::new();
+        let domains = clock_domains.unwrap_or(&empty_domains);
+        match vector_module::build_verified_vector_module(
+            &prepared,
+            domains,
+            ui.controls.is_empty(),
+            plan.num_inputs,
+            plan.num_outputs,
+            options.module_name.as_str(),
+            options.real_type.as_fir_type(),
+            options.max_copy_delay,
+            options.compute_mode,
+            options.scheduling_strategy,
+        ) {
+            Ok(output) => return Ok(output),
+            Err(failure) => vector_fallback = Some(failure.reason),
+        }
+    }
+
+    let mut output = module::build_module(
         &plan,
         options.module_name.as_str(),
         prepared.arena(),
@@ -493,10 +566,12 @@ fn compile_fastlane_inner(
         .as_ref()
         .map(|(hgraph, hsched)| shadow::compare_emission_order(hgraph, hsched, &output));
 
-    Ok(SignalFirOutput {
-        shadow_report,
-        ..output
-    })
+    output.shadow_report = shadow_report;
+    output.vector_pipeline_status = vector_fallback.map_or(
+        VectorPipelineStatus::NotRequested,
+        VectorPipelineStatus::Fallback,
+    );
+    Ok(output)
 }
 
 #[cfg(test)]

@@ -940,5 +940,6 @@ pub(crate) fn build_module<'a>(
         // gate's `Hgraph`/`Hsched`; `build_module` has no schedule to
         // compare against.
         shadow_report: None,
+        vector_pipeline_status: super::super::VectorPipelineStatus::NotRequested,
     })
 }

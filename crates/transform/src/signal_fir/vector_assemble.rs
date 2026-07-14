@@ -931,7 +931,7 @@ fn materialize_action(
             };
             let typ = state_fir_type(delay, real_type)?;
             let index = builder.load_var("vdelay_copy", AccessType::Loop, FirType::Int32);
-            let count = builder.load_var("vcount", AccessType::FunArgs, FirType::Int32);
+            let count = builder.load_var("vcount", AccessType::Stack, FirType::Int32);
             let source_index = builder.binop(FirBinOp::Add, count, index, FirType::Int32);
             let value = builder.load_table(temporary_name, AccessType::Stack, source_index, typ);
             let store = builder.store_table(permanent_name, AccessType::Struct, index, value);
@@ -949,7 +949,7 @@ fn materialize_action(
                     action: action.clone(),
                 });
             };
-            let count = builder.load_var("vcount", AccessType::FunArgs, FirType::Int32);
+            let count = builder.load_var("vcount", AccessType::Stack, FirType::Int32);
             builder.store_var(index_save_name, AccessType::Struct, count)
         }
     };
@@ -1487,16 +1487,17 @@ fn clear_table(
 }
 
 fn sample_loop(builder: &mut FirBuilder<'_>, body: FirId) -> FirId {
-    let start = builder.load_var("vindex", AccessType::FunArgs, FirType::Int32);
-    let count = builder.load_var("vcount", AccessType::FunArgs, FirType::Int32);
+    let start = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let init = builder.declare_var("i0", FirType::Int32, AccessType::Loop, Some(start));
+    let count = builder.load_var("vcount", AccessType::Stack, FirType::Int32);
     let end = builder.binop(FirBinOp::Add, start, count, FirType::Int32);
     let one = builder.int32(1);
-    builder.for_loop("i0", start, end, one, body, false)
+    builder.for_loop("i0", init, end, one, body, false)
 }
 
 fn local_index(builder: &mut FirBuilder<'_>) -> FirId {
     let index = builder.load_var("i0", AccessType::Loop, FirType::Int32);
-    let base = builder.load_var("vindex", AccessType::FunArgs, FirType::Int32);
+    let base = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
     builder.binop(FirBinOp::Sub, index, base, FirType::Int32)
 }
 

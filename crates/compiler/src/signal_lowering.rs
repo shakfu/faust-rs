@@ -289,6 +289,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
     Ok(FirCompileOutput {
         store: lowered.store,
         module: lowered.module,
+        vector_pipeline_status: lowered.vector_pipeline_status,
     })
 }
 

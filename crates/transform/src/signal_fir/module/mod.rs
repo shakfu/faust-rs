@@ -182,7 +182,7 @@ const _: () = assert!(MAX_BRA_TAPE_BLOCK_SIZE.is_power_of_two());
 /// Deterministic prototype emission order for math helper functions.
 ///
 /// Keeping this order stable avoids noisy golden diffs in generated FIR/C/C++.
-const MATH_PROTO_ORDER: &[FirMathOp] = &[
+pub(super) const MATH_PROTO_ORDER: &[FirMathOp] = &[
     FirMathOp::Pow,
     FirMathOp::Min,
     FirMathOp::Max,
@@ -207,7 +207,7 @@ const MATH_PROTO_ORDER: &[FirMathOp] = &[
 ];
 
 /// Deterministic prototype emission order for polymorphic integer helper calls.
-const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
+pub(super) const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 
 /// Flags, per output signal, whether it must be computed in the reverse sample loop.
 ///

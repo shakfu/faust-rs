@@ -19,6 +19,7 @@ use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
 
 use super::cse::materialize_shared_values;
 use super::module::map_binop;
+use super::vector_analysis::EffectAtom;
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_route::{
     RouteResolution, RoutedUseSource, VectorRegion, VectorRouteError, VectorRouteSession,
@@ -63,6 +64,16 @@ impl VerifiedPureVectorProgram {
     #[must_use]
     pub fn store(&self) -> &FirStore {
         &self.store
+    }
+
+    /// Mutable store access reserved for the checked final-module assembler.
+    pub(crate) fn store_mut(&mut self) -> &mut FirStore {
+        &mut self.store
+    }
+
+    /// Consumes the checked program after final module assembly.
+    pub(crate) fn into_store(self) -> FirStore {
+        self.store
     }
 
     /// Canonical transport declarations emitted before region bodies.
@@ -829,7 +840,16 @@ fn verify_plan_prepared_boundary(
                 prepared: prepared_type,
             });
         }
-        if !record.effects.is_empty() {
+        let terminal_output = match match_sig(prepared.arena(), sig) {
+            SigMatch::Output(channel, _) if channel >= 0 => {
+                record.effects
+                    == [EffectAtom::WriteOutput(
+                        u32::try_from(channel).expect("nonnegative output channel fits u32"),
+                    )]
+            }
+            _ => false,
+        };
+        if !record.effects.is_empty() && !terminal_output {
             return Err(PureVectorLowerError::EffectfulSignal {
                 signal_id: record.signal_id,
             });

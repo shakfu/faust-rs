@@ -628,6 +628,17 @@ closed before assembly. This advances the concrete FIR side of R4, but the
 artifact is not yet canonical JSON, hash-bound to its producers, checked by
 Lean, placed into a final module, or admitted to backend execution.
 
+P6.4 composes the accepted finite artifacts into a complete module for the
+pure supported subset. The final checker validates lifecycle placement,
+accepted-body inclusion, and exact output-store coverage, then requires the
+generic FIR scope/type checker to report no errors. Production selection runs
+only after P5.3, P6.1, P6.2, and P6.3b acceptance. Unsupported shapes retain a
+stable, observable fallback reason; that preserves behavior but is explicitly
+not evidence that the fallback module satisfies the higher assurance level.
+The final module artifact is still in-memory Rust FIR: canonical
+serialization, hash binding, Lean acceptance, and stateful/clocked differential
+execution remain open.
+
 ### R5 - Semantic reference execution
 
 Extend the Lean model with a small executable signal/FIR semantics in increments:

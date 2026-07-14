@@ -2113,6 +2113,32 @@ place output stores and lifecycle blocks into a final module, select the path
 from `build_module`, execute differential audio, serialize certificates, or
 activate a backend. Those are the next integration and assurance slices.
 
+Implementation status (2026-07-14, P6.4 production module integration):
+`signal_fir::vector_module` now surrounds an accepted P6.3b body with exact
+audio output stores, C++-shaped `-lv 0` fixed chunks plus remainder or `-lv 1`
+min-bounded chunks, and the complete Faust FIR lifecycle surface. Persistent
+P6 state is placed in the DSP struct, P6 clears are placed only in
+`instanceClear`, `fSampleRate` is initialized by `instanceConstants`, and
+chunk-local declarations remain in `compute`. A final checker requires all six
+lifecycle functions, exact P6 clear placement, inclusion of the accepted
+P6.3b body, complete output-store coverage, and a clean generic FIR verifier
+report. A forged output-coverage witness is rejected.
+
+The production selector now constructs decorations, `VectorPlan`, P6.1 and
+P6.2 plans, a state-refined P5.3 event certificate, P6.3b FIR, and the final
+module before selecting the new path. The currently supported pure subset is
+active for both `-lv` variants and all four `-ss` strategies. Unsupported
+stateful, clocked, reverse-AD, or UI-bearing programs preserve existing
+behavior through the transitional vector builder, but the fallback is no
+longer silent: `VectorPipelineStatus` exposes a stable
+`FRS-VEC-FALLBACK-*` reason through both transform and compiler FIR outputs.
+This public status API is an adapted diagnostic surface, not a C++ ABI change.
+
+P6.4 does not claim certification for a fallback module and does not yet remove
+the transitional vector builder. The next slice must replace the pure-only
+region producer for stateful recursion/delay and clock/FAD islands, then run
+the full differential/backend matrix before fallback removal.
+
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an
 explicit diagnostic for RAD shapes forced to scalar.

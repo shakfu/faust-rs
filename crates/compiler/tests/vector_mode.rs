@@ -9,7 +9,7 @@
 use std::io::Cursor;
 
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
-use compiler::{Compiler, ComputeMode, SignalFirLane};
+use compiler::{Compiler, ComputeMode, SignalFirLane, VectorFallbackReason, VectorPipelineStatus};
 
 /// Compiles `source` to interpreter bytecode with the given compute mode and
 /// runs one `frames`-sample block with the provided single-channel input.
@@ -119,5 +119,45 @@ fn two_pole_filter_is_bit_exact() {
         "biquad_like",
         "process = _ : + ~ (_ <: 0.5 * _' , -0.2 * _'' :> _);",
         32,
+    );
+}
+
+#[test]
+fn production_fir_reports_certified_and_named_fallback_paths() {
+    let compiler = Compiler::new().with_compute_mode(ComputeMode::Vector {
+        vec_size: 8,
+        loop_variant: 0,
+    });
+    let pure = compiler
+        .compile_source_to_fir_with_lane(
+            "pure.dsp",
+            "process = _ * 0.5;",
+            SignalFirLane::TransformFastLane,
+        )
+        .expect("pure vector FIR");
+    assert_eq!(pure.vector_pipeline_status, VectorPipelineStatus::Certified);
+
+    let stateful = compiler
+        .compile_source_to_fir_with_lane(
+            "stateful.dsp",
+            "process = _ : mem;",
+            SignalFirLane::TransformFastLane,
+        )
+        .expect("stateful transitional vector FIR");
+    assert_eq!(
+        stateful.vector_pipeline_status,
+        VectorPipelineStatus::Fallback(VectorFallbackReason::PureLowering)
+    );
+
+    let ui = compiler
+        .compile_source_to_fir_with_lane(
+            "ui.dsp",
+            "process = _ * hslider(\"gain\", 0.5, 0.0, 1.0, 0.01);",
+            SignalFirLane::TransformFastLane,
+        )
+        .expect("UI transitional vector FIR");
+    assert_eq!(
+        ui.vector_pipeline_status,
+        VectorPipelineStatus::Fallback(VectorFallbackReason::UiProgram)
     );
 }

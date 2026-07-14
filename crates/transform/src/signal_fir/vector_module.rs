@@ -1,0 +1,887 @@
+//! Checked final-module integration for the signal-level vector pipeline.
+//!
+//! # C++ provenance and adaptation
+//! The compute drivers mirror `VectorCodeContainer::processFIR` in the C++
+//! compiler: `-lv 0` emits fixed-size chunks plus one remainder, while `-lv 1`
+//! emits one min-bounded chunk loop. Lifecycle placement follows the common
+//! Faust contract implemented by `CodeContainer`: persistent fields belong to
+//! the DSP struct, constants to `instanceConstants`, resettable signal state to
+//! `instanceClear`, and all chunk-local buffers to `compute`.
+//!
+//! Rust keeps this integration behind the complete P4/P5/P6 producer/checker
+//! chain. The final FIR module is independently checked for lifecycle shape,
+//! output coverage, inclusion of the accepted P6.3b body, and generic FIR type
+//! and scope correctness before it can replace the transitional vector module.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use fir::checker::verify_fir_module;
+use fir::{
+    AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType, NamedType, match_fir,
+};
+use propagate::ClockDomainTable;
+use signals::SigId;
+
+use crate::schedule::SchedulingStrategy;
+use crate::signal_prepare::VerifiedPreparedSignals;
+
+use super::decoration_verify::certify_decorations;
+use super::module::{INT_FUN_PROTO_ORDER, MATH_PROTO_ORDER};
+use super::vector_assemble::{VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir};
+use super::vector_clock_ad::build_vector_clock_ad_plan;
+use super::vector_events::{DEFAULT_EVENT_LIMIT, build_state_event_order_certificate};
+use super::vector_lower::lower_pure_vector_program;
+use super::vector_plan::build_vector_plan;
+use super::vector_route::{VectorRegion, VerifiedRoutedFir};
+use super::vector_state::build_vector_state_plan;
+use super::{ComputeMode, SignalFirOutput, VectorFallbackReason, VectorPipelineStatus};
+
+/// Failure stage retained by the production selector as an observable fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VectorModuleFailure {
+    pub reason: VectorFallbackReason,
+    pub detail: String,
+}
+
+impl VectorModuleFailure {
+    fn new(reason: VectorFallbackReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for VectorModuleFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.reason.code(), self.detail)
+    }
+}
+
+/// Runs the complete checked pure-vector path and returns a final FIR module.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_verified_vector_module(
+    prepared: &VerifiedPreparedSignals,
+    domains: &ClockDomainTable,
+    ui_has_no_controls: bool,
+    num_inputs: usize,
+    num_outputs: usize,
+    module_name: &str,
+    real_type: FirType,
+    max_copy_delay: u32,
+    compute_mode: ComputeMode,
+    strategy: SchedulingStrategy,
+) -> Result<SignalFirOutput, VectorModuleFailure> {
+    let built = build_verified_vector_module_with_evidence(
+        prepared,
+        domains,
+        ui_has_no_controls,
+        num_inputs,
+        num_outputs,
+        module_name,
+        real_type,
+        max_copy_delay,
+        compute_mode,
+        strategy,
+    )?;
+    let BuiltVectorModule {
+        output,
+        assembly,
+        output_stores,
+    } = built;
+    if assembly.schema_version != super::vector_assemble::VECTOR_FIR_ASSEMBLY_VERSION
+        || output_stores.len() != num_outputs
+    {
+        return Err(module_shape("verified module evidence lost final coverage"));
+    }
+    Ok(output)
+}
+
+struct BuiltVectorModule {
+    output: SignalFirOutput,
+    assembly: VectorFirAssembly,
+    output_stores: Vec<FirId>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_verified_vector_module_with_evidence(
+    prepared: &VerifiedPreparedSignals,
+    domains: &ClockDomainTable,
+    ui_has_no_controls: bool,
+    num_inputs: usize,
+    num_outputs: usize,
+    module_name: &str,
+    real_type: FirType,
+    max_copy_delay: u32,
+    compute_mode: ComputeMode,
+    strategy: SchedulingStrategy,
+) -> Result<BuiltVectorModule, VectorModuleFailure> {
+    if !ui_has_no_controls {
+        return Err(VectorModuleFailure::new(
+            VectorFallbackReason::UiProgram,
+            "the checked vector module does not yet assemble grouped UI state",
+        ));
+    }
+    let ComputeMode::Vector {
+        vec_size,
+        loop_variant,
+    } = compute_mode
+    else {
+        return Err(VectorModuleFailure::new(
+            VectorFallbackReason::VectorPlan,
+            "checked vector module requested for scalar compute mode",
+        ));
+    };
+
+    let clocks = crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs()).map_err(
+        |error| VectorModuleFailure::new(VectorFallbackReason::ClockAnalysis, error.to_string()),
+    )?;
+    let decorations = certify_decorations(prepared, &clocks).map_err(|error| {
+        VectorModuleFailure::new(VectorFallbackReason::Decorations, error.to_string())
+    })?;
+    let vector_plan = build_vector_plan(&decorations, u64::from(vec_size)).map_err(|error| {
+        VectorModuleFailure::new(VectorFallbackReason::VectorPlan, error.to_string())
+    })?;
+    let state_plan = build_vector_state_plan(&decorations, &vector_plan, u64::from(max_copy_delay))
+        .map_err(|error| {
+            VectorModuleFailure::new(VectorFallbackReason::StatePlan, error.to_string())
+        })?;
+    let clock_plan = build_vector_clock_ad_plan(prepared, domains, &decorations, &vector_plan)
+        .map_err(|error| {
+            VectorModuleFailure::new(VectorFallbackReason::ClockAdPlan, error.to_string())
+        })?;
+    let mut program = lower_pure_vector_program(
+        prepared,
+        &vector_plan,
+        strategy,
+        real_type.clone(),
+        num_inputs,
+    )
+    .map_err(|error| {
+        VectorModuleFailure::new(VectorFallbackReason::PureLowering, error.to_string())
+    })?;
+    build_state_event_order_certificate(
+        &vector_plan,
+        program.routed(),
+        &state_plan,
+        DEFAULT_EVENT_LIMIT,
+    )
+    .map_err(|error| {
+        VectorModuleFailure::new(VectorFallbackReason::EventCertificate, error.to_string())
+    })?;
+
+    let routed = program.routed().clone();
+    let mut loop_inputs = program
+        .regions()
+        .iter()
+        .map(|region| VectorLoopFirInput {
+            loop_id: region.loop_id(),
+            statements: region.statements().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let mut control_statements = program.control_statements().to_vec();
+    let math_ops = program.math_ops().clone();
+    let int_helpers = program.int_helpers().clone();
+    let output_stores = materialize_outputs(
+        prepared.outputs(),
+        num_outputs,
+        &routed,
+        &mut loop_inputs,
+        &mut control_statements,
+        program.store_mut(),
+    )?;
+    let assembly = assemble_vector_fir(
+        &routed,
+        Some(&state_plan),
+        Some(&clock_plan),
+        &loop_inputs,
+        real_type.clone(),
+        program.store_mut(),
+    )
+    .map_err(|error| {
+        VectorModuleFailure::new(VectorFallbackReason::FirAssembly, error.to_string())
+    })?;
+
+    let assembly = assembly.into_assembly();
+    let module = assemble_module(
+        program.store_mut(),
+        module_name,
+        num_inputs,
+        num_outputs,
+        real_type,
+        vec_size,
+        loop_variant,
+        &control_statements,
+        &math_ops,
+        &int_helpers,
+        &assembly,
+    )?;
+    verify_final_module(program.store(), module, &assembly, &output_stores)?;
+
+    Ok(BuiltVectorModule {
+        output: SignalFirOutput {
+            store: program.into_store(),
+            module,
+            emission_order: Vec::new(),
+            shadow_report: None,
+            vector_pipeline_status: VectorPipelineStatus::Certified,
+        },
+        assembly,
+        output_stores,
+    })
+}
+
+fn materialize_outputs(
+    outputs: &[SigId],
+    num_outputs: usize,
+    routed: &VerifiedRoutedFir,
+    loop_inputs: &mut [VectorLoopFirInput],
+    control_statements: &mut Vec<FirId>,
+    store: &mut FirStore,
+) -> Result<Vec<FirId>, VectorModuleFailure> {
+    if outputs.len() != num_outputs {
+        return Err(VectorModuleFailure::new(
+            VectorFallbackReason::OutputAssembly,
+            "prepared output count does not match the module contract",
+        ));
+    }
+    let loop_index = loop_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, body)| (body.loop_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut stores = Vec::with_capacity(outputs.len());
+    for (channel, output) in outputs.iter().enumerate() {
+        let signal_id = u64::from(output.as_u32());
+        let signal = routed
+            .plan()
+            .signals
+            .iter()
+            .find(|signal| signal.signal_id == signal_id)
+            .ok_or_else(|| {
+                VectorModuleFailure::new(
+                    VectorFallbackReason::OutputAssembly,
+                    format!("output signal {signal_id} is absent from the vector plan"),
+                )
+            })?;
+        let super::vector_verify::Placement::Owned(loop_id) = signal.placement else {
+            return Err(VectorModuleFailure::new(
+                VectorFallbackReason::OutputAssembly,
+                format!("output signal {signal_id} has no materialized sample loop"),
+            ));
+        };
+        let value = routed
+            .trace()
+            .definitions()
+            .iter()
+            .find(|definition| {
+                definition.signal_id == signal_id
+                    && definition.region == VectorRegion::Loop(loop_id)
+            })
+            .map(|definition| definition.value)
+            .ok_or_else(|| {
+                VectorModuleFailure::new(
+                    VectorFallbackReason::OutputAssembly,
+                    format!("output signal {signal_id} has no routed FIR definition"),
+                )
+            })?;
+        let region_index = *loop_index.get(&loop_id).ok_or_else(|| {
+            VectorModuleFailure::new(
+                VectorFallbackReason::OutputAssembly,
+                format!("output loop {loop_id} has no final region body"),
+            )
+        })?;
+
+        let value_is_faust_float = store.value_type(value) == Some(FirType::FaustFloat);
+        let mut builder = FirBuilder::new(store);
+        let channel_i32 = i32::try_from(channel).map_err(|_| {
+            VectorModuleFailure::new(
+                VectorFallbackReason::OutputAssembly,
+                "output channel index exceeds FIR i32",
+            )
+        })?;
+        let channel_value = builder.int32(channel_i32);
+        let pointer_type = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let pointer = builder.load_table(
+            "outputs",
+            AccessType::FunArgs,
+            channel_value,
+            pointer_type.clone(),
+        );
+        control_statements.push(builder.declare_var(
+            format!("output{channel}"),
+            pointer_type,
+            AccessType::Stack,
+            Some(pointer),
+        ));
+        let value = if value_is_faust_float {
+            value
+        } else {
+            builder.cast(FirType::FaustFloat, value)
+        };
+        let sample = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+        let output_store =
+            builder.store_table(format!("output{channel}"), AccessType::Stack, sample, value);
+        loop_inputs[region_index].statements.push(output_store);
+        stores.push(output_store);
+    }
+    Ok(stores)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_module(
+    store: &mut FirStore,
+    module_name: &str,
+    num_inputs: usize,
+    num_outputs: usize,
+    real_type: FirType,
+    vec_size: u32,
+    loop_variant: u8,
+    control_statements: &[FirId],
+    math_ops: &std::collections::HashSet<fir::FirMathOp>,
+    int_helpers: &std::collections::BTreeSet<&'static str>,
+    assembly: &VectorFirAssembly,
+) -> Result<FirId, VectorModuleFailure> {
+    let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
+    let dsp_arg = NamedType {
+        name: "dsp".to_owned(),
+        typ: dsp_arg_type.clone(),
+    };
+    let empty = FirBuilder::new(store).block(&[]);
+    let metadata = FirBuilder::new(store).declare_fun(
+        "metadata",
+        FirType::Fun {
+            args: vec![dsp_arg_type.clone(), FirType::Meta],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            dsp_arg.clone(),
+            NamedType {
+                name: "m".to_owned(),
+                typ: FirType::Meta,
+            },
+        ],
+        Some(empty),
+        false,
+    );
+
+    let sample_rate =
+        FirBuilder::new(store).load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
+    let sample_rate_store =
+        FirBuilder::new(store).store_var("fSampleRate", AccessType::Struct, sample_rate);
+    let constants_body = FirBuilder::new(store).block(&[sample_rate_store]);
+    let instance_constants = FirBuilder::new(store).declare_fun(
+        "instanceConstants",
+        FirType::Fun {
+            args: vec![dsp_arg_type.clone(), FirType::Int32],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            dsp_arg.clone(),
+            NamedType {
+                name: "sample_rate".to_owned(),
+                typ: FirType::Int32,
+            },
+        ],
+        Some(constants_body),
+        false,
+    );
+
+    let reset_body = FirBuilder::new(store).block(&[]);
+    let instance_reset_ui =
+        lifecycle_function(store, "instanceResetUserInterface", &dsp_arg, reset_body);
+    let clear_body = FirBuilder::new(store).block(&assembly.clear_statements);
+    let instance_clear = lifecycle_function(store, "instanceClear", &dsp_arg, clear_body);
+    let ui_body = FirBuilder::new(store).block(&[]);
+    let build_ui = FirBuilder::new(store).declare_fun(
+        "buildUserInterface",
+        FirType::Fun {
+            args: vec![dsp_arg_type.clone(), FirType::UI],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            dsp_arg.clone(),
+            NamedType {
+                name: "ui_interface".to_owned(),
+                typ: FirType::UI,
+            },
+        ],
+        Some(ui_body),
+        false,
+    );
+
+    let driver = build_chunk_driver(store, assembly.top_level_statement, vec_size, loop_variant)?;
+    let mut compute_statements = control_statements.to_vec();
+    compute_statements.extend(assembly.local_declarations.iter().copied());
+    compute_statements.extend(driver);
+    let compute_body = FirBuilder::new(store).block(&compute_statements);
+    let audio_ptr = FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))));
+    let compute = FirBuilder::new(store).declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                dsp_arg_type.clone(),
+                FirType::Int32,
+                audio_ptr.clone(),
+                audio_ptr.clone(),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            dsp_arg.clone(),
+            NamedType {
+                name: "count".to_owned(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_owned(),
+                typ: audio_ptr.clone(),
+            },
+            NamedType {
+                name: "outputs".to_owned(),
+                typ: audio_ptr,
+            },
+        ],
+        Some(compute_body),
+        false,
+    );
+
+    let globals = build_prototypes(store, real_type, math_ops, int_helpers);
+    let functions = FirBuilder::new(store).block(&[
+        metadata,
+        instance_constants,
+        instance_reset_ui,
+        instance_clear,
+        build_ui,
+        compute,
+    ]);
+    let sample_rate_field =
+        FirBuilder::new(store).declare_var("fSampleRate", FirType::Int32, AccessType::Struct, None);
+    let mut fields = vec![sample_rate_field];
+    fields.extend(assembly.state_declarations.iter().copied());
+    let dsp_struct = FirBuilder::new(store).block(&fields);
+    let static_declarations = FirBuilder::new(store).block(&[]);
+    Ok(FirBuilder::new(store).module(
+        num_inputs,
+        num_outputs,
+        module_name,
+        dsp_struct,
+        globals,
+        functions,
+        static_declarations,
+    ))
+}
+
+fn lifecycle_function(store: &mut FirStore, name: &str, dsp_arg: &NamedType, body: FirId) -> FirId {
+    FirBuilder::new(store).declare_fun(
+        name,
+        FirType::Fun {
+            args: vec![dsp_arg.typ.clone()],
+            ret: Box::new(FirType::Void),
+        },
+        std::slice::from_ref(dsp_arg),
+        Some(body),
+        false,
+    )
+}
+
+fn build_prototypes(
+    store: &mut FirStore,
+    real_type: FirType,
+    math_ops: &std::collections::HashSet<fir::FirMathOp>,
+    int_helpers: &std::collections::BTreeSet<&'static str>,
+) -> FirId {
+    let mut prototypes = Vec::new();
+    for op in MATH_PROTO_ORDER {
+        if !math_ops.contains(op) {
+            continue;
+        }
+        let arity = match op {
+            fir::FirMathOp::Pow
+            | fir::FirMathOp::Min
+            | fir::FirMathOp::Max
+            | fir::FirMathOp::Atan2
+            | fir::FirMathOp::Fmod
+            | fir::FirMathOp::Remainder => 2,
+            _ => 1,
+        };
+        let args = (0..arity)
+            .map(|index| NamedType {
+                name: format!("arg{index}"),
+                typ: real_type.clone(),
+            })
+            .collect::<Vec<_>>();
+        prototypes.push(FirBuilder::new(store).declare_fun(
+            op.symbol(),
+            FirType::Fun {
+                args: vec![real_type.clone(); arity],
+                ret: Box::new(real_type.clone()),
+            },
+            &args,
+            None,
+            false,
+        ));
+    }
+    for name in INT_FUN_PROTO_ORDER {
+        if !int_helpers.contains(name) {
+            continue;
+        }
+        let arity = usize::from(*name != "abs") + 1;
+        let args = (0..arity)
+            .map(|index| NamedType {
+                name: format!("arg{index}"),
+                typ: FirType::Int32,
+            })
+            .collect::<Vec<_>>();
+        prototypes.push(FirBuilder::new(store).declare_fun(
+            *name,
+            FirType::Fun {
+                args: vec![FirType::Int32; arity],
+                ret: Box::new(FirType::Int32),
+            },
+            &args,
+            None,
+            false,
+        ));
+    }
+    FirBuilder::new(store).block(&prototypes)
+}
+
+fn build_chunk_driver(
+    store: &mut FirStore,
+    chunk: FirId,
+    vec_size: u32,
+    loop_variant: u8,
+) -> Result<Vec<FirId>, VectorModuleFailure> {
+    let vec_size = i32::try_from(vec_size).map_err(|_| {
+        VectorModuleFailure::new(
+            VectorFallbackReason::ModuleVerification,
+            "vector size exceeds FIR i32",
+        )
+    })?;
+    match loop_variant {
+        0 => Ok(build_fast_driver(store, chunk, vec_size)),
+        1 => Ok(vec![build_simple_driver(store, chunk, vec_size)]),
+        _ => Err(VectorModuleFailure::new(
+            VectorFallbackReason::ModuleVerification,
+            format!("unsupported vector loop variant {loop_variant}"),
+        )),
+    }
+}
+
+fn build_simple_driver(store: &mut FirStore, chunk: FirId, vec_size: i32) -> FirId {
+    let mut builder = FirBuilder::new(store);
+    let index = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
+    let count = builder.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let remaining = builder.binop(FirBinOp::Sub, count, index, FirType::Int32);
+    let width = builder.int32(vec_size);
+    let smaller = builder.binop(FirBinOp::Lt, remaining, width, FirType::Bool);
+    let vcount = builder.select2(smaller, remaining, width, FirType::Int32);
+    let vcount = builder.declare_var("vcount", FirType::Int32, AccessType::Stack, Some(vcount));
+    let body = builder.block(&[vcount, chunk]);
+    let zero = builder.int32(0);
+    let init = builder.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(zero));
+    let end = builder.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let step = builder.int32(vec_size);
+    builder.for_loop("vindex", init, end, step, body, false)
+}
+
+fn build_fast_driver(store: &mut FirStore, chunk: FirId, vec_size: i32) -> Vec<FirId> {
+    let mut builder = FirBuilder::new(store);
+    let count = builder.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let width = builder.int32(vec_size);
+    let rem = builder.binop(FirBinOp::Rem, count, width, FirType::Int32);
+    let count = builder.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let limit = builder.binop(FirBinOp::Sub, count, rem, FirType::Int32);
+
+    let width_value = builder.int32(vec_size);
+    let main_vcount = builder.declare_var(
+        "vcount",
+        FirType::Int32,
+        AccessType::Stack,
+        Some(width_value),
+    );
+    let main_body = builder.block(&[main_vcount, chunk]);
+    let zero = builder.int32(0);
+    let main_init = builder.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(zero));
+    let main_step = builder.int32(vec_size);
+    let main_loop = builder.for_loop("vindex", main_init, limit, main_step, main_body, false);
+    let zero = builder.int32(0);
+    let has_main = builder.binop(FirBinOp::Gt, limit, zero, FirType::Bool);
+    let main_then = builder.block(&[main_loop]);
+    let guarded_main = builder.if_(has_main, main_then, None);
+
+    let rem_init = builder.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(limit));
+    let count = builder.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let remaining = builder.binop(FirBinOp::Sub, count, limit, FirType::Int32);
+    let rem_vcount =
+        builder.declare_var("vcount", FirType::Int32, AccessType::Stack, Some(remaining));
+    let rem_body = builder.block(&[rem_init, rem_vcount, chunk]);
+    let count = builder.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let has_rem = builder.binop(FirBinOp::Lt, limit, count, FirType::Bool);
+    let guarded_rem = builder.if_(has_rem, rem_body, None);
+    vec![guarded_main, guarded_rem]
+}
+
+fn verify_final_module(
+    store: &FirStore,
+    module: FirId,
+    assembly: &VectorFirAssembly,
+    output_stores: &[FirId],
+) -> Result<(), VectorModuleFailure> {
+    let report = verify_fir_module(store, module);
+    if report.has_errors() {
+        let detail = report
+            .errors()
+            .map(|diagnostic| format!("{} {}", diagnostic.code, diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(VectorModuleFailure::new(
+            VectorFallbackReason::ModuleVerification,
+            detail,
+        ));
+    }
+    let FirMatch::Module {
+        dsp_struct,
+        functions,
+        ..
+    } = match_fir(store, module)
+    else {
+        return Err(module_shape("root is not a FIR module"));
+    };
+    let FirMatch::Block(fields) = match_fir(store, dsp_struct) else {
+        return Err(module_shape("DSP struct is not a block"));
+    };
+    if assembly
+        .state_declarations
+        .iter()
+        .any(|declaration| !fields.contains(declaration))
+    {
+        return Err(module_shape("P6 state declaration missing from DSP struct"));
+    }
+    let FirMatch::Block(functions) = match_fir(store, functions) else {
+        return Err(module_shape("function section is not a block"));
+    };
+    let bodies = functions
+        .iter()
+        .filter_map(|function| match match_fir(store, *function) {
+            FirMatch::DeclareFun {
+                name,
+                body: Some(body),
+                ..
+            } => Some((name, body)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for required in [
+        "metadata",
+        "instanceConstants",
+        "instanceResetUserInterface",
+        "instanceClear",
+        "buildUserInterface",
+        "compute",
+    ] {
+        if !bodies.contains_key(required) {
+            return Err(module_shape(format!(
+                "missing lifecycle function {required}"
+            )));
+        }
+    }
+    if match_fir(store, bodies["instanceClear"])
+        != FirMatch::Block(assembly.clear_statements.clone())
+    {
+        return Err(module_shape(
+            "instanceClear does not contain exact P6 clears",
+        ));
+    }
+    let compute = bodies["compute"];
+    if !contains_statement(store, compute, assembly.top_level_statement) {
+        return Err(module_shape(
+            "compute does not contain the accepted P6.3b body",
+        ));
+    }
+    for output in output_stores {
+        if !contains_statement(store, compute, *output) {
+            return Err(module_shape("compute does not cover every output store"));
+        }
+    }
+    Ok(())
+}
+
+fn contains_statement(store: &FirStore, root: FirId, target: FirId) -> bool {
+    if root == target {
+        return true;
+    }
+    match match_fir(store, root) {
+        FirMatch::Block(body) => body
+            .into_iter()
+            .any(|child| contains_statement(store, child, target)),
+        FirMatch::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            contains_statement(store, then_block, target)
+                || else_block.is_some_and(|body| contains_statement(store, body, target))
+        }
+        FirMatch::Control { stmt, .. } => contains_statement(store, stmt, target),
+        FirMatch::ForLoop { body, .. }
+        | FirMatch::SimpleForLoop { body, .. }
+        | FirMatch::IteratorForLoop { body, .. }
+        | FirMatch::WhileLoop { body, .. } => contains_statement(store, body, target),
+        FirMatch::Switch { cases, default, .. } => {
+            cases
+                .into_iter()
+                .any(|(_, body)| contains_statement(store, body, target))
+                || default.is_some_and(|body| contains_statement(store, body, target))
+        }
+        _ => false,
+    }
+}
+
+fn module_shape(detail: impl Into<String>) -> VectorModuleFailure {
+    VectorModuleFailure::new(VectorFallbackReason::ModuleVerification, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fir::checker::verify_fir_module;
+    use signals::SigBuilder;
+    use tlib::TreeArena;
+
+    use crate::signal_prepare::prepare_signals_for_fir_verified;
+
+    fn raw_pure_fixture() -> (TreeArena, Vec<SigId>) {
+        let mut arena = TreeArena::new();
+        let roots = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let gain = builder.real(0.5);
+            let value = builder.binop(signals::BinOp::Mul, input, gain);
+            vec![builder.output(0, value)]
+        };
+        (arena, roots)
+    }
+
+    fn pure_fixture() -> VerifiedPreparedSignals {
+        let (arena, roots) = raw_pure_fixture();
+        prepare_signals_for_fir_verified(&arena, &roots, &ui::UiProgram::empty())
+            .expect("prepare pure fixture")
+    }
+
+    #[test]
+    fn final_module_covers_lifecycle_outputs_and_both_chunk_drivers() {
+        for strategy in [
+            SchedulingStrategy::DepthFirst,
+            SchedulingStrategy::BreadthFirst,
+            SchedulingStrategy::Special,
+            SchedulingStrategy::ReverseBreadthFirst,
+        ] {
+            for loop_variant in [0, 1] {
+                let prepared = pure_fixture();
+                let output = build_verified_vector_module(
+                    &prepared,
+                    &ClockDomainTable::new(),
+                    true,
+                    1,
+                    1,
+                    "mydsp",
+                    FirType::Float32,
+                    16,
+                    ComputeMode::Vector {
+                        vec_size: 8,
+                        loop_variant,
+                    },
+                    strategy,
+                )
+                .expect("verified module");
+                assert_eq!(
+                    output.vector_pipeline_status,
+                    VectorPipelineStatus::Certified
+                );
+                assert!(!verify_fir_module(&output.store, output.module).has_errors());
+            }
+        }
+    }
+
+    #[test]
+    fn production_selector_certifies_pure_and_names_stateful_fallback() {
+        let options = super::super::SignalFirOptions {
+            compute_mode: ComputeMode::Vector {
+                vec_size: 8,
+                loop_variant: 0,
+            },
+            ..super::super::SignalFirOptions::default()
+        };
+        let (arena, roots) = raw_pure_fixture();
+        let pure = super::super::compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &roots,
+            1,
+            1,
+            &ui::UiProgram::empty(),
+            &options,
+        )
+        .expect("production pure vector compile");
+        assert_eq!(pure.vector_pipeline_status, VectorPipelineStatus::Certified);
+
+        let mut arena = TreeArena::new();
+        let roots = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let amount = builder.int(2);
+            let delayed = builder.delay(input, amount);
+            vec![builder.output(0, delayed)]
+        };
+        let stateful = super::super::compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &roots,
+            1,
+            1,
+            &ui::UiProgram::empty(),
+            &options,
+        )
+        .expect("transitional stateful vector compile");
+        assert_eq!(
+            stateful.vector_pipeline_status,
+            VectorPipelineStatus::Fallback(VectorFallbackReason::PureLowering)
+        );
+    }
+
+    #[test]
+    fn final_checker_rejects_forged_output_coverage() {
+        let prepared = pure_fixture();
+        let mut built = build_verified_vector_module_with_evidence(
+            &prepared,
+            &ClockDomainTable::new(),
+            true,
+            1,
+            1,
+            "mydsp",
+            FirType::Float32,
+            16,
+            ComputeMode::Vector {
+                vec_size: 8,
+                loop_variant: 0,
+            },
+            SchedulingStrategy::DepthFirst,
+        )
+        .expect("verified module with evidence");
+        assert_eq!(built.output_stores.len(), 1);
+        let forged = FirBuilder::new(&mut built.output.store).int32(0);
+        assert!(matches!(
+            verify_final_module(
+                &built.output.store,
+                built.output.module,
+                &built.assembly,
+                &[forged],
+            ),
+            Err(VectorModuleFailure {
+                reason: VectorFallbackReason::ModuleVerification,
+                ..
+            })
+        ));
+    }
+}

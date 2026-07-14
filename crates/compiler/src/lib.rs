@@ -85,7 +85,9 @@ use signals::SigId;
 use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::schedule::SchedulingStrategy;
-pub use transform::signal_fir::{ComputeMode, RealType};
+pub use transform::signal_fir::{
+    ComputeMode, RealType, VectorFallbackReason, VectorPipelineStatus,
+};
 use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
 use ui::UiProgram;
 
@@ -162,6 +164,8 @@ pub struct FirCompileOutput {
     pub store: FirStore,
     /// FIR module root id.
     pub module: FirId,
+    /// Checked signal-level vector activation or named fallback status.
+    pub vector_pipeline_status: VectorPipelineStatus,
 }
 
 /// Request payload for the artifact-centric WASM compile service used by the
