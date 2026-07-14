@@ -617,6 +617,17 @@ This advances the tuple/projection subset of R4, but stateful projection
 lowering, phase/island FIR assembly, serialization, Lean acceptance, and
 backend eligibility remain P6.3b or later work.
 
+P6.3b adds a fourth finite producer/checker artifact at the final-region
+boundary. The producer composes accepted P5 routes with P6.1 phase words and
+P6.2 island/transport policy; the checker independently requires exact loop,
+phase-action, island-parent, guard-kind, and transport-lifetime coverage. Copy
+and ring storage use the C++ index equations, recursive projections are
+captured before any projection write, island scalars are declared below their
+guard, and held outputs are persistent cleared state. Reverse-AD fallbacks fail
+closed before assembly. This advances the concrete FIR side of R4, but the
+artifact is not yet canonical JSON, hash-bound to its producers, checked by
+Lean, placed into a final module, or admitted to backend execution.
+
 ### R5 - Semantic reference execution
 
 Extend the Lean model with a small executable signal/FIR semantics in increments:

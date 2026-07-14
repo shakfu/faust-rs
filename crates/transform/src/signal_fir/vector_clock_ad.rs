@@ -178,6 +178,23 @@ impl VerifiedVectorClockAdPlan {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn verified_vector_clock_ad_plan_for_test(
+    plan: VectorClockAdPlan,
+    vector_plan: &VerifiedVectorPlan,
+) -> VerifiedVectorClockAdPlan {
+    assert_eq!(plan.schema_version, VECTOR_CLOCK_AD_PLAN_VERSION);
+    assert_eq!(plan.vec_size, vector_plan.plan().vec_size);
+    assert_eq!(plan.transports.len(), vector_plan.plan().transports.len());
+    for (policy, transport) in plan.transports.iter().zip(&vector_plan.plan().transports) {
+        assert_eq!(policy.transport_id, transport.transport_id);
+    }
+    VerifiedVectorClockAdPlan {
+        plan,
+        vector_plan: vector_plan.plan().clone(),
+    }
+}
+
 /// Typed producer/checker failure at the P6.2 boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorClockAdError {

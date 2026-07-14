@@ -2088,11 +2088,30 @@ type is a tuple and requires the producer to expose the corresponding scalar
 projections. A production prepared graph with two mutually recursive
 projections now closes routed-FIR verification for all four `-ss` strategies.
 
-P6.3b is the remaining FIR-assembly slice: lower the stateful projection
-definitions themselves, emit the accepted P6.1 `pre/exec/post` words, nest P4
-loop bodies below P6.2 islands, and replace each island-local or held transport
-with its certified lifetime. Only that assembled artifact can support final
-module integration and differential execution.
+Implementation status (2026-07-14, P6.3b):
+`signal_fir::vector_assemble` now consumes only accepted routed FIR, P6.1 state,
+and optional P6.2 clock/AD artifacts. It emits the exact C++ copy-delay words
+(`_perm -> _tmp`, local write at `R + (i0-vindex)`, and tail copy-back), masked
+ring advance/write/save words, and one stack-temporary capture for every
+simultaneous recursive projection before state writes. Each P4 loop has both a
+complete chunk body (`pre; sample-loop(exec); post`) and a single-fire body for
+serial clock nesting.
+
+P6.2 transport policy is now constructive rather than metadata-only.
+`OuterChunk` remains a stack array indexed by `i0-vindex`; `IslandScalar` is a
+stack scalar declared inside its certified domain guard; `HeldOutput` is a
+struct scalar included in lifecycle state and explicitly cleared. OD and US
+use boolean or counted guards, DS owns and clears a modulo counter, child
+domains are assembled before and inside their exact parent, and reverse-AD
+fallback evidence refuses assembly with `FRS-VEC-RAD-SCALAR` semantics.
+
+The independent checker compares exact loop/action/island coverage with the
+accepted plans, checks storage-target and guard FIR shapes, and verifies that
+island-local declarations have the certified domain lifetime. Mutation tests
+reject substituted state words. The slice remains additive: it does not yet
+place output stores and lifecycle blocks into a final module, select the path
+from `build_module`, execute differential audio, serialize certificates, or
+activate a backend. Those are the next integration and assurance slices.
 
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an

@@ -44,7 +44,12 @@
 //!   recursively checked typed FIR values while requiring all cross-loop
 //!   transports to use scalar projections, matching C++ `sigProj` lowering.
 //!   A real two-projection prepared graph closes routing under all four `-ss`
-//!   strategies. Stateful phase/island FIR assembly remains P6.3b.
+//!   strategies.
+//! - **Vector P6.3b verified FIR assembly**: materialize C++-compatible copy
+//!   and ring delay words, simultaneous recursive projection steps, nested
+//!   OD/US/DS guards, and the three P6.2 transport lifetimes. The independent
+//!   checker requires exact loop/action/island coverage. Final output/module
+//!   placement and `build_module` activation remain deferred.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
@@ -94,6 +99,7 @@ mod recursion;
 pub mod shadow;
 mod siggen;
 pub mod vector_analysis;
+pub mod vector_assemble;
 pub mod vector_clock_ad;
 pub mod vector_events;
 pub mod vector_lower;

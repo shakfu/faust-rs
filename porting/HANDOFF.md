@@ -6,14 +6,14 @@ Date: 2026-07-14
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff
-- Current task: P6.3a recursive-tuple routed-FIR boundary, completed in this
+- Current task: P6.3b verified state/island FIR assembly, completed in this
   commit.
-- P6.3a remains additive and does not activate production vector lowering.
+- P6.3b remains additive and does not activate production vector lowering.
 
 ## Working Tree
 
-- This commit adds canonical tuple definitions, production multi-projection
-  routing tests, and planning updates.
+- This commit adds P6.2-aware routing, verified state/island FIR assembly,
+  structural and mutation tests, and planning updates.
 - Many unrelated pre-existing untracked scratch files remain untouched.
 
 ## What Changed
@@ -42,6 +42,12 @@ Date: 2026-07-14
   new tuple array ABI, cross loop boundaries.
 - Closed P5 routed-FIR verification for a real two-projection recursion under
   all four `-ss` strategies.
+- Materialized P6.1 copy/ring delay words and simultaneous recursive
+  projection captures into explicit loop `pre/exec/post` FIR.
+- Rematerialized all P6.2 transport modes: outer chunk arrays, island-local
+  stack scalars below guards, and cleared persistent held outputs.
+- Nested single-fire P4 loop bodies under OD/US/DS guards and exact parent
+  domains, with a checker for action, island, and lifetime coverage.
 
 ## Decisions And Constraints
 
@@ -49,11 +55,10 @@ Date: 2026-07-14
   conservative P5.3 effects; all other state remains rejected or serial.
 - Exhaustive bounded simulation is executable evidence, not an unbounded proof.
 - `VectorRouteSession` accepts tuple-valued definitions but intentionally
-  rejects tuple transports; stateful projection lowering remains open.
+  rejects tuple transports; P6.3b lowers scalar projections into state words.
 - No CLI, ABI, `build_module`, or backend behavior changes in either P6 slice.
-- Full R4/R5 still requires stateful projection lowering, FIR phase/island
-  emission, output/module assembly, serialization/Lean acceptance, and backend
-  gating.
+- Full R4/R5 still requires output/module assembly, differential execution,
+  serialization/Lean acceptance, and backend gating.
 
 ## Validation
 
@@ -61,7 +66,8 @@ Date: 2026-07-14
 - `cargo test -p transform signal_fir::vector_state --lib` passes (5 tests).
 - `cargo test -p transform signal_fir::vector_events --lib` passes (8 tests).
 - `cargo test -p transform signal_fir::vector_clock_ad --lib` passes (7 tests).
-- `cargo test -p transform signal_fir::vector_route --lib` passes (10 tests).
+- `cargo test -p transform signal_fir::vector_route --lib` passes (11 tests).
+- `cargo test -p transform signal_fir::vector_assemble --lib` passes (2 tests).
 - `cargo test -p compiler --test vector_clock_ad` passes (2 tests).
 - `cargo test -p transform signal_fir::vector --lib` passes (77 tests).
 - `cargo clippy --workspace --all-targets -- -D warnings` passes.
@@ -70,10 +76,10 @@ Date: 2026-07-14
 
 ## Next Steps
 
-1. P6.3b: lower stateful recursive projections and materialize accepted P6.1
-   phases plus P6.2 islands and island-local transports in final region bodies.
-2. Add output/module assembly and connect `build_module` only after P5.3/P6
-   acceptance; then activate compiler options and backends.
+1. Add final output/lifecycle module assembly and connect `build_module` only
+   after P5.3/P6 acceptance; keep backend selection gated by the checker.
+2. Run scalar/vector differential execution for stateful, clocked, and FAD
+   fixtures under `-lv 0/1` and every `-ss` strategy.
 3. Complete canonical JSON/hash, Lean R3/R4 checking, and the stable C++
    vectorization-retention corpus.
 
@@ -83,6 +89,7 @@ Date: 2026-07-14
 - `cargo test -p transform signal_fir::vector_state --lib`
 - `cargo test -p transform signal_fir::vector_clock_ad --lib`
 - `cargo test -p transform signal_fir::vector_route --lib`
+- `cargo test -p transform signal_fir::vector_assemble --lib`
 - `cargo test -p compiler --test vector_clock_ad`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`

@@ -17,9 +17,10 @@
 //!
 //! This is an additive P5 routing gate. It emits real FIR declarations,
 //! stores, and loads for planned transports and independently verifies them,
-//! but it is not connected to `build_module` yet. Stateful delay, recursion,
-//! clock, and AD loop transitions remain P6 and must not silently reuse the
-//! scalar cache through this API.
+//! but it is not connected to `build_module` yet. When a checked P6.2 plan is
+//! supplied, declarations and accesses use its exact outer-chunk,
+//! island-scalar, or held-output lifetime; P6.3b places those words in the
+//! corresponding final region bodies.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -28,6 +29,7 @@ use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType, 
 
 use crate::schedule::SchedulingStrategy;
 
+use super::vector_clock_ad::{ClockTransportMode, ClockTransportPolicy, VerifiedVectorClockAdPlan};
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_schedule::{VectorScheduleError, schedule_vector_plan};
 use super::vector_verify::{
@@ -125,6 +127,8 @@ pub struct RoutedUse {
 pub struct RoutedTransport {
     /// Stable transport id from P4.4.
     pub transport_id: u64,
+    /// Concrete lifetime/indexing policy selected before FIR construction.
+    pub mode: ClockTransportMode,
     /// Stack-array declaration with the canonical transport name and type.
     pub declaration: FirId,
     /// Value defined by the producer loop.
@@ -253,6 +257,10 @@ pub enum VectorRouteError {
         signal_id: u64,
         consumer_loop: u64,
     },
+    ClockPlanMismatch,
+    TransportPolicyCoverage {
+        transport_id: u64,
+    },
 }
 
 impl fmt::Display for VectorRouteError {
@@ -334,6 +342,13 @@ impl fmt::Display for VectorRouteError {
                 f,
                 "signal {signal_id} is not visible from loop {consumer_loop} through the recorded source"
             ),
+            Self::ClockPlanMismatch => {
+                write!(f, "clock/AD plan does not belong to the routed vector plan")
+            }
+            Self::TransportPolicyCoverage { transport_id } => write!(
+                f,
+                "clock transport policy does not exactly cover transport {transport_id}"
+            ),
         }
     }
 }
@@ -377,6 +392,7 @@ pub struct VectorRouteSession<'a> {
     trace: RoutedFirTrace,
     transport_by_route: BTreeMap<(u64, u64, u64), usize>,
     loop_ids: BTreeSet<u64>,
+    transport_policies: Vec<ClockTransportPolicy>,
 }
 
 impl<'a> VectorRouteSession<'a> {
@@ -388,8 +404,48 @@ impl<'a> VectorRouteSession<'a> {
         real_type: FirType,
         store: &mut FirStore,
     ) -> Result<(Self, Vec<FirId>), VectorRouteError> {
+        let policies = verified
+            .plan()
+            .transports
+            .iter()
+            .map(|transport| ClockTransportPolicy {
+                transport_id: transport.transport_id,
+                mode: ClockTransportMode::OuterChunk,
+            })
+            .collect::<Vec<_>>();
+        Self::new_with_policies(verified, strategy, real_type, &policies, store)
+    }
+
+    /// Creates routes using the exact P6.2 transport lifetimes.
+    pub fn new_with_clock_plan(
+        verified: &'a VerifiedVectorPlan,
+        clock_plan: &VerifiedVectorClockAdPlan,
+        strategy: SchedulingStrategy,
+        real_type: FirType,
+        store: &mut FirStore,
+    ) -> Result<(Self, Vec<FirId>), VectorRouteError> {
+        if clock_plan.vector_plan() != verified.plan() {
+            return Err(VectorRouteError::ClockPlanMismatch);
+        }
+        Self::new_with_policies(
+            verified,
+            strategy,
+            real_type,
+            &clock_plan.plan().transports,
+            store,
+        )
+    }
+
+    fn new_with_policies(
+        verified: &'a VerifiedVectorPlan,
+        strategy: SchedulingStrategy,
+        real_type: FirType,
+        policies: &[ClockTransportPolicy],
+        store: &mut FirStore,
+    ) -> Result<(Self, Vec<FirId>), VectorRouteError> {
         let plan = verified.plan();
         verify_vector_plan(plan)?;
+        verify_policy_coverage(plan, policies)?;
         let schedule = schedule_vector_plan(plan, strategy)?;
         let loop_by_id = plan
             .loops
@@ -413,22 +469,13 @@ impl<'a> VectorRouteSession<'a> {
         let mut declarations = Vec::with_capacity(plan.transports.len());
         let mut routed_transports = Vec::with_capacity(plan.transports.len());
         let mut transport_by_route = BTreeMap::new();
-        for (index, transport) in plan.transports.iter().enumerate() {
+        for (index, (transport, policy)) in plan.transports.iter().zip(policies).enumerate() {
             let elem = transport_fir_type(transport, real_type.clone())?;
-            let length = usize::try_from(transport.length).map_err(|_| {
-                VectorRouteError::TransportDeclaration {
-                    transport_id: transport.transport_id,
-                }
-            })?;
-            let declaration = FirBuilder::new(store).declare_var(
-                transport.stable_name.clone(),
-                FirType::Array(Box::new(elem), length),
-                AccessType::Stack,
-                None,
-            );
+            let declaration = declare_transport(store, transport, policy.mode, elem)?;
             declarations.push(declaration);
             routed_transports.push(RoutedTransport {
                 transport_id: transport.transport_id,
+                mode: policy.mode,
                 declaration,
                 producer_value: None,
                 store: None,
@@ -457,6 +504,7 @@ impl<'a> VectorRouteSession<'a> {
                 },
                 transport_by_route,
                 loop_ids,
+                transport_policies: policies.to_vec(),
             },
             declarations,
         ))
@@ -576,13 +624,8 @@ impl<'a> VectorRouteSession<'a> {
                     transport_id: transport.transport_id,
                 });
             }
-            let chunk_index = chunk_index(store);
-            let statement = FirBuilder::new(store).store_table(
-                transport.stable_name.clone(),
-                AccessType::Stack,
-                chunk_index,
-                value,
-            );
+            let statement =
+                store_transport(store, transport, self.transport_policies[index].mode, value);
             routed.producer_value = Some(value);
             routed.store = Some(statement);
             stores.push(statement);
@@ -663,13 +706,8 @@ impl<'a> VectorRouteSession<'a> {
                     value
                 } else {
                     let elem = transport_fir_type(transport, self.real_type.clone())?;
-                    let index_value = chunk_index(store);
-                    let value = FirBuilder::new(store).load_table(
-                        transport.stable_name.clone(),
-                        AccessType::Stack,
-                        index_value,
-                        elem,
-                    );
+                    let value =
+                        load_transport(store, transport, self.transport_policies[index].mode, elem);
                     self.cache
                         .transport_loads
                         .insert(transport.transport_id, value);
@@ -700,7 +738,13 @@ impl<'a> VectorRouteSession<'a> {
         self.trace
             .definitions
             .sort_by_key(|definition| (definition.region, definition.signal_id));
-        verify_routed_fir(self.plan, &self.trace, &self.real_type, store)?;
+        verify_routed_fir_with_policies(
+            self.plan,
+            &self.transport_policies,
+            &self.trace,
+            &self.real_type,
+            store,
+        )?;
         Ok(VerifiedRoutedFir {
             plan: self.plan.clone(),
             layout: self.layout,
@@ -735,7 +779,40 @@ pub fn verify_routed_fir(
     real_type: &FirType,
     store: &FirStore,
 ) -> Result<(), VectorRouteError> {
+    let policies = plan
+        .transports
+        .iter()
+        .map(|transport| ClockTransportPolicy {
+            transport_id: transport.transport_id,
+            mode: ClockTransportMode::OuterChunk,
+        })
+        .collect::<Vec<_>>();
+    verify_routed_fir_with_policies(plan, &policies, trace, real_type, store)
+}
+
+/// Independently checks routed FIR against the exact P6.2 transport policy.
+pub fn verify_routed_fir_with_clock_plan(
+    plan: &VectorPlan,
+    clock_plan: &VerifiedVectorClockAdPlan,
+    trace: &RoutedFirTrace,
+    real_type: &FirType,
+    store: &FirStore,
+) -> Result<(), VectorRouteError> {
+    if clock_plan.vector_plan() != plan {
+        return Err(VectorRouteError::ClockPlanMismatch);
+    }
+    verify_routed_fir_with_policies(plan, &clock_plan.plan().transports, trace, real_type, store)
+}
+
+fn verify_routed_fir_with_policies(
+    plan: &VectorPlan,
+    policies: &[ClockTransportPolicy],
+    trace: &RoutedFirTrace,
+    real_type: &FirType,
+    store: &FirStore,
+) -> Result<(), VectorRouteError> {
     verify_vector_plan(plan)?;
+    verify_policy_coverage(plan, policies)?;
     let signal_by_id = plan
         .signals
         .iter()
@@ -805,13 +882,19 @@ pub fn verify_routed_fir(
             .map_or(u64::MAX, |transport| transport.transport_id);
         return Err(VectorRouteError::TransportCoverage { transport_id });
     }
-    for (transport, routed) in plan.transports.iter().zip(&trace.transports) {
+    for ((transport, policy), routed) in plan.transports.iter().zip(policies).zip(&trace.transports)
+    {
         if routed.transport_id != transport.transport_id {
             return Err(VectorRouteError::TransportCoverage {
                 transport_id: transport.transport_id,
             });
         }
-        verify_transport(transport, routed, real_type, store)?;
+        if routed.mode != policy.mode {
+            return Err(VectorRouteError::TransportPolicyCoverage {
+                transport_id: transport.transport_id,
+            });
+        }
+        verify_transport(transport, policy.mode, routed, real_type, store)?;
         let producer_value_is_declared = trace.definitions.iter().any(|definition| {
             definition.signal_id == transport.signal_id
                 && definition.region == VectorRegion::Loop(transport.producer_loop)
@@ -886,68 +969,274 @@ pub fn verify_routed_fir(
 
 fn verify_transport(
     transport: &TransportRecord,
+    mode: ClockTransportMode,
     routed: &RoutedTransport,
     real_type: &FirType,
     store: &FirStore,
 ) -> Result<(), VectorRouteError> {
     let elem = transport_fir_type(transport, real_type.clone())?;
-    let length =
-        usize::try_from(transport.length).map_err(|_| VectorRouteError::TransportDeclaration {
-            transport_id: transport.transport_id,
-        })?;
-    match match_fir(store, routed.declaration) {
-        FirMatch::DeclareVar {
-            name,
-            typ: FirType::Array(actual_elem, actual_length),
-            access: AccessType::Stack,
-            init: None,
-        } if name == transport.stable_name && *actual_elem == elem && actual_length == length => {}
-        _ => {
-            return Err(VectorRouteError::TransportDeclaration {
-                transport_id: transport.transport_id,
-            });
-        }
-    }
+    verify_transport_declaration(transport, mode, routed.declaration, &elem, store)?;
     let Some(producer_value) = routed.producer_value else {
         return Err(VectorRouteError::TransportStore {
             transport_id: transport.transport_id,
         });
     };
-    match routed.store.map(|statement| match_fir(store, statement)) {
-        Some(FirMatch::StoreTable {
-            name,
-            access: AccessType::Stack,
-            index,
-            value,
-        }) if name == transport.stable_name
-            && value == producer_value
-            && is_chunk_index(store, index)
-            && store.value_type(value) == Some(elem.clone()) => {}
-        _ => {
-            return Err(VectorRouteError::TransportStore {
+    verify_transport_store(transport, mode, routed.store, producer_value, &elem, store)?;
+    verify_transport_load(transport, mode, routed.load, &elem, store)
+}
+
+fn verify_policy_coverage(
+    plan: &VectorPlan,
+    policies: &[ClockTransportPolicy],
+) -> Result<(), VectorRouteError> {
+    if policies.len() != plan.transports.len() {
+        let transport_id = plan
+            .transports
+            .get(policies.len())
+            .map_or(u64::MAX, |transport| transport.transport_id);
+        return Err(VectorRouteError::TransportPolicyCoverage { transport_id });
+    }
+    for (transport, policy) in plan.transports.iter().zip(policies) {
+        if transport.transport_id != policy.transport_id {
+            return Err(VectorRouteError::TransportPolicyCoverage {
                 transport_id: transport.transport_id,
             });
         }
     }
-    match routed.load.map(|value| (value, match_fir(store, value))) {
-        Some((
+    Ok(())
+}
+
+fn declare_transport(
+    store: &mut FirStore,
+    transport: &TransportRecord,
+    mode: ClockTransportMode,
+    elem: FirType,
+) -> Result<FirId, VectorRouteError> {
+    let (typ, access) = match mode {
+        ClockTransportMode::OuterChunk => {
+            let length = usize::try_from(transport.length).map_err(|_| {
+                VectorRouteError::TransportDeclaration {
+                    transport_id: transport.transport_id,
+                }
+            })?;
+            (FirType::Array(Box::new(elem), length), AccessType::Stack)
+        }
+        ClockTransportMode::IslandScalar { .. } => (elem, AccessType::Stack),
+        ClockTransportMode::HeldOutput { .. } => (elem, AccessType::Struct),
+    };
+    Ok(FirBuilder::new(store).declare_var(transport.stable_name.clone(), typ, access, None))
+}
+
+fn store_transport(
+    store: &mut FirStore,
+    transport: &TransportRecord,
+    mode: ClockTransportMode,
+    value: FirId,
+) -> FirId {
+    match mode {
+        ClockTransportMode::OuterChunk => {
+            let index = chunk_index(store);
+            FirBuilder::new(store).store_table(
+                transport.stable_name.clone(),
+                AccessType::Stack,
+                index,
+                value,
+            )
+        }
+        ClockTransportMode::IslandScalar { .. } => FirBuilder::new(store).store_var(
+            transport.stable_name.clone(),
+            AccessType::Stack,
             value,
-            FirMatch::LoadTable {
+        ),
+        ClockTransportMode::HeldOutput { .. } => FirBuilder::new(store).store_var(
+            transport.stable_name.clone(),
+            AccessType::Struct,
+            value,
+        ),
+    }
+}
+
+fn load_transport(
+    store: &mut FirStore,
+    transport: &TransportRecord,
+    mode: ClockTransportMode,
+    elem: FirType,
+) -> FirId {
+    match mode {
+        ClockTransportMode::OuterChunk => {
+            let index = chunk_index(store);
+            FirBuilder::new(store).load_table(
+                transport.stable_name.clone(),
+                AccessType::Stack,
+                index,
+                elem,
+            )
+        }
+        ClockTransportMode::IslandScalar { .. } => {
+            FirBuilder::new(store).load_var(transport.stable_name.clone(), AccessType::Stack, elem)
+        }
+        ClockTransportMode::HeldOutput { .. } => {
+            FirBuilder::new(store).load_var(transport.stable_name.clone(), AccessType::Struct, elem)
+        }
+    }
+}
+
+fn verify_transport_declaration(
+    transport: &TransportRecord,
+    mode: ClockTransportMode,
+    declaration: FirId,
+    elem: &FirType,
+    store: &FirStore,
+) -> Result<(), VectorRouteError> {
+    let valid = match (mode, match_fir(store, declaration)) {
+        (
+            ClockTransportMode::OuterChunk,
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(actual_elem, actual_length),
+                access: AccessType::Stack,
+                init: None,
+            },
+        ) => {
+            usize::try_from(transport.length) == Ok(actual_length)
+                && name == transport.stable_name
+                && *actual_elem == *elem
+        }
+        (
+            ClockTransportMode::IslandScalar { .. },
+            FirMatch::DeclareVar {
+                name,
+                typ,
+                access: AccessType::Stack,
+                init: None,
+            },
+        ) => name == transport.stable_name && typ == *elem,
+        (
+            ClockTransportMode::HeldOutput { .. },
+            FirMatch::DeclareVar {
+                name,
+                typ,
+                access: AccessType::Struct,
+                init: None,
+            },
+        ) => name == transport.stable_name && typ == *elem,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(VectorRouteError::TransportDeclaration {
+            transport_id: transport.transport_id,
+        })
+    }
+}
+
+fn verify_transport_store(
+    transport: &TransportRecord,
+    mode: ClockTransportMode,
+    statement: Option<FirId>,
+    producer_value: FirId,
+    elem: &FirType,
+    store: &FirStore,
+) -> Result<(), VectorRouteError> {
+    let valid = match (mode, statement.map(|id| match_fir(store, id))) {
+        (
+            ClockTransportMode::OuterChunk,
+            Some(FirMatch::StoreTable {
                 name,
                 access: AccessType::Stack,
                 index,
-                typ,
-            },
-        )) if name == transport.stable_name
-            && typ == elem
-            && is_chunk_index(store, index)
-            && store.value_type(value) == Some(elem) =>
-        {
-            Ok(())
+                value,
+            }),
+        ) => {
+            name == transport.stable_name && value == producer_value && is_chunk_index(store, index)
         }
-        _ => Err(VectorRouteError::TransportLoad {
+        (
+            ClockTransportMode::IslandScalar { .. },
+            Some(FirMatch::StoreVar {
+                name,
+                access: AccessType::Stack,
+                value,
+            }),
+        )
+        | (
+            ClockTransportMode::HeldOutput { .. },
+            Some(FirMatch::StoreVar {
+                name,
+                access: AccessType::Struct,
+                value,
+            }),
+        ) => name == transport.stable_name && value == producer_value,
+        _ => false,
+    };
+    if valid && store.value_type(producer_value) == Some(elem.clone()) {
+        Ok(())
+    } else {
+        Err(VectorRouteError::TransportStore {
             transport_id: transport.transport_id,
-        }),
+        })
+    }
+}
+
+fn verify_transport_load(
+    transport: &TransportRecord,
+    mode: ClockTransportMode,
+    value: Option<FirId>,
+    elem: &FirType,
+    store: &FirStore,
+) -> Result<(), VectorRouteError> {
+    let valid = match (mode, value.map(|id| (id, match_fir(store, id)))) {
+        (
+            ClockTransportMode::OuterChunk,
+            Some((
+                id,
+                FirMatch::LoadTable {
+                    name,
+                    access: AccessType::Stack,
+                    index,
+                    typ,
+                },
+            )),
+        ) => {
+            name == transport.stable_name
+                && typ == *elem
+                && is_chunk_index(store, index)
+                && store.value_type(id) == Some(elem.clone())
+        }
+        (
+            ClockTransportMode::IslandScalar { .. },
+            Some((
+                id,
+                FirMatch::LoadVar {
+                    name,
+                    access: AccessType::Stack,
+                    typ,
+                },
+            )),
+        )
+        | (
+            ClockTransportMode::HeldOutput { .. },
+            Some((
+                id,
+                FirMatch::LoadVar {
+                    name,
+                    access: AccessType::Struct,
+                    typ,
+                },
+            )),
+        ) => {
+            name == transport.stable_name
+                && typ == *elem
+                && store.value_type(id) == Some(elem.clone())
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(VectorRouteError::TransportLoad {
+            transport_id: transport.transport_id,
+        })
     }
 }
 
@@ -1092,6 +1381,10 @@ mod tests {
     use super::*;
     use crate::clk_env::annotate;
     use crate::signal_fir::decoration_verify::certify_decorations;
+    use crate::signal_fir::vector_clock_ad::{
+        ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION, VectorClockAdPlan,
+        verified_vector_clock_ad_plan_for_test,
+    };
     use crate::signal_fir::vector_plan::{build_vector_plan, verified_vector_plan_for_test};
     use crate::signal_fir::vector_verify::{
         EpochRecord, LoopEdge, LoopRecord, Rate, SignalRecord, VecSafeWitness, Vectorability,
@@ -1251,6 +1544,26 @@ mod tests {
         build_vector_plan(&decorations, 8).unwrap()
     }
 
+    fn clock_plan_for_mode(
+        vector_plan: &VerifiedVectorPlan,
+        mode: ClockTransportMode,
+    ) -> VerifiedVectorClockAdPlan {
+        verified_vector_clock_ad_plan_for_test(
+            VectorClockAdPlan {
+                schema_version: VECTOR_CLOCK_AD_PLAN_VERSION,
+                vec_size: vector_plan.plan().vec_size,
+                clock_islands: vec![],
+                transports: vec![ClockTransportPolicy {
+                    transport_id: 0,
+                    mode,
+                }],
+                forward_ad: ForwardAdPolicy::ExpandedSignalGraph,
+                reverse_ad_fallbacks: vec![],
+            },
+            vector_plan,
+        )
+    }
+
     fn value_for_type(value_type: &ValueType, store: &mut FirStore) -> FirId {
         match value_type {
             ValueType::Int => FirBuilder::new(store).int32(0),
@@ -1361,6 +1674,62 @@ mod tests {
             ),
             Err(VectorRouteError::UnsupportedTupleTransport { signal_id: 10 })
         ));
+    }
+
+    #[test]
+    fn p6_clock_policy_rematerializes_scalar_and_held_transports() {
+        for (mode, expected_access) in [
+            (
+                ClockTransportMode::IslandScalar { domain_id: 3 },
+                AccessType::Stack,
+            ),
+            (
+                ClockTransportMode::HeldOutput { domain_id: 3 },
+                AccessType::Struct,
+            ),
+        ] {
+            let verified_plan = pure_shared_plan();
+            let clock_plan = clock_plan_for_mode(&verified_plan, mode);
+            let mut store = FirStore::new();
+            let (mut session, declarations) = VectorRouteSession::new_with_clock_plan(
+                &verified_plan,
+                &clock_plan,
+                SchedulingStrategy::DepthFirst,
+                FirType::Float32,
+                &mut store,
+            )
+            .unwrap();
+            assert!(matches!(
+                match_fir(&store, declarations[0]),
+                FirMatch::DeclareVar {
+                    typ: FirType::Float32,
+                    access,
+                    init: None,
+                    ..
+                } if access == expected_access
+            ));
+            define_complete(&mut session, &mut store);
+            session.resolve_in_loop(1, 10, &mut store).unwrap();
+            let routed = session.finish(&store).unwrap();
+            let transport = &routed.trace().transports()[0];
+            assert_eq!(transport.mode, mode);
+            assert!(matches!(
+                transport.store.map(|id| match_fir(&store, id)),
+                Some(FirMatch::StoreVar { access, .. }) if access == expected_access
+            ));
+            assert!(matches!(
+                transport.load.map(|id| match_fir(&store, id)),
+                Some(FirMatch::LoadVar { access, .. }) if access == expected_access
+            ));
+            verify_routed_fir_with_clock_plan(
+                verified_plan.plan(),
+                &clock_plan,
+                routed.trace(),
+                &FirType::Float32,
+                &store,
+            )
+            .unwrap();
+        }
     }
 
     #[test]
