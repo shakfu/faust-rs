@@ -606,6 +606,17 @@ This advances the clock/AD-policy subset of R4/R5, but the artifact is not yet
 serialized or checked by Lean and does not establish final FIR simulation or
 backend eligibility.
 
+P6.3a removes the tuple-definition gap at the routed-FIR boundary without
+inventing a backend tuple ABI. Recursive tuple values use a deterministic
+structural FIR type and a recursively checked component constructor; the
+checker rejects incorrect arity or nested component types even when the outer
+type annotation is forged. Matching C++ `sigProj` lowering, inter-loop tuple
+transports remain invalid and scalar projections carry the values. The real
+two-projection recursion fixture closes routing under every `-ss` strategy.
+This advances the tuple/projection subset of R4, but stateful projection
+lowering, phase/island FIR assembly, serialization, Lean acceptance, and
+backend eligibility remain P6.3b or later work.
+
 ### R5 - Semantic reference execution
 
 Extend the Lean model with a small executable signal/FIR semantics in increments:

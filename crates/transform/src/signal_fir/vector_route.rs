@@ -8,6 +8,13 @@
 //! bodies. A cross-loop read can only use a transport already named by P4.4;
 //! no buffer identity is allocated on demand.
 //!
+//! C++ compiles a recursive tuple through its individual `sigProj` values; it
+//! does not allocate an inter-loop array of tuple objects. Rust retains the
+//! tuple as a canonical typed `ValueArray` in routing evidence so simultaneous
+//! recursion can be checked, but rejects tuple transports: only the scalar
+//! projections may cross loop boundaries. The checker recursively validates
+//! tuple arity and component types instead of trusting the outer FIR type.
+//!
 //! This is an additive P5 routing gate. It emits real FIR declarations,
 //! stores, and loads for planned transports and independently verifies them,
 //! but it is not connected to `build_module` yet. Stateful delay, recursion,
@@ -219,6 +226,9 @@ pub enum VectorRouteError {
     UnsupportedTupleTransport {
         signal_id: u64,
     },
+    TupleValueShape {
+        signal_id: u64,
+    },
     ValueTypeMismatch {
         signal_id: u64,
         expected: FirType,
@@ -277,9 +287,14 @@ impl fmt::Display for VectorRouteError {
                 f,
                 "no planned transport for signal {signal_id} from loop {producer_loop} to loop {consumer_loop}"
             ),
-            Self::UnsupportedTupleTransport { signal_id } => {
-                write!(f, "tuple transport for signal {signal_id} is not lowered")
-            }
+            Self::UnsupportedTupleTransport { signal_id } => write!(
+                f,
+                "tuple signal {signal_id} must be routed through its scalar projections"
+            ),
+            Self::TupleValueShape { signal_id } => write!(
+                f,
+                "tuple value for signal {signal_id} is not a canonical typed component array"
+            ),
             Self::ValueTypeMismatch {
                 signal_id,
                 expected,
@@ -940,19 +955,51 @@ fn transport_fir_type(
     transport: &TransportRecord,
     real_type: FirType,
 ) -> Result<FirType, VectorRouteError> {
-    value_fir_type(&transport.element_type, real_type).ok_or(
-        VectorRouteError::UnsupportedTupleTransport {
+    if matches!(transport.element_type, ValueType::Tuple(_)) {
+        Err(VectorRouteError::UnsupportedTupleTransport {
             signal_id: transport.signal_id,
-        },
-    )
+        })
+    } else {
+        Ok(value_fir_type(&transport.element_type, real_type))
+    }
 }
 
-fn value_fir_type(value_type: &ValueType, real_type: FirType) -> Option<FirType> {
+fn value_fir_type(value_type: &ValueType, real_type: FirType) -> FirType {
     match value_type {
-        ValueType::Int => Some(FirType::Int32),
-        ValueType::Real => Some(real_type),
-        ValueType::Tuple(_) => None,
+        ValueType::Int => FirType::Int32,
+        ValueType::Real => real_type,
+        ValueType::Tuple(components) => {
+            let fields = components
+                .iter()
+                .map(|component| value_fir_type(component, real_type.clone()))
+                .collect::<Vec<_>>();
+            FirType::Struct(tuple_type_name(value_type, &real_type), fields)
+        }
     }
+}
+
+fn tuple_type_name(value_type: &ValueType, real_type: &FirType) -> String {
+    fn append_component(name: &mut String, value_type: &ValueType, real_type: &FirType) {
+        match value_type {
+            ValueType::Int => name.push_str("_i32"),
+            ValueType::Real => match real_type {
+                FirType::Float32 => name.push_str("_f32"),
+                FirType::Float64 => name.push_str("_f64"),
+                _ => name.push_str("_real"),
+            },
+            ValueType::Tuple(components) => {
+                name.push_str("_t");
+                name.push_str(&components.len().to_string());
+                for component in components {
+                    append_component(name, component, real_type);
+                }
+            }
+        }
+    }
+
+    let mut name = String::from("frs_vec_tuple");
+    append_component(&mut name, value_type, real_type);
+    name
 }
 
 fn check_value_type(
@@ -962,18 +1009,44 @@ fn check_value_type(
     value: FirId,
     store: &FirStore,
 ) -> Result<(), VectorRouteError> {
-    let expected = value_fir_type(value_type, real_type.clone())
-        .ok_or(VectorRouteError::UnsupportedTupleTransport { signal_id })?;
+    let expected = value_fir_type(value_type, real_type.clone());
     let actual = store.value_type(value);
-    if actual == Some(expected.clone()) {
-        Ok(())
-    } else {
+    if actual != Some(expected.clone()) {
         Err(VectorRouteError::ValueTypeMismatch {
             signal_id,
             expected,
             actual,
         })
+    } else if value_shape_matches(value_type, real_type, value, store) {
+        Ok(())
+    } else {
+        Err(VectorRouteError::TupleValueShape { signal_id })
     }
+}
+
+fn value_shape_matches(
+    value_type: &ValueType,
+    real_type: &FirType,
+    value: FirId,
+    store: &FirStore,
+) -> bool {
+    let ValueType::Tuple(components) = value_type else {
+        return true;
+    };
+    let FirMatch::ValueArray {
+        values,
+        typ: FirType::Struct(_, fields),
+    } = match_fir(store, value)
+    else {
+        return false;
+    };
+    if values.len() != components.len() || fields.len() != components.len() {
+        return false;
+    }
+    components.iter().zip(values).all(|(component, value)| {
+        store.value_type(value) == Some(value_fir_type(component, real_type.clone()))
+            && value_shape_matches(component, real_type, value, store)
+    })
 }
 
 fn chunk_index(store: &mut FirStore) -> FirId {
@@ -1012,12 +1085,19 @@ fn is_chunk_index(store: &FirStore, value: FirId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use propagate::ClockDomainTable;
+    use signals::SigBuilder;
+    use tlib::TreeArena;
+
     use super::*;
-    use crate::signal_fir::vector_plan::verified_vector_plan_for_test;
+    use crate::clk_env::annotate;
+    use crate::signal_fir::decoration_verify::certify_decorations;
+    use crate::signal_fir::vector_plan::{build_vector_plan, verified_vector_plan_for_test};
     use crate::signal_fir::vector_verify::{
         EpochRecord, LoopEdge, LoopRecord, Rate, SignalRecord, VecSafeWitness, Vectorability,
         WitnessKind,
     };
+    use crate::signal_prepare::prepare_signals_for_fir_verified;
 
     fn pure_shared_plan() -> VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {
@@ -1112,16 +1192,85 @@ mod tests {
         })
     }
 
+    fn tuple_transport_plan() -> VerifiedVectorPlan {
+        let mut plan = pure_shared_plan().into_plan();
+        let tuple = nested_tuple_type();
+        plan.signals
+            .iter_mut()
+            .find(|signal| signal.signal_id == 10)
+            .unwrap()
+            .value_type = tuple.clone();
+        plan.transports[0].element_type = tuple;
+        verified_vector_plan_for_test(plan)
+    }
+
+    fn tuple_definition_plan() -> VerifiedVectorPlan {
+        let mut plan = pure_shared_plan().into_plan();
+        plan.signals
+            .iter_mut()
+            .find(|signal| signal.signal_id == 8)
+            .unwrap()
+            .value_type = nested_tuple_type();
+        verified_vector_plan_for_test(plan)
+    }
+
+    fn nested_tuple_type() -> ValueType {
+        ValueType::Tuple(vec![
+            ValueType::Real,
+            ValueType::Tuple(vec![ValueType::Int, ValueType::Real]),
+        ])
+    }
+
+    fn recursive_multi_projection_plan() -> VerifiedVectorPlan {
+        let mut arena = TreeArena::new();
+        let self_ref = tlib::de_bruijn_ref(&mut arena, 1);
+        let (body0, body1) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let feedback0 = builder.proj(0, self_ref);
+            let feedback1 = builder.proj(1, self_ref);
+            (builder.delay1(feedback0), builder.delay1(feedback1))
+        };
+        let nil = arena.nil();
+        let tail = arena.cons(body1, nil);
+        let bodies = arena.cons(body0, tail);
+        let group = tlib::de_bruijn_rec(&mut arena, bodies);
+        let (out0, out1) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            (builder.proj(0, group), builder.proj(1, group))
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[out0, out1], &ui::UiProgram::empty())
+                .unwrap();
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .unwrap();
+        let decorations = certify_decorations(&prepared, &clocks).unwrap();
+        build_vector_plan(&decorations, 8).unwrap()
+    }
+
+    fn value_for_type(value_type: &ValueType, store: &mut FirStore) -> FirId {
+        match value_type {
+            ValueType::Int => FirBuilder::new(store).int32(0),
+            ValueType::Real => FirBuilder::new(store).float32(0.0),
+            ValueType::Tuple(components) => {
+                let values = components
+                    .iter()
+                    .map(|component| value_for_type(component, store))
+                    .collect::<Vec<_>>();
+                let typ = value_fir_type(value_type, FirType::Float32);
+                FirBuilder::new(store).value_array(&values, typ)
+            }
+        }
+    }
+
     fn value_for(
         signal: &super::super::vector_verify::SignalRecord,
         store: &mut FirStore,
     ) -> FirId {
-        let mut builder = FirBuilder::new(store);
-        match &signal.value_type {
-            ValueType::Int => builder.int32(0),
-            ValueType::Real => builder.float32(0.0),
-            ValueType::Tuple(_) => panic!("pure fixture has no tuple"),
-        }
+        value_for_type(&signal.value_type, store)
     }
 
     fn define_complete<'a>(
@@ -1197,6 +1346,73 @@ mod tests {
                 .iter()
                 .all(|transport| transport.store.is_some() && transport.load.is_some())
         );
+    }
+
+    #[test]
+    fn tuple_transport_is_rejected_in_favor_of_scalar_projections() {
+        let verified_plan = tuple_transport_plan();
+        let mut store = FirStore::new();
+        assert!(matches!(
+            VectorRouteSession::new(
+                &verified_plan,
+                SchedulingStrategy::DepthFirst,
+                FirType::Float32,
+                &mut store,
+            ),
+            Err(VectorRouteError::UnsupportedTupleTransport { signal_id: 10 })
+        ));
+    }
+
+    #[test]
+    fn tuple_definition_rejects_forged_outer_type_with_wrong_components() {
+        let verified_plan = tuple_definition_plan();
+        let tuple = verified_plan.plan().signals[0].value_type.clone();
+        let tuple_fir = value_fir_type(&tuple, FirType::Float32);
+        let mut store = FirStore::new();
+        let (mut session, _) = VectorRouteSession::new(
+            &verified_plan,
+            SchedulingStrategy::DepthFirst,
+            FirType::Float32,
+            &mut store,
+        )
+        .unwrap();
+        let only_component = FirBuilder::new(&mut store).float32(0.0);
+        let forged = FirBuilder::new(&mut store).value_array(&[only_component], tuple_fir);
+        assert_eq!(
+            session.define_control(8, forged, &store),
+            Err(VectorRouteError::TupleValueShape { signal_id: 8 })
+        );
+    }
+
+    #[test]
+    fn production_recursive_tuple_plan_closes_routed_fir() {
+        let verified_plan = recursive_multi_projection_plan();
+        assert!(
+            verified_plan
+                .plan()
+                .signals
+                .iter()
+                .any(|signal| matches!(signal.value_type, ValueType::Tuple(_)))
+        );
+
+        for strategy in [
+            SchedulingStrategy::DepthFirst,
+            SchedulingStrategy::BreadthFirst,
+            SchedulingStrategy::Special,
+            SchedulingStrategy::ReverseBreadthFirst,
+        ] {
+            let mut store = FirStore::new();
+            let (mut session, _) =
+                VectorRouteSession::new(&verified_plan, strategy, FirType::Float32, &mut store)
+                    .unwrap();
+            define_complete(&mut session, &mut store);
+            for transport in &verified_plan.plan().transports {
+                session
+                    .resolve_in_loop(transport.consumer_loop, transport.signal_id, &mut store)
+                    .unwrap();
+            }
+            session.finish(&store).unwrap();
+        }
     }
 
     #[test]

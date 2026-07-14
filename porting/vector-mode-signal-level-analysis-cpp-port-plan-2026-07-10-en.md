@@ -2067,10 +2067,32 @@ confirms that a real propagated FAD contains no reverse carrier. `ReverseTimeRec
 fixed `[Forward, Reverse]` epochs; an executable reference combinator proves by
 construction that reverse cannot run before the forward state and tape exist.
 
-P6.2 remains additive. It does not yet emit island/state actions into final FIR,
-replace island-local P5 transports, assemble tuple-valued recursion, compare
-clocked/FAD vector audio with C++, or enable a backend. Those are the remaining
-conditions before the P6 exit criterion can be claimed.
+At the P6.2 boundary, the work remained additive: it did not emit island/state
+actions into final FIR, replace island-local P5 transports, assemble
+tuple-valued recursion, compare clocked/FAD vector audio with C++, or enable a
+backend. P6.3a below closes only the tuple-definition part of that list.
+
+Implementation status (2026-07-14, P6.3a):
+`VectorRouteSession` now accepts recursively typed tuple definitions as
+canonical FIR `ValueArray` nodes with a deterministic structural `FirType`.
+The independent checker validates the complete recursive shape: the outer type,
+arity, every component type, and nested tuple constructors must all agree with
+the checked `ValueType`. A forged value carrying the expected outer type but an
+incorrect component list is rejected.
+
+This is deliberately not a new tuple ABI. The C++ vector compiler lowers a
+recursive group through its individual `sigProj` values and allocates delay
+storage per projection; it does not transport the group as an array of tuple
+objects. Rust therefore still rejects any inter-loop transport whose element
+type is a tuple and requires the producer to expose the corresponding scalar
+projections. A production prepared graph with two mutually recursive
+projections now closes routed-FIR verification for all four `-ss` strategies.
+
+P6.3b is the remaining FIR-assembly slice: lower the stateful projection
+definitions themselves, emit the accepted P6.1 `pre/exec/post` words, nest P4
+loop bodies below P6.2 islands, and replace each island-local or held transport
+with its certified lifetime. Only that assembled artifact can support final
+module integration and differential execution.
 
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an

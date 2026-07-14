@@ -40,6 +40,11 @@
 //!   as an expanded ordinary signal graph, and force reverse-time/BRA carriers
 //!   to scalar `Forward < Reverse` windows. Both P6 gates remain additive and
 //!   are not yet selected by `build_module` or a backend.
+//! - **Vector P6.3a recursive-tuple routing**: retain recursive groups as
+//!   recursively checked typed FIR values while requiring all cross-loop
+//!   transports to use scalar projections, matching C++ `sigProj` lowering.
+//!   A real two-projection prepared graph closes routing under all four `-ss`
+//!   strategies. Stateful phase/island FIR assembly remains P6.3b.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
