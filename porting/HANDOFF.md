@@ -6,16 +6,16 @@ Date: 2026-07-14
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff
-- Current task: P6.5 production state/clock/FAD vector lowering, completed in
-  this commit.
-- The checked path now covers pure graphs, fixed delays, top-rate symbolic
-  recursion, stateless clock islands, held outputs, and expanded FAD.
+- Current task: P6.6 clock-local state and variable-delay vector lowering,
+  completed in this commit.
+- The checked path now covers pure graphs, fixed and bounded-variable delays,
+  symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
 
 ## Working Tree
 
-- This commit generalizes production region lowering, repairs recursion
-  declaration scope, places held clock outputs, extends differential tests, and
-  records the remaining named fallback boundary.
+- This commit adds clock-domain state cursors, bounded variable-delay lowering,
+  delayed chunk-order edges, exact island schedule projection, and their
+  structural and differential tests.
 - Many unrelated pre-existing untracked scratch files remain untouched.
 
 ## What Changed
@@ -69,6 +69,14 @@ Date: 2026-07-14
 - Added scalar/vector bit-exact interpreter coverage for clocks and FAD and
   checked production selection for recursion, FAD, and clocks under all four
   scheduling strategies.
+- Added `ClockRing` storage with one persistent cursor per domain and one cursor
+  advance per guarded fire.
+- Lowered bounded variable amounts from the accepted type interval and ordered
+  delayed inter-loop producers before readers without an immediate transport.
+- Projected each clock island through the accepted `-ss` schedule, fixing a
+  one-fire recursion lag caused by canonical-id assembly order.
+- Added parity coverage for variable delays and clock-local delay/recursion for
+  both `-lv` variants and all four scheduling strategies.
 
 ## Decisions And Constraints
 
@@ -83,35 +91,26 @@ Date: 2026-07-14
   names for Rust source/diagnostic compatibility; their accepted scope is now
   broader than pure graphs. This is an adapted additive API, not a C/C++ ABI
   change.
-- Clock-local delay/recursion, variable delays, UI programs, and RAD remain
-  explicit fallbacks. P6.5 does not certify those transitional modules.
+- UI programs and RAD remain explicit fallbacks. P6.6 does not certify those
+  transitional modules.
 - Full R4/R5 still requires canonical serialization/hash binding, Lean
   acceptance, and stable C++ corpus retention.
 
 ## Validation
 
 - `cargo fmt --all -- --check` passes.
-- `cargo test -p transform signal_fir::vector_state --lib` passes (5 tests).
-- `cargo test -p transform signal_fir::vector_events --lib` passes (8 tests).
-- `cargo test -p transform signal_fir::vector_clock_ad --lib` passes (7 tests).
-- `cargo test -p transform signal_fir::vector_route --lib` passes (11 tests).
-- `cargo test -p transform signal_fir::vector_assemble --lib` passes (2 tests).
-- `cargo test -p transform signal_fir::vector_module --lib` passes (5 tests).
-- `cargo test -p compiler --test vector_mode` passes (7 tests).
+- `cargo test -p transform signal_fir::vector --lib` passes (97 tests).
+- `cargo test -p compiler --test vector_mode` passes (8 tests).
 - `cargo test -p compiler --test vector_clock_ad` passes (2 tests).
-- `cargo test -p transform signal_fir::vector --lib` passes (95 tests).
 - `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - `cargo test --workspace --all-targets` passes.
 - `cargo run -p xtask -- golden-check` passes all 190 snapshots unchanged.
 
 ## Next Steps
 
-1. Complete the remaining P6 policy and implementation for state local to a
-   clock island and variable delays, with fail-closed certificates and
-   differential fixtures.
-2. Enter P7 and run the scalar/vector differential backend matrix for
+1. Enter P7 and run the scalar/vector differential backend matrix for
    `-lv 0/1` crossed with `-ss 0/1/2/3` before removing transitional fallbacks.
-3. Complete canonical JSON/hash, Lean R3/R4 checking, and the stable C++
+2. Complete canonical JSON/hash, Lean R3/R4 checking, and the stable C++
    vectorization-retention corpus.
 
 ## Useful Commands

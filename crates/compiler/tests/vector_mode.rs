@@ -183,6 +183,18 @@ fn clock_island_and_expanded_fad_are_bit_exact() {
         &clock_inputs,
         24,
     );
+    assert_channels_bit_exact(
+        "clock_recursion",
+        "process = ((_ != 0), _) : ondemand(+ ~ _);",
+        &clock_inputs,
+        24,
+    );
+    assert_channels_bit_exact(
+        "clock_delay",
+        "process = ((_ != 0), _) : ondemand(_ <: _, @(3) :> +);",
+        &clock_inputs,
+        24,
+    );
 
     let inputs = vec![
         ramp(64),
@@ -190,6 +202,19 @@ fn clock_island_and_expanded_fad_are_bit_exact() {
         (0..64).map(|index| 1.0 - index as f32 * 0.02).collect(),
     ];
     assert_channels_bit_exact("fad", "process = fad(*, (_,_,_));", &inputs, 24);
+}
+
+#[test]
+fn bounded_variable_delay_is_bit_exact() {
+    let amount = (0..64)
+        .map(|index| (index as f32 * 0.31).sin() * 0.9)
+        .collect::<Vec<_>>();
+    assert_channels_bit_exact(
+        "variable_delay",
+        "process(carrier, amount) = carrier @ int(amount + 10);",
+        &[ramp(64), amount],
+        24,
+    );
 }
 
 #[test]
@@ -230,6 +255,8 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
             ("recursive", "process = (_ : + ~ _) * 0.5;"),
             ("fad", "process = fad(*, (_,_,_));"),
             ("clock", "process = ((_ != 0), _) : ondemand(*(2));"),
+            ("clock-state", "process = ((_ != 0), _) : ondemand(+ ~ _);"),
+            ("variable-delay", "process = @(int(_ + 10));"),
         ] {
             let output = compiler
                 .compile_source_to_fir_with_lane(
@@ -256,18 +283,6 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
     assert_eq!(
         ui.vector_pipeline_status,
         VectorPipelineStatus::Fallback(VectorFallbackReason::UiProgram)
-    );
-
-    let clock_state = compiler
-        .compile_source_to_fir_with_lane(
-            "clock-state.dsp",
-            "process = ((_ != 0), _) : ondemand(+ ~ _);",
-            SignalFirLane::TransformFastLane,
-        )
-        .expect("clock-local state transitional vector FIR");
-    assert_eq!(
-        clock_state.vector_pipeline_status,
-        VectorPipelineStatus::Fallback(VectorFallbackReason::StatePlan)
     );
 
     let rad = compiler

@@ -2193,6 +2193,48 @@ clock-local delay/recursion and variable-delay policy. P7 must then run the
 full backend matrix. Canonical JSON/hash binding, Lean R3/R4 acceptance, and
 the stable C++ retention corpus remain separate assurance deliverables.
 
+Implementation status (2026-07-14, P6.6 clock-local state and variable delays):
+the checked P6.1 state schema is now version 2 and distinguishes top-rate copy
+or ring storage from `ClockRing(B_d,q_c,N_d)`. For a delayed carrier with
+certified maximum `D` in clock domain `c`, the producer and checker require
+
+```text
+N_d = next_power_of_two(D + 1)
+read(d) = B_d[(q_c - d) & (N_d - 1)]
+write(x) = B_d[q_c & (N_d - 1)] := x
+q_c' = q_c + 1
+```
+
+All delayed carriers in one domain name the same persistent cursor `q_c`, each
+owns a separate ring, and the version-3 assembly advances `q_c` exactly once
+at the end of each guarded fire. Zero-fire samples perform no state transition.
+The independent checker recomputes domain ownership from the accepted P6.2
+island, checks ring geometry and action coverage, checks the exact cursor-update
+FIR word, and rejects a removed cursor advance. This is an **adapted** internal
+Rust representation of the C++ per-clock `IOTA` discipline; it changes neither
+the CLI nor the C/C++ ABI.
+
+For a runtime delay amount `a_t`, lowering accepts exactly the interval already
+accepted by `sigtype::check_delay_interval`, allocates from its certified upper
+bound `D`, and substitutes `a_t` for `d` in the accepted copy/ring equation.
+The lower bound policy therefore remains identical to scalar faust-rs. A
+delayed dependency crossing two P4 loops contributes an ordering edge
+`producer -> reader` to the loop DAG but no immediate-value transport. This
+ensures the producer fills the current chunk before any short or variable
+delay can read it. A candidate edge that would close an existing feedback path
+is omitted; the accepted recursive serial loop and its state transitions retain
+that ordering instead.
+
+Clock islands now project the already accepted `-ss` schedule onto their member
+loops instead of iterating canonical loop ids. This fixed a real one-fire lag
+where a recursive consumer ran before its input producer. Interpreter
+differential tests are bit-exact for bounded variable delay, clock-local
+recursion, and clock-local fixed delay under both `-lv` variants and all four
+`-ss` strategies. The tests are translation-validation evidence, not a proof.
+P6 is now complete for the planned production subset; UI and RAD remain named
+fallbacks, while canonical serialization/Lean acceptance remain assurance
+work. The next implementation phase is P7.
+
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an
 explicit diagnostic for RAD shapes forced to scalar.

@@ -6,10 +6,9 @@
 //! P4.4 plan, plus P6.1/P6.2 state and clock policies when requested. It runs
 //! CSE independently in each routed region, then checks the final bodies
 //! against P5.1 routing evidence. Storage and transport geometry are never
-//! inferred here: fixed positive delays, symbolic recursion, and clock wrappers
-//! are lowered only through their accepted P6 artifacts. Tables, UI, foreign
-//! calls, variable delays, clock-local signal state, and reverse AD remain
-//! fail-closed.
+//! inferred here: fixed or bounded-variable delays, symbolic recursion, and
+//! clock wrappers are lowered only through their accepted P6 artifacts.
+//! Tables, UI, foreign calls, and reverse AD remain fail-closed.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -615,29 +614,51 @@ impl PureVectorLowerer<'_> {
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_dep(scope, inner, cache, active)?,
             SigMatch::Delay1(value) => self.lower_delay_read(scope, value, 1, cache, active)?,
-            SigMatch::Delay(value, amount) => {
-                let amount_value = match match_sig(self.prepared.arena(), amount) {
-                    SigMatch::Int(value) if value >= 0 => value,
-                    _ => {
-                        return Err(PureVectorLowerError::UnsupportedSignal {
-                            signal_id,
-                            expression: "P6.5 requires a constant non-negative vector delay"
-                                .to_owned(),
-                        });
+            SigMatch::Delay(value, amount) => match match_sig(self.prepared.arena(), amount) {
+                SigMatch::Int(amount_literal) if amount_literal >= 0 => {
+                    if amount_literal == 0 {
+                        self.lower_dep(scope, value, cache, active)?
+                    } else {
+                        self.lower_delay_read(
+                            scope,
+                            value,
+                            u64::try_from(amount_literal).expect("non-negative i32 fits u64"),
+                            cache,
+                            active,
+                        )?
                     }
-                };
-                if amount_value == 0 {
-                    self.lower_dep(scope, value, cache, active)?
-                } else {
-                    self.lower_delay_read(
-                        scope,
-                        value,
-                        u64::try_from(amount_value).expect("non-negative i32 fits u64"),
-                        cache,
-                        active,
-                    )?
                 }
-            }
+                _ => {
+                    let max_delay =
+                        sigtype::check_delay_interval(self.prepared.sig_ty(amount).ok_or_else(
+                            || PureVectorLowerError::UnsupportedSignal {
+                                signal_id,
+                                expression: "variable delay amount has no prepared type".to_owned(),
+                            },
+                        )?)
+                        .map_err(|error| {
+                            PureVectorLowerError::UnsupportedSignal {
+                                signal_id,
+                                expression: format!("invalid variable delay interval: {error}"),
+                            }
+                        })?;
+                    if max_delay == 0 {
+                        self.lower_dep(scope, value, cache, active)?
+                    } else {
+                        let amount_value = self.lower_dep(scope, amount, cache, active)?;
+                        self.lower_delay_read_value(
+                            value,
+                            amount_value,
+                            u64::try_from(max_delay).map_err(|_| {
+                                PureVectorLowerError::UnsupportedSignal {
+                                    signal_id,
+                                    expression: "variable delay bound is negative".to_owned(),
+                                }
+                            })?,
+                        )?
+                    }
+                }
+            },
             SigMatch::Proj(index, group) => {
                 if let Some(var) = match_sym_ref(self.prepared.arena(), group) {
                     let _ = self.lower_dep(scope, group, cache, active)?;
@@ -824,6 +845,22 @@ impl PureVectorLowerer<'_> {
         if delay == 0 {
             return self.lower_dep(scope, carrier, cache, active);
         }
+        let amount =
+            FirBuilder::new(&mut self.store).int32(i32::try_from(delay).map_err(|_| {
+                PureVectorLowerError::UnsupportedSignal {
+                    signal_id: u64::from(carrier.as_u32()),
+                    expression: "delay amount exceeds FIR i32".to_owned(),
+                }
+            })?);
+        self.lower_delay_read_value(carrier, amount, delay)
+    }
+
+    fn lower_delay_read_value(
+        &mut self,
+        carrier: SigId,
+        amount: FirId,
+        max_delay: u64,
+    ) -> Result<FirId, PureVectorLowerError> {
         let carrier_id = u64::from(carrier.as_u32());
         let transition = self
             .state_plan
@@ -837,28 +874,22 @@ impl PureVectorLowerer<'_> {
                 signal_id: carrier_id,
                 expression: "delay carrier has no accepted P6.1 storage transition".to_owned(),
             })?;
-        if delay > transition.max_delay {
+        if max_delay > transition.max_delay {
             return Err(PureVectorLowerError::UnsupportedSignal {
                 signal_id: carrier_id,
                 expression: format!(
-                    "delay {delay} exceeds certified maximum {}",
+                    "delay bound {max_delay} exceeds certified maximum {}",
                     transition.max_delay
                 ),
             });
         }
         let typ = value_fir_type(&transition.value_type, self.real_type.clone());
         let mut builder = FirBuilder::new(&mut self.store);
-        let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
-        let vindex = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
-        let local = builder.binop(fir::FirBinOp::Sub, i0, vindex, FirType::Int32);
-        let delay = builder.int32(i32::try_from(delay).map_err(|_| {
-            PureVectorLowerError::UnsupportedSignal {
-                signal_id: carrier_id,
-                expression: "delay amount exceeds FIR i32".to_owned(),
-            }
-        })?);
         let index = match &transition.storage {
             VectorDelayStorage::Copy { history_length, .. } => {
+                let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+                let vindex = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
+                let local = builder.binop(fir::FirBinOp::Sub, i0, vindex, FirType::Int32);
                 let history = builder.int32(i32::try_from(*history_length).map_err(|_| {
                     PureVectorLowerError::UnsupportedSignal {
                         signal_id: carrier_id,
@@ -866,18 +897,34 @@ impl PureVectorLowerer<'_> {
                     }
                 })?);
                 let current = builder.binop(fir::FirBinOp::Add, history, local, FirType::Int32);
-                builder.binop(fir::FirBinOp::Sub, current, delay, FirType::Int32)
+                builder.binop(fir::FirBinOp::Sub, current, amount, FirType::Int32)
             }
             VectorDelayStorage::Ring {
                 index_name, mask, ..
             } => {
+                let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+                let vindex = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
+                let local = builder.binop(fir::FirBinOp::Sub, i0, vindex, FirType::Int32);
                 let base = builder.load_var(index_name, AccessType::Struct, FirType::Int32);
                 let current = builder.binop(fir::FirBinOp::Add, base, local, FirType::Int32);
-                let delayed = builder.binop(fir::FirBinOp::Sub, current, delay, FirType::Int32);
+                let delayed = builder.binop(fir::FirBinOp::Sub, current, amount, FirType::Int32);
                 let mask = builder.int32(i32::try_from(*mask).map_err(|_| {
                     PureVectorLowerError::UnsupportedSignal {
                         signal_id: carrier_id,
                         expression: "ring-delay mask exceeds FIR i32".to_owned(),
+                    }
+                })?);
+                builder.binop(fir::FirBinOp::And, delayed, mask, FirType::Int32)
+            }
+            VectorDelayStorage::ClockRing {
+                cursor_name, mask, ..
+            } => {
+                let cursor = builder.load_var(cursor_name, AccessType::Struct, FirType::Int32);
+                let delayed = builder.binop(fir::FirBinOp::Sub, cursor, amount, FirType::Int32);
+                let mask = builder.int32(i32::try_from(*mask).map_err(|_| {
+                    PureVectorLowerError::UnsupportedSignal {
+                        signal_id: carrier_id,
+                        expression: "clock-ring mask exceeds FIR i32".to_owned(),
                     }
                 })?);
                 builder.binop(fir::FirBinOp::And, delayed, mask, FirType::Int32)
@@ -888,6 +935,9 @@ impl PureVectorLowerer<'_> {
                 builder.load_table(temporary_name, AccessType::Stack, index, typ)
             }
             VectorDelayStorage::Ring { buffer_name, .. } => {
+                builder.load_table(buffer_name, AccessType::Struct, index, typ)
+            }
+            VectorDelayStorage::ClockRing { buffer_name, .. } => {
                 builder.load_table(buffer_name, AccessType::Struct, index, typ)
             }
         })

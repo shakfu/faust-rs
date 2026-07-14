@@ -13,9 +13,10 @@
 //! plan: every projection of one symbolic group is owned by one serial
 //! `LoopKind::Recursive` loop and advances once per sample. The artifact is
 //! derived exclusively from checked P4.3b decorations and the checked P4.4
-//! vector plan; it does not inspect FIR statements. Clock, reverse-time, and
-//! AD state deliberately fail closed until P6.2 supplies their transition
-//! semantics.
+//! vector plan; it does not inspect FIR statements. P6.6 composes that plan
+//! with the checked P6.2 clock artifact: state local to an OD/US/DS island uses
+//! one persistent ring cursor per domain and advances in fire time. Reverse
+//! time and AD state remain fail-closed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -31,7 +32,7 @@ use super::vector_verify::{
 };
 
 /// Current canonical P6.1 state-plan schema.
-pub const VECTOR_STATE_PLAN_VERSION: u32 = 1;
+pub const VECTOR_STATE_PLAN_VERSION: u32 = 2;
 
 /// One `CodeLoop` execution phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -56,6 +57,14 @@ pub enum VectorDelayStorage {
         buffer_name: String,
         index_name: String,
         index_save_name: String,
+        capacity: u64,
+        mask: u64,
+    },
+    /// Persistent ring indexed by one shared clock-domain fire-time cursor.
+    ClockRing {
+        buffer_name: String,
+        cursor_name: String,
+        domain_id: u64,
         capacity: u64,
         mask: u64,
     },
@@ -91,6 +100,8 @@ pub struct DelayTransition {
     pub loop_id: u64,
     pub value_type: ValueType,
     pub max_delay: u64,
+    /// `None` for top-rate chunk time, `Some(d)` for domain fire time.
+    pub clock_domain: Option<u64>,
     pub storage: VectorDelayStorage,
 }
 
@@ -180,24 +191,71 @@ pub(crate) fn verified_vector_state_plan_for_test(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorStateError {
     Plan(VectorPlanError),
-    UnsupportedSchema { found: u32 },
-    VecSizeMismatch { declared: u64, actual: u64 },
-    SignalCoverageMismatch { signal_id: u64 },
-    SignalFactMismatch { signal_id: u64 },
-    MissingLoopOwner { signal_id: u64 },
-    DelayOwnerNotVectorLoop { signal_id: u64, loop_id: u64 },
-    RecursionLoopMismatch { group: u64, loop_id: u64 },
-    UnsupportedClockState { signal_id: u64, clock_id: u32 },
-    UnsupportedStateResource { resource: StateResource },
-    ArithmeticOverflow { signal_id: u64 },
-    NotCanonical { what: &'static str, at: usize },
+    UnsupportedSchema {
+        found: u32,
+    },
+    VecSizeMismatch {
+        declared: u64,
+        actual: u64,
+    },
+    SignalCoverageMismatch {
+        signal_id: u64,
+    },
+    SignalFactMismatch {
+        signal_id: u64,
+    },
+    MissingLoopOwner {
+        signal_id: u64,
+    },
+    DelayOwnerNotVectorLoop {
+        signal_id: u64,
+        loop_id: u64,
+    },
+    RecursionLoopMismatch {
+        group: u64,
+        loop_id: u64,
+    },
+    UnsupportedClockState {
+        signal_id: u64,
+        clock_id: u32,
+    },
+    ClockPlanRequired {
+        signal_id: u64,
+        clock_id: u32,
+    },
+    ClockLoopMismatch {
+        signal_id: u64,
+        clock_id: u64,
+        loop_id: u64,
+    },
+    UnsupportedStateResource {
+        resource: StateResource,
+    },
+    ArithmeticOverflow {
+        signal_id: u64,
+    },
+    NotCanonical {
+        what: &'static str,
+        at: usize,
+    },
     DelayCoverageMismatch,
     RecursionCoverageMismatch,
-    LoopPhaseMismatch { loop_id: u64 },
+    LoopPhaseMismatch {
+        loop_id: u64,
+    },
     SimulationGeometryMismatch,
-    SimulationDelayOutOfRange { delay: usize, max_delay: usize },
-    SimulationChunkTooLarge { count: usize, vec_size: usize },
-    RecursionArityMismatch { state: usize, next: usize },
+    SimulationDelayOutOfRange {
+        delay: usize,
+        max_delay: usize,
+    },
+    SimulationChunkTooLarge {
+        count: usize,
+        vec_size: usize,
+    },
+    RecursionArityMismatch {
+        state: usize,
+        next: usize,
+    },
 }
 
 impl fmt::Display for VectorStateError {
@@ -234,6 +292,21 @@ impl fmt::Display for VectorStateError {
             } => write!(
                 f,
                 "clocked state on signal {signal_id} (domain {clock_id}) requires P6.2"
+            ),
+            Self::ClockPlanRequired {
+                signal_id,
+                clock_id,
+            } => write!(
+                f,
+                "clocked state on signal {signal_id} (domain {clock_id}) requires a checked P6.2 plan"
+            ),
+            Self::ClockLoopMismatch {
+                signal_id,
+                clock_id,
+                loop_id,
+            } => write!(
+                f,
+                "clocked state signal {signal_id} is owned by loop {loop_id}, outside domain {clock_id}"
             ),
             Self::UnsupportedStateResource { resource } => {
                 write!(
@@ -291,12 +364,7 @@ pub fn build_vector_state_plan(
     vector_plan: &VerifiedVectorPlan,
     max_copy_delay: u64,
 ) -> Result<VerifiedVectorStatePlan, VectorStateError> {
-    build_vector_state_plan_with_resources(
-        decorations,
-        vector_plan,
-        max_copy_delay,
-        &BTreeSet::new(),
-    )
+    build_vector_state_plan_with_resources(decorations, vector_plan, None, max_copy_delay)
 }
 
 /// Builds P6.1 state transitions while delegating clock/hold resources to an
@@ -315,16 +383,16 @@ pub fn build_vector_state_plan_with_clock(
     build_vector_state_plan_with_resources(
         decorations,
         vector_plan,
+        Some(clock_plan),
         max_copy_delay,
-        &clock_plan.managed_state_resources(),
     )
 }
 
 fn build_vector_state_plan_with_resources(
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VerifiedVectorPlan,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
     max_copy_delay: u64,
-    external_resources: &BTreeSet<StateResource>,
 ) -> Result<VerifiedVectorStatePlan, VectorStateError> {
     let source = decorations.certificate();
     let plan = vector_plan.plan();
@@ -350,14 +418,22 @@ fn build_vector_state_plan_with_resources(
             return Err(VectorStateError::MissingLoopOwner { signal_id });
         };
         let loop_record = loops_by_id[&loop_id];
-        if !matches!(
+        let clock_domain = record.clock_domain.map(u64::from);
+        verify_delay_owner(
+            signal_id,
+            loop_id,
             loop_record.kind,
-            LoopKind::Vectorizable | LoopKind::Recursive(_)
-        ) {
-            return Err(VectorStateError::DelayOwnerNotVectorLoop { signal_id, loop_id });
-        }
+            clock_domain,
+            clock_plan,
+        )?;
         let max_delay = u64::from(record.max_delay);
-        let storage = delay_storage(signal_id, max_delay, plan.vec_size, max_copy_delay)?;
+        let storage = delay_storage(
+            signal_id,
+            max_delay,
+            plan.vec_size,
+            max_copy_delay,
+            clock_domain,
+        )?;
         let loop_phases = phases
             .entry(loop_id)
             .or_insert_with(|| empty_phases(loop_id));
@@ -378,6 +454,7 @@ fn build_vector_state_plan_with_resources(
                     .post
                     .push(VectorStateAction::DelayRingSaveAdvance { signal_id });
             }
+            VectorDelayStorage::ClockRing { .. } => {}
         }
         loop_phases
             .exec
@@ -387,6 +464,7 @@ fn build_vector_state_plan_with_resources(
             loop_id,
             value_type: signal.value_type.clone(),
             max_delay,
+            clock_domain,
             storage,
         });
     }
@@ -436,11 +514,14 @@ fn build_vector_state_plan_with_resources(
         delays,
         recursions,
     };
-    verify_vector_state_plan_with_resources(decorations, plan, &state_plan, external_resources)?;
+    verify_vector_state_plan_with_resources(decorations, plan, clock_plan, &state_plan)?;
+    let delegated_resources = clock_plan
+        .map(VerifiedVectorClockAdPlan::managed_state_resources)
+        .unwrap_or_default();
     Ok(VerifiedVectorStatePlan {
         plan: state_plan,
         vector_plan: plan.clone(),
-        delegated_resources: external_resources.clone(),
+        delegated_resources,
     })
 }
 
@@ -450,7 +531,7 @@ pub fn verify_vector_state_plan(
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
 ) -> Result<(), VectorStateError> {
-    verify_vector_state_plan_with_resources(decorations, vector_plan, state_plan, &BTreeSet::new())
+    verify_vector_state_plan_with_resources(decorations, vector_plan, None, state_plan)
 }
 
 /// Checks P6.1 while accepting only the clock/hold resources named by P6.2.
@@ -465,19 +546,14 @@ pub fn verify_vector_state_plan_with_clock(
             signal_id: u64::MAX,
         });
     }
-    verify_vector_state_plan_with_resources(
-        decorations,
-        vector_plan,
-        state_plan,
-        &clock_plan.managed_state_resources(),
-    )
+    verify_vector_state_plan_with_resources(decorations, vector_plan, Some(clock_plan), state_plan)
 }
 
 fn verify_vector_state_plan_with_resources(
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VectorPlan,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
     state_plan: &VectorStatePlan,
-    external_resources: &BTreeSet<StateResource>,
 ) -> Result<(), VectorStateError> {
     verify_vector_plan(vector_plan)?;
     if state_plan.schema_version != VECTOR_STATE_PLAN_VERSION {
@@ -493,9 +569,9 @@ fn verify_vector_state_plan_with_resources(
     }
     let records = &decorations.certificate().records;
     verify_source_alignment(records, vector_plan)?;
-    verify_supported_state(records, state_plan, external_resources)?;
-    verify_delays(records, vector_plan, state_plan)?;
-    verify_recursions(records, vector_plan, state_plan)?;
+    verify_supported_state(records, vector_plan, state_plan, clock_plan)?;
+    verify_delays(records, vector_plan, state_plan, clock_plan)?;
+    verify_recursions(records, vector_plan, state_plan, clock_plan)?;
     verify_phases(state_plan)?;
     Ok(())
 }
@@ -527,10 +603,19 @@ fn verify_source_alignment(
 
 fn verify_supported_state(
     records: &[DecorationRecord],
+    vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
-    external_resources: &BTreeSet<StateResource>,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
 ) -> Result<(), VectorStateError> {
     let resources = managed_resources(state_plan);
+    let external_resources = clock_plan
+        .map(VerifiedVectorClockAdPlan::managed_state_resources)
+        .unwrap_or_default();
+    let signals = vector_plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
     for record in records {
         for effect in &record.effects {
             let Some(resource) = state_resource(effect) else {
@@ -538,10 +623,14 @@ fn verify_supported_state(
             };
             if resources.contains(resource) {
                 if let Some(clock_id) = record.clock_domain {
-                    return Err(VectorStateError::UnsupportedClockState {
-                        signal_id: u64::from(record.signal_id),
-                        clock_id,
-                    });
+                    let signal_id = u64::from(record.signal_id);
+                    let signal = signals
+                        .get(&signal_id)
+                        .ok_or(VectorStateError::SignalCoverageMismatch { signal_id })?;
+                    let Placement::Owned(loop_id) = signal.placement else {
+                        return Err(VectorStateError::MissingLoopOwner { signal_id });
+                    };
+                    verify_clock_loop(signal_id, u64::from(clock_id), loop_id, clock_plan)?;
                 }
             } else if !external_resources.contains(resource) {
                 return Err(VectorStateError::UnsupportedStateResource {
@@ -557,6 +646,7 @@ fn verify_delays(
     records: &[DecorationRecord],
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
 ) -> Result<(), VectorStateError> {
     check_strict_by(&state_plan.delays, "delay transitions", |delay| {
         delay.signal_id
@@ -599,23 +689,23 @@ fn verify_delays(
         if transition.loop_id != loop_id
             || transition.value_type != signal.value_type
             || transition.max_delay != u64::from(record.max_delay)
+            || transition.clock_domain != record.clock_domain.map(u64::from)
         {
             return Err(VectorStateError::DelayCoverageMismatch);
         }
-        if !matches!(
+        verify_delay_owner(
+            transition.signal_id,
+            loop_id,
             loops[&loop_id].kind,
-            LoopKind::Vectorizable | LoopKind::Recursive(_)
-        ) {
-            return Err(VectorStateError::DelayOwnerNotVectorLoop {
-                signal_id: transition.signal_id,
-                loop_id,
-            });
-        }
+            transition.clock_domain,
+            clock_plan,
+        )?;
         let expected_storage = delay_storage(
             transition.signal_id,
             transition.max_delay,
             state_plan.vec_size,
             state_plan.max_copy_delay,
+            transition.clock_domain,
         )?;
         if transition.storage != expected_storage {
             return Err(VectorStateError::DelayCoverageMismatch);
@@ -628,6 +718,7 @@ fn verify_recursions(
     records: &[DecorationRecord],
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
 ) -> Result<(), VectorStateError> {
     check_strict_by(&state_plan.recursions, "recursion transitions", |rec| {
         rec.group
@@ -687,6 +778,9 @@ fn verify_recursions(
                         loop_id,
                     });
                 }
+                if let Some(domain_id) = signal.clock_id.checked_sub(1) {
+                    verify_clock_loop(signal_id, domain_id, loop_id, clock_plan)?;
+                }
             }
         }
     }
@@ -717,6 +811,7 @@ fn verify_phases(state_plan: &VectorStatePlan) -> Result<(), VectorStateError> {
                     signal_id: delay.signal_id,
                 });
             }
+            VectorDelayStorage::ClockRing { .. } => {}
         }
         phases.exec.push(VectorStateAction::DelayWrite {
             signal_id: delay.signal_id,
@@ -773,8 +868,24 @@ fn delay_storage(
     max_delay: u64,
     vec_size: u64,
     max_copy_delay: u64,
+    clock_domain: Option<u64>,
 ) -> Result<VectorDelayStorage, VectorStateError> {
     let base = format!("vstate_s{signal_id}");
+    if let Some(domain_id) = clock_domain {
+        let required = max_delay
+            .checked_add(1)
+            .ok_or(VectorStateError::ArithmeticOverflow { signal_id })?;
+        let capacity = required
+            .checked_next_power_of_two()
+            .ok_or(VectorStateError::ArithmeticOverflow { signal_id })?;
+        return Ok(VectorDelayStorage::ClockRing {
+            buffer_name: base,
+            cursor_name: format!("vclock_d{domain_id}_iota"),
+            domain_id,
+            capacity,
+            mask: capacity - 1,
+        });
+    }
     if max_delay < max_copy_delay {
         let history_length = max_delay
             .checked_add(3)
@@ -802,6 +913,51 @@ fn delay_storage(
             index_save_name: format!("{base}_idx_save"),
             capacity,
             mask: capacity - 1,
+        })
+    }
+}
+
+fn verify_delay_owner(
+    signal_id: u64,
+    loop_id: u64,
+    kind: LoopKind,
+    clock_domain: Option<u64>,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
+) -> Result<(), VectorStateError> {
+    if let Some(domain_id) = clock_domain {
+        return verify_clock_loop(signal_id, domain_id, loop_id, clock_plan);
+    }
+    if matches!(kind, LoopKind::Vectorizable | LoopKind::Recursive(_)) {
+        Ok(())
+    } else {
+        Err(VectorStateError::DelayOwnerNotVectorLoop { signal_id, loop_id })
+    }
+}
+
+fn verify_clock_loop(
+    signal_id: u64,
+    domain_id: u64,
+    loop_id: u64,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
+) -> Result<(), VectorStateError> {
+    let Some(clock_plan) = clock_plan else {
+        return Err(VectorStateError::ClockPlanRequired {
+            signal_id,
+            clock_id: u32::try_from(domain_id).unwrap_or(u32::MAX),
+        });
+    };
+    if clock_plan
+        .plan()
+        .clock_islands
+        .iter()
+        .any(|island| island.domain_id == domain_id && island.nested_loop_ids.contains(&loop_id))
+    {
+        Ok(())
+    } else {
+        Err(VectorStateError::ClockLoopMismatch {
+            signal_id,
+            clock_id: domain_id,
+            loop_id,
         })
     }
 }
@@ -1125,7 +1281,7 @@ mod tests {
     #[test]
     fn production_delay_geometry_matches_cpp_threshold_and_rounding() {
         assert!(matches!(
-            delay_storage(1, 5, 8, 16).unwrap(),
+            delay_storage(1, 5, 8, 16, None).unwrap(),
             VectorDelayStorage::Copy {
                 history_length: 8,
                 temporary_length: 16,
@@ -1180,6 +1336,20 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn clock_delay_geometry_uses_one_domain_cursor_and_power_of_two_ring() {
+        assert_eq!(
+            delay_storage(9, 20, 8, 64, Some(3)).unwrap(),
+            VectorDelayStorage::ClockRing {
+                buffer_name: "vstate_s9".to_owned(),
+                cursor_name: "vclock_d3_iota".to_owned(),
+                domain_id: 3,
+                capacity: 32,
+                mask: 31,
+            }
+        );
     }
 
     #[test]
@@ -1268,8 +1438,8 @@ mod tests {
         const CHUNKINGS: [[usize; 4]; 3] = [[4, 4, 0, 0], [1, 3, 2, 2], [3, 4, 1, 0]];
         for max_delay in 1_u64..=5 {
             let vec_size = 4_u64;
-            let copy_storage = delay_storage(1, max_delay, vec_size, max_delay + 1).unwrap();
-            let ring_storage = delay_storage(1, max_delay, vec_size, 0).unwrap();
+            let copy_storage = delay_storage(1, max_delay, vec_size, max_delay + 1, None).unwrap();
+            let ring_storage = delay_storage(1, max_delay, vec_size, 0, None).unwrap();
             for input_code in 0..3_usize.pow(8) {
                 let values = ternary_values(input_code, 8);
                 let delays = (0..=max_delay as usize).collect::<Vec<_>>();

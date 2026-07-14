@@ -656,6 +656,25 @@ AD are named fallbacks. Canonical serialization, producer hashes, Lean R3/R4
 acceptance, and C++ corpus retention are still required before the certified
 porting claim can be strengthened.
 
+P6.6 extends the finite state and assembly artifacts without claiming an
+unbounded semantic proof. State schema v2 records either top-rate copy/ring
+storage or a clock ring `(domain, buffer, shared cursor, capacity, mask)`.
+Assembly schema v3 records the optional cursor advance inside each guard. The
+Rust checker independently recomputes domain-loop ownership from the accepted
+clock plan and requires `capacity = pow2ceil(maxDelay + 1)`, masked reads and
+writes, one common cursor name per domain, and exactly one `cursor := cursor+1`
+per fire. A negative mutation removes that word and must be rejected.
+
+Bounded variable delays instantiate the same checked storage equation with a
+runtime amount whose type-derived upper bound fixes the allocation. Delayed
+cross-loop dependencies add an ordering edge but no immediate transport, so
+the chunk producer precedes its readers unless that edge would close a checked
+feedback path. Scalar/vector traces now cover these rules for `lv=0/1` and
+`ss=0/1/2/3`. The remaining proof obligation is still
+R5: relate these finite equations and guarded event traces to an executable
+signal semantics, then bind the accepted Rust artifacts to canonical R3/R4
+serialization and Lean checking.
+
 ### R5 - Semantic reference execution
 
 Extend the Lean model with a small executable signal/FIR semantics in increments:

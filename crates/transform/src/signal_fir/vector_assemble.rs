@@ -15,7 +15,9 @@
 //! P6.5 keeps recursion-step declarations in the enclosing sample scope and
 //! places held clock outputs after the island guard, so a non-firing sample
 //! observes the previous held value. Final lifecycle placement is checked by
-//! `vector_module`; cross-backend activation remains a later phase.
+//! `vector_module`. P6.6 adds one checked shared state cursor per clock domain;
+//! it advances at the end of each guarded fire. Cross-backend activation
+//! remains a later phase.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -33,7 +35,7 @@ use super::vector_state::{
 use super::vector_verify::{ValueType, VectorPlan};
 
 /// Current canonical P6.3b/P6.5 assembly schema.
-pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 2;
+pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 3;
 
 /// Already-lowered non-state statements owned by one checked P4 loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +87,8 @@ pub struct AssembledClockIsland {
     pub nested_loop_ids: Vec<u64>,
     /// P6.2 `IslandScalar` declarations whose lifetime begins below this guard.
     pub local_declarations: Vec<FirId>,
+    /// Optional shared P6.6 state-cursor advance inside this domain guard.
+    pub state_cursor_advance: Option<FirId>,
     pub statement: FirId,
 }
 
@@ -345,6 +349,7 @@ pub fn assemble_vector_fir(
 
         let islands = materialize_clock_islands(
             routed,
+            state_plan,
             clock_plan,
             &loops,
             &definitions,
@@ -480,11 +485,11 @@ pub fn verify_vector_fir_assembly(
         .map(|island| (island.domain_id, island))
         .collect::<BTreeMap<_, _>>();
     for (actual, expected) in assembly.islands.iter().zip(expected_islands) {
+        let scheduled_loop_ids = scheduled_island_loop_ids(routed, expected);
         let local_declarations = expected_island_declarations(routed, expected.domain_id);
         let mut expected_body = local_declarations.clone();
         expected_body.extend(
-            expected
-                .nested_loop_ids
+            scheduled_loop_ids
                 .iter()
                 .map(|loop_id| assembled_loop_by_id[loop_id].iteration_statement),
         );
@@ -494,11 +499,20 @@ pub fn verify_vector_fir_assembly(
                 .filter(|child| child.parent_domain == Some(expected.domain_id))
                 .map(|child| assembled_island_by_id[&child.domain_id].statement),
         );
+        let expected_cursor = independently_expected_clock_cursor(state_plan, expected.domain_id)?;
+        if let Some(advance) = actual.state_cursor_advance {
+            expected_body.push(advance);
+        }
         if actual.domain_id != expected.domain_id
             || actual.parent_domain != expected.parent_domain
             || actual.guard != expected.guard
-            || actual.nested_loop_ids != expected.nested_loop_ids
+            || actual.nested_loop_ids != scheduled_loop_ids
             || actual.local_declarations != local_declarations
+            || !state_cursor_advance_matches(
+                actual.state_cursor_advance,
+                expected_cursor.as_deref(),
+                store,
+            )
             || !guard_shape_matches(expected, actual.statement, &expected_body, store)
         {
             return Err(VectorFirAssemblyError::IslandShape {
@@ -508,6 +522,72 @@ pub fn verify_vector_fir_assembly(
     }
     verify_clock_output_stores(assembly, expected_islands, store)?;
     Ok(())
+}
+
+fn independently_expected_clock_cursor(
+    state_plan: Option<&VerifiedVectorStatePlan>,
+    domain_id: u64,
+) -> Result<Option<String>, VectorFirAssemblyError> {
+    let Some(state_plan) = state_plan else {
+        return Ok(None);
+    };
+    let mut expected = None;
+    for delay in &state_plan.plan().delays {
+        if let VectorDelayStorage::ClockRing {
+            cursor_name,
+            domain_id: actual_domain,
+            ..
+        } = &delay.storage
+            && *actual_domain == domain_id
+        {
+            if expected.as_ref().is_some_and(|name| name != cursor_name) {
+                return Err(VectorFirAssemblyError::IslandShape { domain_id });
+            }
+            expected = Some(cursor_name.clone());
+        }
+    }
+    Ok(expected)
+}
+
+fn state_cursor_advance_matches(
+    statement: Option<FirId>,
+    cursor_name: Option<&str>,
+    store: &FirStore,
+) -> bool {
+    let (Some(statement), Some(cursor_name)) = (statement, cursor_name) else {
+        return statement.is_none() && cursor_name.is_none();
+    };
+    let FirMatch::StoreVar {
+        name,
+        access: AccessType::Struct,
+        value,
+    } = match_fir(store, statement)
+    else {
+        return false;
+    };
+    if name != cursor_name {
+        return false;
+    }
+    let FirMatch::BinOp {
+        op: FirBinOp::Add,
+        lhs,
+        rhs,
+        ..
+    } = match_fir(store, value)
+    else {
+        return false;
+    };
+    matches!(
+        (match_fir(store, lhs), match_fir(store, rhs)),
+        (
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::Struct,
+                ..
+            },
+            FirMatch::Int32 { value: 1, .. }
+        ) if name == cursor_name
+    )
 }
 
 fn require_same_plan(
@@ -642,6 +722,7 @@ fn materialize_state_storage(
     local: &mut Vec<FirId>,
     clear: &mut Vec<FirId>,
 ) -> Result<(), VectorFirAssemblyError> {
+    let mut clock_cursors = BTreeSet::new();
     for delay in &state_plan.plan().delays {
         let typ = state_fir_type(delay, real_type.clone())?;
         match &delay.storage {
@@ -712,6 +793,38 @@ fn materialize_state_storage(
                 let zero = builder.int32(0);
                 clear.push(builder.store_var(index_name, AccessType::Struct, zero));
                 clear.push(builder.store_var(index_save_name, AccessType::Struct, zero));
+            }
+            VectorDelayStorage::ClockRing {
+                buffer_name,
+                cursor_name,
+                capacity,
+                ..
+            } => {
+                let capacity_u64 = *capacity;
+                let capacity = usize_value("clock-ring capacity", capacity_u64)?;
+                state.push(builder.declare_var(
+                    buffer_name,
+                    FirType::Array(Box::new(typ.clone()), capacity),
+                    AccessType::Struct,
+                    None,
+                ));
+                clear.push(clear_table(
+                    builder,
+                    buffer_name,
+                    AccessType::Struct,
+                    &typ,
+                    capacity_u64,
+                )?);
+                if clock_cursors.insert(cursor_name.clone()) {
+                    state.push(builder.declare_var(
+                        cursor_name,
+                        FirType::Int32,
+                        AccessType::Struct,
+                        None,
+                    ));
+                    let zero = builder.int32(0);
+                    clear.push(builder.store_var(cursor_name, AccessType::Struct, zero));
+                }
             }
         }
     }
@@ -937,6 +1050,17 @@ fn materialize_action(
                     let masked = builder.binop(FirBinOp::And, added, mask, FirType::Int32);
                     builder.store_table(buffer_name, AccessType::Struct, masked, value)
                 }
+                VectorDelayStorage::ClockRing {
+                    buffer_name,
+                    cursor_name,
+                    mask,
+                    ..
+                } => {
+                    let cursor = builder.load_var(cursor_name, AccessType::Struct, FirType::Int32);
+                    let mask = fir_i32(builder, "clock-ring mask", *mask)?;
+                    let index = builder.binop(FirBinOp::And, cursor, mask, FirType::Int32);
+                    builder.store_table(buffer_name, AccessType::Struct, index, value)
+                }
             }
         }
         VectorStateAction::DelayCopyOut { signal_id } => {
@@ -987,6 +1111,7 @@ fn materialize_action(
 #[allow(clippy::too_many_arguments)]
 fn materialize_clock_islands(
     routed: &VerifiedRoutedFir,
+    state_plan: Option<&VerifiedVectorStatePlan>,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
     loops: &[AssembledVectorLoop],
     definitions: &BTreeMap<(VectorRegion, u64), FirId>,
@@ -1027,6 +1152,7 @@ fn materialize_clock_islands(
         }
     }
     let mut statements = BTreeMap::new();
+    let mut state_cursor_advances = BTreeMap::new();
     let mut pending = clock_plan.plan().clock_islands.len();
     while statements.len() < pending {
         let before = statements.len();
@@ -1050,14 +1176,22 @@ fn materialize_clock_islands(
                 .get(&island.domain_id)
                 .cloned()
                 .unwrap_or_default();
+            let scheduled_loop_ids = scheduled_island_loop_ids(routed, island);
             let mut body = local_declarations.clone();
             body.extend(
-                island
-                    .nested_loop_ids
+                scheduled_loop_ids
                     .iter()
                     .map(|loop_id| loop_by_id[loop_id].iteration_statement),
             );
             body.extend(children.iter().map(|child| statements[&child.domain_id]));
+            if let Some(cursor_name) = clock_cursor_for_domain(state_plan, island.domain_id)? {
+                let cursor = builder.load_var(&cursor_name, AccessType::Struct, FirType::Int32);
+                let one = builder.int32(1);
+                let next = builder.binop(FirBinOp::Add, cursor, one, FirType::Int32);
+                let advance = builder.store_var(&cursor_name, AccessType::Struct, next);
+                body.push(advance);
+                state_cursor_advances.insert(island.domain_id, advance);
+            }
             let body = builder.block(&body);
             let clock = resolve_clock_value(routed, definitions, island)?;
             let guarded = build_guard(
@@ -1092,14 +1226,55 @@ fn materialize_clock_islands(
             domain_id: island.domain_id,
             parent_domain: island.parent_domain,
             guard: island.guard,
-            nested_loop_ids: island.nested_loop_ids.clone(),
+            nested_loop_ids: scheduled_island_loop_ids(routed, island),
             local_declarations: island_declarations
                 .get(&island.domain_id)
                 .cloned()
                 .unwrap_or_default(),
+            state_cursor_advance: state_cursor_advances.get(&island.domain_id).copied(),
             statement: statements[&island.domain_id],
         })
         .collect())
+}
+
+fn scheduled_island_loop_ids(routed: &VerifiedRoutedFir, island: &ClockIsland) -> Vec<u64> {
+    let members = island
+        .nested_loop_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    routed
+        .layout()
+        .loops()
+        .iter()
+        .filter_map(|region| members.contains(&region.loop_id).then_some(region.loop_id))
+        .collect()
+}
+
+fn clock_cursor_for_domain(
+    state_plan: Option<&VerifiedVectorStatePlan>,
+    domain_id: u64,
+) -> Result<Option<String>, VectorFirAssemblyError> {
+    let Some(state_plan) = state_plan else {
+        return Ok(None);
+    };
+    let names = state_plan
+        .plan()
+        .delays
+        .iter()
+        .filter_map(|delay| match &delay.storage {
+            VectorDelayStorage::ClockRing {
+                cursor_name,
+                domain_id: delay_domain,
+                ..
+            } if *delay_domain == domain_id => Some(cursor_name.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if names.len() > 1 {
+        return Err(VectorFirAssemblyError::IslandShape { domain_id });
+    }
+    Ok(names.into_iter().next())
 }
 
 fn materialize_top_level(
@@ -1334,7 +1509,7 @@ fn verify_action_shape(
                     *history_length,
                     store,
                 ),
-                VectorDelayStorage::Ring { .. } => false,
+                VectorDelayStorage::Ring { .. } | VectorDelayStorage::ClockRing { .. } => false,
             }
         }
         VectorStateAction::DelayRingAdvance { signal_id } => {
@@ -1375,6 +1550,14 @@ fn verify_action_shape(
                         ..
                     },
                 ) => *buffer_name == name,
+                (
+                    VectorDelayStorage::ClockRing { buffer_name, .. },
+                    FirMatch::StoreTable {
+                        name,
+                        access: AccessType::Struct,
+                        ..
+                    },
+                ) => *buffer_name == name,
                 _ => false,
             }
         }
@@ -1395,7 +1578,7 @@ fn verify_action_shape(
                     *history_length,
                     store,
                 ),
-                VectorDelayStorage::Ring { .. } => false,
+                VectorDelayStorage::Ring { .. } | VectorDelayStorage::ClockRing { .. } => false,
             }
         }
         VectorStateAction::DelayRingSaveAdvance { signal_id } => {
@@ -1731,6 +1914,7 @@ mod tests {
                     DelayTransition {
                         signal_id: 11,
                         loop_id: 0,
+                        clock_domain: None,
                         value_type: ValueType::Real,
                         max_delay: 3,
                         storage: VectorDelayStorage::Copy {
@@ -1743,6 +1927,7 @@ mod tests {
                     DelayTransition {
                         signal_id: 12,
                         loop_id: 0,
+                        clock_domain: None,
                         value_type: ValueType::Real,
                         max_delay: 5,
                         storage: VectorDelayStorage::Ring {
@@ -1968,6 +2153,35 @@ mod tests {
             },
             &vector,
         );
+        let state = verified_vector_state_plan_for_test(
+            VectorStatePlan {
+                schema_version: VECTOR_STATE_PLAN_VERSION,
+                vec_size: 8,
+                max_copy_delay: 16,
+                loops: vec![LoopStatePhases {
+                    loop_id: 2,
+                    pre: vec![],
+                    exec: vec![VectorStateAction::DelayWrite { signal_id: 12 }],
+                    post: vec![],
+                }],
+                delays: vec![DelayTransition {
+                    signal_id: 12,
+                    loop_id: 2,
+                    value_type: ValueType::Real,
+                    max_delay: 3,
+                    clock_domain: Some(7),
+                    storage: VectorDelayStorage::ClockRing {
+                        buffer_name: "vstate_s12".to_owned(),
+                        cursor_name: "vclock_d7_iota".to_owned(),
+                        domain_id: 7,
+                        capacity: 4,
+                        mask: 3,
+                    },
+                }],
+                recursions: vec![],
+            },
+            &vector,
+        );
         let mut store = FirStore::new();
         let clock_value = FirBuilder::new(&mut store).int32(2);
         let value = FirBuilder::new(&mut store).float32(0.5);
@@ -2027,7 +2241,7 @@ mod tests {
         };
         let verified = assemble_vector_fir(
             &routed,
-            None,
+            Some(&state),
             Some(&clock),
             &inputs,
             std::slice::from_ref(&clock_output),
@@ -2037,14 +2251,15 @@ mod tests {
         .expect("assemble clock");
         let assembly = verified.assembly();
         assert_eq!(assembly.islands.len(), 1);
+        assert!(assembly.islands[0].state_cursor_advance.is_some());
         assert_eq!(assembly.islands[0].local_declarations.len(), 1);
         assert!(assembly.local_declarations.is_empty());
         assert!(matches!(
             match_fir(&store, assembly.islands[0].statement),
             FirMatch::SimpleForLoop { .. }
         ));
-        assert_eq!(assembly.state_declarations.len(), 1);
-        assert_eq!(assembly.clear_statements.len(), 1);
+        assert_eq!(assembly.state_declarations.len(), 3);
+        assert_eq!(assembly.clear_statements.len(), 3);
         assert_eq!(assembly.clock_output_stores, [clock_output]);
         assert!(matches!(
             match_fir(&store, assembly.state_declarations[0]),
@@ -2057,15 +2272,22 @@ mod tests {
         let mut forged = assembly.clone();
         forged.islands[0].statement = FirBuilder::new(&mut store).int32(0);
         assert!(matches!(
-            verify_vector_fir_assembly(&routed, None, Some(&clock), &forged, &store),
+            verify_vector_fir_assembly(&routed, Some(&state), Some(&clock), &forged, &store),
             Err(VectorFirAssemblyError::IslandShape { domain_id: 7 })
         ));
 
         let mut forged = assembly.clone();
         forged.clock_output_stores[0].owner_loop_id = 99;
         assert!(matches!(
-            verify_vector_fir_assembly(&routed, None, Some(&clock), &forged, &store),
+            verify_vector_fir_assembly(&routed, Some(&state), Some(&clock), &forged, &store),
             Err(VectorFirAssemblyError::ClockLoopOwnership { loop_id: 99 })
         ));
+
+        let mut forged = assembly.clone();
+        forged.islands[0].state_cursor_advance = None;
+        assert_eq!(
+            verify_vector_fir_assembly(&routed, Some(&state), Some(&clock), &forged, &store),
+            Err(VectorFirAssemblyError::IslandShape { domain_id: 7 })
+        );
     }
 }

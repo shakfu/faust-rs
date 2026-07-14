@@ -11,8 +11,11 @@
 //!
 //! The result deliberately contains no scheduling order and this API has no
 //! `SchedulingStrategy` parameter. `-ss` is applied later, independently in
-//! each fixed epoch. P5 still owns region-aware FIR routing; P6 owns complete
-//! clock-domain epochs and delay/recursion storage geometry.
+//! each fixed epoch. Delayed inter-loop uses contribute ordering edges but no
+//! immediate-value transports: this is the Rust counterpart of the C++ delay
+//! line loop preceding its readers within a vector chunk. P5 still owns
+//! region-aware FIR routing; P6 owns complete clock-domain epochs and
+//! delay/recursion storage geometry.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -318,9 +321,16 @@ pub fn build_vector_plan(
     }
 
     let mut cross_uses = BTreeSet::<(u32, u64, u64)>::new();
+    let mut delayed_edges = BTreeSet::<LoopEdge>::new();
     let mut effect_edges = BTreeSet::<LoopEdge>::new();
     for dependency in &certificate.dependencies {
-        add_dependency_edges(dependency, &state, &mut cross_uses, &mut effect_edges)?;
+        add_dependency_edges(
+            dependency,
+            &state,
+            &mut cross_uses,
+            &mut delayed_edges,
+            &mut effect_edges,
+        )?;
     }
     let mut data_edges = cross_uses
         .iter()
@@ -329,6 +339,14 @@ pub fn build_vector_plan(
             dependency: producer,
         })
         .collect::<BTreeSet<_>>();
+    let mut ordering_edges = data_edges.clone();
+    ordering_edges.extend(effect_edges.iter().copied());
+    for edge in delayed_edges {
+        if !reachable(edge.consumer, edge.dependency, &ordering_edges) {
+            data_edges.insert(edge);
+            ordering_edges.insert(edge);
+        }
+    }
 
     let loop_ids = (0..next_loop).collect::<Vec<_>>();
     orient_effect_conflicts(&loop_ids, &state, &data_edges, &mut effect_edges);
@@ -441,6 +459,7 @@ fn add_dependency_edges(
     dependency: &DependencyFact,
     state: &PlacementState<'_>,
     cross_uses: &mut BTreeSet<(u32, u64, u64)>,
+    delayed_edges: &mut BTreeSet<LoopEdge>,
     effect_edges: &mut BTreeSet<LoopEdge>,
 ) -> Result<(), VectorPlanBuildError> {
     if state.placement.get(&dependency.from) == Some(&Placement::Control) {
@@ -475,7 +494,13 @@ fn add_dependency_edges(
                     dependency: producer,
                 });
             }
-            DepKind::Delayed { .. } | DepKind::ClockBoundary => {}
+            DepKind::Delayed { .. } => {
+                delayed_edges.insert(LoopEdge {
+                    consumer,
+                    dependency: producer,
+                });
+            }
+            DepKind::ClockBoundary => {}
         }
     }
     Ok(())
@@ -664,6 +689,39 @@ mod tests {
                     consumer: transport.consumer_loop,
                     dependency: transport.producer_loop,
                 })
+        }));
+    }
+
+    #[test]
+    fn delayed_cross_loop_use_orders_chunks_without_an_immediate_transport() {
+        let mut arena = TreeArena::new();
+        let (input, delayed) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let ten = builder.int(10);
+            (input, builder.delay(input, ten))
+        };
+        let decorations = certify(&arena, &[delayed]);
+        let plan = build_vector_plan(&decorations, 8).unwrap();
+        let signal = |id: signals::SigId| {
+            plan.plan()
+                .signals
+                .iter()
+                .find(|signal| signal.signal_id == u64::from(id.as_u32()))
+                .unwrap()
+        };
+        let Placement::Owned(producer) = signal(input).placement else {
+            panic!("delayed carrier must own its state loop");
+        };
+        let Placement::Owned(consumer) = signal(delayed).placement else {
+            panic!("delay read must own its reader loop");
+        };
+        assert!(plan.plan().data_edges.contains(&LoopEdge {
+            consumer,
+            dependency: producer,
+        }));
+        assert!(!plan.plan().transports.iter().any(|transport| {
+            transport.producer_loop == producer && transport.consumer_loop == consumer
         }));
     }
 

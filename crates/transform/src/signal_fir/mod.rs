@@ -55,8 +55,11 @@
 //!   verification, and production selection after P5.3/P6 acceptance.
 //! - **Vector P6.5 production lowering**: admit fixed delays, symbolic
 //!   recursion, stateless clock islands with held outputs, and expanded FAD
-//!   graphs into the checked final-module path. Variable delays, clock-local
-//!   state, UI programs, and RAD remain named scalar-compatible fallbacks.
+//!   graphs into the checked final-module path.
+//! - **Vector P6.6 clock-state and variable-delay lowering**: use bounded
+//!   runtime delay amounts, order delayed inter-loop producers before readers,
+//!   and materialize one shared fire-time cursor per stateful clock island.
+//!   UI programs and RAD remain named scalar-compatible fallbacks.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
@@ -168,11 +171,11 @@ impl RealType {
 /// the non-recursive ones (SIMD); recursive computations stay in serial loops.
 ///
 /// Roadmap P6, vector doc V1
-/// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). P6.5 activates
-/// the independently checked signal-level path for pure graphs, fixed delays,
-/// symbolic recursion, stateless clock islands, and expanded FAD graphs. Other
-/// shapes retain the transitional vector builder with an observable
-/// [`VectorPipelineStatus::Fallback`] reason.
+/// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). P6.6 activates
+/// the independently checked signal-level path for pure graphs, fixed and
+/// bounded-variable delays, symbolic recursion, stateful clock islands, and
+/// expanded FAD graphs. Other shapes retain the transitional vector builder
+/// with an observable [`VectorPipelineStatus::Fallback`] reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComputeMode {
     /// One scalar loop over the whole block (`for i in 0..count`).
@@ -291,7 +294,7 @@ pub struct SignalFirOptions {
     /// or above `max_copy_delay` use circular-pow2).
     pub delay_line_threshold: u32,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
-    /// (`-vec`). Accepted P6.5 programs use the checked P4/P5/P6 path; named
+    /// (`-vec`). Accepted P6.6 programs use the checked P4/P5/P6 path; named
     /// unsupported shapes retain the transitional vector builder.
     pub compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
