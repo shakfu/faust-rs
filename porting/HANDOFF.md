@@ -1,76 +1,75 @@
 # Session Handoff
 
-Date: 2026-07-13
+Date: 2026-07-14
 
 ## Repo State
 
 - Branch: `ondemand-vec-fad-synthesis`
-- HEAD: the commit containing this handoff
-- Current task: P4.4 production `VectorPlan` construction
-- P4.4 is implemented additively and included in this commit.
+- Base HEAD: `1ada5b26d318` (`Build production VectorPlan from verified decorations`)
+- Current task: P5.1 region-aware routed-FIR construction and verification
+- P5.1 is implemented in the working tree and remains additive.
 
 ## Working Tree
 
-- Committed changes: production vector-plan construction, strengthened plan
-  verification, plan/certification documentation, today's journal/index, and
-  this handoff.
-- Many pre-existing untracked scratch files remain at the repository root and
-  were left untouched.
+- Tracked changes cover P5.1 routing, a P4.4 root-promotion fix, planning and
+  certification status, today's journal/index, and this handoff.
+- `crates/transform/src/signal_fir/vector_route.rs` is the new untracked source
+  file that belongs to this change.
+- Many unrelated pre-existing untracked scratch files remain at the repository
+  root and were left untouched.
 
 ## What Changed
 
-- Added `signal_fir::vector_plan::build_vector_plan`, accepting only an opaque
-  `VerifiedDecorationCertificate` and positive `vec_size`.
-- Consolidated vector placement against certified occurrence/max-delay facts;
-  the pass does not inspect the signal arena or fused FIR.
-- Allocated deterministic root, recursion-group, and separated loops before
-  scheduling; no `SchedulingStrategy` enters plan construction.
-- Materialized nonduplicable values once, pre-planned typed cross-loop
-  transports, and oriented conflicting effects deterministically.
-- Returned only an opaque `VerifiedVectorPlan` after independent verification.
-- Strengthened `verify_vector_plan` to derive duplicability and local
-  `VecSafe`, check loop/epoch agreement and canonical witnesses, and reject
-  unordered conflicting effects.
+- Added `VectorRouteSession`, consuming only `VerifiedVectorPlan` and the common
+  `SchedulingStrategy` to materialize strategy-dependent loop-region order.
+- Added distinct control, owned-loop, loop-local inline, and transport-load
+  caches with fail-closed visibility rules.
+- Declared every canonical typed transport up front; emitted producer stores
+  and consumer loads only for exact P4.4 routes at `i0 - vindex`.
+- Added independent `verify_routed_fir` checks for definitions, types, scopes,
+  transport shapes, and producer/consumer linkage.
+- Fixed P4.4 construction when a later sample root was visited inline while
+  traversing an earlier root; it is now promoted to the shared root loop.
 
 ## Decisions And Constraints
 
-- Empty effects and declared-pure foreign effects are the only duplicable sets.
-- State reads/writes block local pointwise `VecSafe`; other effects are safe
-  only when the loop graph orders every conflicting pair.
-- All projections of one symbolic recursion group share one serial loop.
-- Non-recursive unsafe loops conservatively use `Island`; precise clock epochs
-  and state transitions remain P6.
-- The current P4.4 plan has one forward epoch. AD and full clock-domain epoch
-  construction remain P6.
-- Table carriers are control values and fail closed if a numeric chunk
-  transport is requested.
-- P4.4 is not yet connected to FIR routing, compiler options, or backends.
+- Routing cannot allocate storage or names. P4.4 remains the sole transport
+  allocation authority.
+- `Control` values are ancestor-visible; `Inline` values exist per exact loop;
+  `Owned` values are direct only in their owner and transported elsewhere.
+- This is an adapted internal C++ mapping with no external CLI/ABI change.
+- The new route is not connected to `build_module`. P6 must define complete
+  state transitions before stateful lowering can safely use these regions.
+- Full R4 is not claimed: effect traces, epoch-body order, per-region CSE,
+  actual signal-expression routing, and backend activation remain open.
 
 ## Validation
 
 - `cargo fmt --all` passes.
-- Focused vector analysis/plan/schedule/verifier tests pass (52 tests).
+- `cargo test -p transform signal_fir::vector_route --lib` passes (7 tests).
+- `cargo test -p transform signal_fir::vector_plan --lib` passes (6 tests).
+- `cargo clippy -p transform --all-targets -- -D warnings` passes.
 - `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- `cargo test --workspace --all-targets` passes, including all 270 transform
-  tests; pre-existing explicitly ignored tests remain ignored.
+- `cargo test --workspace --all-targets` passes.
 - `cargo run -p xtask -- golden-check` passes all 190 snapshots unchanged.
 
 ## Next Steps
 
-1. P5: route signal-to-FIR lowering through `VerifiedVectorPlan` with the
-   three-scope value cache and fail-closed transport resolution.
-2. Add independent routed-FIR checks for region visibility, transport
-   store/load pairing, effects, and value typing before backend activation.
-3. P6: refine delay storage, recursive transitions, clock epochs, and AD
-   execution semantics.
-4. Complete canonical JSON/hash plus the Lean R3 checker and add the stable C++
-   occurrence oracle/vectorization-retention corpus.
+1. P5.2: lower actual pure signal closures into `VectorRouteSession` regions,
+   then run CSE independently per routed region.
+2. Add the bounded event-order/FissionSafe checker and complete routed effect
+   and epoch-order evidence.
+3. P6: implement delay storage, recursion transitions, clock epochs, and AD
+   execution semantics before stateful route activation.
+4. Connect the verified routed module to `build_module`, compiler options, and
+   backends only after those gates pass.
+5. Complete canonical JSON/hash, Lean R3/R4 checking, and the stable C++
+   occurrence/vectorization-retention corpus.
 
 ## Useful Commands
 
+- `cargo test -p transform signal_fir::vector_route --lib`
 - `cargo test -p transform signal_fir::vector_plan --lib`
-- `cargo test -p transform signal_fir::vector_verify --lib`
-- `cargo test -p transform signal_fir::vector_schedule --lib`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`
 - `cargo run -p xtask -- golden-check`

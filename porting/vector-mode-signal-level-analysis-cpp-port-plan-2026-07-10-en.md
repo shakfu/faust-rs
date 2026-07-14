@@ -1848,7 +1848,7 @@ lowering, an independent FIR check establishes `R-Type`, `R-Effects`, and
   permitted only for a named unsupported effect/clock/recursion reason captured
   in the snapshot.
 
-**Implementation status (2026-07-13).** The additive P5 assurance slices now
+**Implementation status (2026-07-14, P5.1).** The additive P5 assurance slices now
 include the strategy-independent `VectorPlan` DTO, independent
 `verify_vector_plan`, production P4.4 construction from accepted decorations,
 projection of the executed PV plan into the DTO, and `schedule_vector_plan`.
@@ -1858,9 +1858,32 @@ strategies, and checks every result with the independent schedule postcondition
 verifier. Production construction derives duplicability and local `VecSafe`,
 pre-plans typed transports, and conservatively orders every pair of conflicting
 loop effects; the verifier independently rejects unordered conflicts. Tests
-prove that strategy changes only per-epoch loop order. Region-aware
-routing/cache, per-region CSE, complete transport resolution in routed FIR,
-routed-FIR verification, and backend emission remain open.
+prove that strategy changes only per-epoch loop order.
+
+P5.1 adds `signal_fir::vector_route::VectorRouteSession`, which accepts only an
+opaque `VerifiedVectorPlan`. It projects the selected per-epoch schedule into
+loop regions, replaces global value lookup with distinct `Control`, `Owned`,
+and `(loop, Inline)` caches, declares every typed transport before lowering,
+and refuses to allocate a cross-loop route on demand. An owned producer emits
+the exact pre-planned store and a sibling consumer resolves only through the
+matching load; both use the canonical `i0 - vindex` chunk index. The independent
+`verify_routed_fir` gate checks region legality, FIR value types, complete
+definition coverage, exact transport identity/declaration/store/load shape,
+producer-definition linkage, consumer-use linkage, and direct-use visibility.
+Mutation and scope tests cover missing loads, altered load FIR, substituted
+direct-use values, sibling writes, loop-local inline values, ancestor control
+values, and all four `-ss` strategies. P4.4 was also hardened so a sample root visited inline from an
+earlier root is promoted to the root loop instead of panicking.
+
+This internal API is an adapted C++ mapping: C++ combines placement, caching,
+and buffer creation in `DAGInstructionsCompiler`; Rust consumes the already
+verified P4.4 plan and never creates storage during lookup. It has no external
+CLI or ABI impact. P5.1 remains additive and is deliberately not called by
+`build_module`: routing complete stateful signal lowering before P6 defines
+delay, recursion, clock, and AD transitions would be unsound. Actual
+signal-expression lowering into these regions, per-region CSE, the bounded
+event-order/FissionSafe gate, complete epoch/effect checking, vectorization
+retention, and backend activation remain open.
 
 **Exit criterion:** shared expressions and pure prefixes/tails are separated
 without inspecting FIR statements; all four strategies execute bit-exactly for

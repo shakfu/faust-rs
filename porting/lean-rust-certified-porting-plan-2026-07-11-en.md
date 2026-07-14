@@ -548,6 +548,19 @@ After signal-level routing, emit and verify:
 
 Backend generation is forbidden unless this certificate is accepted.
 
+Implementation status (2026-07-14, partial R4/P5.1): Rust now has an additive
+`VectorRouteSession` and independent `verify_routed_fir` gate. The route starts
+only from `VerifiedVectorPlan`, materializes scheduled loop regions and the
+three visibility scopes, and emits the plan's canonical typed transport
+declarations, producer stores, and consumer loads at the exact `i0 - vindex`
+index. Verification reconnects each store to the declared producer value and
+each load to a recorded consumer use, checks value types and region visibility,
+and rejects missing or mutated evidence. This establishes the structural
+transport and value-routing subset of R4. Exactly-once effect traces, complete
+epoch-body order, per-region CSE, actual signal-expression routing, Lean-side
+checking, and the backend activation gate remain open; therefore no full R4
+certificate is claimed yet.
+
 ### R5 - Semantic reference execution
 
 Extend the Lean model with a small executable signal/FIR semantics in increments:

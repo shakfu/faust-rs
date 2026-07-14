@@ -52,6 +52,12 @@ impl VerifiedVectorPlan {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn verified_vector_plan_for_test(plan: VectorPlan) -> VerifiedVectorPlan {
+    verify_vector_plan(&plan).expect("test vector plan must satisfy the production verifier");
+    VerifiedVectorPlan { plan }
+}
+
 /// Why production P4.4 plan construction failed closed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorPlanBuildError {
@@ -279,18 +285,25 @@ pub fn build_vector_plan(
         if record.variability != Variability::Samp {
             continue;
         }
-        if let std::collections::btree_map::Entry::Vacant(entry) = state.placement.entry(root) {
-            let loop_id = root_loop.expect("an inline sample root allocated the root loop");
-            entry.insert(Placement::Owned(loop_id));
-            state
-                .roots_by_loop
-                .entry(loop_id)
-                .or_default()
-                .insert(u64::from(root));
-        }
-        let loop_id = match state.placement[&root] {
-            Placement::Owned(loop_id) => loop_id,
-            Placement::Control | Placement::Inline => unreachable!("sample root is owned"),
+        let loop_id = match state.placement.get(&root).copied() {
+            Some(Placement::Owned(loop_id)) => loop_id,
+            Some(Placement::Inline) | None => {
+                // A preceding output traversal may already have visited this
+                // pure root inline. Its top-level use still needs a concrete
+                // producer in the shared root loop; revisiting it records both
+                // execution contexts and therefore the required transport.
+                let loop_id = root_loop.expect("an inline sample root allocated the root loop");
+                state.placement.insert(root, Placement::Owned(loop_id));
+                state
+                    .roots_by_loop
+                    .entry(loop_id)
+                    .or_default()
+                    .insert(u64::from(root));
+                loop_id
+            }
+            Some(Placement::Control) => {
+                return Err(VectorPlanBuildError::SampleSignalUnplaced { signal_id: root });
+            }
         };
         state.visit(root, loop_id)?;
     }
@@ -737,6 +750,35 @@ mod tests {
             panic!("effectful output must be materialized");
         };
         assert!(plan.loops[owner as usize].roots.contains(&output.signal_id));
+    }
+
+    #[test]
+    fn previously_visited_inline_sample_root_is_promoted_without_panicking() {
+        let mut arena = TreeArena::new();
+        let (left, right) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let half = builder.real(0.5);
+            let shared = builder.binop(signals::BinOp::Mul, input, half);
+            let one = builder.real(1.0);
+            let two = builder.real(2.0);
+            (
+                builder.binop(signals::BinOp::Add, shared, one),
+                builder.binop(signals::BinOp::Mul, shared, two),
+            )
+        };
+        let decorations = certify(&arena, &[left, right]);
+        let plan = build_vector_plan(&decorations, 8).unwrap();
+        let right_id = u64::from(decorations.certificate().roots[1]);
+        assert!(matches!(
+            plan.plan()
+                .signals
+                .iter()
+                .find(|signal| signal.signal_id == right_id)
+                .unwrap()
+                .placement,
+            Placement::Owned(_)
+        ));
     }
 
     #[test]
