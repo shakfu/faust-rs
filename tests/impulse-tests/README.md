@@ -80,6 +80,7 @@ make p7-smoke      # run all 72 combinations on the representative P7 corpus
 make p7-matrix     # run all 72 combinations on the full configured corpus
 make -j8 p7-full   # fresh full matrix plus the versioned audited report
 make bench         # compare C++ Faust and faust-rs performance with faustbench -single
+make vec-bench     # compare scalar/vec0/vec1 C++ throughput under -ss 0..3
 make compile-bench # compare C++ Faust and faust-rs compile time
 make all           # cpp + c + interp + cranelift + wasm + assemblyscript
 make -k -j8 cpp    # parallel, keep going past failures
@@ -164,6 +165,27 @@ The default precision option is `BENCH_OPTIONS=-double`; the recipe also passes
 
 ```bash
 make bench BENCH_OPTIONS="-double -run 3" BENCH_WARN_MIN=10
+```
+
+`make vec-bench` keeps the `faust-rs` compiler and native C++ build settings
+fixed and measures the 12 combinations formed by scalar, `-vec -lv 0`, and
+`-vec -lv 1` crossed with `-ss 0..3`. It writes:
+
+- `build/bench/vector-scheduling.csv` — one row per DSP/combination, including
+  throughput, gain versus `scalar -ss 0`, and vector gain versus scalar at the
+  same `-ss` value.
+- `build/bench/vector-scheduling-summary.csv` — the fastest mode and scheduling
+  strategy for each DSP.
+- `build/bench/vector-scheduling-aggregate.csv` — arithmetic and geometric mean
+  speedups, plus win counts, for each of the 12 mode/strategy combinations.
+- `build/bench/logs/*.scalar.ss*.log` and `*.vec*.ss*.log` — raw faustbench
+  output for every measurement.
+
+This is a developer performance benchmark, not a correctness gate. Use several
+runs and a fixed block size when comparing changes:
+
+```bash
+make vec-bench VEC_BENCH_OPTIONS="-double -run 5 -bs 512"
 ```
 
 `make compile-bench` measures compiler wall-clock time on the same corpus. It

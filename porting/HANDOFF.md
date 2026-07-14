@@ -6,22 +6,27 @@ Date: 2026-07-14
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff.
-- Current task: C++ scheduling inside symbolic recursion, completed in this
-  commit.
+- Current task: scalar/vector C++ throughput across `-ss 0..3`, completed in
+  this commit.
 - The checked path now covers pure graphs, fixed and bounded-variable delays,
   symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
 
 ## Working Tree
 
-- This commit removes the former context-bound `SYMREC` exception and makes
-  scheduled shared sample materialization observable in generated code.
+- This commit adds and documents `vec-bench`; this handoff and today's journal
+  record the work.
 - Many unrelated pre-existing untracked scratch files remain untouched.
-- `tests/impulse-tests` P7 generated directories were cleaned before the APF
-  validation; only the 24 scalar APF combinations were regenerated. Run the
-  full matrix again before attempting `p7-report` from local artifacts.
+- `tests/impulse-tests` currently contains only partial/stale P7 generated
+  directories. Run `p7-full` before attempting `p7-report` from local artifacts.
 
 ## What Changed
 
+- Added a 12-combination scalar/`lv0`/`lv1` x `-ss 0..3` C++ throughput
+  benchmark with detailed, per-DSP winner, and corpus-aggregate CSV outputs.
+- Added per-combination `[run]`/`[done]` progress with a 1/12 through 12/12
+  counter, plus explicit failure-log paths.
+- Kept the benchmark non-gating while warning on configurable vector slowdowns;
+  raw logs preserve every faustbench command and measurement.
 - Activated selected scalar schedules in control, top, and wrapper regions.
 - Registered symbolic recursion binders globally and scheduled ordinary
   recurrence-body nodes through the same Hgraph as C++.
@@ -140,6 +145,11 @@ Date: 2026-07-14
 
 ## Validation
 
+- `make -f Make.bench vec-bench dspfiles=dsp/APF.dsp
+  VEC_BENCH_OPTIONS="-double -run 1 -bs 512"` completes all 12 combinations;
+  two runs validate detailed, winner, and aggregate CSV generation.
+- `make -n vec-bench dspfiles=dsp/APF.dsp` and `make help` expose the expected
+  commands and controls.
 - `make -C tests/impulse-tests -j8 all-ss dspfiles=dsp/APF.dsp` passes all 24
   scalar APF comparisons across six executable backends and four strategies.
 - `cargo test -p transform signal_fir --lib` passes all 220 selected tests.
@@ -160,9 +170,10 @@ Date: 2026-07-14
 
 ## Next Steps
 
-1. Keep P7.3 (FIR/WAST/Julia artifact and single-precision gates) deferred as
-   requested unless it becomes necessary for a release gate.
-2. Add optimized/unoptimized final-state/effect parity and the versioned
+1. Run `make vec-bench VEC_BENCH_OPTIONS="-double -run 5 -bs 512"` on the full
+   corpus when the machine can be reserved for stable performance sampling.
+2. Resume P7.3 (FIR/WAST/Julia artifact and single-precision gates).
+3. Add optimized/unoptimized final-state/effect parity and the versioned
    vectorization-coverage baseline before cost-model work or fallback removal.
 
 ## Useful Commands

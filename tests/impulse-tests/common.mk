@@ -58,6 +58,11 @@ FAUSTBENCH ?= faustbench -single
 BENCH_OPTIONS ?= -double
 BENCH_WARN_MIN ?= 5
 BENCH_CSV ?= build/bench/summary.csv
+VEC_BENCH_OPTIONS ?= $(BENCH_OPTIONS)
+VEC_BENCH_WARN_MIN ?= 5
+VEC_BENCH_CSV ?= build/bench/vector-scheduling.csv
+VEC_BENCH_SUMMARY_CSV ?= build/bench/vector-scheduling-summary.csv
+VEC_BENCH_AGGREGATE_CSV ?= build/bench/vector-scheduling-aggregate.csv
 COMPILE_BENCH_CSV ?= build/bench/compile-summary.csv
 
 dspfiles := $(wildcard dsp/*.dsp)

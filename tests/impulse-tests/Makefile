@@ -35,7 +35,7 @@ SCALAR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach ss,$(SS_VALUES),$(b
 VECTOR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach lv,0 1,$(foreach ss,$(SS_VALUES),$(backend)-vec$(lv)-ss$(ss))))
 P7_SMOKE_DSPFILES ?= dsp/APF.dsp dsp/delays.dsp dsp/select2.dsp
 
-.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss p7-matrix p7-smoke p7-clean p7-report p7-full reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 bench compile-bench build tools help clean distclean
+.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss p7-matrix p7-smoke p7-clean p7-report p7-full reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 bench vec-bench compile-bench build tools help clean distclean
 
 all: cpp c interp cranelift wasm assemblyscript
 
@@ -146,6 +146,9 @@ assemblyscript-vec1:
 bench:
 	@$(MAKE) -f Make.bench bench
 
+vec-bench:
+	@$(MAKE) -f Make.bench vec-bench
+
 compile-bench:
 	@$(MAKE) -f Make.bench compile-bench
 
@@ -184,6 +187,7 @@ help:
 	@echo "  p7-smoke       : p7-matrix on P7_SMOKE_DSPFILES"
 	@echo "  p7-full        : clean P7 outputs, run full matrix, write audited report"
 	@echo "  bench          : compare C++ Faust and faust-rs generated-code speed with faustbench -single"
+	@echo "  vec-bench      : compare scalar/vec0/vec1 C++ code under -ss 0..3"
 	@echo "  compile-bench  : compare C++ Faust and faust-rs compile time on the DSP corpus"
 	@echo "  cpp            : check the faust-rs C++ backend (full 4-pass)"
 	@echo "  c              : check the faust-rs C backend (full 4-pass)"
@@ -200,7 +204,11 @@ help:
 	@echo "  RUNNER=$(RUNNER)"
 	@echo "  FAUSTBENCH=$(FAUSTBENCH)"   
 	@echo "  BENCH_OPTIONS=$(BENCH_OPTIONS)"
-	@echo "  BENCH_CSV=$(BENCH_CSV)"   
+	@echo "  BENCH_CSV=$(BENCH_CSV)"
+	@echo "  VEC_BENCH_OPTIONS=$(VEC_BENCH_OPTIONS)"
+	@echo "  VEC_BENCH_CSV=$(VEC_BENCH_CSV)"
+	@echo "  VEC_BENCH_SUMMARY_CSV=$(VEC_BENCH_SUMMARY_CSV)"
+	@echo "  VEC_BENCH_AGGREGATE_CSV=$(VEC_BENCH_AGGREGATE_CSV)"
 	@echo "  COMPILE_BENCH_CSV=$(COMPILE_BENCH_CSV)"
 	@echo "  precision=<tol>  (filesCompare tolerance override)"
 	@echo ""
