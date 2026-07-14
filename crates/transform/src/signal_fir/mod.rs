@@ -34,7 +34,12 @@
 //!   recursion `pre/exec/post` phases from accepted signal decorations, refine
 //!   P5.3 state effects with phase events, and exhaustively validate the C++
 //!   copy/ring delay representations against newest-first abstract history.
-//!   Both gates remain additive; P6.2 still owns clocks and AD epochs.
+//! - **Vector P6.2 clock/AD artifact**: compose the checked vector plan with a
+//!   freshly checked clock environment, materialize nested serial OD/US/DS
+//!   islands, restrict outer-chunk transports to top-rate values, accept FAD
+//!   as an expanded ordinary signal graph, and force reverse-time/BRA carriers
+//!   to scalar `Forward < Reverse` windows. Both P6 gates remain additive and
+//!   are not yet selected by `build_module` or a backend.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
@@ -84,6 +89,7 @@ mod recursion;
 pub mod shadow;
 mod siggen;
 pub mod vector_analysis;
+pub mod vector_clock_ad;
 pub mod vector_events;
 pub mod vector_lower;
 pub mod vector_plan;

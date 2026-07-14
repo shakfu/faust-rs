@@ -590,8 +590,21 @@ managed state resources. Bounded concrete copy/ring executions are compared
 through `alpha` with `history_step`/`delay_read`, and accepted transition words
 refine P5.3 effects into phase events with explicit barriers and recursion-step
 chains. This advances the delay/recursion subset of R4/R5, but it is not yet
-serialized or accepted by Lean, and it does not cover clock/AD transitions,
-tuple FIR routing, final module assembly, or backend eligibility.
+serialized or accepted by Lean, and it does not cover tuple FIR routing, final
+module assembly, or backend eligibility.
+
+P6.2 adds a third finite producer/checker artifact for clocks and AD policy. It
+recomputes `ClkEnvMap`, checks the domain tree and wrapper-kind agreement,
+reconstructs one nested serial island per OD/US/DS wrapper, and partitions
+transports into top-rate outer-chunk, island-scalar, and persistent held-output
+routes. Its executable `ClockStep`
+model covers boolean, counted, and modulo firing while preserving state and
+held output on zero fires. FAD is accepted only in its post-propagation ordinary
+signal form. Reverse carriers are not vector-certified: they produce a stable
+scalar-fallback diagnostic and immutable `Forward < Reverse` epoch evidence.
+This advances the clock/AD-policy subset of R4/R5, but the artifact is not yet
+serialized or checked by Lean and does not establish final FIR simulation or
+backend eligibility.
 
 ### R5 - Semantic reference execution
 

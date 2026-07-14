@@ -2026,8 +2026,51 @@ particular, P5.1 currently rejects tuple-valued FIR definitions, so a real
 recursive-group tuple cannot yet pass complete routed-FIR assembly; the P6.1
 producer itself is tested on the real prepared multi-projection graph, while
 event integration uses an independently verified scalar-projection fixture.
-Clock/AD simulation, tuple FIR routing, C++ output differentials, final module
-assembly, and backend activation remain open.
+
+Implementation status (2026-07-14, P6.2):
+`signal_fir::vector_clock_ad::build_vector_clock_ad_plan` now composes an opaque
+checked `VectorPlan` with the propagation-owned `ClockDomainTable` and a fresh
+`clk_env::annotate` result over the verified prepared forest. Its checker
+revalidates exact signal/clock identities, the acyclic domain parent relation,
+one wrapper per domain, serial boundary ownership, domain members and nested
+P4 loops. This is a representation-level adaptation of the C++ hierarchical
+`CodeIFblock`: the P4 loops remain stable identities and the P6.2 certificate
+places them below explicit serial island nodes instead of rebuilding them.
+
+The executable guard model is:
+
+```math
+fires(c,i)=
+\begin{cases}
+1_{h_i\ne0}, & OD_{bool},\\
+\max(h_i,0), & OD_{int}\text{ or }US,\\
+1_{q_i=0},\quad q_{i+1}=(q_i+1)\bmod h_i, & DS,\ h_i>0.
+\end{cases}
+```
+
+`simulate_clock_step` applies `Step_c` exactly this many times. Tests establish
+that zero fires preserve both state and held output, counted guards advance in
+fire time, the DS counter produces the expected periodic trace, and nested
+islands preserve exact parentage. Guard selection matches scalar lowering:
+boolean OD is recognized from a valid `[0,1]` interval, while counted OD/US/DS
+requires an integer clock.
+
+Every existing P5 transport is classified as `OuterChunk` for a top-rate
+signal, `IslandScalar(domain)` for an ephemeral domain-rate value, or
+`HeldOutput(domain)` for a persistent `PermVar` exported to an ancestor.
+Therefore the artifact explicitly forbids reusing P5's `i0-vindex` route below
+a guard and prevents a hold from being replaced by an ephemeral scalar. Final
+FIR assembly must rematerialize both domain policies with their distinct
+lifetimes. FAD is certified as `ExpandedSignalGraph` and a compiler-level test
+confirms that a real propagated FAD contains no reverse carrier. `ReverseTimeRec` and
+`BlockReverseAD` each produce an explicit `FRS-VEC-RAD-SCALAR` fallback with
+fixed `[Forward, Reverse]` epochs; an executable reference combinator proves by
+construction that reverse cannot run before the forward state and tape exist.
+
+P6.2 remains additive. It does not yet emit island/state actions into final FIR,
+replace island-local P5 transports, assemble tuple-valued recursion, compare
+clocked/FAD vector audio with C++, or enable a backend. Those are the remaining
+conditions before the P6 exit criterion can be claimed.
 
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an
