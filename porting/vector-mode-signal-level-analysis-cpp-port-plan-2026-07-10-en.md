@@ -1939,11 +1939,11 @@ and accept the same state accesses when co-located in one serial loop.
 
 The bounded checker is a concrete executable refinement of the existing Lean
 `FissionSafe` predicate, not a proof of complete DSP semantics. Its scalar
-order is a deterministic topological linear extension of the accepted plan;
-P6 must still connect delay, recursion, clock, and AD transition semantics to
-that event vocabulary. Complete output/module assembly, vectorization
-retention, Lean-side certificate acceptance, and backend activation remain
-open.
+order is a deterministic topological linear extension of the accepted plan.
+P6.1 now connects delay and recursion transitions to this vocabulary; clock and
+AD transitions remain P6.2 work. Complete output/module assembly,
+vectorization retention, Lean-side certificate acceptance, and backend
+activation remain open.
 
 **Exit criterion:** shared expressions and pure prefixes/tails are separated
 without inspecting FIR statements; all four strategies execute bit-exactly for
@@ -1978,6 +1978,56 @@ not be justified by topological order alone.
 - Keep RAD/BRA scalar until reverse-window semantics under chunking are
   explicitly specified and tested. Forward and reverse execution remain
   separate fixed epochs even after vector support is enabled.
+
+Implementation status (2026-07-14, P6.1):
+`signal_fir::vector_state::build_vector_state_plan` now derives a canonical
+state artifact exclusively from an opaque checked decoration certificate and
+an opaque checked vector plan. Its independent checker revalidates exact source
+signal facts, state-resource coverage, loop ownership, recursion-group
+co-location, storage geometry, canonical ordering, and complete phase bodies.
+It fails closed on clock, reverse-time, and AD state, which remain P6.2.
+
+For a carrier with certified maximum delay `D`, vector size `V`, and copy
+threshold `M`, the checked C++ storage equations are:
+
+```math
+storage(D,V,M)=
+\begin{cases}
+Copy(R,R+V), & D<M,\quad R=4\lceil D/4\rceil,\\
+Ring(N,N-1), & D\ge M,\quad N=2^{\lceil\log_2(D+V)\rceil}.
+\end{cases}
+```
+
+The generated phase words are exactly
+`CopyIn; Write(i); CopyOut` or
+`AdvanceRing; Write(i); SaveAdvance`. A recursion group contributes one
+`RecursionStep(group,i)` in `exec`; all prepared aliases of the same projection
+index are grouped under one persistent projection, and every projection is
+owned by the unique `LoopKind::Recursive(group)` loop.
+
+`CopyDelayState` and `RingDelayState` implement the concrete C++ chunk steps.
+Their abstraction functions return newest-first histories, and focused tests
+exhaustively establish, for 32,805 length-eight sequences over `{-1,0,1}`,
+three full/partial chunk partitions, and delays one through five, that every
+read and post-chunk state equals `delay_read`/`history_step`. This is bounded
+executable evidence for `DelaySim`, not an unbounded proof.
+
+P5.3 now has a state-refined entry point. It replaces only the exact delay and
+recursion resources managed by the checked P6.1 artifact with `LoopPre`,
+sample-indexed `Loop`, and `LoopPost` transition events. Scalar execution orders
+all pre phases, then sample-major loop bodies, then all post phases; vector
+execution orders `pre; samples; post` per scheduled loop. Phase barriers and
+successive recursion steps are added to `D_b`, and `FissionSafe_b` is checked
+for all four `-ss` strategies.
+
+This slice routes transition actions to canonical loop phases but does not yet
+emit those actions as final FIR statements or activate `build_module`. In
+particular, P5.1 currently rejects tuple-valued FIR definitions, so a real
+recursive-group tuple cannot yet pass complete routed-FIR assembly; the P6.1
+producer itself is tested on the real prepared multi-projection graph, while
+event integration uses an independently verified scalar-projection fixture.
+Clock/AD simulation, tuple FIR routing, C++ output differentials, final module
+assembly, and backend activation remain open.
 
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an

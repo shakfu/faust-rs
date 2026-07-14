@@ -581,8 +581,17 @@ cross-sample reversals and are rejected even when a static effect edge orders
 the loop DAG. Co-located serial state and pure transported data are accepted.
 The explicit bound fails closed instead of checking a prefix. This is concrete
 Rust evidence for the finite R4 ordering obligation, but the Rust certificate
-is not yet serialized or accepted by Lean, and P6 transition simulation is
-still required before backend eligibility.
+is not yet serialized or accepted by Lean.
+
+P6.1 now adds a second finite producer/checker artifact for delay and recursion
+state. It records the C++ copy/ring storage geometry, canonical loop
+`pre/exec/post` words, simultaneous recursion projection groups, and exact
+managed state resources. Bounded concrete copy/ring executions are compared
+through `alpha` with `history_step`/`delay_read`, and accepted transition words
+refine P5.3 effects into phase events with explicit barriers and recursion-step
+chains. This advances the delay/recursion subset of R4/R5, but it is not yet
+serialized or accepted by Lean, and it does not cover clock/AD transitions,
+tuple FIR routing, final module assembly, or backend eligibility.
 
 ### R5 - Semantic reference execution
 
