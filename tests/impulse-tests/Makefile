@@ -29,7 +29,13 @@ include common.mk
 
 MAKE ?= make
 
-.PHONY: all all-vec0 all-vec1 all-vec reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 bench compile-bench build tools help clean distclean
+BACKENDS := cpp c interp cranelift wasm assemblyscript
+SS_VALUES := 0 1 2 3
+SCALAR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach ss,$(SS_VALUES),$(backend)-ss$(ss)))
+VECTOR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach lv,0 1,$(foreach ss,$(SS_VALUES),$(backend)-vec$(lv)-ss$(ss))))
+P7_SMOKE_DSPFILES ?= dsp/APF.dsp dsp/delays.dsp dsp/select2.dsp
+
+.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss p7-matrix p7-smoke reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 bench compile-bench build tools help clean distclean
 
 all: cpp c interp cranelift wasm assemblyscript
 
@@ -38,6 +44,35 @@ all-vec0: cpp-vec0 c-vec0 interp-vec0 cranelift-vec0 wasm-vec0 assemblyscript-ve
 all-vec1: cpp-vec1 c-vec1 interp-vec1 cranelift-vec1 wasm-vec1 assemblyscript-vec1
 
 all-vec: all-vec0 all-vec1
+
+all-ss: $(SCALAR_SS_TARGETS)
+
+all-vec-ss: $(VECTOR_SS_TARGETS)
+
+p7-matrix: all-ss all-vec-ss
+
+p7-smoke:
+	$(MAKE) p7-matrix dspfiles="$(P7_SMOKE_DSPFILES)"
+
+# P7.1 matrix targets. Each outdir is unique so combinations can run in
+# parallel without sharing generated artifacts.
+define DEFINE_SCHEDULE_TARGETS
+$(1)-ss%:
+	$$(MAKE) -f $(2) all outdir=$$@ $(3) COMPILER_OPTS="-ss $$*"
+
+$(1)-vec0-ss%:
+	$$(MAKE) -f $(2) all outdir=$$@ $(3) COMPILER_OPTS="-vec -lv 0 -ss $$*"
+
+$(1)-vec1-ss%:
+	$$(MAKE) -f $(2) all outdir=$$@ $(3) COMPILER_OPTS="-vec -lv 1 -ss $$*"
+endef
+
+$(eval $(call DEFINE_SCHEDULE_TARGETS,cpp,Make.gcc,lang=cpp))
+$(eval $(call DEFINE_SCHEDULE_TARGETS,c,Make.gcc,lang=c))
+$(eval $(call DEFINE_SCHEDULE_TARGETS,interp,Make.interp,))
+$(eval $(call DEFINE_SCHEDULE_TARGETS,cranelift,Make.cranelift,))
+$(eval $(call DEFINE_SCHEDULE_TARGETS,wasm,Make.wasm,))
+$(eval $(call DEFINE_SCHEDULE_TARGETS,assemblyscript,Make.assemblyscript,))
 
 reference:
 	$(MAKE) -f Make.ref reference
@@ -104,8 +139,8 @@ compile-bench:
 
 # Build the faust-rs binaries the harness drives.
 build:
-	cd ../.. && cargo build --release -p compiler -p impulse-runner \
-		-p cranelift-ffi --bin impulse_cranelift
+	cd ../.. && cargo build --release -p compiler -p impulse-runner
+	cd ../.. && cargo build --release -p cranelift-ffi --bin impulse_cranelift
 
 tools: $(COMPARE)
 
@@ -129,6 +164,12 @@ help:
 	@echo "  assemblyscript : check the faust-rs AssemblyScript backend (scalar prefix, Node/asc)"
 	@echo "  *-vec0/*-vec1  : check a backend with -vec -lv 0 / -vec -lv 1"
 	@echo "  all-vec        : run all vector-mode backend variants"
+	@echo "  <backend>-ssN  : check scalar mode with -ss N (N=0..3)"
+	@echo "  <backend>-vecL-ssN: check -vec -lv L crossed with -ss N"
+	@echo "  all-ss         : scalar -ss 0..3 across all six backends"
+	@echo "  all-vec-ss     : -lv 0/1 x -ss 0..3 across all six backends"
+	@echo "  p7-matrix      : all-ss + all-vec-ss (full configured corpus)"
+	@echo "  p7-smoke       : p7-matrix on P7_SMOKE_DSPFILES"
 	@echo "  bench          : compare C++ Faust and faust-rs generated-code speed with faustbench -single"
 	@echo "  compile-bench  : compare C++ Faust and faust-rs compile time on the DSP corpus"
 	@echo "  cpp            : check the faust-rs C++ backend (full 4-pass)"

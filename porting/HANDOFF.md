@@ -6,20 +6,27 @@ Date: 2026-07-14
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff
-- Current task: P6.6 clock-local state and variable-delay vector lowering,
-  completed in this commit.
+- Current task: P7.1 executable scheduling backend matrix, completed in this
+  commit.
 - The checked path now covers pure graphs, fixed and bounded-variable delays,
   symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
 
 ## Working Tree
 
-- This commit adds clock-domain state cursors, bounded variable-delay lowering,
-  delayed chunk-order edges, exact island schedule projection, and their
-  structural and differential tests.
+- This commit adds `-ss` propagation through all executable impulse runners,
+  72 isolated scheduling-matrix targets, and a representative differential
+  smoke gate.
 - Many unrelated pre-existing untracked scratch files remain untouched.
 
 ## What Changed
 
+- Added scalar `-ss 0..3` and vector `-lv 0/1 x -ss 0..3` targets for all six
+  executable backends, with aggregate `p7-matrix` and `p7-smoke` targets.
+- Added validated scheduling-option handling to the interpreter, Cranelift,
+  WASM, and AssemblyScript runners.
+- Fixed the impulse `build` target so Cargo's Cranelift `--bin` filter cannot
+  leave a stale `impulse-runner` release binary.
+- Extended known-failure inheritance across vector and scheduling suffixes.
 - Added canonical delay storage and loop phase DTOs derived only from verified
   decoration and vector-plan artifacts.
 - Matched C++ copy geometry `R=4*ceil(D/4)`, temporary length `R+V`, and ring
@@ -80,6 +87,10 @@ Date: 2026-07-14
 
 ## Decisions And Constraints
 
+- P7.1 is a representative matrix-plumbing gate, not the P7 exit gate and not
+  a proof of `V-Simulation`.
+- P7.2 must run all 72 combinations over the 92 supported impulse DSPs and
+  retain an auditable summary before artifact/cost-model work proceeds.
 - Only exact delay/recursion resources covered by the P6.1 artifact replace
   conservative P5.3 effects; all other state remains rejected or serial.
 - Exhaustive bounded simulation is executable evidence, not an unbounded proof.
@@ -98,6 +109,14 @@ Date: 2026-07-14
 
 ## Validation
 
+- `make -C tests/impulse-tests -j8 p7-smoke` passes 216/216 comparisons across
+  72 backend/mode/strategy combinations.
+- Focused unit tests for both Rust impulse runners pass; Node syntax and
+  malformed-`-ss` rejection checks pass.
+- `cargo fmt --all -- --check` passes.
+- `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- `cargo test --workspace --all-targets` passes.
+- `cargo run -p xtask -- golden-check` passes all 190 snapshots unchanged.
 - `cargo fmt --all -- --check` passes.
 - `cargo test -p transform signal_fir::vector --lib` passes (97 tests).
 - `cargo test -p compiler --test vector_mode` passes (8 tests).
@@ -108,10 +127,11 @@ Date: 2026-07-14
 
 ## Next Steps
 
-1. Enter P7 and run the scalar/vector differential backend matrix for
-   `-lv 0/1` crossed with `-ss 0/1/2/3` before removing transitional fallbacks.
-2. Complete canonical JSON/hash, Lean R3/R4 checking, and the stable C++
-   vectorization-retention corpus.
+1. Execute P7.2: run `make -C tests/impulse-tests -j8 p7-matrix` over the full
+   92-DSP supported corpus and store an auditable per-combination summary.
+2. Add the FIR/WAST/Julia artifact matrix and supported single-precision gates.
+3. Add optimized/unoptimized final-state/effect parity and the versioned
+   vectorization-coverage baseline before cost-model work or fallback removal.
 
 ## Useful Commands
 
@@ -123,6 +143,8 @@ Date: 2026-07-14
 - `cargo test -p transform signal_fir::vector_module --lib`
 - `cargo test -p compiler --test vector_mode`
 - `cargo test -p compiler --test vector_clock_ad`
+- `make -C tests/impulse-tests -j8 p7-smoke`
+- `make -C tests/impulse-tests -j8 p7-matrix`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`
 - `cargo run -p xtask -- golden-check`

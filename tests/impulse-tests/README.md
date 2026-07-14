@@ -39,11 +39,15 @@ See the design write-up in
      `-vec -lv 0` or `-vec -lv 1` respectively. Available for `cpp`, `c`,
      `interp`, `cranelift`, `wasm`, and `assemblyscript`; `make all-vec` runs
      both vector loop variants across all backends.
+   - `make <backend>-ssN` / `make <backend>-vecL-ssN` — cross scalar mode or
+     vector loop variant `L` with scheduling strategy `N`. `make all-ss` runs
+     scalar `-ss 0..3`, `make all-vec-ss` runs `-lv 0/1 x -ss 0..3`, and
+     `make p7-matrix` runs all 72 backend/mode/strategy combinations.
 
 ## Requirements
 
-- A built faust-rs workspace: `make build` (runs
-  `cargo build --release -p compiler -p impulse-runner`).
+- A built faust-rs workspace: `make build` (builds `compiler`,
+  `impulse-runner`, and the `impulse_cranelift` binary in release mode).
 - A C++ Faust checkout for the reference oracle and the native C/C++ paths
   (architecture headers + `impulsearch.cpp`). Paths are configured in
   [`common.mk`](common.mk) and overridable:
@@ -67,6 +71,10 @@ make assemblyscript # check the AssemblyScript backend (scalar prefix)
 make cpp-vec0      # check the C++ backend with -vec -lv 0
 make cpp-vec1      # check the C++ backend with -vec -lv 1
 make all-vec       # check -vec -lv 0 and -vec -lv 1 across all backends
+make cpp-ss2       # check scalar C++ with scheduling strategy 2
+make cpp-vec1-ss3  # check C++ with -vec -lv 1 -ss 3
+make p7-smoke      # run all 72 combinations on the representative P7 corpus
+make p7-matrix     # run all 72 combinations on the full configured corpus
 make bench         # compare C++ Faust and faust-rs performance with faustbench -single
 make compile-bench # compare C++ Faust and faust-rs compile time
 make all           # cpp + c + interp + cranelift + wasm + assemblyscript
@@ -123,6 +131,12 @@ applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
 outdirs such as `cpp-vec0` / `cpp-vec1`, inherit the base backend known-failure
 lists, and can be run per backend or together with `make all-vec`; excluded
 cases are documented in `known.mk` to fix later.
+
+The P7 scheduling matrix uses separate outdirs such as `cpp-ss2` and
+`wasm-vec1-ss3`. `P7_SMOKE_DSPFILES` defaults to `APF`, `delays`, and
+`select2`, covering recursion, delay storage, and conditional selection. The
+full-corpus P7 gate is `make -j8 p7-matrix`; `dspfiles` can also be overridden
+explicitly for a targeted run.
 
 ## Performance Bench
 

@@ -2272,6 +2272,22 @@ mode/strategy/backend combinations, including final state and observable effects
 - Remove transitional FIR paths and redundant implementation tests while
   retaining their DSP cases as signal-schedule regression tests.
 
+**P7.1 status (2026-07-14): scheduling-matrix execution is operational.** The
+six runtime harnesses now accept and propagate `-ss`; malformed values are
+rejected before compilation or Cranelift factory creation. The impulse driver
+exposes scalar `-ss 0..3` and `-lv 0/1 x -ss 0..3` targets with isolated
+artifact directories, for 72 backend/mode/strategy combinations. A
+representative differential smoke run over `APF`, `delays`, and `select2`
+accepted all 216 generated responses against the C++ oracle. This is L1/L2
+translation-validation evidence, not `V-Simulation` proof and not the P7 exit
+gate.
+
+P7.2 must execute the same 72 combinations over all 92 supported impulse DSPs
+and retain an auditable result summary. Subsequent P7 work still includes the
+FIR/WAST/Julia artifact matrix, single-precision coverage where supported,
+optimized/unoptimized and final-state/effect parity, the versioned coverage
+baseline, cost measurements/model, and transitional-path removal.
+
 **Exit criterion:** every emitter passes its artifact gate; every executable
 impulse backend passes scalar `-ss 0/1/2/3` and `vec0`/`vec1` crossed with
 `-ss 0/1/2/3`; optimized and unoptimized execution agree on the representative
