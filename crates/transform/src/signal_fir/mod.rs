@@ -27,6 +27,10 @@
 //!   signal closures into scheduled P4.4 regions, run CSE per region, and
 //!   independently reconnect final bodies to P5.1 route evidence. This path is
 //!   not yet selected by `build_module` or any backend.
+//! - **Vector P5.3 bounded assurance gate**: expand a complete routed chunk into
+//!   definition/use/transport/effect events, reconstruct scalar and vector
+//!   orders plus dynamic dependencies, and reject any `FissionSafe` reversal.
+//!   This gate remains additive and bounded; P6 owns state-transition semantics.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
@@ -76,6 +80,7 @@ mod recursion;
 pub mod shadow;
 mod siggen;
 pub mod vector_analysis;
+pub mod vector_events;
 pub mod vector_lower;
 pub mod vector_plan;
 pub mod vector_route;

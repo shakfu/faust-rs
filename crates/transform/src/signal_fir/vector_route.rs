@@ -156,11 +156,18 @@ impl RoutedFirTrace {
 /// Opaque evidence that [`verify_routed_fir`] accepted the routing trace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedRoutedFir {
+    plan: VectorPlan,
     layout: VectorRegionLayout,
     trace: RoutedFirTrace,
 }
 
 impl VerifiedRoutedFir {
+    /// Returns the exact verified plan whose stable identities own this route.
+    #[must_use]
+    pub fn plan(&self) -> &VectorPlan {
+        &self.plan
+    }
+
     #[must_use]
     pub fn layout(&self) -> &VectorRegionLayout {
         &self.layout
@@ -680,6 +687,7 @@ impl<'a> VectorRouteSession<'a> {
             .sort_by_key(|definition| (definition.region, definition.signal_id));
         verify_routed_fir(self.plan, &self.trace, &self.real_type, store)?;
         Ok(VerifiedRoutedFir {
+            plan: self.plan.clone(),
             layout: self.layout,
             trace: self.trace,
         })

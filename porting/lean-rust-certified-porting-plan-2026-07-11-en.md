@@ -548,7 +548,7 @@ After signal-level routing, emit and verify:
 
 Backend generation is forbidden unless this certificate is accepted.
 
-Implementation status (2026-07-14, partial R4/P5.2): Rust now has additive
+Implementation status (2026-07-14, partial R4/P5.3): Rust now has additive
 `VectorRouteSession` and independent `verify_routed_fir` gate. The route starts
 only from `VerifiedVectorPlan`, materializes scheduled loop regions and the
 three visibility scopes, and emits the plan's canonical typed transport
@@ -568,8 +568,21 @@ checker proves that every accepted P5.1 definition and transport store/load is
 present in the final CSE-rewritten body assigned to its region. Tests cover
 both FIR real precisions, all four schedules, a rejecting body mutation, and
 fail-closed stateful input. This advances the value/transport/body subset of R4,
-but it does not establish effect traces, state transitions, full epoch order,
-Lean-side acceptance, or backend eligibility.
+but it does not by itself establish effect traces, state transitions, full
+epoch order, Lean-side acceptance, or backend eligibility.
+
+P5.3 adds a bounded producer/checker pair over the exact P4.4 plan retained by
+the routed artifact. It expands the complete chunk into canonical definition,
+use, transport, effect, and epoch-boundary events; derives a sample-major
+scalar order, the routed loop-major vector order, and a conservative dynamic
+dependence relation; then exhaustively checks the Lean-shaped `FissionSafe`
+predicate. Conflicting state or observable effects in separate loops expose
+cross-sample reversals and are rejected even when a static effect edge orders
+the loop DAG. Co-located serial state and pure transported data are accepted.
+The explicit bound fails closed instead of checking a prefix. This is concrete
+Rust evidence for the finite R4 ordering obligation, but the Rust certificate
+is not yet serialized or accepted by Lean, and P6 transition simulation is
+still required before backend eligibility.
 
 ### R5 - Semantic reference execution
 

@@ -1848,7 +1848,7 @@ lowering, an independent FIR check establishes `R-Type`, `R-Effects`, and
   permitted only for a named unsupported effect/clock/recursion reason captured
   in the snapshot.
 
-**Implementation status (2026-07-14, P5.2).** The additive P5 assurance slices now
+**Implementation status (2026-07-14, P5.3).** The additive P5 assurance slices now
 include the strategy-independent `VectorPlan` DTO, independent
 `verify_vector_plan`, production P4.4 construction from accepted decorations,
 projection of the executed PV plan into the DTO, and `schedule_vector_plan`.
@@ -1903,9 +1903,47 @@ verified P4.4 plan and never creates storage during lookup. It has no external
 CLI or ABI impact. P5.1 remains additive and is deliberately not called by
 `build_module`: routing complete stateful signal lowering before P6 defines
 delay, recursion, clock, and AD transitions would be unsound. P5.2 is an
-additive executable artifact, not backend activation. The bounded
-event-order/FissionSafe gate, complete epoch/effect checking, output/module
-assembly, vectorization retention, and backend activation remain open.
+additive executable artifact, not backend activation.
+
+P5.3 adds `signal_fir::vector_events::build_event_order_certificate` and the
+independent `verify_event_order_certificate` gate. The routed artifact now
+retains the exact `VectorPlan` that owns its stable identities, preventing a
+same-shape route from being checked against different effect facts. For a
+caller-supplied event bound, the producer expands the complete chunk; it never
+accepts a truncated prefix. The canonical finite event set contains control
+and loop definitions, routed uses, transport stores and loads, exact
+signal-level effect atoms, and epoch entry/exit barriers.
+
+For each epoch, the checker constructs a canonical sample-major scalar order
+and the routed `-ss` loop-major vector order. Its finite dependence relation is
+the union of local event order, fixed epoch barriers, every data/effect loop
+edge instantiated at each sample, exact definition/store/load/use chains, and
+every pair of conflicting dynamic effects oriented by scalar order:
+
+```math
+\begin{aligned}
+<_{s} &= epoch\;then\;sample\;then\;canonicalTopo(loop)\;then\;local \\
+<_{v} &= epoch\;then\;scheduled(loop)\;then\;sample\;then\;local \\
+D_b &= D_{local} \cup D_{epoch} \cup D_{loop\times sample}
+       \cup D_{route} \cup D_{conflict} \\
+FissionSafe_b &\iff \forall(x,y)\in D_b,\;x<_{s}y\Rightarrow x<_{v}y.
+\end{aligned}
+```
+
+This catches the case that the static loop DAG alone cannot prove: two loops
+may have a valid ordering effect edge for the current sample, yet fission can
+reverse a carried conflict such as `B(i) -> A(i+1)`. Tests accept pure typed
+transport under all four strategies, reject altered orders/dependencies and an
+undersized bound, reject cross-loop shared state and conflicting output writes,
+and accept the same state accesses when co-located in one serial loop.
+
+The bounded checker is a concrete executable refinement of the existing Lean
+`FissionSafe` predicate, not a proof of complete DSP semantics. Its scalar
+order is a deterministic topological linear extension of the accepted plan;
+P6 must still connect delay, recursion, clock, and AD transition semantics to
+that event vocabulary. Complete output/module assembly, vectorization
+retention, Lean-side certificate acceptance, and backend activation remain
+open.
 
 **Exit criterion:** shared expressions and pure prefixes/tails are separated
 without inspecting FIR statements; all four strategies execute bit-exactly for
