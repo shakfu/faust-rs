@@ -23,6 +23,10 @@
 //! - prepared typing/promotion (`Preparation Step 2/3/4`): consume the reduced
 //!   `signal_prepare` type map so FIR lowering keeps integer delay/recursion/table
 //!   carriers instead of defaulting every internal value to `real_ty`.
+//! - **Vector P5.2 additive artifact**: lower verified effect-free prepared
+//!   signal closures into scheduled P4.4 regions, run CSE per region, and
+//!   independently reconnect final bodies to P5.1 route evidence. This path is
+//!   not yet selected by `build_module` or any backend.
 //! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
 //!   `SigBlockReverseAD` carriers whose body signals are trivially
 //!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
@@ -72,6 +76,7 @@ mod recursion;
 pub mod shadow;
 mod siggen;
 pub mod vector_analysis;
+pub mod vector_lower;
 pub mod vector_plan;
 pub mod vector_route;
 pub mod vector_schedule;

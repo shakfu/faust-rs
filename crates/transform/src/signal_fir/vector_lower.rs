@@ -1,0 +1,1319 @@
+//! P5.2 pure signal-closure lowering into verified vector regions.
+//!
+//! C++ `DAGInstructionsCompiler::compileMultiSignal` recursively lowers one
+//! loop root and its inline closure while its current loop owns cache lookup.
+//! This adapted Rust slice consumes the already verified prepared forest and
+//! P4.4 plan, lowers only effect-free pointwise nodes, runs CSE independently
+//! in each routed region, then checks the final bodies against P5.1 routing
+//! evidence. Delay, recursion, tables, UI, foreign calls, clocks, and AD remain
+//! fail-closed until P6 defines their state transitions.
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt;
+
+use fir::{AccessType, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
+use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
+
+use crate::schedule::SchedulingStrategy;
+use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
+
+use super::cse::materialize_shared_values;
+use super::module::map_binop;
+use super::vector_plan::VerifiedVectorPlan;
+use super::vector_route::{
+    RouteResolution, RoutedUseSource, VectorRegion, VectorRouteError, VectorRouteSession,
+    VerifiedRoutedFir,
+};
+use super::vector_verify::{Placement, SignalRecord, ValueType, VectorPlan};
+
+/// One scheduled vector loop and its final CSE-rewritten FIR body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PureVectorRegionBody {
+    loop_id: u64,
+    statements: Vec<FirId>,
+}
+
+impl PureVectorRegionBody {
+    /// Stable P4.4 loop identity.
+    #[must_use]
+    pub fn loop_id(&self) -> u64 {
+        self.loop_id
+    }
+
+    /// Final statements in execution order.
+    #[must_use]
+    pub fn statements(&self) -> &[FirId] {
+        &self.statements
+    }
+}
+
+/// Opaque P5.2 result accepted by both routing and region-body verification.
+pub struct VerifiedPureVectorProgram {
+    store: FirStore,
+    transport_declarations: Vec<FirId>,
+    control_statements: Vec<FirId>,
+    regions: Vec<PureVectorRegionBody>,
+    routed: VerifiedRoutedFir,
+    math_ops: HashSet<FirMathOp>,
+    int_helpers: BTreeSet<&'static str>,
+}
+
+impl VerifiedPureVectorProgram {
+    /// FIR store owning every returned id.
+    #[must_use]
+    pub fn store(&self) -> &FirStore {
+        &self.store
+    }
+
+    /// Canonical transport declarations emitted before region bodies.
+    #[must_use]
+    pub fn transport_declarations(&self) -> &[FirId] {
+        &self.transport_declarations
+    }
+
+    /// Fixed control-scope statements, including input pointer aliases.
+    #[must_use]
+    pub fn control_statements(&self) -> &[FirId] {
+        &self.control_statements
+    }
+
+    /// Loop bodies in the selected strategy-dependent schedule order.
+    #[must_use]
+    pub fn regions(&self) -> &[PureVectorRegionBody] {
+        &self.regions
+    }
+
+    /// Independently accepted P5.1 route evidence.
+    #[must_use]
+    pub fn routed(&self) -> &VerifiedRoutedFir {
+        &self.routed
+    }
+
+    /// Math prototypes required when this artifact is assembled as a module.
+    #[must_use]
+    pub fn math_ops(&self) -> &HashSet<FirMathOp> {
+        &self.math_ops
+    }
+
+    /// Integer helper prototypes required by `min`, `max`, or `abs`.
+    #[must_use]
+    pub fn int_helpers(&self) -> &BTreeSet<&'static str> {
+        &self.int_helpers
+    }
+}
+
+/// P5.2 lowering or final-body verification failure.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PureVectorLowerError {
+    /// P5.1 route construction or verification failed.
+    Route(VectorRouteError),
+    /// Internal real precision is outside the active fast-lane contract.
+    InvalidRealType(FirType),
+    /// A P4.4 signal id is absent from the verified prepared forest.
+    MissingPreparedSignal { signal_id: u64 },
+    /// Prepared and planned scalar types disagree.
+    PlannedTypeMismatch {
+        signal_id: u64,
+        planned: ValueType,
+        prepared: Option<SimpleSigType>,
+    },
+    /// The pure P5.2 slice cannot execute an effect-bearing signal.
+    EffectfulSignal { signal_id: u64 },
+    /// The pure P5.2 slice has no state/effect semantics for this node.
+    UnsupportedSignal { signal_id: u64, expression: String },
+    /// A control expression depended on a sample-region value.
+    InvalidControlDependency { signal_id: u64 },
+    /// A pure signal cycle escaped the P4/P6 recursion boundary.
+    PureCycle {
+        signal_id: u64,
+        region: VectorRegion,
+    },
+    /// Audio input index is invalid for the declared module arity.
+    InputIndexOutOfRange { index: i32, num_inputs: usize },
+    /// FIR operands or result violate the prepared typing contract.
+    FirTypeMismatch {
+        signal_id: u64,
+        expected: FirType,
+        actual: Option<FirType>,
+    },
+    /// Region-local CSE did not preserve one sink per requested root.
+    CseRootCoverage { region: VectorRegion },
+    /// Final bodies do not contain the evidence accepted by P5.1.
+    BodyEvidence { detail: String },
+}
+
+impl fmt::Display for PureVectorLowerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Route(error) => write!(f, "vector routing failed: {error}"),
+            Self::InvalidRealType(typ) => write!(f, "unsupported vector real type {typ:?}"),
+            Self::MissingPreparedSignal { signal_id } => {
+                write!(
+                    f,
+                    "vector plan signal {signal_id} is absent from the prepared forest"
+                )
+            }
+            Self::PlannedTypeMismatch {
+                signal_id,
+                planned,
+                prepared,
+            } => write!(
+                f,
+                "signal {signal_id} planned type {planned:?} disagrees with prepared type {prepared:?}"
+            ),
+            Self::EffectfulSignal { signal_id } => {
+                write!(
+                    f,
+                    "signal {signal_id} is effectful and cannot enter pure P5.2 lowering"
+                )
+            }
+            Self::UnsupportedSignal {
+                signal_id,
+                expression,
+            } => write!(
+                f,
+                "signal {signal_id} is outside the pure P5.2 node set: {expression}"
+            ),
+            Self::InvalidControlDependency { signal_id } => {
+                write!(f, "control lowering reached sample signal {signal_id}")
+            }
+            Self::PureCycle { signal_id, region } => {
+                write!(f, "pure signal cycle at signal {signal_id} in {region:?}")
+            }
+            Self::InputIndexOutOfRange { index, num_inputs } => {
+                write!(f, "input index {index} is outside num_inputs={num_inputs}")
+            }
+            Self::FirTypeMismatch {
+                signal_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "signal {signal_id} FIR type {actual:?} does not match {expected:?}"
+            ),
+            Self::CseRootCoverage { region } => {
+                write!(f, "CSE changed root-sink coverage in {region:?}")
+            }
+            Self::BodyEvidence { detail } => {
+                write!(f, "routed region-body verification failed: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PureVectorLowerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Route(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<VectorRouteError> for PureVectorLowerError {
+    fn from(value: VectorRouteError) -> Self {
+        Self::Route(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LowerScope {
+    Control,
+    Loop(u64),
+}
+
+impl LowerScope {
+    fn region(self) -> VectorRegion {
+        match self {
+            Self::Control => VectorRegion::Control,
+            Self::Loop(loop_id) => VectorRegion::Loop(loop_id),
+        }
+    }
+}
+
+struct PureVectorLowerer<'a> {
+    prepared: &'a VerifiedPreparedSignals,
+    session: VectorRouteSession<'a>,
+    store: FirStore,
+    real_type: FirType,
+    num_inputs: usize,
+    signal_ids: BTreeMap<u64, SigId>,
+    input_declarations: Vec<FirId>,
+    input_aliases: BTreeSet<usize>,
+    math_ops: HashSet<FirMathOp>,
+    int_helpers: BTreeSet<&'static str>,
+}
+
+/// Lowers actual effect-free prepared signals into P4.4 vector regions.
+///
+/// CSE is run once per control/loop region with loop-id-derived temporary names.
+/// No stateful or effectful node is accepted, and this artifact is not yet
+/// connected to backend module assembly.
+pub fn lower_pure_vector_program(
+    prepared: &VerifiedPreparedSignals,
+    verified_plan: &VerifiedVectorPlan,
+    strategy: SchedulingStrategy,
+    real_type: FirType,
+    num_inputs: usize,
+) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
+    if !matches!(real_type, FirType::Float32 | FirType::Float64) {
+        return Err(PureVectorLowerError::InvalidRealType(real_type));
+    }
+    let signal_ids = collect_prepared_ids(prepared);
+    verify_plan_prepared_boundary(prepared, verified_plan.plan(), &signal_ids)?;
+
+    let mut store = FirStore::new();
+    let (session, transport_declarations) =
+        VectorRouteSession::new(verified_plan, strategy, real_type.clone(), &mut store)?;
+    let mut lowerer = PureVectorLowerer {
+        prepared,
+        session,
+        store,
+        real_type,
+        num_inputs,
+        signal_ids,
+        input_declarations: Vec::new(),
+        input_aliases: BTreeSet::new(),
+        math_ops: HashSet::new(),
+        int_helpers: BTreeSet::new(),
+    };
+
+    let mut control_cache = BTreeMap::new();
+    let mut active = BTreeSet::new();
+    let control_ids = lowerer
+        .session
+        .plan()
+        .signals
+        .iter()
+        .filter_map(|record| (record.placement == Placement::Control).then_some(record.signal_id))
+        .collect::<Vec<_>>();
+    let mut control_values = Vec::with_capacity(control_ids.len());
+    for &signal_id in &control_ids {
+        let sig = lowerer.sig(signal_id)?;
+        control_values.push(lowerer.lower_control(sig, &mut control_cache, &mut active)?);
+    }
+    let (mut control_statements, rewritten_control_values) =
+        materialize_region_roots(&mut lowerer.store, &control_values, VectorRegion::Control)?;
+    for (&signal_id, &value) in control_ids.iter().zip(&rewritten_control_values) {
+        lowerer
+            .session
+            .define_control(signal_id, value, &lowerer.store)?;
+    }
+
+    let layout = lowerer.session.layout().loops().to_vec();
+    let mut regions = Vec::with_capacity(layout.len());
+    for region in layout {
+        let mut local_cache = BTreeMap::new();
+        let mut active = BTreeSet::new();
+        let mut root_values = Vec::with_capacity(region.roots.len());
+        for &root in &region.roots {
+            let sig = lowerer.sig(root)?;
+            root_values.push(lowerer.lower_in_loop(
+                region.loop_id,
+                sig,
+                &mut local_cache,
+                &mut active,
+            )?);
+        }
+        let (mut statements, rewritten_roots) = materialize_region_roots_with_prefix(
+            &mut lowerer.store,
+            &root_values,
+            VectorRegion::Loop(region.loop_id),
+            &format!("fVecL{}Temp", region.loop_id),
+            &format!("iVecL{}Temp", region.loop_id),
+        )?;
+        for (&root, &value) in region.roots.iter().zip(&rewritten_roots) {
+            local_cache.insert(root, value);
+        }
+
+        let mut stores = Vec::new();
+        for (&signal_id, &value) in &local_cache {
+            stores.extend(lowerer.session.define_in_loop(
+                region.loop_id,
+                signal_id,
+                value,
+                &mut lowerer.store,
+            )?);
+        }
+        let transported_values = stores
+            .iter()
+            .filter_map(|statement| match match_fir(&lowerer.store, *statement) {
+                FirMatch::StoreTable { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        statements.retain(|statement| {
+            !matches!(
+                match_fir(&lowerer.store, *statement),
+                FirMatch::Drop(value) if transported_values.contains(&value)
+            )
+        });
+        statements.extend(stores);
+        regions.push(PureVectorRegionBody {
+            loop_id: region.loop_id,
+            statements,
+        });
+    }
+
+    control_statements.splice(0..0, lowerer.input_declarations.iter().copied());
+    let routed = lowerer.session.finish(&lowerer.store)?;
+    verify_pure_vector_bodies(
+        verified_plan.plan(),
+        &routed,
+        &transport_declarations,
+        &control_statements,
+        &regions,
+        &lowerer.store,
+    )?;
+    Ok(VerifiedPureVectorProgram {
+        store: lowerer.store,
+        transport_declarations,
+        control_statements,
+        regions,
+        routed,
+        math_ops: lowerer.math_ops,
+        int_helpers: lowerer.int_helpers,
+    })
+}
+
+impl PureVectorLowerer<'_> {
+    fn sig(&self, signal_id: u64) -> Result<SigId, PureVectorLowerError> {
+        self.signal_ids
+            .get(&signal_id)
+            .copied()
+            .ok_or(PureVectorLowerError::MissingPreparedSignal { signal_id })
+    }
+
+    fn record(&self, signal_id: u64) -> Result<SignalRecord, PureVectorLowerError> {
+        self.session
+            .plan()
+            .signals
+            .iter()
+            .find(|record| record.signal_id == signal_id)
+            .cloned()
+            .ok_or(PureVectorLowerError::MissingPreparedSignal { signal_id })
+    }
+
+    fn lower_control(
+        &mut self,
+        sig: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let signal_id = u64::from(sig.as_u32());
+        if let Some(value) = cache.get(&signal_id).copied() {
+            return Ok(value);
+        }
+        let record = self.record(signal_id)?;
+        if record.placement != Placement::Control {
+            return Err(PureVectorLowerError::InvalidControlDependency { signal_id });
+        }
+        let scope = LowerScope::Control;
+        if !active.insert((scope, signal_id)) {
+            return Err(PureVectorLowerError::PureCycle {
+                signal_id,
+                region: scope.region(),
+            });
+        }
+        let value = self.lower_raw(scope, sig, cache, active)?;
+        active.remove(&(scope, signal_id));
+        self.check_type(signal_id, value)?;
+        cache.insert(signal_id, value);
+        Ok(value)
+    }
+
+    fn lower_in_loop(
+        &mut self,
+        loop_id: u64,
+        sig: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let signal_id = u64::from(sig.as_u32());
+        let record = self.record(signal_id)?;
+        match record.placement {
+            Placement::Control => {
+                match self
+                    .session
+                    .resolve_in_loop(loop_id, signal_id, &mut self.store)?
+                {
+                    RouteResolution::Value(value) => return Ok(value),
+                    RouteResolution::NeedsInlineLowering => unreachable!("control is never inline"),
+                }
+            }
+            Placement::Owned(owner) if owner != loop_id => {
+                return match self
+                    .session
+                    .resolve_in_loop(loop_id, signal_id, &mut self.store)?
+                {
+                    RouteResolution::Value(value) => Ok(value),
+                    RouteResolution::NeedsInlineLowering => {
+                        unreachable!("owned value is never inline")
+                    }
+                };
+            }
+            Placement::Inline | Placement::Owned(_) => {}
+        }
+        if let Some(value) = cache.get(&signal_id).copied() {
+            return Ok(value);
+        }
+        let scope = LowerScope::Loop(loop_id);
+        if !active.insert((scope, signal_id)) {
+            return Err(PureVectorLowerError::PureCycle {
+                signal_id,
+                region: scope.region(),
+            });
+        }
+        let value = self.lower_raw(scope, sig, cache, active)?;
+        active.remove(&(scope, signal_id));
+        self.check_type(signal_id, value)?;
+        cache.insert(signal_id, value);
+        Ok(value)
+    }
+
+    fn lower_dep(
+        &mut self,
+        scope: LowerScope,
+        sig: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        match scope {
+            LowerScope::Control => self.lower_control(sig, cache, active),
+            LowerScope::Loop(loop_id) => self.lower_in_loop(loop_id, sig, cache, active),
+        }
+    }
+
+    fn lower_raw(
+        &mut self,
+        scope: LowerScope,
+        sig: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let signal_id = u64::from(sig.as_u32());
+        let value = match match_sig(self.prepared.arena(), sig) {
+            SigMatch::Int(value) => FirBuilder::new(&mut self.store).int32(value),
+            SigMatch::Real(value) => self.float_const(value),
+            SigMatch::Input(index) => self.lower_input(index)?,
+            SigMatch::Output(_, inner) => self.lower_dep(scope, inner, cache, active)?,
+            SigMatch::IntCast(value) => {
+                let value = self.lower_dep(scope, value, cache, active)?;
+                FirBuilder::new(&mut self.store).cast(FirType::Int32, value)
+            }
+            SigMatch::FloatCast(value) => {
+                let value = self.lower_dep(scope, value, cache, active)?;
+                FirBuilder::new(&mut self.store).cast(self.real_type.clone(), value)
+            }
+            SigMatch::BitCast(value) => {
+                let value = self.lower_dep(scope, value, cache, active)?;
+                FirBuilder::new(&mut self.store).bitcast(self.real_type.clone(), value)
+            }
+            SigMatch::Select2(cond, else_value, then_value) => {
+                let cond = self.lower_dep(scope, cond, cache, active)?;
+                let then_value = self.lower_dep(scope, then_value, cache, active)?;
+                let else_value = self.lower_dep(scope, else_value, cache, active)?;
+                let typ = self.fir_type(signal_id)?;
+                FirBuilder::new(&mut self.store).select2(cond, then_value, else_value, typ)
+            }
+            SigMatch::BinOp(op, lhs, rhs) => {
+                self.lower_binop(scope, signal_id, op, lhs, rhs, cache, active)?
+            }
+            SigMatch::Pow(lhs, rhs) => {
+                self.lower_math2(scope, FirMathOp::Pow, lhs, rhs, cache, active)?
+            }
+            SigMatch::Min(lhs, rhs) => {
+                self.lower_minmax(scope, signal_id, lhs, rhs, true, cache, active)?
+            }
+            SigMatch::Max(lhs, rhs) => {
+                self.lower_minmax(scope, signal_id, lhs, rhs, false, cache, active)?
+            }
+            SigMatch::Sin(value) => {
+                self.lower_math1(scope, FirMathOp::Sin, value, cache, active)?
+            }
+            SigMatch::Cos(value) => {
+                self.lower_math1(scope, FirMathOp::Cos, value, cache, active)?
+            }
+            SigMatch::Acos(value) => {
+                self.lower_math1(scope, FirMathOp::Acos, value, cache, active)?
+            }
+            SigMatch::Asin(value) => {
+                self.lower_math1(scope, FirMathOp::Asin, value, cache, active)?
+            }
+            SigMatch::Atan(value) => {
+                self.lower_math1(scope, FirMathOp::Atan, value, cache, active)?
+            }
+            SigMatch::Atan2(lhs, rhs) => {
+                self.lower_math2(scope, FirMathOp::Atan2, lhs, rhs, cache, active)?
+            }
+            SigMatch::Tan(value) => {
+                self.lower_math1(scope, FirMathOp::Tan, value, cache, active)?
+            }
+            SigMatch::Exp(value) => {
+                self.lower_math1(scope, FirMathOp::Exp, value, cache, active)?
+            }
+            SigMatch::Exp10(value) => {
+                self.lower_math1(scope, FirMathOp::Exp10, value, cache, active)?
+            }
+            SigMatch::Log(value) => {
+                self.lower_math1(scope, FirMathOp::Log, value, cache, active)?
+            }
+            SigMatch::Log10(value) => {
+                self.lower_math1(scope, FirMathOp::Log10, value, cache, active)?
+            }
+            SigMatch::Sqrt(value) => {
+                self.lower_math1(scope, FirMathOp::Sqrt, value, cache, active)?
+            }
+            SigMatch::Abs(value) => self.lower_abs(scope, signal_id, value, cache, active)?,
+            SigMatch::Fmod(lhs, rhs) => {
+                self.lower_math2(scope, FirMathOp::Fmod, lhs, rhs, cache, active)?
+            }
+            SigMatch::Remainder(lhs, rhs) => {
+                self.lower_math2(scope, FirMathOp::Remainder, lhs, rhs, cache, active)?
+            }
+            SigMatch::Floor(value) => {
+                self.lower_math1(scope, FirMathOp::Floor, value, cache, active)?
+            }
+            SigMatch::Ceil(value) => {
+                self.lower_math1(scope, FirMathOp::Ceil, value, cache, active)?
+            }
+            SigMatch::Rint(value) => {
+                self.lower_math1(scope, FirMathOp::Rint, value, cache, active)?
+            }
+            SigMatch::Round(value) => {
+                self.lower_math1(scope, FirMathOp::Round, value, cache, active)?
+            }
+            SigMatch::Lowest(value) | SigMatch::Highest(value) => {
+                self.lower_dep(scope, value, cache, active)?
+            }
+            _ => {
+                return Err(PureVectorLowerError::UnsupportedSignal {
+                    signal_id,
+                    expression: dump_sig_readable(self.prepared.arena(), sig),
+                });
+            }
+        };
+        Ok(value)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_binop(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        op: BinOp,
+        lhs: SigId,
+        rhs: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let lhs = self.lower_dep(scope, lhs, cache, active)?;
+        let rhs = self.lower_dep(scope, rhs, cache, active)?;
+        let result_type = self.fir_type(signal_id)?;
+        let (fir_op, typ) = map_binop(op, result_type.clone()).ok_or_else(|| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: format!("unsupported binary operator {}", op.name()),
+            }
+        })?;
+        let lhs_type = self.store.value_type(lhs);
+        let rhs_type = self.store.value_type(rhs);
+        let operands_ok = match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                lhs_type == Some(result_type.clone()) && rhs_type == Some(result_type)
+            }
+            BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => {
+                lhs_type == Some(FirType::Int32) && rhs_type == Some(FirType::Int32)
+            }
+            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne => {
+                lhs_type == rhs_type
+                    && matches!(
+                        lhs_type,
+                        Some(FirType::Int32 | FirType::Float32 | FirType::Float64)
+                    )
+            }
+        };
+        if !operands_ok {
+            return Err(PureVectorLowerError::FirTypeMismatch {
+                signal_id,
+                expected: typ,
+                actual: lhs_type,
+            });
+        }
+        Ok(FirBuilder::new(&mut self.store).binop(fir_op, lhs, rhs, typ))
+    }
+
+    fn lower_math1(
+        &mut self,
+        scope: LowerScope,
+        op: FirMathOp,
+        value: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let value = self.lower_dep(scope, value, cache, active)?;
+        self.math_ops.insert(op);
+        Ok(FirBuilder::new(&mut self.store).math_call(op, &[value], self.real_type.clone()))
+    }
+
+    fn lower_math2(
+        &mut self,
+        scope: LowerScope,
+        op: FirMathOp,
+        lhs: SigId,
+        rhs: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let lhs = self.lower_dep(scope, lhs, cache, active)?;
+        let rhs = self.lower_dep(scope, rhs, cache, active)?;
+        self.math_ops.insert(op);
+        Ok(FirBuilder::new(&mut self.store).math_call(op, &[lhs, rhs], self.real_type.clone()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_minmax(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        lhs: SigId,
+        rhs: SigId,
+        is_min: bool,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        if self.fir_type(signal_id)? == FirType::Int32 {
+            let lhs = self.lower_dep(scope, lhs, cache, active)?;
+            let rhs = self.lower_dep(scope, rhs, cache, active)?;
+            let name = if is_min { "min_i" } else { "max_i" };
+            self.int_helpers.insert(name);
+            return Ok(FirBuilder::new(&mut self.store).fun_call(
+                name,
+                &[lhs, rhs],
+                FirType::Int32,
+            ));
+        }
+        self.lower_math2(
+            scope,
+            if is_min {
+                FirMathOp::Min
+            } else {
+                FirMathOp::Max
+            },
+            lhs,
+            rhs,
+            cache,
+            active,
+        )
+    }
+
+    fn lower_abs(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        value: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        if self.fir_type(signal_id)? == FirType::Int32 {
+            let value = self.lower_dep(scope, value, cache, active)?;
+            self.int_helpers.insert("abs");
+            return Ok(FirBuilder::new(&mut self.store).fun_call("abs", &[value], FirType::Int32));
+        }
+        self.lower_math1(scope, FirMathOp::Abs, value, cache, active)
+    }
+
+    fn lower_input(&mut self, index: i32) -> Result<FirId, PureVectorLowerError> {
+        let Ok(index_usize) = usize::try_from(index) else {
+            return Err(PureVectorLowerError::InputIndexOutOfRange {
+                index,
+                num_inputs: self.num_inputs,
+            });
+        };
+        if index_usize >= self.num_inputs {
+            return Err(PureVectorLowerError::InputIndexOutOfRange {
+                index,
+                num_inputs: self.num_inputs,
+            });
+        }
+        let alias = format!("input{index_usize}");
+        if self.input_aliases.insert(index_usize) {
+            let mut builder = FirBuilder::new(&mut self.store);
+            let channel = builder.int32(index);
+            let pointer_type = FirType::Ptr(Box::new(FirType::FaustFloat));
+            let pointer =
+                builder.load_table("inputs", AccessType::FunArgs, channel, pointer_type.clone());
+            self.input_declarations.push(builder.declare_var(
+                alias.clone(),
+                pointer_type,
+                AccessType::Stack,
+                Some(pointer),
+            ));
+        }
+        let mut builder = FirBuilder::new(&mut self.store);
+        let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+        let raw = builder.load_table(alias, AccessType::Stack, i0, FirType::FaustFloat);
+        Ok(builder.cast(self.real_type.clone(), raw))
+    }
+
+    fn float_const(&mut self, value: f64) -> FirId {
+        let mut builder = FirBuilder::new(&mut self.store);
+        match self.real_type {
+            FirType::Float32 => builder.float32(value as f32),
+            FirType::Float64 => builder.float64(value),
+            _ => unreachable!("real type checked at entry"),
+        }
+    }
+
+    fn fir_type(&self, signal_id: u64) -> Result<FirType, PureVectorLowerError> {
+        let record = self.record(signal_id)?;
+        value_type_to_fir(&record.value_type, &self.real_type).ok_or(
+            PureVectorLowerError::PlannedTypeMismatch {
+                signal_id,
+                planned: record.value_type,
+                prepared: self.prepared.ty(self.sig(signal_id)?),
+            },
+        )
+    }
+
+    fn check_type(&self, signal_id: u64, value: FirId) -> Result<(), PureVectorLowerError> {
+        let expected = self.fir_type(signal_id)?;
+        let actual = self.store.value_type(value);
+        if actual == Some(expected.clone()) {
+            Ok(())
+        } else {
+            Err(PureVectorLowerError::FirTypeMismatch {
+                signal_id,
+                expected,
+                actual,
+            })
+        }
+    }
+}
+
+fn collect_prepared_ids(prepared: &VerifiedPreparedSignals) -> BTreeMap<u64, SigId> {
+    let mut ids = BTreeMap::new();
+    let mut stack = prepared.outputs().to_vec();
+    while let Some(id) = stack.pop() {
+        if ids.insert(u64::from(id.as_u32()), id).is_some() {
+            continue;
+        }
+        if let Some(children) = prepared.arena().children(id) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    ids
+}
+
+fn verify_plan_prepared_boundary(
+    prepared: &VerifiedPreparedSignals,
+    plan: &VectorPlan,
+    ids: &BTreeMap<u64, SigId>,
+) -> Result<(), PureVectorLowerError> {
+    for record in &plan.signals {
+        let sig = ids.get(&record.signal_id).copied().ok_or(
+            PureVectorLowerError::MissingPreparedSignal {
+                signal_id: record.signal_id,
+            },
+        )?;
+        let prepared_type = prepared.ty(sig);
+        let matches = matches!(
+            (&record.value_type, prepared_type),
+            (ValueType::Int, Some(SimpleSigType::Int))
+                | (ValueType::Real, Some(SimpleSigType::Real))
+        );
+        if !matches {
+            return Err(PureVectorLowerError::PlannedTypeMismatch {
+                signal_id: record.signal_id,
+                planned: record.value_type.clone(),
+                prepared: prepared_type,
+            });
+        }
+        if !record.effects.is_empty() {
+            return Err(PureVectorLowerError::EffectfulSignal {
+                signal_id: record.signal_id,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn value_type_to_fir(value_type: &ValueType, real_type: &FirType) -> Option<FirType> {
+    match value_type {
+        ValueType::Int => Some(FirType::Int32),
+        ValueType::Real => Some(real_type.clone()),
+        ValueType::Tuple(_) => None,
+    }
+}
+
+fn materialize_region_roots(
+    store: &mut FirStore,
+    values: &[FirId],
+    region: VectorRegion,
+) -> Result<(Vec<FirId>, Vec<FirId>), PureVectorLowerError> {
+    materialize_region_roots_with_prefix(
+        store,
+        values,
+        region,
+        "fVecControlTemp",
+        "iVecControlTemp",
+    )
+}
+
+fn materialize_region_roots_with_prefix(
+    store: &mut FirStore,
+    values: &[FirId],
+    region: VectorRegion,
+    float_prefix: &str,
+    int_prefix: &str,
+) -> Result<(Vec<FirId>, Vec<FirId>), PureVectorLowerError> {
+    let mut builder = FirBuilder::new(store);
+    let mut statements = values
+        .iter()
+        .map(|&value| builder.drop_(value))
+        .collect::<Vec<_>>();
+    materialize_shared_values(store, &mut statements, float_prefix, 0, int_prefix, 0);
+    let rewritten = statements
+        .iter()
+        .filter_map(|statement| match match_fir(store, *statement) {
+            FirMatch::Drop(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if rewritten.len() != values.len() {
+        return Err(PureVectorLowerError::CseRootCoverage { region });
+    }
+    Ok((statements, rewritten))
+}
+
+/// Independently reconnects final region bodies to the accepted P5.1 route.
+pub fn verify_pure_vector_bodies(
+    plan: &VectorPlan,
+    routed: &VerifiedRoutedFir,
+    transport_declarations: &[FirId],
+    control_statements: &[FirId],
+    regions: &[PureVectorRegionBody],
+    store: &FirStore,
+) -> Result<(), PureVectorLowerError> {
+    let expected_order = routed
+        .layout()
+        .loops()
+        .iter()
+        .map(|region| region.loop_id)
+        .collect::<Vec<_>>();
+    let actual_order = regions
+        .iter()
+        .map(PureVectorRegionBody::loop_id)
+        .collect::<Vec<_>>();
+    if actual_order != expected_order {
+        return Err(PureVectorLowerError::BodyEvidence {
+            detail: "region order differs from the verified schedule".to_owned(),
+        });
+    }
+    let routed_transports = routed.trace().transports();
+    if transport_declarations.len() != plan.transports.len()
+        || routed_transports.len() != plan.transports.len()
+    {
+        return Err(PureVectorLowerError::BodyEvidence {
+            detail: "transport declaration coverage differs from the plan".to_owned(),
+        });
+    }
+    for (index, transport) in plan.transports.iter().enumerate() {
+        if transport_declarations[index] != routed_transports[index].declaration {
+            return Err(PureVectorLowerError::BodyEvidence {
+                detail: format!(
+                    "transport {} declaration is not authoritative",
+                    transport.transport_id
+                ),
+            });
+        }
+        let producer = region_by_id(regions, transport.producer_loop)?;
+        let consumer = region_by_id(regions, transport.consumer_loop)?;
+        let store_id =
+            routed_transports[index]
+                .store
+                .ok_or_else(|| PureVectorLowerError::BodyEvidence {
+                    detail: format!("transport {} has no producer store", transport.transport_id),
+                })?;
+        let load_id =
+            routed_transports[index]
+                .load
+                .ok_or_else(|| PureVectorLowerError::BodyEvidence {
+                    detail: format!("transport {} has no consumer load", transport.transport_id),
+                })?;
+        if producer
+            .statements
+            .iter()
+            .filter(|&&id| id == store_id)
+            .count()
+            != 1
+        {
+            return Err(PureVectorLowerError::BodyEvidence {
+                detail: format!(
+                    "transport {} store is not emitted exactly once",
+                    transport.transport_id
+                ),
+            });
+        }
+        if !body_contains(store, &consumer.statements, load_id) {
+            return Err(PureVectorLowerError::BodyEvidence {
+                detail: format!(
+                    "transport {} load is absent from its consumer body",
+                    transport.transport_id
+                ),
+            });
+        }
+    }
+    for definition in routed.trace().definitions() {
+        let visible = match definition.region {
+            VectorRegion::Control => body_contains(store, control_statements, definition.value),
+            VectorRegion::Loop(loop_id) => body_contains(
+                store,
+                &region_by_id(regions, loop_id)?.statements,
+                definition.value,
+            ),
+        };
+        if !visible {
+            return Err(PureVectorLowerError::BodyEvidence {
+                detail: format!(
+                    "signal {} definition is absent from {:?}",
+                    definition.signal_id, definition.region
+                ),
+            });
+        }
+    }
+    for routed_use in routed.trace().uses() {
+        if let RoutedUseSource::Transport(_) = routed_use.source {
+            let consumer = region_by_id(regions, routed_use.consumer_loop)?;
+            if !body_contains(store, &consumer.statements, routed_use.value) {
+                return Err(PureVectorLowerError::BodyEvidence {
+                    detail: format!(
+                        "signal {} routed load is absent from loop {}",
+                        routed_use.signal_id, routed_use.consumer_loop
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn region_by_id(
+    regions: &[PureVectorRegionBody],
+    loop_id: u64,
+) -> Result<&PureVectorRegionBody, PureVectorLowerError> {
+    regions
+        .iter()
+        .find(|region| region.loop_id == loop_id)
+        .ok_or_else(|| PureVectorLowerError::BodyEvidence {
+            detail: format!("missing loop body {loop_id}"),
+        })
+}
+
+fn body_contains(store: &FirStore, roots: &[FirId], needle: FirId) -> bool {
+    let mut stack = roots.to_vec();
+    let mut seen = BTreeSet::new();
+    while let Some(value) = stack.pop() {
+        if value == needle {
+            return true;
+        }
+        if seen.insert(value) {
+            stack.extend(fir_children(store, value));
+        }
+    }
+    false
+}
+
+fn fir_children(store: &FirStore, value: FirId) -> Vec<FirId> {
+    match match_fir(store, value) {
+        FirMatch::BinOp { lhs, rhs, .. } => vec![lhs, rhs],
+        FirMatch::Neg { value, .. }
+        | FirMatch::Cast { value, .. }
+        | FirMatch::Bitcast { value, .. }
+        | FirMatch::Drop(value) => vec![value],
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => vec![cond, then_value, else_value],
+        FirMatch::FunCall { args, .. } => args,
+        FirMatch::LoadTable { index, .. } => vec![index],
+        FirMatch::DeclareVar { init, .. } => init.into_iter().collect(),
+        FirMatch::StoreTable { index, value, .. } => vec![index, value],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use propagate::ClockDomainTable;
+    use signals::SigBuilder;
+    use sigtype::{Nature, Variability, Vectorability as SigVectorability};
+    use tlib::TreeArena;
+
+    use super::*;
+    use crate::clk_env::annotate;
+    use crate::signal_fir::decoration_verify::{CanonicalSigType, certify_decorations};
+    use crate::signal_fir::vector_plan::verified_vector_plan_for_test;
+    use crate::signal_fir::vector_verify::{
+        EpochRecord, LoopEdge, LoopKind, LoopRecord, Rate, TransportRecord, VecSafeWitness,
+        VectorPlan, Vectorability, WitnessKind,
+    };
+    use crate::signal_prepare::prepare_signals_for_fir_verified;
+
+    fn pure_fixture() -> (VerifiedPreparedSignals, VerifiedVectorPlan) {
+        let mut arena = TreeArena::new();
+        let root = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input0 = builder.input(0);
+            let input1 = builder.input(1);
+            let sum = builder.binop(BinOp::Add, input0, input1);
+            let producer = builder.atan2(sum, sum);
+            builder.binop(BinOp::Add, producer, input0)
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[root], &ui::UiProgram::empty()).unwrap();
+        let producer =
+            find_repeated_atan2(prepared.arena(), prepared.outputs()[0]).unwrap_or_else(|| {
+                panic!(
+                    "prepared pure fixture changed shape: {}",
+                    dump_sig_readable(prepared.arena(), prepared.outputs()[0])
+                )
+            });
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .unwrap();
+        let decorations = certify_decorations(&prepared, &clocks).unwrap();
+        let consumer = prepared.outputs()[0];
+        let signals = decorations
+            .certificate()
+            .records
+            .iter()
+            .map(|record| SignalRecord {
+                signal_id: u64::from(record.signal_id),
+                value_type: canonical_value_type(&record.sig_type),
+                rate: match record.variability {
+                    Variability::Konst => Rate::Konst,
+                    Variability::Block => Rate::Block,
+                    Variability::Samp => Rate::Samp,
+                },
+                vectorability: match record.vectorability {
+                    SigVectorability::Vect => Vectorability::Vect,
+                    SigVectorability::Scal => Vectorability::Scal,
+                    SigVectorability::TrueScal => Vectorability::TrueScal,
+                },
+                clock_id: 0,
+                effects: record.effects.clone(),
+                placement: if record.signal_id == producer.as_u32() {
+                    Placement::Owned(0)
+                } else if record.signal_id == consumer.as_u32() {
+                    Placement::Owned(1)
+                } else if record.variability == Variability::Samp {
+                    Placement::Inline
+                } else {
+                    Placement::Control
+                },
+                duplicable: true,
+            })
+            .collect();
+        let plan = verified_vector_plan_for_test(VectorPlan {
+            vec_size: 16,
+            signals,
+            loops: vec![
+                LoopRecord {
+                    loop_id: 0,
+                    stable_name: "loop_pure_producer".to_owned(),
+                    kind: LoopKind::Vectorizable,
+                    roots: vec![u64::from(producer.as_u32())],
+                    epoch_id: 0,
+                },
+                LoopRecord {
+                    loop_id: 1,
+                    stable_name: "loop_pure_consumer".to_owned(),
+                    kind: LoopKind::Vectorizable,
+                    roots: vec![u64::from(consumer.as_u32())],
+                    epoch_id: 0,
+                },
+            ],
+            epochs: vec![EpochRecord {
+                epoch_id: 0,
+                rank: 0,
+                loops: vec![0, 1],
+            }],
+            transports: vec![TransportRecord {
+                transport_id: 0,
+                stable_name: "transport_pure_producer".to_owned(),
+                signal_id: u64::from(producer.as_u32()),
+                producer_loop: 0,
+                consumer_loop: 1,
+                element_type: ValueType::Real,
+                length: 16,
+            }],
+            data_edges: vec![LoopEdge {
+                consumer: 1,
+                dependency: 0,
+            }],
+            effect_edges: vec![],
+            vec_safe_witnesses: vec![
+                VecSafeWitness {
+                    loop_id: 0,
+                    witness_kind: WitnessKind::Pointwise,
+                },
+                VecSafeWitness {
+                    loop_id: 1,
+                    witness_kind: WitnessKind::Pointwise,
+                },
+            ],
+        });
+        (prepared, plan)
+    }
+
+    fn find_repeated_atan2(arena: &TreeArena, root: SigId) -> Option<SigId> {
+        let mut stack = vec![root];
+        let mut seen = BTreeSet::new();
+        while let Some(signal) = stack.pop() {
+            if !seen.insert(signal) {
+                continue;
+            }
+            if matches!(
+                match_sig(arena, signal),
+                SigMatch::Atan2(lhs, rhs) if lhs == rhs
+            ) {
+                return Some(signal);
+            }
+            if let Some(children) = arena.children(signal) {
+                stack.extend(children.iter().copied());
+            }
+        }
+        None
+    }
+
+    fn canonical_value_type(sig_type: &CanonicalSigType) -> ValueType {
+        match sig_type {
+            CanonicalSigType::Simple { nature, .. } => match nature {
+                Nature::Int => ValueType::Int,
+                Nature::Real | Nature::Any => ValueType::Real,
+            },
+            CanonicalSigType::Table { content, .. } => canonical_value_type(content),
+            CanonicalSigType::Tuplet { components, .. } => {
+                ValueType::Tuple(components.iter().map(canonical_value_type).collect())
+            }
+        }
+    }
+
+    #[test]
+    fn lowers_actual_pure_closures_with_local_cse_and_transport() {
+        let (prepared, plan) = pure_fixture();
+        let program = lower_pure_vector_program(
+            &prepared,
+            &plan,
+            SchedulingStrategy::DepthFirst,
+            FirType::Float32,
+            2,
+        )
+        .unwrap();
+        assert_eq!(program.regions().len(), 2);
+        assert!(program.regions()[0].statements().iter().any(|statement| {
+            matches!(
+                match_fir(program.store(), *statement),
+                FirMatch::DeclareVar { name, .. } if name == "fVecL0Temp0"
+            )
+        }));
+        assert!(!program.regions()[1].statements().iter().any(|statement| {
+            matches!(
+                match_fir(program.store(), *statement),
+                FirMatch::DeclareVar { name, .. } if name.starts_with("fVecL0Temp")
+            )
+        }));
+        assert!(body_contains(
+            program.store(),
+            program.regions()[1].statements(),
+            program.routed().trace().transports()[0].load.unwrap()
+        ));
+        assert_eq!(program.routed().trace().transports().len(), 1);
+    }
+
+    #[test]
+    fn all_scheduling_strategies_keep_region_local_storage_names() {
+        let (prepared, plan) = pure_fixture();
+        for strategy in [
+            SchedulingStrategy::DepthFirst,
+            SchedulingStrategy::BreadthFirst,
+            SchedulingStrategy::Special,
+            SchedulingStrategy::ReverseBreadthFirst,
+        ] {
+            let program =
+                lower_pure_vector_program(&prepared, &plan, strategy, FirType::Float64, 2).unwrap();
+            assert_eq!(program.routed().trace().transports()[0].transport_id, 0);
+            assert!(program.regions().iter().any(|region| {
+                region.statements().iter().any(|statement| {
+                    matches!(
+                        match_fir(program.store(), *statement),
+                        FirMatch::DeclareVar { name, .. } if name == "fVecL0Temp0"
+                    )
+                })
+            }));
+        }
+    }
+
+    #[test]
+    fn final_body_verifier_rejects_a_missing_consumer_body() {
+        let (prepared, plan) = pure_fixture();
+        let program = lower_pure_vector_program(
+            &prepared,
+            &plan,
+            SchedulingStrategy::DepthFirst,
+            FirType::Float32,
+            2,
+        )
+        .unwrap();
+        let mut regions = program.regions().to_vec();
+        regions[1].statements.clear();
+        assert!(matches!(
+            verify_pure_vector_bodies(
+                plan.plan(),
+                program.routed(),
+                program.transport_declarations(),
+                program.control_statements(),
+                &regions,
+                program.store()
+            ),
+            Err(PureVectorLowerError::BodyEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn stateful_signal_fails_closed_before_region_lowering() {
+        let mut arena = TreeArena::new();
+        let root = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            builder.delay1(input)
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[root], &ui::UiProgram::empty()).unwrap();
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .unwrap();
+        let decorations = certify_decorations(&prepared, &clocks).unwrap();
+        let plan = crate::signal_fir::vector_plan::build_vector_plan(&decorations, 16).unwrap();
+        assert!(matches!(
+            lower_pure_vector_program(
+                &prepared,
+                &plan,
+                SchedulingStrategy::DepthFirst,
+                FirType::Float32,
+                1
+            ),
+            Err(PureVectorLowerError::EffectfulSignal { .. })
+                | Err(PureVectorLowerError::UnsupportedSignal { .. })
+        ));
+    }
+}

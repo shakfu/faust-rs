@@ -142,6 +142,7 @@ use super::recursion::{
 use super::siggen::interpret_generator;
 
 mod arithmetic;
+pub(in crate::signal_fir) use arithmetic::map_binop;
 mod bra;
 mod build;
 mod clocked;

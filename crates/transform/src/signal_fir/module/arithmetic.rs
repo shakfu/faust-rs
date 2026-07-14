@@ -535,7 +535,7 @@ impl<'a> SignalToFirLower<'a> {
 /// distinct from the optional backend-specific `SignalBool2IntPromotion` pass:
 /// the fast-lane does not rely on that pass and must preserve the standard
 /// signal semantics directly. Bitwise operators also produce `Int32`.
-fn map_binop(op: BinOp, real_ty: FirType) -> Option<(FirBinOp, FirType)> {
+pub(in crate::signal_fir) fn map_binop(op: BinOp, real_ty: FirType) -> Option<(FirBinOp, FirType)> {
     match op {
         // Arithmetic operators: result is the internal real type.
         BinOp::Add => Some((FirBinOp::Add, real_ty)),

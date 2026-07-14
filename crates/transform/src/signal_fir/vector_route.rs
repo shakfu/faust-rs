@@ -445,6 +445,12 @@ impl<'a> VectorRouteSession<'a> {
         &self.layout
     }
 
+    /// Returns the immutable P4.4 plan that owns all route identities.
+    #[must_use]
+    pub fn plan(&self) -> &VectorPlan {
+        self.plan
+    }
+
     /// Records a control value, visible from every vector loop.
     pub fn define_control(
         &mut self,

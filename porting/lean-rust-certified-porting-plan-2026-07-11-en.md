@@ -548,7 +548,7 @@ After signal-level routing, emit and verify:
 
 Backend generation is forbidden unless this certificate is accepted.
 
-Implementation status (2026-07-14, partial R4/P5.1): Rust now has an additive
+Implementation status (2026-07-14, partial R4/P5.2): Rust now has additive
 `VectorRouteSession` and independent `verify_routed_fir` gate. The route starts
 only from `VerifiedVectorPlan`, materializes scheduled loop regions and the
 three visibility scopes, and emits the plan's canonical typed transport
@@ -560,6 +560,16 @@ transport and value-routing subset of R4. Exactly-once effect traces, complete
 epoch-body order, per-region CSE, actual signal-expression routing, Lean-side
 checking, and the backend activation gate remain open; therefore no full R4
 certificate is claimed yet.
+
+The P5.2 pure executable slice now lowers actual verified prepared signal
+closures into those regions and runs CSE independently in each control/loop
+scope before route values are sealed. A second independent postcondition
+checker proves that every accepted P5.1 definition and transport store/load is
+present in the final CSE-rewritten body assigned to its region. Tests cover
+both FIR real precisions, all four schedules, a rejecting body mutation, and
+fail-closed stateful input. This advances the value/transport/body subset of R4,
+but it does not establish effect traces, state transitions, full epoch order,
+Lean-side acceptance, or backend eligibility.
 
 ### R5 - Semantic reference execution
 
