@@ -285,6 +285,63 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
         .collect()
 }
 
+/// Collects signals that can only be lowered while an explicit reverse-AD
+/// carrier owns the current epoch context. The carrier's projection remains a
+/// normal scheduled node and expands this set as one fixed unit.
+fn fixed_ad_internal_signals(arena: &TreeArena, signals: &[SigId]) -> HashSet<SigId> {
+    let mut stack = signals.to_vec();
+    let mut visited = HashSet::new();
+    let mut internal = HashSet::new();
+    while let Some(sig) = stack.pop() {
+        if !visited.insert(sig) {
+            continue;
+        }
+        if matches!(
+            match_sig(arena, sig),
+            SigMatch::BlockReverseAD { .. } | SigMatch::ReverseTimeRec(_)
+        ) {
+            collect_descendants(arena, arena.children(sig).unwrap_or(&[]), &mut internal);
+        }
+        if let Some(children) = arena.children(sig) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    internal
+}
+
+/// Collects every expression owned by a symbolic-recursion body. The owning
+/// `Proj(SYMREC)` remains schedulable and lowers this closure with its binder
+/// active; individual descendants are not valid standalone lowering roots.
+fn symrec_internal_signals(arena: &TreeArena, signals: &[SigId]) -> HashSet<SigId> {
+    let mut stack = signals.to_vec();
+    let mut visited = HashSet::new();
+    let mut internal = HashSet::new();
+    while let Some(sig) = stack.pop() {
+        if !visited.insert(sig) {
+            continue;
+        }
+        if let Some((_, bodies)) = match_sym_rec(arena, sig) {
+            collect_descendants(arena, &[bodies], &mut internal);
+        }
+        if let Some(children) = arena.children(sig) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    internal
+}
+
+fn collect_descendants(arena: &TreeArena, roots: &[SigId], output: &mut HashSet<SigId>) {
+    let mut stack = roots.to_vec();
+    while let Some(sig) = stack.pop() {
+        if !output.insert(sig) {
+            continue;
+        }
+        if let Some(children) = arena.children(sig) {
+            stack.extend(children.iter().copied());
+        }
+    }
+}
+
 /// Stateful lowering engine that converts a propagated signal forest into FIR.
 ///
 /// Stateful rather than purely recursive because the FIR output has multiple
@@ -380,14 +437,21 @@ struct SignalToFirLower<'a> {
     rad_reverse: build::RadReverseState,
     /// Grouped BRA (Block Reverse AD) lowering state.
     bra: bra::BraState,
-    /// Demand-driven first-lowering order: every `SigId` in the order it is
-    /// first materialized (first cache insertion in
-    /// [`Self::lower_signal`]). Observation-only — never read by lowering,
-    /// only exported through [`crate::signal_fir::SignalFirOutput`] for the
-    /// P3 shadow-mode comparison (`crate::signal_fir::shadow`) against a
-    /// selected `Hsched`. Recording it costs one `Vec::push` per distinct
-    /// signal and changes no emitted FIR.
+    /// First-lowering order, recorded at the sole cache-insertion site and
+    /// exported as the P3 schedule-conformance trace.
     emission_order: Vec<SigId>,
+    /// Selected scalar schedule. Present only on the authoritative scalar
+    /// forward path; vector planning schedules its completed loop graph
+    /// instead, and reverse AD keeps its fixed epoch driver.
+    scalar_schedule: Option<crate::hgraph::Hsched>,
+    /// Signals whose first materialization must occur inside a guarded hold
+    /// payload even when clock inference assigns them an ancestor domain.
+    /// `TempVar` sources are excluded because they are explicit outer reads.
+    clocked_payload_signals: HashSet<SigId>,
+    /// Signals expanded only inside their owning reverse-AD carrier context.
+    fixed_ad_internal_signals: HashSet<SigId>,
+    /// Signals expanded only inside their owning symbolic-recursion binder.
+    symrec_internal_signals: HashSet<SigId>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.

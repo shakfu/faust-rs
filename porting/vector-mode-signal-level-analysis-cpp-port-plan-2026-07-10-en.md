@@ -683,9 +683,9 @@ Membership and edge rules:
 
 The audit (`auditHgraph` parity) is extended accordingly: exact one-graph
 membership for every reachable signal, no `Samp` signal in `Control`, no
-undeclared cross-domain immediate edge. Activation stays behind the P3 shadow
-mode: the selected `Hsched` is compared against demand-driven lowering before
-it becomes authoritative.
+undeclared cross-domain immediate edge. Activation was initially held behind
+the P3 shadow mode; the completed production activation and its retained
+semantic barriers are recorded in the P3 status below.
 
 ## 5. Formal specification layer
 
@@ -1557,6 +1557,57 @@ golden output; the shadow finding is their go/no-go input, not a substitute
 for the per-case audit the exit criterion requires. The conservative effect
 classification bullet is also still open (no schedule-dependent emission
 exists yet to need it).
+
+**Implementation status (2026-07-14, P3 authoritative scalar scheduling).**
+P3 is now active on the production scalar forward path. The selected
+`SchedulingStrategy` replaces the former hard-coded DFS gate and drives the
+`Control`, `Top`, and nested `Wrapper` regions dependencies-first. Before the
+strategy is applied, the canonical P4 signal analysis supplies conservative
+compute-time effects; conflicting effects not already related by data edges
+are oriented according to one deterministic DFS linear extension. All four
+strategies therefore share the same effect order and may reorder only work
+whose effects commute.
+
+Activation exposed the exponential path-count growth of the literal C++
+`spschedule` implementation on shared scalar DAGs. Rust `-ss 2` now computes
+the same logical raw sequence compactly as `(length, last-position map)`
+summaries, memoized per node, and sorts nodes by decreasing last position. For
+every raw sequence representable by the literal algorithm this is exactly its
+reverse-scan deduplication; executable tests compare both forms on shared DAGs.
+A 160-node fully cross-connected ladder completes in milliseconds instead of
+materializing an exponential list. If the logical length exceeds `u128`, Rust
+falls back to verified deterministic DFS: the C++ list cannot be represented
+on a `usize` machine in that case, while the Rust scheduling API remains total.
+
+The Rust lowerer retains two explicit fixed-granularity rules outside `-ss`.
+A `SYMREC` body is expanded as one context-bound unit when its owning
+projection opens the recursion binder; scheduling its unbound `SYMREF`
+children independently would be ill-formed. `BlockReverseAD` and
+`ReverseTimeRec` retain the P6 fixed forward/reverse epoch driver and are not
+flattened into the same-tick scalar DAG. These are semantic barriers, not a
+second scheduling option. Ordinary expanded FAD remains an ordinary scheduled
+signal graph.
+
+Clocked scalar regions are authoritative as well. The prepass preserves the
+C++ `generatePermVar` rule: the complete held-payload closure is lowered inside
+its guarded block even when clock inference assigns it an ancestor rate, while
+`TempVar` remains the explicit boundary that re-enables ancestor placement.
+Lifecycle phases, output stores, delay maintenance, and AD epochs remain fixed
+outside strategy order. CSE already runs after constants, control, and routed
+sample regions have been assembled.
+
+Structural tests prove that all four strategies drive the actual first-lowering
+order and that an asymmetric signal DAG yields distinct orders. A separate
+effect fixture proves that unknown foreign effects retain one common relative
+order under every strategy. Interpreter execution is bit-exact across all four
+scalar strategies; the complete ondemand suite and C++ clocked differential
+suite pass. The production impulse corpus passes for C, C++, interpreter,
+Cranelift, WASM, and AssemblyScript under every `-ss 0/1/2/3` value: 92 DSPs
+times 6 backends times 4 strategies, or 2,208 accepted scalar comparisons.
+The default `-ss 0` activation required no golden refresh:
+`cargo run -p xtask -- golden-check` accepted every versioned Rust snapshot
+unchanged. This closes the P3 exit criterion for the scalar scheduling scope;
+reverse-AD epoch ordering remains the fixed P6 contract.
 
 **Exit criterion:** `-ss 0/1/2/3` produce valid distinct scalar schedules and
 bit-exact runtime results. Any textual golden changes for `-ss 0` are individually

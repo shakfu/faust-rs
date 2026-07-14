@@ -85,6 +85,25 @@ fn scheduling_strategies() -> [SchedulingStrategy; 4] {
     ]
 }
 
+#[test]
+fn scalar_scheduling_strategies_are_bit_exact() {
+    let source = "process = _,_ <: (_ * 2.0 + 1.0), (_ * 3.0 + 4.0) :> _;";
+    let inputs = [ramp(67), ramp(67).into_iter().rev().collect()];
+    let expected = run_channels_with_strategy(
+        source,
+        ComputeMode::Scalar,
+        &inputs,
+        SchedulingStrategy::DepthFirst,
+    );
+    for strategy in scheduling_strategies().into_iter().skip(1) {
+        assert_eq!(
+            run_channels_with_strategy(source, ComputeMode::Scalar, &inputs, strategy),
+            expected,
+            "scalar execution changed under {strategy:?}"
+        );
+    }
+}
+
 /// A `frames`-sample deterministic ramp with a non-integer step.
 fn ramp(frames: usize) -> Vec<f32> {
     (0..frames).map(|k| 0.13 * k as f32 - 1.0).collect()

@@ -6,20 +6,27 @@ Date: 2026-07-14
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff
-- Current task: P7.2 full executable scheduling backend matrix, completed in
-  this commit.
+- Current task: P3 authoritative scalar scheduling, completed in this commit.
 - The checked path now covers pure graphs, fixed and bounded-variable delays,
   symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
 
 ## Working Tree
 
-- This commit executes the 72-target scheduling matrix over all 92 supported
-  impulse DSPs, adds a versioned SHA-256 report, and fixes the vector FIR shape
-  defect exposed by the run.
+- This commit makes the selected `Hsched` authoritative for scalar lowering,
+  closes recursion/clock/AD context boundaries, and removes exponential
+  `-ss 2` path-list materialization.
 - Many unrelated pre-existing untracked scratch files remain untouched.
 
 ## What Changed
 
+- Activated selected scalar schedules in control, top, and wrapper regions.
+- Oriented direct conflicting signal effects before strategy selection.
+- Kept complete symbolic-recursion descendants under their owning binder and
+  held clock payloads under the correct guarded region.
+- Preserved fixed forward/reverse epochs for reverse-time and BRA carriers.
+- Replaced literal exponential special-schedule expansion with an
+  order-equivalent memoized last-position summary and retained the literal
+  algorithm as a test oracle.
 - Added `p7-full`/`p7-report` orchestration and an xtask report checker that
   requires all 6,624 non-empty responses and binds each combination by exact
   byte count and SHA-256.
@@ -97,6 +104,12 @@ Date: 2026-07-14
 
 ## Decisions And Constraints
 
+- Scalar `-ss` controls only legal same-tick reordering. Recursion binders,
+  clock guards, lifecycle routing, state maintenance, output stores, and AD
+  epochs remain semantic barriers outside the scheduling policy.
+- Compact `-ss 2` is exactly equivalent while the C++ raw sequence length fits
+  `u128`; beyond that non-materializable parity domain it uses verified DFS to
+  preserve scheduler totality.
 - P7.2 is complete translation-validation evidence for the executable impulse
   contracts, not the P7 exit gate and not a proof of `V-Simulation`.
 - P7.3 must add FIR/WAST/Julia artifact gates and supported single-precision
@@ -119,32 +132,23 @@ Date: 2026-07-14
 
 ## Validation
 
+- `make -C tests/impulse-tests all-ss` passes all 2,208 scalar comparisons:
+  92 DSPs x 6 executable backends x 4 scheduling strategies.
+- Authoritative-order, direct-effect, compact-special-schedule, ondemand,
+  clocked differential, reverse-AD, and scalar bit-parity tests pass.
 - `make -C tests/impulse-tests -j16 p7-matrix` passes all 6,624 differential
   comparisons across the complete 72-combination matrix.
 - `make -C tests/impulse-tests p7-report` verifies 72 x 92 non-empty responses
   and emits the versioned 10,958,514,432-byte SHA-256 inventory.
-- Focused vector assembly, C/C++ production lowering, and xtask report tests
-  pass.
-- `make -C tests/impulse-tests -j8 p7-smoke` passes 216/216 comparisons across
-  72 backend/mode/strategy combinations.
-- Focused unit tests for both Rust impulse runners pass; Node syntax and
-  malformed-`-ss` rejection checks pass.
 - `cargo fmt --all -- --check` passes.
-- `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- `cargo test --workspace --all-targets` passes.
-- `cargo run -p xtask -- golden-check` passes all 190 snapshots unchanged.
-- `cargo fmt --all -- --check` passes.
-- `cargo test -p transform signal_fir::vector --lib` passes (97 tests).
-- `cargo test -p compiler --test vector_mode` passes (8 tests).
-- `cargo test -p compiler --test vector_clock_ad` passes (2 tests).
 - `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - `cargo test --workspace --all-targets` passes.
 - `cargo run -p xtask -- golden-check` passes all 190 snapshots unchanged.
 
 ## Next Steps
 
-1. Execute P7.3: add the FIR/WAST/Julia artifact matrix and supported
-   single-precision gates.
+1. Keep P7.3 (FIR/WAST/Julia artifact and single-precision gates) deferred as
+   requested unless it becomes necessary for a release gate.
 2. Add optimized/unoptimized final-state/effect parity and the versioned
    vectorization-coverage baseline before cost-model work or fallback removal.
 

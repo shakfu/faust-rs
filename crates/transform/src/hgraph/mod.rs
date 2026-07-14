@@ -165,7 +165,7 @@ impl Digraph {
 }
 
 /// Hierarchical dependency graph: one digraph per clock-domain instance.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Hgraph {
     /// Per-domain graphs in deterministic creation order (`Top` first, then
     /// wrappers in traversal order).
@@ -603,7 +603,7 @@ pub fn audit_control_variability(
 }
 
 /// One serialized per-graph schedule.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Hsched {
     /// `(key, schedule)` pairs in the same deterministic order as
     /// [`Hgraph::graphs`]. Each schedule lists the graph's owned signals in
@@ -654,6 +654,108 @@ pub fn schedule(hgraph: &Hgraph, strategy: SchedulingStrategy) -> Result<Hsched,
         out.schedules.push((*key, order));
     }
     Ok(out)
+}
+
+/// Adds strategy-independent ordering edges between conflicting compute-time
+/// effects.
+///
+/// The baseline is the deterministic depth-first linear extension of each
+/// graph's data dependencies. Conflicting nodes that are not already ordered
+/// are chained in that baseline order. Every public scheduling strategy then
+/// observes the same effect constraints and may reorder only commuting work.
+///
+/// This is the scalar counterpart of vector-plan effect orientation. The
+/// supplied facts come from the canonical signal-level analysis rather than
+/// from generated FIR statements.
+pub fn orient_effect_conflicts(
+    hgraph: &mut Hgraph,
+    uses: &crate::signal_fir::vector_analysis::SignalUseTable,
+) -> Result<(), HgraphError> {
+    use crate::signal_fir::vector_analysis::effect_sets_conflict;
+
+    for graph_index in 0..hgraph.graphs.len() {
+        let graph = &hgraph.graphs[graph_index].1;
+        let baseline =
+            crate::schedule::schedule(SchedulingStrategy::DepthFirst, graph).map_err(|err| {
+                match err {
+                    crate::schedule::ScheduleError::SelfEdge { node } => {
+                        HgraphError::InstantaneousCycle {
+                            key: hgraph.graphs[graph_index].0,
+                            sig: node,
+                        }
+                    }
+                    crate::schedule::ScheduleError::Cycle { remaining } => {
+                        HgraphError::InstantaneousCycle {
+                            key: hgraph.graphs[graph_index].0,
+                            sig: remaining[0],
+                        }
+                    }
+                }
+            })?;
+        let position = baseline
+            .iter()
+            .enumerate()
+            .map(|(position, &sig)| (sig, position))
+            .collect::<AHashMap<_, _>>();
+        let nodes = graph
+            .nodes()
+            .iter()
+            .copied()
+            .filter(|&sig| {
+                uses.get(sig)
+                    .is_some_and(|info| !info.direct_effects().is_empty())
+            })
+            .collect::<Vec<_>>();
+
+        for (left_index, &left) in nodes.iter().enumerate() {
+            for &right in &nodes[left_index + 1..] {
+                let left_effects = uses.get(left).map_or(&[][..], |info| info.direct_effects());
+                let right_effects = uses
+                    .get(right)
+                    .map_or(&[][..], |info| info.direct_effects());
+                if !effect_sets_conflict(left_effects, right_effects) {
+                    continue;
+                }
+
+                let graph = &hgraph.graphs[graph_index].1;
+                if dependency_reachable(graph, left, right)
+                    || dependency_reachable(graph, right, left)
+                {
+                    continue;
+                }
+
+                let (consumer, dependency) = if position[&left] < position[&right] {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                hgraph.graphs[graph_index]
+                    .1
+                    .add_edge(consumer, dependency, false);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dependency_reachable(graph: &Digraph, from: SigId, to: SigId) -> bool {
+    let mut stack = vec![from];
+    let mut visited = AHashSet::new();
+    while let Some(sig) = stack.pop() {
+        if !visited.insert(sig) {
+            continue;
+        }
+        for edge in graph.edges(sig) {
+            if edge.delayed || !graph.contains(edge.to) {
+                continue;
+            }
+            if edge.to == to {
+                return true;
+            }
+            stack.push(edge.to);
+        }
+    }
+    false
 }
 
 #[cfg(test)]

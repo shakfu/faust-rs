@@ -7,11 +7,11 @@ use std::collections::HashMap;
 
 use propagate::{ClockDomain, ClockDomainId, ClockDomainKind, ClockDomainTable};
 use signals::{BinOp, SigBuilder, SigId};
-use tlib::TreeArena;
+use tlib::{NodeKind, TreeArena, vec_to_list};
 
 use super::{
     Digraph, GraphKey, Hgraph, HgraphError, audit_control_variability, audit_hgraph, build_hgraph,
-    needs_subgraph, schedule,
+    needs_subgraph, orient_effect_conflicts, schedule,
 };
 use crate::clk_env::annotate;
 use crate::schedule::SchedulingStrategy;
@@ -244,6 +244,77 @@ fn delayed_edges_do_not_order_the_tick() {
     // The recursion is broken by the delayed edge: scheduling must succeed.
     schedule(&hgraph, SchedulingStrategy::DepthFirst)
         .expect("state-breaking recursion is acyclic on immediate edges");
+}
+
+#[test]
+fn conflicting_unknown_effects_receive_a_strategy_independent_order() {
+    let mut arena = TreeArena::new();
+    let (call_a, call_b) = {
+        let int_type = arena.int(0);
+        let real_type = arena.int(1);
+        let name_f32 = arena.symbol("p3_probe_f");
+        let name_f64 = arena.symbol("p3_probe");
+        let names = vec_to_list(&mut arena, &[name_f32, name_f64]);
+        let signature = vec_to_list(&mut arena, &[int_type, names, real_type]);
+        let include = arena.symbol("<p3_probe.h>");
+        let library = arena.symbol("");
+        let tag = arena.intern_tag("FFUN");
+        let descriptor = arena.intern(NodeKind::Tag(tag), &[signature, include, library]);
+        let mut b = SigBuilder::new(&mut arena);
+        let input_a = b.input(0);
+        let input_b = b.input(1);
+        let args_a = vec_to_list(&mut arena, &[input_a]);
+        let args_b = vec_to_list(&mut arena, &[input_b]);
+        let mut b = SigBuilder::new(&mut arena);
+        (b.ffun(descriptor, args_a), b.ffun(descriptor, args_b))
+    };
+    let prepared = crate::signal_prepare::prepare_signals_for_fir_verified(
+        &arena,
+        &[call_a, call_b],
+        &ui::UiProgram::empty(),
+    )
+    .expect("foreign-call fixture prepares");
+    let domains = ClockDomainTable::new();
+    let envs = annotate(prepared.arena(), &domains, prepared.outputs()).unwrap();
+    let analysis = crate::signal_fir::vector_analysis::analyze_vector_signals(&prepared, &envs)
+        .expect("effect analysis succeeds");
+    let mut hgraph = build_hgraph(
+        prepared.arena(),
+        &domains,
+        &envs,
+        prepared.outputs(),
+        prepared.sig_types_map(),
+    )
+    .unwrap();
+    let [left, right] = prepared.outputs() else {
+        panic!("fixture must keep two roots");
+    };
+    let top = hgraph.graph(GraphKey::Top).unwrap();
+    assert!(
+        !top.edges(*left).iter().any(|edge| edge.to == *right)
+            && !top.edges(*right).iter().any(|edge| edge.to == *left),
+        "the fixture starts without a data-order relation"
+    );
+
+    orient_effect_conflicts(&mut hgraph, &analysis.uses).unwrap();
+    let baseline = schedule(&hgraph, SchedulingStrategy::DepthFirst).unwrap();
+    let baseline = baseline.schedule(GraphKey::Top).unwrap();
+    let left_before_right =
+        baseline.iter().position(|sig| sig == left) < baseline.iter().position(|sig| sig == right);
+    for strategy in [
+        SchedulingStrategy::DepthFirst,
+        SchedulingStrategy::BreadthFirst,
+        SchedulingStrategy::Special,
+        SchedulingStrategy::ReverseBreadthFirst,
+    ] {
+        let order = schedule(&hgraph, strategy).unwrap();
+        let order = order.schedule(GraphKey::Top).unwrap();
+        assert_eq!(
+            order.iter().position(|sig| sig == left) < order.iter().position(|sig| sig == right),
+            left_before_right,
+            "{strategy:?} reordered conflicting foreign effects"
+        );
+    }
 }
 
 // ── Control graph (plan §4.6) ────────────────────────────────────────────────

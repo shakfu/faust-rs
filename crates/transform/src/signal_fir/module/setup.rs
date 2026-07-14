@@ -99,6 +99,10 @@ impl<'a> SignalToFirLower<'a> {
             rad_reverse: build::RadReverseState::default(),
             bra: bra::BraState::default(),
             emission_order: Vec::new(),
+            scalar_schedule: None,
+            clocked_payload_signals: HashSet::new(),
+            fixed_ad_internal_signals: HashSet::new(),
+            symrec_internal_signals: HashSet::new(),
         }
     }
 

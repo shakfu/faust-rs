@@ -25,14 +25,11 @@
 //! non-integer US/DS clocks).
 //!
 //! # Emission model (adaptation note)
-//! C++ drives emission from the `Hsched` schedule. This port keeps the
-//! fast-lane's demand-driven lowering and obtains the same ordering
-//! guarantees from the **region redirection** rule: when lowering reaches a
-//! signal whose inferred domain is a strict ancestor of the domain of the
-//! open guarded block, emission is redirected to the ancestor's region
-//! (statements land *before* the guard statement, which is appended when the
-//! block closes). `Hgraph`/`Hsched` (P1.2) are still built by the clocked
-//! entry point as a pre-lowering validation pass (partition + causality).
+//! Like C++, scalar emission is driven by the selected per-region `Hsched`.
+//! Recursive expression construction remains demand-driven inside each
+//! scheduled node. The **region redirection** rule still controls placement:
+//! a signal inferred in a strict ancestor domain is appended to that
+//! ancestor's region before the descendant guard closes.
 //!
 //! **Redirection exception — held payloads.** The payload of
 //! `PermVar(Clocked(env, value))` is lowered *in the guarded block that writes
@@ -130,6 +127,56 @@ fn clocked_not_lowered(message: impl Into<String>) -> SignalFirError {
 }
 
 impl<'a> SignalToFirLower<'a> {
+    /// Records the closure that must be materialized inside guarded hold
+    /// payloads. This enforces the C++ `generatePermVar` exception before the
+    /// top-level scalar schedule starts lowering ancestor-domain nodes.
+    pub(super) fn prepare_clocked_payload_schedule(&mut self, roots: &[SigId]) {
+        let mut reachable = roots.to_vec();
+        let mut visited = HashSet::new();
+        while let Some(sig) = reachable.pop() {
+            if !visited.insert(sig) {
+                continue;
+            }
+            match match_sig(self.arena, sig) {
+                SigMatch::OnDemand(children)
+                | SigMatch::Upsampling(children)
+                | SigMatch::Downsampling(children) => {
+                    for &hold in children.iter().skip(1) {
+                        if let SigMatch::PermVar(inner) = match_sig(self.arena, hold) {
+                            self.clocked_payload_signals.insert(inner);
+                            let payload = match match_sig(self.arena, inner) {
+                                SigMatch::Clocked(_, payload) => payload,
+                                _ => inner,
+                            };
+                            self.collect_guarded_payload(payload);
+                        }
+                    }
+                    reachable.extend(children.iter().copied());
+                }
+                _ => {
+                    if let Some(children) = self.arena.children(sig) {
+                        reachable.extend(children.iter().copied());
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_guarded_payload(&mut self, root: SigId) {
+        let mut stack = vec![root];
+        while let Some(sig) = stack.pop() {
+            if !self.clocked_payload_signals.insert(sig) {
+                continue;
+            }
+            if matches!(match_sig(self.arena, sig), SigMatch::TempVar(_)) {
+                continue;
+            }
+            if let Some(children) = self.arena.children(sig) {
+                stack.extend(children.iter().copied());
+            }
+        }
+    }
+
     /// Computes the append-redirection depth for `sig`, when its inferred
     /// domain is a strict ancestor of the effective (append-target) domain.
     ///
@@ -578,7 +625,13 @@ impl<'a> SignalToFirLower<'a> {
         let prev_redirect = self.regions.set_redirect(None);
 
         let mut body_result: Result<(), SignalFirError> = Ok(());
+        if let Err(error) = self.lower_scheduled_graph(crate::hgraph::GraphKey::Wrapper(wrapper)) {
+            body_result = Err(error);
+        }
         for (value, field) in &hold_stores {
+            if body_result.is_err() {
+                break;
+            }
             // Propagation wraps every held value as Clocked(env, v); the
             // payload must be emitted in this guarded block, even when the
             // payload itself is inferred at an ancestor clock environment.

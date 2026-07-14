@@ -16,9 +16,8 @@
 //! entries, and `layers = 30` (60 nodes) about two *billion* — squarely
 //! impractical. Any caller that might present `Special` with a DAG whose
 //! nodes are shared this densely across paths must bound `layers`-like
-//! depth or fall back to another strategy; this is a faithful port of a C++
-//! algorithm with the same asymptotic behavior, not a Rust-specific defect
-//! (`special.rs` module docs).
+//! depth. The production implementation must remain compact while preserving
+//! the exact order of the literal C++ sequence (`special.rs` module docs).
 
 use std::time::Instant;
 
@@ -41,5 +40,37 @@ fn special_completes_on_a_path_heavy_eighteen_to_twenty_node_ladder() {
     assert!(
         elapsed.as_secs() < 5,
         "special on ladder(10) took {elapsed:?}, expected well under a second"
+    );
+}
+
+#[test]
+fn compact_special_matches_the_literal_sequence_on_shared_dags() {
+    for layers in 1..=10 {
+        let g = ladder(layers);
+        let raw = crate::schedule::special::raw(&g, &g.nodes());
+        let mut seen = ahash::AHashSet::new();
+        let literal = raw
+            .iter()
+            .rev()
+            .copied()
+            .filter(|node| seen.insert(*node))
+            .collect::<Vec<_>>();
+        let compact = schedule(SchedulingStrategy::Special, &g).expect("ladder schedules");
+        assert_eq!(compact, literal, "mismatch at {layers} layers");
+    }
+}
+
+#[test]
+fn compact_special_avoids_path_count_growth() {
+    let g = ladder(80);
+    let start = Instant::now();
+    let order = schedule(SchedulingStrategy::Special, &g).expect("large ladder schedules");
+    let elapsed = start.elapsed();
+
+    assert_eq!(order.len(), 160);
+    assert!(verify_schedule(&g, &order).is_ok());
+    assert!(
+        elapsed.as_secs() < 5,
+        "compact special on ladder(80) took {elapsed:?}"
     );
 }

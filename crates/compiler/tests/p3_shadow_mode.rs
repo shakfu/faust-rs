@@ -1,16 +1,13 @@
-//! P3 shadow-mode corpus evidence (observation-only).
+//! P3 scalar-scheduling corpus evidence.
 //!
 //! Compiles a spread of plain scalar corpus programs end-to-end through the
-//! real front-end and asserts the activation-safety property the P3 plan
-//! needs before making `Hsched` authoritative: the current demand-driven
-//! lowering order already **respects every same-tick (immediate) dependency
-//! edge** of the hierarchical graph. Where that holds, an `Hsched`-driven
-//! order can only reorder independent nodes — activation introduces no
-//! dependency-ordering change.
+//! real front-end and checks that authoritative `Hsched` lowering respects
+//! every same-tick dependency. A separate asymmetric fixture proves that the
+//! four public strategies do not collapse to one actual emission order.
 //!
-//! Also tallies how many programs' demand-driven order is *already identical*
-//! to the depth-first `-ss 0` schedule on the comparable intersection (the
-//! "no golden churn" signal), printed for the record.
+//! Exact schedule equality is checked on the comparable materialized subset.
+//! Recursive bodies remain context-bound units, so their internal first-cache
+//! trace may differ while still respecting every dependency.
 //!
 //! Scope: deliberately plain, forward-time scalar programs (recursion,
 //! delays, UI, fork/join). RAD/BRA/clocked programs have a different,
@@ -18,15 +15,19 @@
 //! blocks) that the flat same-tick `Hgraph` does not describe, so they are
 //! out of scope for this same-tick invariant and are covered by P5/P6.
 
-use compiler::Compiler;
-use transform::signal_fir::shadow::ShadowReport;
-use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
+use std::collections::BTreeSet;
 
-fn shadow_for(name: &str, source: &str) -> ShadowReport {
+use compiler::{Compiler, SchedulingStrategy};
+use transform::signal_fir::shadow::ShadowReport;
+use transform::signal_fir::{
+    RealType, SignalFirOptions, SignalFirOutput, compile_signals_to_fir_fastlane_with_ui,
+};
+
+fn scalar_fir_for(name: &str, source: &str, strategy: SchedulingStrategy) -> SignalFirOutput {
     let out = Compiler::new()
         .compile_source_to_signals(name, source)
         .unwrap_or_else(|e| panic!("{name}: front-end compile failed: {e}"));
-    let fir = compile_signals_to_fir_fastlane_with_ui(
+    compile_signals_to_fir_fastlane_with_ui(
         &out.parse.state.arena,
         &out.signals,
         out.process_arity.inputs,
@@ -35,11 +36,16 @@ fn shadow_for(name: &str, source: &str) -> ShadowReport {
         &SignalFirOptions {
             module_name: "mydsp".to_owned(),
             real_type: RealType::Float32,
+            scheduling_strategy: strategy,
             ..SignalFirOptions::default()
         },
     )
-    .unwrap_or_else(|e| panic!("{name}: fast-lane lowering failed: {e}"));
-    fir.shadow_report
+    .unwrap_or_else(|e| panic!("{name}: fast-lane lowering failed: {e}"))
+}
+
+fn shadow_for(name: &str, source: &str) -> ShadowReport {
+    scalar_fir_for(name, source, SchedulingStrategy::DepthFirst)
+        .shadow_report
         .unwrap_or_else(|| panic!("{name}: a plain scalar program must build an Hgraph"))
 }
 
@@ -66,14 +72,14 @@ const PROGRAMS: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn demand_driven_order_respects_immediate_edges_across_the_scalar_corpus() {
+fn authoritative_order_respects_immediate_edges_across_the_scalar_corpus() {
     let mut matched = 0usize;
     for (name, source) in PROGRAMS {
         let report = shadow_for(name, source);
         assert!(
             report.respects_all_immediate_edges(),
             "{name}: demand-driven lowering must already respect every \
-             same-tick dependency edge before P3 activation is safe; \
+             same-tick dependency edge under authoritative P3 lowering; \
              inversions: {:?}",
             report.inversions
         );
@@ -89,13 +95,49 @@ fn demand_driven_order_respects_immediate_edges_across_the_scalar_corpus() {
             report.matches_schedule_everywhere()
         );
     }
-    // Recorded finding, not an assertion target: how many of the sampled
-    // scalar programs would see zero `-ss 0` statement-order change on
-    // activation (their demand-driven order already equals the DFS schedule
-    // on the comparable intersection).
+    // Diagnostic only: recursive context bundling can make the first-cache
+    // trace differ from the abstract per-node schedule.
     eprintln!(
-        "P3 shadow mode: {matched}/{} sampled scalar programs already match \
-         the -ss 0 schedule on the comparable intersection",
+        "P3 conformance: {matched}/{} sampled scalar programs exactly match \
+         the -ss 0 schedule on the comparable materialized intersection",
         PROGRAMS.len()
+    );
+}
+
+#[test]
+fn selected_strategy_is_authoritative_and_changes_an_asymmetric_scalar_dag() {
+    let source = "process = _,_ <: (_ * 2.0 + 1.0), (_ * 3.0 + 4.0) :> _;";
+    let strategies = [
+        SchedulingStrategy::DepthFirst,
+        SchedulingStrategy::BreadthFirst,
+        SchedulingStrategy::Special,
+        SchedulingStrategy::ReverseBreadthFirst,
+    ];
+    let mut distinct_orders = BTreeSet::new();
+    for strategy in strategies {
+        let fir = scalar_fir_for("p3_authoritative", source, strategy);
+        let report = fir
+            .shadow_report
+            .as_ref()
+            .expect("plain scalar lowering records the accepted schedule");
+        assert!(
+            report.respects_all_immediate_edges(),
+            "{strategy:?} introduced an immediate-edge inversion: {:?}",
+            report.inversions
+        );
+        assert!(
+            report.matches_schedule_everywhere(),
+            "{strategy:?} must drive first lowering on this non-recursive graph"
+        );
+        distinct_orders.insert(
+            fir.emission_order
+                .iter()
+                .map(|sig| sig.as_u32())
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert!(
+        distinct_orders.len() >= 2,
+        "the four strategies must not collapse to one emission order on an asymmetric DAG"
     );
 }

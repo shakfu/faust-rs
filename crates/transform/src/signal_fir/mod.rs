@@ -299,8 +299,8 @@ pub struct SignalFirOptions {
     pub compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
     /// `--scheduling-strategy`). Deliberately independent of [`ComputeMode`]:
-    /// the checked vector path applies it to every induced epoch schedule;
-    /// scalar activation remains tracked separately (plan §2.5).
+    /// scalar lowering applies it to hierarchical signal regions and the
+    /// checked vector path applies it to every induced loop epoch.
     pub scheduling_strategy: SchedulingStrategy,
 }
 
@@ -328,18 +328,14 @@ pub struct SignalFirOutput {
     pub store: FirStore,
     /// Root node id of the generated FIR module.
     pub module: FirId,
-    /// Demand-driven first-lowering order of every distinct materialized
-    /// `SigId` (P3 shadow-mode diagnostic input, plan §P3 "record
-    /// statement-order... differences for `-ss 0` before making it
-    /// authoritative"). Observation-only: nothing in lowering or codegen
-    /// reads it, and it never affects the emitted FIR. Compare it against a
-    /// selected `hgraph::Hsched` with [`shadow::compare_emission_order`].
+    /// First-lowering order of every distinct materialized `SigId`. On the
+    /// scalar forward path this is driven by the selected `Hsched`; recursive
+    /// bodies remain context-bound units. The trace is exported only for
+    /// conformance diagnostics via [`shadow::compare_emission_order`].
     pub emission_order: Vec<SigId>,
-    /// P3 shadow-mode report: how the demand-driven [`Self::emission_order`]
-    /// relates to the causality gate's selected `Hsched` (`-ss 0`). `None`
-    /// when no hierarchical graph was built (a wrapper program compiled
-    /// through the clock-unaware entry point). Observation-only; the FIR is
-    /// identical whether or not this is computed.
+    /// P3 schedule-conformance report comparing [`Self::emission_order`] with
+    /// the selected `Hsched`. `None` when no hierarchical graph was built.
+    /// The report is observation-only; computing it never changes FIR.
     pub shadow_report: Option<shadow::ShadowReport>,
     /// Observable activation/fallback state for the signal-level vector path.
     pub vector_pipeline_status: VectorPipelineStatus,
@@ -429,14 +425,10 @@ fn compile_fastlane_inner(
         )
     })?;
 
-    // Causality gate (P3): build the hierarchical dependency graph and a
-    // schedule for every prepared forest before lowering. `gate_graphs`
-    // captures the `(Hgraph, Hsched)` when one is built, so the P3
-    // shadow-mode diagnostic below can compare the selected schedule against
-    // the demand-driven emission order — over the same prepared arena. The
-    // schedule itself is still *not* authoritative over lowering: only its
-    // acceptance (causality) gates, so `-ss` remains behaviorally
-    // unobservable.
+    // P3: build the hierarchical dependency graph, orient conflicting effects
+    // independently of strategy, and schedule every prepared scalar forest.
+    // The accepted Hsched drives scalar forward lowering; vector mode instead
+    // schedules its strategy-independent LoopGraph.
     let mut gate_graphs: Option<(crate::hgraph::Hgraph, crate::hgraph::Hsched)> = None;
     let clocked = match clock_domains {
         Some(domains) if !domains.is_empty() => {
@@ -447,7 +439,7 @@ fn compile_fastlane_inner(
                         format!("clock-environment inference failed: {err}"),
                     )
                 })?;
-            let hgraph = crate::hgraph::build_hgraph(
+            let mut hgraph = crate::hgraph::build_hgraph(
                 prepared.arena(),
                 domains,
                 &envs,
@@ -460,9 +452,25 @@ fn compile_fastlane_inner(
                     format!("hierarchical dependency graph failed: {err}"),
                 )
             })?;
+            if matches!(options.compute_mode, ComputeMode::Scalar) {
+                let effects =
+                    vector_analysis::analyze_vector_signals(&prepared, &envs).map_err(|err| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::ClockAnalysis,
+                            format!("scalar effect analysis failed: {err}"),
+                        )
+                    })?;
+                crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects.uses).map_err(
+                    |err| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::ClockAnalysis,
+                            format!("scalar effect ordering failed: {err}"),
+                        )
+                    },
+                )?;
+            }
             let hsched =
-                crate::hgraph::schedule(&hgraph, crate::schedule::SchedulingStrategy::DepthFirst)
-                    .map_err(|err| {
+                crate::hgraph::schedule(&hgraph, options.scheduling_strategy).map_err(|err| {
                     SignalFirError::new(
                         SignalFirErrorCode::ClockAnalysis,
                         format!("clock-domain scheduling failed: {err}"),
@@ -499,7 +507,7 @@ fn compile_fastlane_inner(
                                 format!("clock-environment inference failed: {err}"),
                             )
                         })?;
-                let hgraph = crate::hgraph::build_hgraph(
+                let mut hgraph = crate::hgraph::build_hgraph(
                     prepared.arena(),
                     &empty_domains,
                     &envs,
@@ -512,16 +520,30 @@ fn compile_fastlane_inner(
                         format!("hierarchical dependency graph failed: {err}"),
                     )
                 })?;
-                let hsched = crate::hgraph::schedule(
-                    &hgraph,
-                    crate::schedule::SchedulingStrategy::DepthFirst,
-                )
-                .map_err(|err| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::ClockAnalysis,
-                        format!("clock-domain scheduling failed: {err}"),
-                    )
-                })?;
+                if matches!(options.compute_mode, ComputeMode::Scalar) {
+                    let effects = vector_analysis::analyze_vector_signals(&prepared, &envs)
+                        .map_err(|err| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::ClockAnalysis,
+                                format!("scalar effect analysis failed: {err}"),
+                            )
+                        })?;
+                    crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects.uses).map_err(
+                        |err| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::ClockAnalysis,
+                                format!("scalar effect ordering failed: {err}"),
+                            )
+                        },
+                    )?;
+                }
+                let hsched = crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
+                    .map_err(|err| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::ClockAnalysis,
+                            format!("clock-domain scheduling failed: {err}"),
+                        )
+                    })?;
                 gate_graphs = Some((hgraph, hsched));
             }
             None
@@ -562,14 +584,16 @@ fn compile_fastlane_inner(
         options.delay_line_threshold,
         options.compute_mode,
         clocked,
+        if matches!(options.compute_mode, ComputeMode::Scalar) {
+            gate_graphs.as_ref().map(|(_, schedule)| schedule)
+        } else {
+            None
+        },
     )?;
 
-    // P3 shadow mode (observation-only): with the demand-driven emission
-    // order and the gate's selected `Hsched` now both available over the
-    // same prepared arena, record how they relate. This never alters the
-    // returned FIR — it only annotates the output for diagnostics/tests, so
-    // activation (making the schedule authoritative) can be judged against
-    // real corpus evidence rather than assumed.
+    // Keep the former shadow report as a post-activation conformance trace.
+    // It compares the accepted schedule and actual first-lowering order over
+    // the same prepared arena without changing the returned FIR.
     let shadow_report = gate_graphs
         .as_ref()
         .map(|(hgraph, hsched)| shadow::compare_emission_order(hgraph, hsched, &output));

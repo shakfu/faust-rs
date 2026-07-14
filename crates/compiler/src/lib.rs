@@ -503,13 +503,11 @@ impl Compiler {
     /// Selects the signal/loop dependency scheduling strategy (`-ss` /
     /// `--scheduling-strategy`).
     ///
-    /// Vectorization port plan phase P2: plumbing only. The strategy is
-    /// stored and threaded through to [`SignalFirOptions`] so it is visible
-    /// to every lowering path, but nothing in the compile pipeline invokes
-    /// [`transform::schedule::schedule`] yet — P3 activates scalar
-    /// scheduling. Independent of [`ComputeMode`]: selecting `-vec` does not
-    /// change this default, and selecting a strategy does not change the
-    /// scalar/vector codegen path.
+    /// Scalar lowering applies the strategy to the hierarchical signal DAG;
+    /// vector lowering applies the same strategy to each completed loop-DAG
+    /// epoch. Fixed reverse-AD epochs remain outside this pluggable order.
+    /// Independent of [`ComputeMode`]: selecting `-vec` does not change the
+    /// default or decode a second scheduling option.
     #[must_use]
     pub fn with_scheduling_strategy(mut self, strategy: SchedulingStrategy) -> Self {
         self.scheduling_strategy = strategy;

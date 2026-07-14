@@ -11,6 +11,86 @@
 use super::*;
 
 impl<'a> SignalToFirLower<'a> {
+    /// Lowers every node owned by one hierarchical graph in the accepted
+    /// dependencies-first order. Recursive calls remain responsible for
+    /// expression construction, while the previsit fixes the order in which
+    /// independent nodes first enter the region-local caches and statements.
+    pub(super) fn lower_scheduled_graph(
+        &mut self,
+        key: crate::hgraph::GraphKey,
+    ) -> Result<(), SignalFirError> {
+        let schedule = self
+            .scalar_schedule
+            .as_ref()
+            .and_then(|schedule| schedule.schedule(key))
+            .unwrap_or(&[])
+            .to_vec();
+        for sig in schedule {
+            if self.fixed_ad_internal_signals.contains(&sig)
+                || self.symrec_internal_signals.contains(&sig)
+            {
+                continue;
+            }
+            if matches!(
+                key,
+                crate::hgraph::GraphKey::Control | crate::hgraph::GraphKey::Top
+            ) && self.clocked_payload_signals.contains(&sig)
+            {
+                continue;
+            }
+            // A prepared SYMREC body may appear before its owning projection
+            // in the abstract dependency schedule, but the Rust lowerer must
+            // open that projection's recursion context before resolving a
+            // SYMREF. The projection remains scheduled normally and lowers
+            // the skipped body as one context-bound unit.
+            if self.requires_active_recursion(sig) {
+                continue;
+            }
+            if matches!(key, crate::hgraph::GraphKey::Wrapper(_))
+                && self.clocked_payload_signals.contains(&sig)
+            {
+                let payload = match match_sig(self.arena, sig) {
+                    SigMatch::Clocked(_, payload) => payload,
+                    _ => sig,
+                };
+                let _ = self.lower_clocked_payload(payload)?;
+            } else {
+                let _ = self.lower_signal(sig)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn requires_active_recursion(&self, root: SigId) -> bool {
+        let mut stack = vec![root];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(sig) = stack.pop() {
+            if !visited.insert(sig) {
+                continue;
+            }
+            if let SigMatch::Proj(_, group) = match_sig(self.arena, sig) {
+                let group = match match_sig(self.arena, group) {
+                    SigMatch::ReverseTimeRec(body) => body,
+                    _ => group,
+                };
+                if match_sym_ref(self.arena, group).is_some()
+                    || tlib::match_de_bruijn_ref(self.arena, group).is_some()
+                {
+                    return true;
+                }
+                if match_sym_rec(self.arena, group).is_some() {
+                    // This projection is the binder that makes every SYMREF
+                    // below its group legal; do not inspect through it.
+                    continue;
+                }
+            }
+            if let Some(children) = self.arena.children(sig) {
+                stack.extend(children.iter().copied());
+            }
+        }
+        false
+    }
+
     /// Central dispatcher: lowers one signal node to a FIR value expression.
     ///
     /// Results are memoized in [`Self::cache`] for DAG sharing.  As a side
@@ -276,10 +356,9 @@ impl<'a> SignalToFirLower<'a> {
         };
 
         if !self.is_recursive_projection(sig) {
-            // First materialization of `sig`: the sole cache-insertion site,
-            // so this is exactly the demand-driven emission order the P3
-            // shadow-mode diagnostic compares against a selected `Hsched`
-            // (`crate::signal_fir::shadow`). Observation-only.
+            // First materialization of `sig`: the sole cache-insertion site
+            // and therefore the exact P3 conformance trace compared with the
+            // selected Hsched (`crate::signal_fir::shadow`).
             if self.cache.insert(sig, lowered).is_none() {
                 self.emission_order.push(sig);
             }

@@ -1,42 +1,19 @@
-//! P3 shadow-mode comparison (observation-only).
+//! P3 schedule-conformance comparison (observation-only).
 //!
-//! Plan `vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`,
-//! "P3 - Scalar scheduling activation":
+//! This module was introduced for the pre-activation shadow audit required by
+//! `vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md` P3. The
+//! report remains useful after activation: it compares actual first lowering
+//! with the accepted `Hsched` over the same prepared forest.
 //!
-//! > Run `Hsched` in shadow mode against demand-driven lowering first. Record
-//! > statement-order, naming, and CSE differences for `-ss 0` before making
-//! > it authoritative.
+//! An empty inversion set proves that every materialized same-tick dependency
+//! was emitted first. Exact intersection equality additionally proves that a
+//! non-recursive graph was driven directly by the selected strategy. Recursive
+//! bodies may differ because Rust must expand them inside their `SYMREC`
+//! binder; that context-bound expansion is a fixed execution unit.
 //!
-//! This module answers, without changing any emitted FIR, the two questions
-//! activation hinges on:
-//!
-//! 1. **Is activation safe?** Does the current demand-driven lowering order
-//!    already *respect* every same-tick (immediate) dependency edge of the
-//!    hierarchical graph? If yes, an `Hsched`-driven order — which respects
-//!    those edges by construction — can only reorder *independent* nodes, so
-//!    activation introduces no dependency-ordering change, only a possible
-//!    reshuffle among nodes that are free to move.
-//! 2. **Would activation change anything for `-ss 0`?** Restricted to the
-//!    nodes both orders share, is the demand-driven order already identical
-//!    to the depth-first `Hsched`? If yes, activating `-ss 0` would (for this
-//!    program) be a no-op on statement order — no golden churn.
-//!
-//! # Why a comparison and not an assertion
-//! The report *records*; it never panics. The demand-driven lowerer and the
-//! hierarchical graph derive their child/dependency sets slightly differently
-//! (e.g. the graph treats a `Delay`'s carried value as a delayed, non-ordering
-//! edge and its amount as immediate; the lowerer descends by `match_sig`
-//! children), so the two signal universes are related but not identical.
-//! Emitting a report lets the P3 activation decision weigh real corpus
-//! evidence instead of assuming absence of differences (plan exit criterion:
-//! "Any textual golden changes for `-ss 0` are individually audited and
-//! documented rather than assumed absent").
-//!
-//! # Alignment
-//! Both inputs are over the *same* prepared arena: [`compare_emission_order`]
-//! is only ever called from `compile_fastlane_inner`, which owns both the
-//! causality gate's [`crate::hgraph::Hgraph`]/[`crate::hgraph::Hsched`] and
-//! the `emission_order` returned by `build_module`.
+//! The comparison never mutates FIR and never panics. `Hgraph` includes inline
+//! nodes that need not receive a separate FIR materialization, so exact order
+//! is deliberately checked only on the common node set.
 
 use ahash::AHashMap;
 use signals::SigId;
@@ -44,8 +21,7 @@ use signals::SigId;
 use crate::hgraph::{GraphKey, Hgraph, Hsched};
 use crate::signal_fir::SignalFirOutput;
 
-/// One same-tick dependency edge the demand-driven emission order failed to
-/// respect: `consumer` was emitted before its immediate `dependency`.
+/// One same-tick dependency edge the actual emission order failed to respect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgeInversion {
     /// The graph the edge belongs to.
@@ -56,47 +32,41 @@ pub struct EdgeInversion {
     pub dependency: SigId,
 }
 
-/// Per-graph shadow-mode facts.
+/// Per-graph schedule-conformance facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphShadow {
     /// Which hierarchical graph this describes.
     pub key: GraphKey,
-    /// Owned nodes of the graph that also appear in the demand-driven
+    /// Owned nodes of the graph that also appear in the actual
     /// emission order (the comparable intersection).
     pub covered_nodes: usize,
     /// Owned nodes of the graph *absent* from the emission order (inline or
-    /// otherwise never separately materialized by the demand-driven lowerer).
+    /// otherwise never separately materialized by the lowerer).
     pub uncovered_nodes: usize,
-    /// `true` when, restricted to `covered_nodes`, the demand-driven order is
-    /// identical to this graph's selected `Hsched` order — i.e. activating
-    /// the selected strategy would not reorder anything here.
+    /// `true` when the actual and selected orders match on `covered_nodes`.
     pub matches_schedule_on_intersection: bool,
 }
 
-/// Result of comparing one program's demand-driven emission order against a
-/// selected `Hsched`. Observation-only.
+/// Result of comparing one program's actual emission order against a selected
+/// `Hsched`. Observation-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShadowReport {
     /// Per-graph facts, in `Hsched` order (`Control`, `Top`, wrappers…).
     pub graphs: Vec<GraphShadow>,
-    /// Every immediate edge the demand-driven order got out of order. **Empty
-    /// is the activation-safety signal**: the demand-driven order already
-    /// respects every observable same-tick dependency.
+    /// Every immediate edge emitted out of order. Empty means every observable
+    /// same-tick dependency is respected.
     pub inversions: Vec<EdgeInversion>,
 }
 
 impl ShadowReport {
-    /// The activation-safety verdict: the demand-driven order respects every
+    /// The conformance verdict: the actual order respects every
     /// observable immediate dependency of every graph.
     #[must_use]
     pub fn respects_all_immediate_edges(&self) -> bool {
         self.inversions.is_empty()
     }
 
-    /// The no-churn verdict: on the comparable intersection, the demand-driven
-    /// order already equals the selected schedule for every graph — so
-    /// activating that strategy would change no statement order for this
-    /// program.
+    /// Whether actual and selected orders agree on every comparable node.
     #[must_use]
     pub fn matches_schedule_everywhere(&self) -> bool {
         self.graphs

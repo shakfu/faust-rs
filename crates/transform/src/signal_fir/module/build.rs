@@ -408,6 +408,7 @@ pub(crate) fn build_module<'a>(
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
     clocked: Option<clocked::ClockedPlan<'a>>,
+    scalar_schedule: Option<&crate::hgraph::Hsched>,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let delay_opts = DelayOptions {
         max_copy_delay,
@@ -427,6 +428,12 @@ pub(crate) fn build_module<'a>(
         delay_opts,
     );
     lower.clocked = clocked.map(clocked::ClockedState::new);
+    lower.scalar_schedule = scalar_schedule.cloned();
+    lower.fixed_ad_internal_signals = fixed_ad_internal_signals(lower.arena, signals);
+    lower.symrec_internal_signals = symrec_internal_signals(lower.arena, signals);
+    if lower.clocked.is_some() && lower.scalar_schedule.is_some() {
+        lower.prepare_clocked_payload_schedule(signals);
+    }
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     lower.assign_clocked_delay_cursors()?;
@@ -461,6 +468,7 @@ pub(crate) fn build_module<'a>(
     let has_forward_outputs = reverse_time_outputs.iter().any(|is_reverse| !*is_reverse);
     let has_reverse_outputs = reverse_time_outputs.iter().any(|is_reverse| *is_reverse);
     if has_reverse_outputs {
+        lower.scalar_schedule = None;
         // Readable structural fallback keys are only needed when the RAD
         // reverse-time loop must reconnect a delayed value to a forward output.
         lower.rad_reverse.forward_output_by_sig_key = signals
@@ -472,6 +480,15 @@ pub(crate) fn build_module<'a>(
             .collect();
     }
     let mut sample_loops = Vec::new();
+
+    // Reverse AD owns a fixed forward/reverse epoch split and is deliberately
+    // outside P3's flat same-tick Hgraph. P6 keeps that driver authoritative.
+    // Every ordinary scalar forward program, including clock islands, is
+    // previsited through the selected hierarchical schedule.
+    if !has_reverse_outputs {
+        lower.lower_scheduled_graph(crate::hgraph::GraphKey::Control)?;
+        lower.lower_scheduled_graph(crate::hgraph::GraphKey::Top)?;
+    }
 
     if has_forward_outputs {
         // Forward loop slice.  This is not necessarily "primal only": when a

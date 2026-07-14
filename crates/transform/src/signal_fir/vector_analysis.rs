@@ -590,6 +590,18 @@ pub struct SignalUseInfo {
     pub very_simple: bool,
     /// Sorted conservative compute-time effects, including non-`Gen` children.
     pub effects: Vec<EffectAtom>,
+    /// Sorted effects performed by this node itself, excluding child effects.
+    ///
+    /// This internal projection lets scalar scheduling orient actual effect
+    /// operations without paying a quadratic cost over every transitive
+    /// effect carrier in the signal graph.
+    direct_effects: Vec<EffectAtom>,
+}
+
+impl SignalUseInfo {
+    pub(crate) fn direct_effects(&self) -> &[EffectAtom] {
+        &self.direct_effects
+    }
 }
 
 /// Deterministic record pairing a `SigId` with its P4.2 facts.
@@ -1262,11 +1274,12 @@ fn decorate_effects(
         }
     }
     for (&sig, effects) in &accumulated {
-        records
+        let info = &mut records
             .get_mut(&sig)
             .expect("effect record has matching signal record")
-            .info
-            .effects = effects.iter().cloned().collect();
+            .info;
+        info.effects = effects.iter().cloned().collect();
+        info.direct_effects = direct[&sig].iter().cloned().collect();
     }
     Ok(())
 }
@@ -1647,6 +1660,7 @@ fn ensure_record(
                 recursive_projection,
                 very_simple,
                 effects: Vec::new(),
+                direct_effects: Vec::new(),
             },
         },
     );
