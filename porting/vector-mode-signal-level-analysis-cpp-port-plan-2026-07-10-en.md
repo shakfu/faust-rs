@@ -2139,6 +2139,60 @@ the transitional vector builder. The next slice must replace the pure-only
 region producer for stateful recursion/delay and clock/FAD islands, then run
 the full differential/backend matrix before fallback removal.
 
+Implementation status (2026-07-14, P6.5 production state/clock lowering):
+`signal_fir::vector_lower::lower_vector_program` now consumes the accepted
+P6.1 and P6.2 artifacts instead of rediscovering state or clock structure.
+Fixed positive delay reads use the certified storage equation
+
+```text
+copy: R + (i0 - vindex) - d
+ring: (index + (i0 - vindex) - d) & mask
+```
+
+and symbolic recursion is resolved through the unique reachable binder before
+all projection next-values are captured. Tuple definitions remain structural
+evidence only; no new backend-visible `ValueArray` runtime ABI is introduced.
+The P6.3b assembler now flattens recursion next-value declarations into the
+enclosing sample scope, then performs simultaneous projection writes. Its
+schema was advanced to version 2 so an old checker cannot silently accept the
+changed scope contract.
+
+Stateless OD/US/DS islands are now executable in the checked production module.
+Island-owned output stores execute after the guard in the same outer-sample
+iteration, which gives the recurrence
+
+```text
+hold_t = fire_t ? island_t : hold_(t-1)
+output_t = hold_t
+```
+
+including non-firing samples. Control-rate outputs are filled over every
+sample of the current chunk. Propagated FAD needs no separate vector ABI: its
+expanded ordinary signal graph follows the same typed region lowering.
+Reverse AD still fails closed with the exact stable diagnostic
+`FRS-VEC-RAD-SCALAR` and fixed `Forward < Reverse` epochs.
+
+The checked production selector now certifies pure graphs, fixed delays,
+top-rate symbolic recursion, stateless clock islands with held outputs, and
+expanded FAD for both `-lv 0/1` and every `-ss 0/1/2/3` strategy. Differential
+interpreter tests are bit-exact against scalar execution for delay, recursion,
+clock, and FAD fixtures, including a partial final chunk. Variable delays,
+state local to a clock island, UI programs, and RAD retain named fallbacks.
+
+Public API mapping is **adapted** and additive. The historical
+`VerifiedPureVectorProgram` and `PureLowering` names are retained for Rust
+source and diagnostic stability although the accepted subset is no longer
+pure-only. `VectorStateFirAction::execution_statements` and
+`VectorClockOutputStore` expose the finite scope/output witnesses needed by the
+independent checker; they do not change the CLI or C/C++ ABI. Structural
+mutation tests reject a forged recursion expansion or clock-output owner.
+
+P6.5 closes production construction for the supported state/clock/FAD subset,
+but it is not a proof of arbitrary DSP vectorization. Remaining P6 work is
+clock-local delay/recursion and variable-delay policy. P7 must then run the
+full backend matrix. Canonical JSON/hash binding, Lean R3/R4 acceptance, and
+the stable C++ retention corpus remain separate assurance deliverables.
+
 **Exit criterion:** no loop separation is discovered from a fused FIR body;
 scalar/`-vec` bit-exactness holds for supported FAD and clocked islands, with an
 explicit diagnostic for RAD shapes forced to scalar.

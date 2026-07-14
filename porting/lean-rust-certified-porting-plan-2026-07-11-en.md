@@ -639,6 +639,23 @@ The final module artifact is still in-memory Rust FIR: canonical
 serialization, hash binding, Lean acceptance, and stateful/clocked differential
 execution remain open.
 
+P6.5 extends production execution without raising the assurance claim. The
+generalized lowerer may use a state effect only when it is named by the
+accepted P6.1 plan or delegated to the accepted P6.2 clock/hold plan. Fixed
+delay reads instantiate the certified copy/ring equations, symbolic recursion
+resolves through its binder, recursion next-value declarations remain visible
+until simultaneous writes complete, and a held clock output is stored after
+its guard on every outer sample. The assembly schema is versioned so these
+scope and placement rules are checked as part of the finite artifact.
+
+Bounded scalar/vector differential execution now covers fixed delays,
+top-rate recursion, stateless clock islands, and expanded FAD under both loop
+variants and all scheduling strategies. This is translation-validation
+evidence, not a Lean proof. Variable delays, clock-local state, UI, and reverse
+AD are named fallbacks. Canonical serialization, producer hashes, Lean R3/R4
+acceptance, and C++ corpus retention are still required before the certified
+porting claim can be strengthened.
+
 ### R5 - Semantic reference execution
 
 Extend the Lean model with a small executable signal/FIR semantics in increments:

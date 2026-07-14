@@ -24,6 +24,7 @@ use sigtype::{Nature, Variability};
 
 use super::decoration_verify::{CanonicalSigType, DecorationRecord, VerifiedDecorationCertificate};
 use super::vector_analysis::{EffectAtom, StateCell, StateResource};
+use super::vector_clock_ad::VerifiedVectorClockAdPlan;
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_verify::{
     LoopKind, Placement, Rate, ValueType, VectorPlan, VectorPlanError, verify_vector_plan,
@@ -134,6 +135,7 @@ pub struct VectorStatePlan {
 pub struct VerifiedVectorStatePlan {
     plan: VectorStatePlan,
     vector_plan: VectorPlan,
+    delegated_resources: BTreeSet<StateResource>,
 }
 
 impl VerifiedVectorStatePlan {
@@ -155,7 +157,9 @@ impl VerifiedVectorStatePlan {
     /// State resources whose generic P5.3 effects are refined by this plan.
     #[must_use]
     pub fn managed_resources(&self) -> BTreeSet<StateResource> {
-        managed_resources(&self.plan)
+        let mut resources = managed_resources(&self.plan);
+        resources.extend(self.delegated_resources.iter().cloned());
+        resources
     }
 }
 
@@ -168,6 +172,7 @@ pub(crate) fn verified_vector_state_plan_for_test(
     VerifiedVectorStatePlan {
         plan,
         vector_plan: vector_plan.plan().clone(),
+        delegated_resources: BTreeSet::new(),
     }
 }
 
@@ -286,6 +291,41 @@ pub fn build_vector_state_plan(
     vector_plan: &VerifiedVectorPlan,
     max_copy_delay: u64,
 ) -> Result<VerifiedVectorStatePlan, VectorStateError> {
+    build_vector_state_plan_with_resources(
+        decorations,
+        vector_plan,
+        max_copy_delay,
+        &BTreeSet::new(),
+    )
+}
+
+/// Builds P6.1 state transitions while delegating clock/hold resources to an
+/// independently accepted P6.2 artifact.
+pub fn build_vector_state_plan_with_clock(
+    decorations: &VerifiedDecorationCertificate,
+    vector_plan: &VerifiedVectorPlan,
+    clock_plan: &VerifiedVectorClockAdPlan,
+    max_copy_delay: u64,
+) -> Result<VerifiedVectorStatePlan, VectorStateError> {
+    if clock_plan.vector_plan() != vector_plan.plan() {
+        return Err(VectorStateError::SignalCoverageMismatch {
+            signal_id: u64::MAX,
+        });
+    }
+    build_vector_state_plan_with_resources(
+        decorations,
+        vector_plan,
+        max_copy_delay,
+        &clock_plan.managed_state_resources(),
+    )
+}
+
+fn build_vector_state_plan_with_resources(
+    decorations: &VerifiedDecorationCertificate,
+    vector_plan: &VerifiedVectorPlan,
+    max_copy_delay: u64,
+    external_resources: &BTreeSet<StateResource>,
+) -> Result<VerifiedVectorStatePlan, VectorStateError> {
     let source = decorations.certificate();
     let plan = vector_plan.plan();
     verify_source_alignment(source.records.as_slice(), plan)?;
@@ -396,10 +436,11 @@ pub fn build_vector_state_plan(
         delays,
         recursions,
     };
-    verify_vector_state_plan(decorations, plan, &state_plan)?;
+    verify_vector_state_plan_with_resources(decorations, plan, &state_plan, external_resources)?;
     Ok(VerifiedVectorStatePlan {
         plan: state_plan,
         vector_plan: plan.clone(),
+        delegated_resources: external_resources.clone(),
     })
 }
 
@@ -408,6 +449,35 @@ pub fn verify_vector_state_plan(
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
+) -> Result<(), VectorStateError> {
+    verify_vector_state_plan_with_resources(decorations, vector_plan, state_plan, &BTreeSet::new())
+}
+
+/// Checks P6.1 while accepting only the clock/hold resources named by P6.2.
+pub fn verify_vector_state_plan_with_clock(
+    decorations: &VerifiedDecorationCertificate,
+    vector_plan: &VectorPlan,
+    clock_plan: &VerifiedVectorClockAdPlan,
+    state_plan: &VectorStatePlan,
+) -> Result<(), VectorStateError> {
+    if clock_plan.vector_plan() != vector_plan {
+        return Err(VectorStateError::SignalCoverageMismatch {
+            signal_id: u64::MAX,
+        });
+    }
+    verify_vector_state_plan_with_resources(
+        decorations,
+        vector_plan,
+        state_plan,
+        &clock_plan.managed_state_resources(),
+    )
+}
+
+fn verify_vector_state_plan_with_resources(
+    decorations: &VerifiedDecorationCertificate,
+    vector_plan: &VectorPlan,
+    state_plan: &VectorStatePlan,
+    external_resources: &BTreeSet<StateResource>,
 ) -> Result<(), VectorStateError> {
     verify_vector_plan(vector_plan)?;
     if state_plan.schema_version != VECTOR_STATE_PLAN_VERSION {
@@ -423,7 +493,7 @@ pub fn verify_vector_state_plan(
     }
     let records = &decorations.certificate().records;
     verify_source_alignment(records, vector_plan)?;
-    verify_supported_state(records, state_plan)?;
+    verify_supported_state(records, state_plan, external_resources)?;
     verify_delays(records, vector_plan, state_plan)?;
     verify_recursions(records, vector_plan, state_plan)?;
     verify_phases(state_plan)?;
@@ -458,22 +528,22 @@ fn verify_source_alignment(
 fn verify_supported_state(
     records: &[DecorationRecord],
     state_plan: &VectorStatePlan,
+    external_resources: &BTreeSet<StateResource>,
 ) -> Result<(), VectorStateError> {
     let resources = managed_resources(state_plan);
     for record in records {
-        if let Some(clock_id) = record.clock_domain
-            && record.effects.iter().any(is_state_effect)
-        {
-            return Err(VectorStateError::UnsupportedClockState {
-                signal_id: u64::from(record.signal_id),
-                clock_id,
-            });
-        }
         for effect in &record.effects {
             let Some(resource) = state_resource(effect) else {
                 continue;
             };
-            if !resources.contains(resource) {
+            if resources.contains(resource) {
+                if let Some(clock_id) = record.clock_domain {
+                    return Err(VectorStateError::UnsupportedClockState {
+                        signal_id: u64::from(record.signal_id),
+                        clock_id,
+                    });
+                }
+            } else if !external_resources.contains(resource) {
                 return Err(VectorStateError::UnsupportedStateResource {
                     resource: resource.clone(),
                 });
@@ -780,10 +850,6 @@ fn managed_resources(plan: &VectorStatePlan) -> BTreeSet<StateResource> {
         }
     }
     result
-}
-
-fn is_state_effect(effect: &EffectAtom) -> bool {
-    state_resource(effect).is_some()
 }
 
 fn state_resource(effect: &EffectAtom) -> Option<&StateResource> {

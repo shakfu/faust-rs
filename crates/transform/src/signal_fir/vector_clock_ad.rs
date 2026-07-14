@@ -176,6 +176,31 @@ impl VerifiedVectorClockAdPlan {
     pub fn into_plan(self) -> VectorClockAdPlan {
         self.plan
     }
+
+    /// State resources whose execution is completely owned by P6.2 guards or
+    /// persistent held-output transports.
+    #[must_use]
+    pub fn managed_state_resources(&self) -> BTreeSet<StateResource> {
+        self.vector_plan
+            .signals
+            .iter()
+            .flat_map(|signal| signal.effects.iter())
+            .filter_map(|effect| match effect {
+                EffectAtom::ReadState(resource) | EffectAtom::WriteState(resource)
+                    if matches!(
+                        resource,
+                        StateResource::Signal {
+                            cell: StateCell::Clock | StateCell::Hold,
+                            ..
+                        }
+                    ) =>
+                {
+                    Some(resource.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

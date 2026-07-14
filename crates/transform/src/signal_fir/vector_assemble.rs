@@ -12,8 +12,10 @@
 //! Clock guards follow the scalar `SignalFIRLowerer` implementation of OD, US,
 //! and DS. Unlike the C++ compiler's mutable `CodeLoop` tree, Rust assembles an
 //! immutable, checked artifact from the accepted P4.4/P5/P6.1/P6.2 artifacts.
-//! This module remains additive: final module lifecycle placement and backend
-//! activation are later phases.
+//! P6.5 keeps recursion-step declarations in the enclosing sample scope and
+//! places held clock outputs after the island guard, so a non-firing sample
+//! observes the previous held value. Final lifecycle placement is checked by
+//! `vector_module`; cross-backend activation remains a later phase.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -30,8 +32,8 @@ use super::vector_state::{
 };
 use super::vector_verify::{ValueType, VectorPlan};
 
-/// Current canonical P6.3b assembly schema.
-pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 1;
+/// Current canonical P6.3b/P6.5 assembly schema.
+pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 2;
 
 /// Already-lowered non-state statements owned by one checked P4 loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,11 +42,24 @@ pub struct VectorLoopFirInput {
     pub statements: Vec<FirId>,
 }
 
+/// One top-rate output store whose value is produced by a held clock island.
+///
+/// This is an adapted Rust representation of the C++ post-island output write:
+/// ownership is explicit rather than inferred from a mutable `CodeLoop` tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VectorClockOutputStore {
+    pub owner_loop_id: u64,
+    pub statement: FirId,
+}
+
 /// Concrete statement implementing one accepted P6.1 action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorStateFirAction {
     pub action: VectorStateAction,
     pub statement: FirId,
+    /// Statements inserted into the enclosing sample scope. Recursion-step
+    /// declarations are flattened so subsequent delay writes can read them.
+    pub execution_statements: Vec<FirId>,
 }
 
 /// One loop body after state-phase materialization.
@@ -82,6 +97,7 @@ pub struct VectorFirAssembly {
     pub clear_statements: Vec<FirId>,
     pub loops: Vec<AssembledVectorLoop>,
     pub islands: Vec<AssembledClockIsland>,
+    pub clock_output_stores: Vec<VectorClockOutputStore>,
     pub top_level_statement: FirId,
 }
 
@@ -238,6 +254,7 @@ pub fn assemble_vector_fir(
     state_plan: Option<&VerifiedVectorStatePlan>,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
     inputs: &[VectorLoopFirInput],
+    clock_output_stores: &[VectorClockOutputStore],
     real_type: FirType,
     store: &mut FirStore,
 ) -> Result<VerifiedVectorFirAssembly, VectorFirAssemblyError> {
@@ -336,7 +353,8 @@ pub fn assemble_vector_fir(
             &mut state_declarations,
             &mut clear_statements,
         )?;
-        let top_level_statement = materialize_top_level(routed, &loops, &islands, &mut builder)?;
+        let top_level_statement =
+            materialize_top_level(routed, &loops, &islands, clock_output_stores, &mut builder)?;
         VectorFirAssembly {
             schema_version: VECTOR_FIR_ASSEMBLY_VERSION,
             local_declarations,
@@ -344,6 +362,7 @@ pub fn assemble_vector_fir(
             clear_statements,
             loops,
             islands,
+            clock_output_stores: clock_output_stores.to_vec(),
             top_level_statement,
         }
     };
@@ -487,6 +506,7 @@ pub fn verify_vector_fir_assembly(
             });
         }
     }
+    verify_clock_output_stores(assembly, expected_islands, store)?;
     Ok(())
 }
 
@@ -756,7 +776,9 @@ fn materialize_loop(
         }
     }
     let mut exec = inputs.to_vec();
-    exec.extend(exec_actions.iter().map(|action| action.statement));
+    for action in &exec_actions {
+        exec.extend(action.execution_statements.iter().copied());
+    }
     let iteration_statement = builder.block(&exec);
     let sample_loop = sample_loop(builder, iteration_statement);
     let mut chunk = pre
@@ -789,6 +811,7 @@ fn materialize_action(
     real_type: FirType,
     builder: &mut FirBuilder<'_>,
 ) -> Result<VectorStateFirAction, VectorFirAssemblyError> {
+    let mut execution_statements = None;
     let statement = match action {
         VectorStateAction::DelayCopyIn { signal_id } => {
             let delay = delays[signal_id];
@@ -877,6 +900,7 @@ fn materialize_action(
                     recursion_values.insert(*signal_id, load);
                 }
             }
+            execution_statements = Some(declarations.clone());
             builder.block(&declarations)
         }
         VectorStateAction::DelayWrite { signal_id } => {
@@ -956,6 +980,7 @@ fn materialize_action(
     Ok(VectorStateFirAction {
         action: action.clone(),
         statement,
+        execution_statements: execution_statements.unwrap_or_else(|| vec![statement]),
     })
 }
 
@@ -1081,17 +1106,51 @@ fn materialize_top_level(
     routed: &VerifiedRoutedFir,
     loops: &[AssembledVectorLoop],
     islands: &[AssembledClockIsland],
+    clock_output_stores: &[VectorClockOutputStore],
     builder: &mut FirBuilder<'_>,
 ) -> Result<FirId, VectorFirAssemblyError> {
     let owned = islands
         .iter()
         .flat_map(|island| island.nested_loop_ids.iter().copied())
         .collect::<BTreeSet<_>>();
-    let roots = islands
+    let direct_owner = islands
+        .iter()
+        .flat_map(|island| {
+            island
+                .nested_loop_ids
+                .iter()
+                .map(move |loop_id| (*loop_id, island.domain_id))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let island_by_id = islands
+        .iter()
+        .map(|island| (island.domain_id, island))
+        .collect::<BTreeMap<_, _>>();
+    let mut stores_by_root = BTreeMap::<u64, Vec<FirId>>::new();
+    for output in clock_output_stores {
+        let mut domain = *direct_owner.get(&output.owner_loop_id).ok_or(
+            VectorFirAssemblyError::ClockLoopOwnership {
+                loop_id: output.owner_loop_id,
+            },
+        )?;
+        while let Some(parent) = island_by_id[&domain].parent_domain {
+            domain = parent;
+        }
+        stores_by_root
+            .entry(domain)
+            .or_default()
+            .push(output.statement);
+    }
+    let mut roots = Vec::new();
+    for island in islands
         .iter()
         .filter(|island| island.parent_domain.is_none())
-        .map(|island| (island.nested_loop_ids.first().copied(), island.statement))
-        .collect::<Vec<_>>();
+    {
+        let mut sample_body = vec![island.statement];
+        sample_body.extend(stores_by_root.remove(&island.domain_id).unwrap_or_default());
+        let statement = builder.block(&sample_body);
+        roots.push((island.nested_loop_ids.first().copied(), statement));
+    }
     let loop_by_id = loops
         .iter()
         .map(|assembled| (assembled.loop_id, assembled))
@@ -1115,6 +1174,62 @@ fn materialize_top_level(
         );
     }
     Ok(builder.block(&body))
+}
+
+fn verify_clock_output_stores(
+    assembly: &VectorFirAssembly,
+    islands: &[ClockIsland],
+    store: &FirStore,
+) -> Result<(), VectorFirAssemblyError> {
+    let owned = islands
+        .iter()
+        .flat_map(|island| island.nested_loop_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for output in &assembly.clock_output_stores {
+        if !owned.contains(&output.owner_loop_id)
+            || !matches!(
+                match_fir(store, output.statement),
+                FirMatch::StoreTable { name, .. } if name.starts_with("output")
+            )
+            || !contains_statement(store, assembly.top_level_statement, output.statement)
+        {
+            return Err(VectorFirAssemblyError::ClockLoopOwnership {
+                loop_id: output.owner_loop_id,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn contains_statement(store: &FirStore, root: FirId, target: FirId) -> bool {
+    if root == target {
+        return true;
+    }
+    match match_fir(store, root) {
+        FirMatch::Block(body) => body
+            .into_iter()
+            .any(|child| contains_statement(store, child, target)),
+        FirMatch::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            contains_statement(store, then_block, target)
+                || else_block.is_some_and(|body| contains_statement(store, body, target))
+        }
+        FirMatch::Control { stmt, .. } => contains_statement(store, stmt, target),
+        FirMatch::ForLoop { body, .. }
+        | FirMatch::SimpleForLoop { body, .. }
+        | FirMatch::IteratorForLoop { body, .. }
+        | FirMatch::WhileLoop { body, .. } => contains_statement(store, body, target),
+        FirMatch::Switch { cases, default, .. } => {
+            cases
+                .into_iter()
+                .any(|(_, body)| contains_statement(store, body, target))
+                || default.is_some_and(|body| contains_statement(store, body, target))
+        }
+        _ => false,
+    }
 }
 
 fn resolve_clock_value(
@@ -1294,7 +1409,13 @@ fn verify_action_shape(
             )
         }
     };
-    if valid {
+    let execution_valid = match &action.action {
+        VectorStateAction::RecursionStep { .. } => {
+            matches!(match_fir(store, action.statement), FirMatch::Block(body) if body == action.execution_statements)
+        }
+        _ => action.execution_statements == [action.statement],
+    };
+    if valid && execution_valid {
         Ok(())
     } else {
         Err(VectorFirAssemblyError::ActionShape {
@@ -1676,6 +1797,7 @@ mod tests {
             Some(&state),
             None,
             &[input],
+            &[],
             FirType::Float32,
             &mut store,
         )
@@ -1895,11 +2017,20 @@ mod tests {
                 statements: held_stores,
             },
         ];
+        let clock_output = {
+            let mut builder = FirBuilder::new(&mut store);
+            let index = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+            VectorClockOutputStore {
+                owner_loop_id: 2,
+                statement: builder.store_table("output0", AccessType::Stack, index, loaded),
+            }
+        };
         let verified = assemble_vector_fir(
             &routed,
             None,
             Some(&clock),
             &inputs,
+            std::slice::from_ref(&clock_output),
             FirType::Float32,
             &mut store,
         )
@@ -1914,6 +2045,7 @@ mod tests {
         ));
         assert_eq!(assembly.state_declarations.len(), 1);
         assert_eq!(assembly.clear_statements.len(), 1);
+        assert_eq!(assembly.clock_output_stores, [clock_output]);
         assert!(matches!(
             match_fir(&store, assembly.state_declarations[0]),
             FirMatch::DeclareVar {
@@ -1927,6 +2059,13 @@ mod tests {
         assert!(matches!(
             verify_vector_fir_assembly(&routed, None, Some(&clock), &forged, &store),
             Err(VectorFirAssemblyError::IslandShape { domain_id: 7 })
+        ));
+
+        let mut forged = assembly.clone();
+        forged.clock_output_stores[0].owner_loop_id = 99;
+        assert!(matches!(
+            verify_vector_fir_assembly(&routed, None, Some(&clock), &forged, &store),
+            Err(VectorFirAssemblyError::ClockLoopOwnership { loop_id: 99 })
         ));
     }
 }

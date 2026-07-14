@@ -1253,7 +1253,7 @@ fn transport_fir_type(
     }
 }
 
-fn value_fir_type(value_type: &ValueType, real_type: FirType) -> FirType {
+pub(super) fn value_fir_type(value_type: &ValueType, real_type: FirType) -> FirType {
     match value_type {
         ValueType::Int => FirType::Int32,
         ValueType::Real => real_type,

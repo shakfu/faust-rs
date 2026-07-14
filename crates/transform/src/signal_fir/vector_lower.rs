@@ -1,30 +1,37 @@
-//! P5.2 pure signal-closure lowering into verified vector regions.
+//! P5.2/P6.5 signal-closure lowering into verified vector regions.
 //!
 //! C++ `DAGInstructionsCompiler::compileMultiSignal` recursively lowers one
 //! loop root and its inline closure while its current loop owns cache lookup.
 //! This adapted Rust slice consumes the already verified prepared forest and
-//! P4.4 plan, lowers only effect-free pointwise nodes, runs CSE independently
-//! in each routed region, then checks the final bodies against P5.1 routing
-//! evidence. Delay, recursion, tables, UI, foreign calls, clocks, and AD remain
-//! fail-closed until P6 defines their state transitions.
+//! P4.4 plan, plus P6.1/P6.2 state and clock policies when requested. It runs
+//! CSE independently in each routed region, then checks the final bodies
+//! against P5.1 routing evidence. Storage and transport geometry are never
+//! inferred here: fixed positive delays, symbolic recursion, and clock wrappers
+//! are lowered only through their accepted P6 artifacts. Tables, UI, foreign
+//! calls, variable delays, clock-local signal state, and reverse AD remain
+//! fail-closed.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
 use fir::{AccessType, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
+use tlib::match_sym_ref;
 
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
 
 use super::cse::materialize_shared_values;
 use super::module::map_binop;
+use super::recursion::{decode_group_projection, decode_symbolic_group_bodies};
 use super::vector_analysis::EffectAtom;
+use super::vector_clock_ad::VerifiedVectorClockAdPlan;
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_route::{
     RouteResolution, RoutedUseSource, VectorRegion, VectorRouteError, VectorRouteSession,
-    VerifiedRoutedFir,
+    VerifiedRoutedFir, value_fir_type,
 };
+use super::vector_state::{VectorDelayStorage, VerifiedVectorStatePlan};
 use super::vector_verify::{Placement, SignalRecord, ValueType, VectorPlan};
 
 /// One scheduled vector loop and its final CSE-rewritten FIR body.
@@ -48,7 +55,12 @@ impl PureVectorRegionBody {
     }
 }
 
-/// Opaque P5.2 result accepted by both routing and region-body verification.
+/// Opaque P5.2/P6.5 result accepted by routing and region-body verification.
+///
+/// The historical `Pure` name is retained for source compatibility. The
+/// representation now also carries programs accepted through explicit P6.1
+/// state and P6.2 clock policies; it does not imply that those programs are
+/// pure.
 pub struct VerifiedPureVectorProgram {
     store: FirStore,
     transport_declarations: Vec<FirId>,
@@ -253,6 +265,7 @@ struct PureVectorLowerer<'a> {
     input_aliases: BTreeSet<usize>,
     math_ops: HashSet<FirMathOp>,
     int_helpers: BTreeSet<&'static str>,
+    state_plan: Option<&'a VerifiedVectorStatePlan>,
 }
 
 /// Lowers actual effect-free prepared signals into P4.4 vector regions.
@@ -267,15 +280,81 @@ pub fn lower_pure_vector_program(
     real_type: FirType,
     num_inputs: usize,
 ) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
+    lower_vector_program_impl(
+        prepared,
+        verified_plan,
+        None,
+        None,
+        strategy,
+        real_type,
+        num_inputs,
+    )
+}
+
+/// Lowers the P6-supported vector subset using authoritative state and clock
+/// artifacts. Forward AD needs no special carrier after propagation and enters
+/// through the ordinary pointwise cases below.
+pub fn lower_vector_program(
+    prepared: &VerifiedPreparedSignals,
+    verified_plan: &VerifiedVectorPlan,
+    state_plan: &VerifiedVectorStatePlan,
+    clock_plan: &VerifiedVectorClockAdPlan,
+    strategy: SchedulingStrategy,
+    real_type: FirType,
+    num_inputs: usize,
+) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
+    if state_plan.vector_plan() != verified_plan.plan()
+        || clock_plan.vector_plan() != verified_plan.plan()
+    {
+        return Err(PureVectorLowerError::BodyEvidence {
+            detail: "P6 artifacts do not belong to the selected vector plan".to_owned(),
+        });
+    }
+    lower_vector_program_impl(
+        prepared,
+        verified_plan,
+        Some(state_plan),
+        Some(clock_plan),
+        strategy,
+        real_type,
+        num_inputs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_vector_program_impl<'a>(
+    prepared: &'a VerifiedPreparedSignals,
+    verified_plan: &'a VerifiedVectorPlan,
+    state_plan: Option<&'a VerifiedVectorStatePlan>,
+    clock_plan: Option<&'a VerifiedVectorClockAdPlan>,
+    strategy: SchedulingStrategy,
+    real_type: FirType,
+    num_inputs: usize,
+) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
     if !matches!(real_type, FirType::Float32 | FirType::Float64) {
         return Err(PureVectorLowerError::InvalidRealType(real_type));
     }
     let signal_ids = collect_prepared_ids(prepared);
-    verify_plan_prepared_boundary(prepared, verified_plan.plan(), &signal_ids)?;
+    verify_plan_prepared_boundary(
+        prepared,
+        verified_plan.plan(),
+        &signal_ids,
+        state_plan,
+        clock_plan,
+    )?;
 
     let mut store = FirStore::new();
-    let (session, transport_declarations) =
-        VectorRouteSession::new(verified_plan, strategy, real_type.clone(), &mut store)?;
+    let (session, transport_declarations) = if let Some(clock_plan) = clock_plan {
+        VectorRouteSession::new_with_clock_plan(
+            verified_plan,
+            clock_plan,
+            strategy,
+            real_type.clone(),
+            &mut store,
+        )?
+    } else {
+        VectorRouteSession::new(verified_plan, strategy, real_type.clone(), &mut store)?
+    };
     let mut lowerer = PureVectorLowerer {
         prepared,
         session,
@@ -287,6 +366,7 @@ pub fn lower_pure_vector_program(
         input_aliases: BTreeSet::new(),
         math_ops: HashSet::new(),
         int_helpers: BTreeSet::new(),
+        state_plan,
     };
 
     let mut control_cache = BTreeMap::new();
@@ -316,16 +396,31 @@ pub fn lower_pure_vector_program(
     for region in layout {
         let mut local_cache = BTreeMap::new();
         let mut active = BTreeSet::new();
-        let mut root_values = Vec::with_capacity(region.roots.len());
+        let mut materialized_roots = Vec::with_capacity(region.roots.len());
         for &root in &region.roots {
             let sig = lowerer.sig(root)?;
-            root_values.push(lowerer.lower_in_loop(
-                region.loop_id,
-                sig,
-                &mut local_cache,
-                &mut active,
-            )?);
+            let value =
+                lowerer.lower_in_loop(region.loop_id, sig, &mut local_cache, &mut active)?;
+            let structural_tuple = lowerer
+                .session
+                .plan()
+                .signals
+                .iter()
+                .find(|signal| signal.signal_id == root)
+                .is_some_and(|signal| {
+                    matches!(signal.value_type, ValueType::Tuple(_))
+                        && (match_sym_ref(lowerer.prepared.arena(), sig).is_some()
+                            || decode_symbolic_group_bodies(lowerer.prepared.arena(), sig)
+                                .is_some())
+                });
+            if !structural_tuple {
+                materialized_roots.push((root, value));
+            }
         }
+        let root_values = materialized_roots
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
         let (mut statements, rewritten_roots) = materialize_region_roots_with_prefix(
             &mut lowerer.store,
             &root_values,
@@ -333,8 +428,8 @@ pub fn lower_pure_vector_program(
             &format!("fVecL{}Temp", region.loop_id),
             &format!("iVecL{}Temp", region.loop_id),
         )?;
-        for (&root, &value) in region.roots.iter().zip(&rewritten_roots) {
-            local_cache.insert(root, value);
+        for ((root, _), &value) in materialized_roots.iter().zip(&rewritten_roots) {
+            local_cache.insert(*root, value);
         }
 
         let mut stores = Vec::new();
@@ -503,11 +598,77 @@ impl PureVectorLowerer<'_> {
         active: &mut BTreeSet<(LowerScope, u64)>,
     ) -> Result<FirId, PureVectorLowerError> {
         let signal_id = u64::from(sig.as_u32());
+        if let Some((_var, bodies)) = decode_symbolic_group_bodies(self.prepared.arena(), sig) {
+            let mut values = Vec::with_capacity(bodies.len());
+            for body in bodies {
+                values.push(self.lower_dep(scope, body, cache, active)?);
+            }
+            let typ = self.fir_type(signal_id)?;
+            return Ok(FirBuilder::new(&mut self.store).value_array(&values, typ));
+        }
+        if let Some(var) = match_sym_ref(self.prepared.arena(), sig) {
+            return self.lower_symbolic_ref(scope, signal_id, var, cache, active);
+        }
         let value = match match_sig(self.prepared.arena(), sig) {
             SigMatch::Int(value) => FirBuilder::new(&mut self.store).int32(value),
             SigMatch::Real(value) => self.float_const(value),
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_dep(scope, inner, cache, active)?,
+            SigMatch::Delay1(value) => self.lower_delay_read(scope, value, 1, cache, active)?,
+            SigMatch::Delay(value, amount) => {
+                let amount_value = match match_sig(self.prepared.arena(), amount) {
+                    SigMatch::Int(value) if value >= 0 => value,
+                    _ => {
+                        return Err(PureVectorLowerError::UnsupportedSignal {
+                            signal_id,
+                            expression: "P6.5 requires a constant non-negative vector delay"
+                                .to_owned(),
+                        });
+                    }
+                };
+                if amount_value == 0 {
+                    self.lower_dep(scope, value, cache, active)?
+                } else {
+                    self.lower_delay_read(
+                        scope,
+                        value,
+                        u64::try_from(amount_value).expect("non-negative i32 fits u64"),
+                        cache,
+                        active,
+                    )?
+                }
+            }
+            SigMatch::Proj(index, group) => {
+                if let Some(var) = match_sym_ref(self.prepared.arena(), group) {
+                    let _ = self.lower_dep(scope, group, cache, active)?;
+                    let bodies = self.symbolic_bodies_for_var(signal_id, var)?;
+                    let index = usize::try_from(index).map_err(|_| {
+                        PureVectorLowerError::UnsupportedSignal {
+                            signal_id,
+                            expression: "negative symbolic recursion projection".to_owned(),
+                        }
+                    })?;
+                    let canonical = if bodies.len() == 1 { 0 } else { index };
+                    let body = bodies.get(canonical).copied().ok_or_else(|| {
+                        PureVectorLowerError::UnsupportedSignal {
+                            signal_id,
+                            expression: "symbolic recursion projection is out of bounds".to_owned(),
+                        }
+                    })?;
+                    return self.lower_dep(scope, body, cache, active);
+                }
+                let projection = decode_group_projection(self.prepared.arena(), sig, index, group)
+                    .map_err(|error| PureVectorLowerError::UnsupportedSignal {
+                        signal_id,
+                        expression: error.to_string(),
+                    })?;
+                self.lower_dep(
+                    scope,
+                    projection.bodies[projection.canonical_index],
+                    cache,
+                    active,
+                )?
+            }
             SigMatch::IntCast(value) => {
                 let value = self.lower_dep(scope, value, cache, active)?;
                 FirBuilder::new(&mut self.store).cast(FirType::Int32, value)
@@ -597,6 +758,51 @@ impl PureVectorLowerer<'_> {
             SigMatch::Lowest(value) | SigMatch::Highest(value) => {
                 self.lower_dep(scope, value, cache, active)?
             }
+            SigMatch::Attach(value, attached) => {
+                let _ = self.lower_dep(scope, attached, cache, active)?;
+                self.lower_dep(scope, value, cache, active)?
+            }
+            SigMatch::Enable(value, gate) => {
+                let value = self.lower_dep(scope, value, cache, active)?;
+                let gate = self.lower_dep(scope, gate, cache, active)?;
+                let typ = self.fir_type(signal_id)?;
+                let zero = self.zero_value(&typ)?;
+                FirBuilder::new(&mut self.store).select2(gate, value, zero, typ)
+            }
+            SigMatch::Control(value, gate) => {
+                let _ = self.lower_dep(scope, gate, cache, active)?;
+                self.lower_dep(scope, value, cache, active)?
+            }
+            SigMatch::Seq(block, held) => {
+                let _ = self.lower_dep(scope, block, cache, active)?;
+                self.lower_dep(scope, held, cache, active)?
+            }
+            SigMatch::Clocked(_, inner)
+            | SigMatch::TempVar(inner)
+            | SigMatch::PermVar(inner)
+            | SigMatch::ZeroPad(inner, _) => self.lower_dep(scope, inner, cache, active)?,
+            SigMatch::OnDemand(children)
+            | SigMatch::Upsampling(children)
+            | SigMatch::Downsampling(children) => {
+                let Some((&last, prefix)) = children.split_last() else {
+                    return Err(PureVectorLowerError::UnsupportedSignal {
+                        signal_id,
+                        expression: "empty clock wrapper".to_owned(),
+                    });
+                };
+                for &child in prefix {
+                    let _ = self.lower_dep(scope, child, cache, active)?;
+                }
+                self.lower_dep(scope, last, cache, active)?
+            }
+            SigMatch::ClockEnvToken(domain) => {
+                FirBuilder::new(&mut self.store).int32(i32::try_from(domain).map_err(|_| {
+                    PureVectorLowerError::UnsupportedSignal {
+                        signal_id,
+                        expression: "clock domain identity exceeds FIR i32".to_owned(),
+                    }
+                })?)
+            }
             _ => {
                 return Err(PureVectorLowerError::UnsupportedSignal {
                     signal_id,
@@ -605,6 +811,132 @@ impl PureVectorLowerer<'_> {
             }
         };
         Ok(value)
+    }
+
+    fn lower_delay_read(
+        &mut self,
+        scope: LowerScope,
+        carrier: SigId,
+        delay: u64,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        if delay == 0 {
+            return self.lower_dep(scope, carrier, cache, active);
+        }
+        let carrier_id = u64::from(carrier.as_u32());
+        let transition = self
+            .state_plan
+            .and_then(|plan| {
+                plan.plan()
+                    .delays
+                    .iter()
+                    .find(|transition| transition.signal_id == carrier_id)
+            })
+            .ok_or_else(|| PureVectorLowerError::UnsupportedSignal {
+                signal_id: carrier_id,
+                expression: "delay carrier has no accepted P6.1 storage transition".to_owned(),
+            })?;
+        if delay > transition.max_delay {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id: carrier_id,
+                expression: format!(
+                    "delay {delay} exceeds certified maximum {}",
+                    transition.max_delay
+                ),
+            });
+        }
+        let typ = value_fir_type(&transition.value_type, self.real_type.clone());
+        let mut builder = FirBuilder::new(&mut self.store);
+        let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+        let vindex = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
+        let local = builder.binop(fir::FirBinOp::Sub, i0, vindex, FirType::Int32);
+        let delay = builder.int32(i32::try_from(delay).map_err(|_| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id: carrier_id,
+                expression: "delay amount exceeds FIR i32".to_owned(),
+            }
+        })?);
+        let index = match &transition.storage {
+            VectorDelayStorage::Copy { history_length, .. } => {
+                let history = builder.int32(i32::try_from(*history_length).map_err(|_| {
+                    PureVectorLowerError::UnsupportedSignal {
+                        signal_id: carrier_id,
+                        expression: "copy-delay history exceeds FIR i32".to_owned(),
+                    }
+                })?);
+                let current = builder.binop(fir::FirBinOp::Add, history, local, FirType::Int32);
+                builder.binop(fir::FirBinOp::Sub, current, delay, FirType::Int32)
+            }
+            VectorDelayStorage::Ring {
+                index_name, mask, ..
+            } => {
+                let base = builder.load_var(index_name, AccessType::Struct, FirType::Int32);
+                let current = builder.binop(fir::FirBinOp::Add, base, local, FirType::Int32);
+                let delayed = builder.binop(fir::FirBinOp::Sub, current, delay, FirType::Int32);
+                let mask = builder.int32(i32::try_from(*mask).map_err(|_| {
+                    PureVectorLowerError::UnsupportedSignal {
+                        signal_id: carrier_id,
+                        expression: "ring-delay mask exceeds FIR i32".to_owned(),
+                    }
+                })?);
+                builder.binop(fir::FirBinOp::And, delayed, mask, FirType::Int32)
+            }
+        };
+        Ok(match &transition.storage {
+            VectorDelayStorage::Copy { temporary_name, .. } => {
+                builder.load_table(temporary_name, AccessType::Stack, index, typ)
+            }
+            VectorDelayStorage::Ring { buffer_name, .. } => {
+                builder.load_table(buffer_name, AccessType::Struct, index, typ)
+            }
+        })
+    }
+
+    fn lower_symbolic_ref(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        var: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let bodies = self.symbolic_bodies_for_var(signal_id, var)?;
+        let mut values = Vec::with_capacity(bodies.len());
+        for body in bodies {
+            values.push(self.lower_dep(scope, body, cache, active)?);
+        }
+        let typ = self.fir_type(signal_id)?;
+        Ok(FirBuilder::new(&mut self.store).value_array(&values, typ))
+    }
+
+    fn symbolic_bodies_for_var(
+        &self,
+        signal_id: u64,
+        var: SigId,
+    ) -> Result<Vec<SigId>, PureVectorLowerError> {
+        self.signal_ids
+            .values()
+            .find_map(|&candidate| {
+                let (bound, bodies) =
+                    decode_symbolic_group_bodies(self.prepared.arena(), candidate)?;
+                (bound == var).then_some(bodies)
+            })
+            .ok_or_else(|| PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "symbolic recursion reference has no reachable binder".to_owned(),
+            })
+    }
+
+    fn zero_value(&mut self, typ: &FirType) -> Result<FirId, PureVectorLowerError> {
+        Ok(match typ {
+            FirType::Int32 | FirType::Bool => FirBuilder::new(&mut self.store).int32(0),
+            FirType::Float32 => FirBuilder::new(&mut self.store).float32(0.0),
+            FirType::Float64 => FirBuilder::new(&mut self.store).float64(0.0),
+            other => {
+                return Err(PureVectorLowerError::InvalidRealType(other.clone()));
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -820,7 +1152,15 @@ fn verify_plan_prepared_boundary(
     prepared: &VerifiedPreparedSignals,
     plan: &VectorPlan,
     ids: &BTreeMap<u64, SigId>,
+    state_plan: Option<&VerifiedVectorStatePlan>,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
 ) -> Result<(), PureVectorLowerError> {
+    let mut managed_resources = state_plan
+        .map(VerifiedVectorStatePlan::managed_resources)
+        .unwrap_or_default();
+    if let Some(clock_plan) = clock_plan {
+        managed_resources.extend(clock_plan.managed_state_resources());
+    }
     for record in &plan.signals {
         let sig = ids.get(&record.signal_id).copied().ok_or(
             PureVectorLowerError::MissingPreparedSignal {
@@ -828,11 +1168,15 @@ fn verify_plan_prepared_boundary(
             },
         )?;
         let prepared_type = prepared.ty(sig);
-        let matches = matches!(
-            (&record.value_type, prepared_type),
+        let matches = match (&record.value_type, prepared_type) {
             (ValueType::Int, Some(SimpleSigType::Int))
-                | (ValueType::Real, Some(SimpleSigType::Real))
-        );
+            | (ValueType::Real, Some(SimpleSigType::Real)) => true,
+            (ValueType::Tuple(_), _) => {
+                decode_symbolic_group_bodies(prepared.arena(), sig).is_some()
+                    || match_sym_ref(prepared.arena(), sig).is_some()
+            }
+            _ => false,
+        };
         if !matches {
             return Err(PureVectorLowerError::PlannedTypeMismatch {
                 signal_id: record.signal_id,
@@ -840,16 +1184,20 @@ fn verify_plan_prepared_boundary(
                 prepared: prepared_type,
             });
         }
-        let terminal_output = match match_sig(prepared.arena(), sig) {
+        let output_channel = match match_sig(prepared.arena(), sig) {
             SigMatch::Output(channel, _) if channel >= 0 => {
-                record.effects
-                    == [EffectAtom::WriteOutput(
-                        u32::try_from(channel).expect("nonnegative output channel fits u32"),
-                    )]
+                Some(u32::try_from(channel).expect("nonnegative output channel fits u32"))
             }
-            _ => false,
+            _ => None,
         };
-        if !record.effects.is_empty() && !terminal_output {
+        let effects_supported = record.effects.iter().all(|effect| match effect {
+            EffectAtom::ReadState(resource) | EffectAtom::WriteState(resource) => {
+                managed_resources.contains(resource)
+            }
+            EffectAtom::WriteOutput(channel) => output_channel == Some(*channel),
+            _ => false,
+        });
+        if !record.effects.is_empty() && !effects_supported {
             return Err(PureVectorLowerError::EffectfulSignal {
                 signal_id: record.signal_id,
             });
@@ -862,7 +1210,7 @@ fn value_type_to_fir(value_type: &ValueType, real_type: &FirType) -> Option<FirT
     match value_type {
         ValueType::Int => Some(FirType::Int32),
         ValueType::Real => Some(real_type.clone()),
-        ValueType::Tuple(_) => None,
+        ValueType::Tuple(_) => Some(value_fir_type(value_type, real_type.clone())),
     }
 }
 
@@ -993,7 +1341,18 @@ pub fn verify_pure_vector_bodies(
                 definition.value,
             ),
         };
-        if !visible {
+        let structural_tuple = plan
+            .signals
+            .iter()
+            .find(|signal| signal.signal_id == definition.signal_id)
+            .is_some_and(|signal| {
+                matches!(signal.value_type, ValueType::Tuple(_))
+                    && !plan
+                        .transports
+                        .iter()
+                        .any(|transport| transport.signal_id == definition.signal_id)
+            });
+        if !visible && !structural_tuple {
             return Err(PureVectorLowerError::BodyEvidence {
                 detail: format!(
                     "signal {} definition is absent from {:?}",
