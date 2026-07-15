@@ -36,7 +36,7 @@ use std::fmt;
 
 use super::decoration_verify::VerifiedDecorationCertificate;
 pub use super::vector_analysis::EffectAtom;
-use super::vector_analysis::{DepKind, ForeignPurity, effect_sets_conflict};
+use super::vector_analysis::{DepKind, ForeignPurity, StateResource};
 
 /// `$defs/signalType`: the v1 value-type vocabulary (matches the Lean
 /// `ValueTy`). FIR widths / `FaustFloat` live in the routed-FIR layer, not
@@ -134,7 +134,10 @@ pub struct TransportRecord {
 /// `$defs/fusedSerialGroupRecord`.
 ///
 /// A group preserves the original loop identities while requiring their
-/// delayed recursive work to be emitted as one serial per-sample unit. An
+/// delayed recursive work to be emitted as one serial per-sample unit.
+/// Coupled recursive owners may share one group; `owner_loop_id` and
+/// `recursive_carrier_signal_id` are its canonical identity, while
+/// `state_write_signal_ids` covers every recursive member. An
 /// `internal_transport_id` retains a planned transport identity whose access
 /// is rematerialized as a scalar value inside that unit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,9 +266,10 @@ pub enum VectorPlanError {
     FusedGroupCarrierNotRecursiveDelayed { group_id: u64, signal_id: u64 },
     /// A delayed read lacks the declared `DepKind::Delayed` carrier edge.
     FusedGroupDelayedDependencyMissing { group_id: u64, signal_id: u64 },
-    /// A declared state writer is not a projection in the carrier's recursion
-    /// group.
+    /// A declared state writer does not match its recursive member loop.
     FusedGroupStateWriterMismatch { group_id: u64, signal_id: u64 },
+    /// A recursive member loop has no matching projection writer in the group.
+    FusedGroupRecursiveMemberMissingWriter { group_id: u64, loop_id: u64 },
     /// Grouped signals or loops cross incompatible clock domains.
     FusedGroupClockMismatch { group_id: u64 },
     /// An active chunk transport still materializes a delayed read internally.
@@ -441,7 +445,11 @@ impl fmt::Display for VectorPlanError {
                 signal_id,
             } => write!(
                 f,
-                "fused group {group_id} writer {signal_id} is outside the carrier recursion group"
+                "fused group {group_id} writer {signal_id} does not match a recursive member loop"
+            ),
+            Self::FusedGroupRecursiveMemberMissingWriter { group_id, loop_id } => write!(
+                f,
+                "fused group {group_id} recursive member loop {loop_id} has no state writer"
             ),
             Self::FusedGroupClockMismatch { group_id } => {
                 write!(f, "fused group {group_id} crosses clock domains")
@@ -813,17 +821,15 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         .map(|loop_record| {
             (
                 loop_record.loop_id,
-                loop_effects(&signal_by_id, loop_record),
+                CheckedEffectConflictSummary::new(&signal_by_id, loop_record),
             )
         })
         .collect::<AHashMap<_, _>>();
     let reachability = CheckedReachability::new(plan);
     for (index, left) in plan.loops.iter().enumerate() {
         for right in &plan.loops[index + 1..] {
-            if effect_sets_conflict(
-                &effects_by_loop[&left.loop_id],
-                &effects_by_loop[&right.loop_id],
-            ) && !reachability.reaches(left.loop_id, right.loop_id)
+            if effects_by_loop[&left.loop_id].conflicts(&effects_by_loop[&right.loop_id])
+                && !reachability.reaches(left.loop_id, right.loop_id)
                 && !reachability.reaches(right.loop_id, left.loop_id)
             {
                 return Err(VectorPlanError::UnorderedEffectConflict {
@@ -955,12 +961,6 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
         .iter()
         .map(|loop_| (loop_.loop_id, loop_))
         .collect::<AHashMap<_, _>>();
-    let transports = plan
-        .transports
-        .iter()
-        .map(|transport| (transport.transport_id, transport))
-        .collect::<AHashMap<_, _>>();
-
     for group in &plan.fused_serial_groups {
         let carrier_id = group.recursive_carrier_signal_id;
         let Some(carrier) = records.get(&carrier_id).copied() else {
@@ -1019,7 +1019,10 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
         for &read_signal_id in &group.delayed_read_signal_ids {
             let has_delayed_carrier_edge = certificate.dependencies.iter().any(|dependency| {
                 u64::from(dependency.from) == read_signal_id
-                    && u64::from(dependency.to) == carrier_id
+                    && group
+                        .state_write_signal_ids
+                        .binary_search(&u64::from(dependency.to))
+                        .is_ok()
                     && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
             });
             if !has_delayed_carrier_edge {
@@ -1031,11 +1034,24 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
         }
 
         for &writer_signal_id in &group.state_write_signal_ids {
-            let writer_projection = records
+            let Some(writer_projection) = records
                 .get(&writer_signal_id)
-                .and_then(|record| record.recursive_projection);
-            if writer_projection.map(|writer| writer.group) != Some(projection.group)
-                || signals[&writer_signal_id].placement != Placement::Owned(group.owner_loop_id)
+                .and_then(|record| record.recursive_projection)
+            else {
+                return Err(VectorPlanError::FusedGroupStateWriterMismatch {
+                    group_id: group.group_id,
+                    signal_id: writer_signal_id,
+                });
+            };
+            let Placement::Owned(writer_owner) = signals[&writer_signal_id].placement else {
+                return Err(VectorPlanError::FusedGroupStateWriterMismatch {
+                    group_id: group.group_id,
+                    signal_id: writer_signal_id,
+                });
+            };
+            if group.member_loop_ids.binary_search(&writer_owner).is_err()
+                || loops[&writer_owner].kind
+                    != LoopKind::Recursive(u64::from(writer_projection.group))
             {
                 return Err(VectorPlanError::FusedGroupStateWriterMismatch {
                     group_id: group.group_id,
@@ -1043,20 +1059,34 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
                 });
             }
         }
-
-        for &transport_id in &group.internal_transport_ids {
-            let transport = transports[&transport_id];
-            if group
-                .delayed_read_signal_ids
-                .binary_search(&transport.signal_id)
-                .is_err()
-            {
-                return Err(VectorPlanError::FusedGroupTransportNotDelayedRead {
+        for &loop_id in &group.member_loop_ids {
+            let LoopKind::Recursive(recursion_group) = loops[&loop_id].kind else {
+                continue;
+            };
+            if !group.state_write_signal_ids.iter().any(|signal_id| {
+                signals[signal_id].placement == Placement::Owned(loop_id)
+                    && records[signal_id]
+                        .recursive_projection
+                        .is_some_and(|projection| u64::from(projection.group) == recursion_group)
+            }) {
+                if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                    eprintln!(
+                        "[vector-fused-missing-writer] group={} loop={} recursion={} writers={:?}",
+                        group.group_id, loop_id, recursion_group, group.state_write_signal_ids
+                    );
+                }
+                return Err(VectorPlanError::FusedGroupRecursiveMemberMissingWriter {
                     group_id: group.group_id,
-                    transport_id,
+                    loop_id,
                 });
             }
         }
+
+        // Internal transports may form an arbitrary pure chain between a
+        // delayed read and its recursive writer. Finite-shape verification
+        // above proves that every listed transport stays within the fused
+        // member set; the check below requires every dangerous delayed-read
+        // transport in that set to be listed.
         for transport in &plan.transports {
             if group
                 .delayed_read_signal_ids
@@ -1092,18 +1122,90 @@ fn rank_of(plan: &VectorPlan, epoch_id: u64) -> u64 {
         .map_or(u64::MAX, |e| e.rank)
 }
 
-fn loop_effects(
-    signal_by_id: &AHashMap<u64, &SignalRecord>,
-    loop_record: &LoopRecord,
-) -> Vec<EffectAtom> {
-    let mut effects = loop_record
-        .roots
-        .iter()
-        .flat_map(|root| signal_by_id[root].effects.iter().cloned())
-        .collect::<Vec<_>>();
-    effects.sort();
-    effects.dedup();
-    effects
+struct CheckedEffectConflictSummary {
+    any: bool,
+    barrier: bool,
+    state_reads: AHashSet<StateResource>,
+    state_writes: AHashSet<StateResource>,
+    table_reads: AHashSet<u32>,
+    table_writes: AHashSet<u32>,
+    ui_writes: AHashSet<u32>,
+    output_writes: AHashSet<u32>,
+}
+
+impl Default for CheckedEffectConflictSummary {
+    fn default() -> Self {
+        Self {
+            any: false,
+            barrier: false,
+            state_reads: AHashSet::new(),
+            state_writes: AHashSet::new(),
+            table_reads: AHashSet::new(),
+            table_writes: AHashSet::new(),
+            ui_writes: AHashSet::new(),
+            output_writes: AHashSet::new(),
+        }
+    }
+}
+
+impl CheckedEffectConflictSummary {
+    fn new(signal_by_id: &AHashMap<u64, &SignalRecord>, loop_record: &LoopRecord) -> Self {
+        let mut summary = Self::default();
+        for effect in loop_record
+            .roots
+            .iter()
+            .flat_map(|root| &signal_by_id[root].effects)
+        {
+            summary.any = true;
+            match effect {
+                EffectAtom::ReadState(resource) => {
+                    summary.state_reads.insert(resource.clone());
+                }
+                EffectAtom::WriteState(resource) => {
+                    summary.state_writes.insert(resource.clone());
+                }
+                EffectAtom::ReadTable(table) => {
+                    summary.table_reads.insert(*table);
+                }
+                EffectAtom::WriteTable(table) => {
+                    summary.table_writes.insert(*table);
+                }
+                EffectAtom::WriteUi(zone) => {
+                    summary.ui_writes.insert(*zone);
+                }
+                EffectAtom::WriteOutput(output) => {
+                    summary.output_writes.insert(*output);
+                }
+                EffectAtom::Foreign { purity, .. } => {
+                    summary.barrier |=
+                        matches!(purity, ForeignPurity::Impure | ForeignPurity::Unknown);
+                }
+            }
+        }
+        summary
+    }
+
+    fn conflicts(&self, other: &Self) -> bool {
+        (self.barrier && other.any)
+            || (other.barrier && self.any)
+            || hash_intersects(&self.state_writes, &other.state_reads)
+            || hash_intersects(&self.state_writes, &other.state_writes)
+            || hash_intersects(&self.state_reads, &other.state_writes)
+            || hash_intersects(&self.table_writes, &other.table_reads)
+            || hash_intersects(&self.table_writes, &other.table_writes)
+            || hash_intersects(&self.table_reads, &other.table_writes)
+            || hash_intersects(&self.ui_writes, &other.ui_writes)
+            || hash_intersects(&self.output_writes, &other.output_writes)
+    }
+}
+
+fn hash_intersects<T: Eq + std::hash::Hash>(left: &AHashSet<T>, right: &AHashSet<T>) -> bool {
+    let (small, large) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    small.iter().any(|item| large.contains(item))
 }
 
 /// Checker-local transitive closure. This deliberately does not reuse the
@@ -1212,8 +1314,80 @@ mod tests {
     use super::*;
     use crate::clk_env::annotate;
     use crate::signal_fir::decoration_verify::certify_decorations;
-    use crate::signal_fir::vector_analysis::{StateCell, StateResource};
+    use crate::signal_fir::vector_analysis::{
+        ForeignResource, ForeignTypeCode, StateCell, StateResource, effect_sets_conflict,
+    };
     use crate::signal_prepare::prepare_signals_for_fir_verified;
+
+    #[test]
+    fn checked_effect_summaries_match_atom_pair_semantics() {
+        let state = StateResource::Signal {
+            owner: 7,
+            cell: StateCell::Delay,
+        };
+        let atoms = vec![
+            EffectAtom::ReadState(state.clone()),
+            EffectAtom::WriteState(state),
+            EffectAtom::ReadTable(3),
+            EffectAtom::WriteTable(3),
+            EffectAtom::WriteUi(4),
+            EffectAtom::WriteOutput(5),
+            EffectAtom::Foreign {
+                resource: ForeignResource::Variable {
+                    name: "unknown".to_owned(),
+                    value_type: ForeignTypeCode(1),
+                },
+                purity: ForeignPurity::Unknown,
+            },
+            EffectAtom::Foreign {
+                resource: ForeignResource::Variable {
+                    name: "pure".to_owned(),
+                    value_type: ForeignTypeCode(1),
+                },
+                purity: ForeignPurity::Pure,
+            },
+        ];
+        let mut sets = vec![Vec::new(), atoms.clone()];
+        sets.extend(atoms.into_iter().map(|atom| vec![atom]));
+        for left in &sets {
+            for right in &sets {
+                let left_signal = test_effect_signal(0, left.clone());
+                let right_signal = test_effect_signal(1, right.clone());
+                let signals = AHashMap::from([(0, &left_signal), (1, &right_signal)]);
+                let left_loop = test_effect_loop(0, 0);
+                let right_loop = test_effect_loop(1, 1);
+                assert_eq!(
+                    CheckedEffectConflictSummary::new(&signals, &left_loop)
+                        .conflicts(&CheckedEffectConflictSummary::new(&signals, &right_loop)),
+                    effect_sets_conflict(left, right),
+                    "summary mismatch for {left:?} vs {right:?}"
+                );
+            }
+        }
+    }
+
+    fn test_effect_signal(signal_id: u64, effects: Vec<EffectAtom>) -> SignalRecord {
+        SignalRecord {
+            signal_id,
+            value_type: ValueType::Real,
+            rate: Rate::Samp,
+            vectorability: Vectorability::Scal,
+            clock_id: 0,
+            effects,
+            placement: Placement::Owned(signal_id),
+            duplicable: false,
+        }
+    }
+
+    fn test_effect_loop(loop_id: u64, root: u64) -> LoopRecord {
+        LoopRecord {
+            loop_id,
+            stable_name: format!("effect_loop_{loop_id}"),
+            kind: LoopKind::Island(loop_id),
+            roots: vec![root],
+            epoch_id: 0,
+        }
+    }
 
     /// A minimal valid two-loop plan mirroring the PV DSP shape: loop 0 owns
     /// `x` (a vectorizable producer), loop 1 consumes it (vectorizable), one
@@ -1526,6 +1700,16 @@ mod tests {
                 transport_id: 0,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn fused_checker_rejects_recursive_member_without_state_writer() {
+        let (mut plan, decorations) = fused_decoration_fixture();
+        plan.loops[1].kind = LoopKind::Recursive(999);
+        assert!(matches!(
+            verify_fused_serial_groups(&plan, &decorations),
+            Err(VectorPlanError::FusedGroupRecursiveMemberMissingWriter { loop_id: 1, .. })
         ));
     }
 

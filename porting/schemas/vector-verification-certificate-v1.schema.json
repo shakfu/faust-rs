@@ -860,7 +860,7 @@
       }
     },
     "fusedSerialGroupRecord": {
-      "$comment": "JSON Schema validates only finite shape and local identities. max_delay, recursive_projection, DepKind::Delayed, recursion-group, and clock-domain joins are independently reconstructed by the Rust verify_fused_serial_groups L2 checker from the accepted decoration certificate.",
+      "$comment": "JSON Schema validates only finite shape and local identities. max_delay, recursive_projection, DepKind::Delayed, recursion-group membership for every coupled recursive owner, and clock-domain joins are independently reconstructed by the Rust verify_fused_serial_groups L2 checker from the accepted decoration certificate.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -878,6 +878,7 @@
           "$ref": "#/$defs/uint53"
         },
         "owner_loop_id": {
+          "description": "Canonical recursive owner used to identify the fused component; other coupled recursive owners may appear in member_loop_ids.",
           "$ref": "#/$defs/uint53"
         },
         "member_loop_ids": {
@@ -890,6 +891,7 @@
           "uniqueItems": true
         },
         "recursive_carrier_signal_id": {
+          "description": "Canonical delayed recursive carrier owned by owner_loop_id; other carriers are covered by state_write_signal_ids.",
           "$ref": "#/$defs/uint53"
         },
         "delayed_read_signal_ids": {
@@ -902,7 +904,7 @@
           "uniqueItems": true
         },
         "state_write_signal_ids": {
-          "description": "Non-empty set-like array ordered by ascending signal id.",
+          "description": "Non-empty set-like array ordered by ascending signal id; covers the recursive projections of every recursive member loop.",
           "type": "array",
           "minItems": 1,
           "items": {

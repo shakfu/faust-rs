@@ -425,6 +425,7 @@ fn build_vector_state_plan_with_resources(
             loop_record.kind,
             clock_domain,
             clock_plan,
+            plan,
         )?;
         let max_delay = u64::from(record.max_delay);
         let storage = delay_storage(
@@ -699,6 +700,7 @@ fn verify_delays(
             loops[&loop_id].kind,
             transition.clock_domain,
             clock_plan,
+            vector_plan,
         )?;
         let expected_storage = delay_storage(
             transition.signal_id,
@@ -923,11 +925,16 @@ fn verify_delay_owner(
     kind: LoopKind,
     clock_domain: Option<u64>,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
+    vector_plan: &VectorPlan,
 ) -> Result<(), VectorStateError> {
     if let Some(domain_id) = clock_domain {
         return verify_clock_loop(signal_id, domain_id, loop_id, clock_plan);
     }
-    if matches!(kind, LoopKind::Vectorizable | LoopKind::Recursive(_)) {
+    let fused_serial_member = vector_plan
+        .fused_serial_groups
+        .iter()
+        .any(|group| group.member_loop_ids.binary_search(&loop_id).is_ok());
+    if matches!(kind, LoopKind::Vectorizable | LoopKind::Recursive(_)) || fused_serial_member {
         Ok(())
     } else {
         Err(VectorStateError::DelayOwnerNotVectorLoop { signal_id, loop_id })

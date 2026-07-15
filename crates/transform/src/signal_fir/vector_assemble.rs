@@ -1534,44 +1534,65 @@ fn verify_assembled_fused_serial_groups(
             }
         }
 
+        let Some(state_plan) = state_plan else {
+            return Err(reject());
+        };
         for &signal_id in &group.state_write_signal_ids {
+            let owners = state_plan
+                .plan()
+                .recursions
+                .iter()
+                .filter(|recursion| {
+                    recursion
+                        .projections
+                        .iter()
+                        .any(|projection| projection.signal_ids.binary_search(&signal_id).is_ok())
+                })
+                .map(|recursion| recursion.loop_id)
+                .collect::<Vec<_>>();
+            let [owner_loop_id] = owners.as_slice() else {
+                return Err(reject());
+            };
             let definitions = routed
                 .trace()
                 .definitions()
                 .iter()
                 .filter(|definition| {
                     definition.signal_id == signal_id
-                        && definition.region == VectorRegion::Loop(group.owner_loop_id)
+                        && definition.region == VectorRegion::Loop(*owner_loop_id)
                 })
                 .collect::<Vec<_>>();
             if definitions.len() != 1
                 || !fir_contains(store, *physical_body, definitions[0].value)
-                || state_plan.is_none_or(|state| {
-                    !state.plan().recursions.iter().any(|recursion| {
-                        recursion.loop_id == group.owner_loop_id
-                            && recursion.projections.iter().any(|projection| {
-                                projection.signal_ids.binary_search(&signal_id).is_ok()
-                            })
-                    })
-                })
+                || group.member_loop_ids.binary_search(owner_loop_id).is_err()
             {
                 return Err(reject());
             }
         }
-        let carrier_writes = members
+        let delayed_writer_ids = state_plan
+            .plan()
+            .delays
             .iter()
-            .flat_map(|loop_id| loop_by_id[loop_id].exec_actions.iter())
-            .filter(|action| {
-                action.action
-                    == (VectorStateAction::DelayWrite {
-                        signal_id: group.recursive_carrier_signal_id,
-                    })
+            .filter(|delay| {
+                group
+                    .state_write_signal_ids
+                    .binary_search(&delay.signal_id)
+                    .is_ok()
             })
+            .map(|delay| delay.signal_id)
             .collect::<Vec<_>>();
-        if carrier_writes.len() != 1
-            || !fir_contains(store, *physical_body, carrier_writes[0].statement)
-        {
+        if delayed_writer_ids.is_empty() {
             return Err(reject());
+        }
+        for signal_id in delayed_writer_ids {
+            let writes = members
+                .iter()
+                .flat_map(|loop_id| loop_by_id[loop_id].exec_actions.iter())
+                .filter(|action| action.action == (VectorStateAction::DelayWrite { signal_id }))
+                .collect::<Vec<_>>();
+            if writes.len() != 1 || !fir_contains(store, *physical_body, writes[0].statement) {
+                return Err(reject());
+            }
         }
 
         for &transport_id in &group.internal_transport_ids {

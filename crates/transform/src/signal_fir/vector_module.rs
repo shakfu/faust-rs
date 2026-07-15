@@ -333,7 +333,6 @@ fn reject_cross_loop_delay_read_transports(
                         .delayed_read_signal_ids
                         .binary_search(&transport.signal_id)
                         .is_ok()
-                    && group.recursive_carrier_signal_id == carrier_signal_id
                     && group
                         .state_write_signal_ids
                         .binary_search(&carrier_signal_id)
@@ -349,6 +348,12 @@ fn reject_cross_loop_delay_read_transports(
             });
             if covered {
                 continue;
+            }
+            if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                eprintln!(
+                    "[vector-fused-uncovered] transport={:?} carrier={} groups={:?}",
+                    transport, carrier_signal_id, plan.fused_serial_groups
+                );
             }
             return Err(VectorModuleFailure::new(
                 VectorFallbackReason::VectorPlan,

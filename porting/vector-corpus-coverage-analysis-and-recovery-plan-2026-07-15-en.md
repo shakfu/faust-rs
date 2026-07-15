@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phases 0 and 1 complete
+Status: in progress — Phases 0, 1, and 2 complete
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -90,6 +90,38 @@ seconds for `bells.dsp`, 153 to 10 seconds for `cubic_distortion.dsp`, and 75.7
 to 65.8 seconds for `reverb_designer.dsp`; the last DSP already costs about
 60.6 seconds in scalar mode. `count_vector_corpus --compare-scalar-time` now
 reports that distinction directly.
+
+Phase 2 was completed on 2026-07-15. The post-UI plan waterfall was first
+partitioned into 20 delayed-recursion crossings, 18 unplaced sample nodes, 18
+invalid non-sample/lifecycle owners, and two table-value transports. Placement
+now assigns owners only to compute-visible sample nodes, traverses the complete
+checked dependency projection, and materializes disconnected effect roots
+retained by decorations. Stateful `waveform` table-typed nodes cross loop
+boundaries as typed element-value transports rather than as copied table
+identities.
+
+`FusedSerialGroup` now supports multiple projections, arbitrary internal
+transports, independent disjoint recursive slices, and transitively merged
+components of coupled recursive owners. The independent checker reconstructs
+every delayed read-to-writer edge, recursive owner, clock join, and internal
+transport from accepted decorations; final assembly checks every delayed state
+write inside the one physical per-sample loop. The complete 93-DSP sweep now
+has zero `VectorPlan` fallback: 39 files first fail in `StatePlan`, 41 in
+`PureLowering`, one soundfile remains in `UiProgram`, and `subcontainer1.dsp`
+retains its independent SIGGEN error. The certified count intentionally stays
+at 11 because Phase 2 changes only plan admissibility; no newly certified DSP
+or generated sample path exists yet to claim as parity-tested.
+
+Profiling caught a real debug-build regression before this phase was committed.
+On `reverb_designer.dsp`, a vector request that later fell back took 80.3
+seconds versus 59.3 seconds scalar. The causes were quadratic raw effect-set
+comparisons in the independent plan checker and a second complete plan check in
+the clock/AD producer. A checker-local compact effect summary, cross-checked
+against atom-pair semantics, and reuse of the accepted `VerifiedVectorPlan`
+reduced the vector request to about 65.2 seconds. Its remaining approximately
+six seconds are attributable in stage traces to decoration and one plan build;
+the 59-second frontend cost is unchanged and remains scheduled for the Phase 6
+historical audit.
 
 ## 2. Measured Baseline
 

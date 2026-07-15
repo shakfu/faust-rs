@@ -71,8 +71,6 @@ pub enum VectorPlanBuildError {
     MissingRecord { signal_id: u32 },
     /// A compute-visible sample signal was not reached by occurrence facts.
     SampleSignalUnplaced { signal_id: u32 },
-    /// A table carrier cannot be copied through a numeric chunk transport.
-    TableTransport { signal_id: u32 },
     /// The independent plan verifier rejected the constructed DTO.
     Verification(VectorPlanError),
 }
@@ -86,9 +84,6 @@ impl fmt::Display for VectorPlanBuildError {
             }
             Self::SampleSignalUnplaced { signal_id } => {
                 write!(f, "sample signal {signal_id} has no vector placement")
-            }
-            Self::TableTransport { signal_id } => {
-                write!(f, "table signal {signal_id} cannot use a chunk transport")
             }
             Self::Verification(error) => write!(f, "constructed vector plan is invalid: {error}"),
         }
@@ -242,7 +237,10 @@ pub fn build_vector_plan(
 
     let mut owner = BTreeMap::<u32, u64>::new();
     for record in &certificate.records {
-        if separations[&record.signal_id] == LoopSeparation::SeparateSerial {
+        if record.variability == Variability::Samp
+            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+            && separations[&record.signal_id] == LoopSeparation::SeparateSerial
+        {
             let group = record
                 .recursive_projection
                 .expect("serial separation is a recursive projection")
@@ -251,7 +249,10 @@ pub fn build_vector_plan(
         }
     }
     for record in &certificate.records {
-        if separations[&record.signal_id] == LoopSeparation::SeparateVectorizable {
+        if record.variability == Variability::Samp
+            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+            && separations[&record.signal_id] == LoopSeparation::SeparateVectorizable
+        {
             owner.insert(record.signal_id, next_loop);
             next_loop += 1;
         }
@@ -264,10 +265,17 @@ pub fn build_vector_plan(
             .or_default()
             .push((occurrence.edge_key, occurrence.to));
     }
+    for dependency in &certificate.dependencies {
+        children
+            .entry(dependency.from)
+            .or_default()
+            .push((dependency.edge_key, dependency.to));
+    }
     let children = children
         .into_iter()
         .map(|(signal, mut edges)| {
             edges.sort_unstable();
+            edges.dedup();
             (signal, edges.into_iter().map(|(_, child)| child).collect())
         })
         .collect();
@@ -283,6 +291,9 @@ pub fn build_vector_plan(
         if record.variability != Variability::Samp {
             state.placement.insert(record.signal_id, Placement::Control);
         }
+    }
+    for &boundary in &certificate.lifecycle_boundaries {
+        state.placement.insert(boundary, Placement::Control);
     }
     for (&signal, &loop_id) in &owner {
         state.placement.insert(signal, Placement::Owned(loop_id));
@@ -323,11 +334,102 @@ pub fn build_vector_plan(
         };
         state.visit(root, loop_id)?;
     }
+    // C++ OccMarkup expands a shared node's children only on its first visit.
+    // Its canonical occurrence projection can therefore contain a
+    // compute-visible effect component that is disconnected from the output
+    // roots even though the full certified dependency facts retain it (for
+    // example an `attach`-only bargraph branch). Materialize only the maximal
+    // roots of each such component; visiting them then assigns their complete
+    // closure without duplicating descendant effects.
+    loop {
+        let unplaced = certificate
+            .records
+            .iter()
+            .filter(|record| {
+                record.variability == Variability::Samp
+                    && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+                    && !state.placement.contains_key(&record.signal_id)
+            })
+            .map(|record| record.signal_id)
+            .collect::<BTreeSet<_>>();
+        if unplaced.is_empty() {
+            break;
+        }
+        let descendants = unplaced
+            .iter()
+            .flat_map(|signal| state.children.get(signal).into_iter().flatten())
+            .filter(|child| unplaced.contains(child))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let component_roots = unplaced
+            .difference(&descendants)
+            .copied()
+            .collect::<Vec<_>>();
+        if component_roots.is_empty() {
+            break;
+        }
+        let mut made_progress = false;
+        for root in component_roots {
+            let record = state.records[&root];
+            if effects_duplicable(&record.effects) {
+                state.placement.insert(root, Placement::Inline);
+                made_progress = true;
+                continue;
+            }
+            let loop_id = next_loop;
+            next_loop += 1;
+            state.placement.insert(root, Placement::Owned(loop_id));
+            state
+                .roots_by_loop
+                .entry(loop_id)
+                .or_default()
+                .insert(u64::from(root));
+            state.visit(root, loop_id)?;
+            made_progress = true;
+        }
+        if !made_progress {
+            break;
+        }
+    }
     trace_stage("placement");
     for record in &certificate.records {
         if record.variability == Variability::Samp
+            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && !state.placement.contains_key(&record.signal_id)
         {
+            if timing_enabled {
+                let incoming = certificate
+                    .occurrence_dependencies
+                    .iter()
+                    .filter(|dependency| dependency.to == record.signal_id)
+                    .count();
+                let outgoing = certificate
+                    .occurrence_dependencies
+                    .iter()
+                    .filter(|dependency| dependency.from == record.signal_id)
+                    .count();
+                let parents = certificate
+                    .occurrence_dependencies
+                    .iter()
+                    .filter(|dependency| dependency.to == record.signal_id)
+                    .map(|dependency| {
+                        (
+                            dependency.from,
+                            state.placement.get(&dependency.from).copied(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[vector-plan-unplaced] signal={} type={:?} effects={:?} incoming={} outgoing={} parents={:?} lifecycle_boundary={}",
+                    record.signal_id,
+                    record.sig_type,
+                    record.effects,
+                    incoming,
+                    outgoing,
+                    parents,
+                    certificate.lifecycle_boundaries.contains(&record.signal_id)
+                );
+            }
             return Err(VectorPlanBuildError::SampleSignalUnplaced {
                 signal_id: record.signal_id,
             });
@@ -439,9 +541,6 @@ pub fn build_vector_plan(
     for (transport_id, &(signal_id, producer_loop, consumer_loop)) in cross_uses.iter().enumerate()
     {
         let record = state.records[&signal_id];
-        if matches!(record.sig_type, CanonicalSigType::Table { .. }) {
-            return Err(VectorPlanBuildError::TableTransport { signal_id });
-        }
         transports.push(TransportRecord {
             transport_id: u64::try_from(transport_id).expect("transport count fits u64"),
             stable_name: format!("transport_s{signal_id}_l{producer_loop}_l{consumer_loop}"),
@@ -483,10 +582,9 @@ pub fn build_vector_plan(
     Ok(VerifiedVectorPlan { plan })
 }
 
-/// Derives the first fail-closed fused-serial slice directly from certified
-/// decoration facts. The initial producer deliberately accepts only top-rate,
-/// direct delayed-read-to-recursion transports. More general chains remain on
-/// the scalar fallback until their larger fusion closure is specified.
+/// Derives a fail-closed fused-serial slice directly from certified decoration
+/// facts. Every delayed read and pure transport chain belonging to one
+/// top-rate recursion group is kept in a single per-sample execution unit.
 fn build_fused_serial_groups(
     certificate: &super::decoration_verify::DecorationCertificate,
     state: &PlacementState<'_>,
@@ -498,7 +596,6 @@ fn build_fused_serial_groups(
         recursion_group: Option<u32>,
         members: BTreeSet<u64>,
         delayed_reads: BTreeSet<u64>,
-        internal_transports: BTreeSet<u64>,
         ambiguous: bool,
     }
 
@@ -528,77 +625,105 @@ fn build_fused_serial_groups(
             else {
                 continue;
             };
-            // The first certified slice fuses a delayed-read producer directly
-            // into the recursive writer loop. Longer pure chains fail closed.
-            if transport.consumer_loop != owner_loop_id || transport.producer_loop == owner_loop_id
-            {
-                continue;
-            }
             let candidate = candidates.entry(owner_loop_id).or_default();
             let carrier = u64::from(dependency.to);
             if candidate
-                .carrier
-                .is_some_and(|existing| existing != carrier)
-                || candidate
-                    .recursion_group
-                    .is_some_and(|existing| existing != projection.group)
+                .recursion_group
+                .is_some_and(|existing| existing != projection.group)
             {
                 candidate.ambiguous = true;
                 continue;
             }
-            candidate.carrier = Some(carrier);
+            candidate.carrier = Some(
+                candidate
+                    .carrier
+                    .map_or(carrier, |current| current.min(carrier)),
+            );
             candidate.recursion_group = Some(projection.group);
+            // Fuse the delayed-read producer, its immediate consumer, and the
+            // recursion owner. Overlapping slices are merged transitively
+            // below so coupled recursive groups remain sample-synchronous.
             candidate.members.insert(transport.producer_loop);
+            candidate.members.insert(transport.consumer_loop);
             candidate.members.insert(owner_loop_id);
             candidate.delayed_reads.insert(transport.signal_id);
-            candidate.internal_transports.insert(transport.transport_id);
         }
     }
 
-    let mut used_loops = BTreeSet::new();
-    let mut groups = Vec::new();
-    for (owner_loop_id, candidate) in candidates {
-        let (Some(carrier), Some(recursion_group)) = (candidate.carrier, candidate.recursion_group)
-        else {
-            continue;
-        };
-        if candidate.ambiguous
-            || candidate
-                .members
+    let mut components = Vec::<Vec<(u64, Candidate)>>::new();
+    for candidate in candidates.into_iter().filter(|(_, candidate)| {
+        !candidate.ambiguous && candidate.carrier.is_some() && candidate.recursion_group.is_some()
+    }) {
+        let mut component = vec![candidate];
+        let mut members = component[0].1.members.clone();
+        while let Some(position) = components.iter().position(|existing| {
+            existing
                 .iter()
-                .any(|loop_id| used_loops.contains(loop_id))
-        {
-            continue;
+                .any(|(_, candidate)| !candidate.members.is_disjoint(&members))
+        }) {
+            let existing = components.remove(position);
+            for (_, candidate) in &existing {
+                members.extend(candidate.members.iter().copied());
+            }
+            component.extend(existing);
         }
+        component.sort_by_key(|(owner_loop_id, _)| *owner_loop_id);
+        components.push(component);
+    }
+    components.sort_by_key(|component| component[0].0);
+
+    let mut groups = Vec::new();
+    for component in components {
+        let owner_loop_id = component[0].0;
+        let carrier = component[0].1.carrier.expect("component carrier checked");
+        let members = component
+            .iter()
+            .flat_map(|(_, candidate)| candidate.members.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let delayed_reads = component
+            .iter()
+            .flat_map(|(_, candidate)| candidate.delayed_reads.iter().copied())
+            .collect::<BTreeSet<_>>();
         let state_write_signal_ids = certificate
             .records
             .iter()
             .filter(|record| {
-                record
-                    .recursive_projection
-                    .is_some_and(|projection| projection.group == recursion_group)
-                    && state.placement.get(&record.signal_id)
-                        == Some(&Placement::Owned(owner_loop_id))
+                record.recursive_projection.is_some()
+                    && state
+                        .placement
+                        .get(&record.signal_id)
+                        .is_some_and(|placement| {
+                            matches!(placement, Placement::Owned(owner) if members.contains(owner))
+                        })
             })
             .map(|record| u64::from(record.signal_id))
             .collect::<Vec<_>>();
-        let output_or_transport_roots = state
-            .roots_by_loop
-            .get(&owner_loop_id)
-            .map(|roots| roots.iter().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let output_or_transport_roots = members
+            .iter()
+            .flat_map(|loop_id| state.roots_by_loop.get(loop_id).into_iter().flatten())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let internal_transport_ids = transports
+            .iter()
+            .filter(|transport| {
+                members.contains(&transport.producer_loop)
+                    && members.contains(&transport.consumer_loop)
+            })
+            .map(|transport| transport.transport_id)
+            .collect::<Vec<_>>();
         if state_write_signal_ids.is_empty() || output_or_transport_roots.is_empty() {
             continue;
         }
-        used_loops.extend(candidate.members.iter().copied());
         groups.push(FusedSerialGroupRecord {
             group_id: u64::try_from(groups.len()).expect("fused group count fits u64"),
             owner_loop_id,
-            member_loop_ids: candidate.members.into_iter().collect(),
+            member_loop_ids: members.into_iter().collect(),
             recursive_carrier_signal_id: carrier,
-            delayed_read_signal_ids: candidate.delayed_reads.into_iter().collect(),
+            delayed_read_signal_ids: delayed_reads.into_iter().collect(),
             state_write_signal_ids,
-            internal_transport_ids: candidate.internal_transports.into_iter().collect(),
+            internal_transport_ids,
             output_or_transport_roots,
         });
     }
@@ -1168,6 +1293,83 @@ mod tests {
                 .filter_map(|record| record.recursive_projection)
                 .all(|projection| u64::from(projection.group) == group_id)
         );
+        let fused = plan
+            .fused_serial_groups
+            .iter()
+            .find(|group| group.owner_loop_id == recursive[0].loop_id)
+            .expect("multi-projection delayed recursion must have one fused serial slice");
+        let writer_projection_indices = decorations
+            .certificate()
+            .records
+            .iter()
+            .filter(|record| {
+                fused
+                    .state_write_signal_ids
+                    .binary_search(&u64::from(record.signal_id))
+                    .is_ok()
+            })
+            .filter_map(|record| {
+                record
+                    .recursive_projection
+                    .map(|projection| projection.index)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(writer_projection_indices, BTreeSet::from([0, 1]));
+        let delayed_projection_indices = decorations
+            .certificate()
+            .dependencies
+            .iter()
+            .filter(|dependency| {
+                fused
+                    .delayed_read_signal_ids
+                    .binary_search(&u64::from(dependency.from))
+                    .is_ok()
+                    && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
+            })
+            .filter_map(|dependency| {
+                decorations
+                    .certificate()
+                    .records
+                    .iter()
+                    .find(|record| record.signal_id == dependency.to)
+                    .and_then(|record| record.recursive_projection)
+                    .map(|projection| projection.index)
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!delayed_projection_indices.is_empty());
+        assert!(delayed_projection_indices.is_subset(&writer_projection_indices));
+    }
+
+    #[test]
+    fn stateful_waveform_values_use_typed_numeric_transports() {
+        let mut arena = TreeArena::new();
+        let (left, right) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let v0 = builder.real(0.1);
+            let v1 = builder.real(0.5);
+            let waveform = builder.waveform(&[v0, v1]);
+            let two = builder.real(2.0);
+            let three = builder.real(3.0);
+            (
+                builder.binop(signals::BinOp::Mul, waveform, two),
+                builder.binop(signals::BinOp::Mul, waveform, three),
+            )
+        };
+        let decorations = certify(&arena, &[left, right]);
+        let plan = build_vector_plan(&decorations, 8).unwrap().into_plan();
+        let table_ids = decorations
+            .certificate()
+            .records
+            .iter()
+            .filter(|record| matches!(record.sig_type, CanonicalSigType::Table { .. }))
+            .map(|record| u64::from(record.signal_id))
+            .collect::<BTreeSet<_>>();
+
+        assert!(plan.transports.iter().any(|transport| {
+            table_ids.contains(&transport.signal_id)
+                && transport.element_type == ValueType::Real
+                && transport.length == 8
+        }));
     }
 
     #[test]

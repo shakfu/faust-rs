@@ -422,7 +422,13 @@ pub fn build_vector_clock_ad_plan(
         forward_ad: ForwardAdPolicy::ExpandedSignalGraph,
         reverse_ad_fallbacks,
     };
-    verify_vector_clock_ad_plan(prepared, domains, decorations, plan, &clock_ad_plan)?;
+    verify_vector_clock_ad_plan_after_vector_plan(
+        prepared,
+        domains,
+        decorations,
+        plan,
+        &clock_ad_plan,
+    )?;
     Ok(VerifiedVectorClockAdPlan {
         plan: clock_ad_plan,
         vector_plan: plan.clone(),
@@ -438,6 +444,22 @@ pub fn verify_vector_clock_ad_plan(
     clock_ad_plan: &VectorClockAdPlan,
 ) -> Result<(), VectorClockAdError> {
     verify_vector_plan(vector_plan)?;
+    verify_vector_clock_ad_plan_after_vector_plan(
+        prepared,
+        domains,
+        decorations,
+        vector_plan,
+        clock_ad_plan,
+    )
+}
+
+fn verify_vector_clock_ad_plan_after_vector_plan(
+    prepared: &VerifiedPreparedSignals,
+    domains: &ClockDomainTable,
+    decorations: &VerifiedDecorationCertificate,
+    vector_plan: &VectorPlan,
+    clock_ad_plan: &VectorClockAdPlan,
+) -> Result<(), VectorClockAdError> {
     if clock_ad_plan.schema_version != VECTOR_CLOCK_AD_PLAN_VERSION {
         return Err(VectorClockAdError::UnsupportedSchema {
             found: clock_ad_plan.schema_version,

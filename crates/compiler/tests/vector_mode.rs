@@ -426,6 +426,35 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
 }
 
 #[test]
+fn phase2_plan_accepts_multi_projection_recursion_and_table_value_transports() {
+    std::thread::Builder::new()
+        .name("phase2-vector-plan-corpus".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let compiler = Compiler::new().with_compute_mode(ComputeMode::Vector {
+                vec_size: 32,
+                loop_variant: 0,
+            });
+            let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/impulse-tests/dsp");
+            for name in ["APF.dsp", "pow.dsp"] {
+                let path = corpus.join(name);
+                let output = compiler
+                    .compile_file_default_to_fir_with_lane(&path, SignalFirLane::TransformFastLane)
+                    .unwrap_or_else(|error| panic!("{name} vector FIR: {error}"));
+                assert_ne!(
+                    output.vector_pipeline_status,
+                    VectorPipelineStatus::Fallback(VectorFallbackReason::VectorPlan),
+                    "{name} must pass the checked phase-2 vector plan"
+                );
+            }
+        })
+        .expect("spawn large-stack phase-2 test")
+        .join()
+        .expect("phase-2 test thread");
+}
+
+#[test]
 fn vector_copy_delay_loops_reach_c_family_backends() {
     let source = include_str!("../../../tests/impulse-tests/dsp/noiseabs.dsp");
     for loop_variant in [0_u8, 1] {
