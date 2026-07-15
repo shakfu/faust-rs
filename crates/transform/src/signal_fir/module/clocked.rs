@@ -617,6 +617,7 @@ impl<'a> SignalToFirLower<'a> {
 
         // ── Body: lower the held values inside the child region ──────────
         self.regions.open_child();
+        self.cache.open_child();
         {
             let clocked_state = self.clocked.as_mut().expect("clocked state present");
             clocked_state.open_domains.push(domain);
@@ -659,6 +660,7 @@ impl<'a> SignalToFirLower<'a> {
             clocked_state.open_loops.pop();
         }
         let mut body_phases = self.regions.close_child();
+        self.cache.close_child();
         self.regions.set_redirect(prev_redirect);
         body_result?;
 

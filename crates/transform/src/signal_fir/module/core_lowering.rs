@@ -66,7 +66,7 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// Returns a typed `FRS-SFIR-*` error for unsupported signal families.
     pub(super) fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
-        if let Some(id) = self.cache.get(&sig).copied() {
+        if let Some(id) = self.cache.get_at(self.regions.effective_depth(), sig) {
             return Ok(id);
         }
 
@@ -327,7 +327,9 @@ impl<'a> SignalToFirLower<'a> {
             // First materialization of `sig`: the sole cache-insertion site
             // and therefore the exact P3 conformance trace compared with the
             // selected Hsched (`crate::signal_fir::shadow`).
-            if self.cache.insert(sig, lowered).is_none() {
+            self.cache
+                .insert_at(self.regions.effective_depth(), sig, lowered);
+            if self.emission_seen.insert(sig) {
                 self.emission_order.push(sig);
             }
         }

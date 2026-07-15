@@ -369,8 +369,8 @@ struct SignalToFirLower<'a> {
     real_ty: FirType,
     /// FIR node store being built; owned by this lowerer and returned in the output.
     store: FirStore,
-    /// Memoization cache: maps a `SigId` to its already-lowered `FirId` for DAG sharing.
-    cache: HashMap<SigId, FirId>,
+    /// Region-scoped memoization cache for legal DAG sharing.
+    cache: region::RegionCache,
     /// FIR statement buckets for each Faust lifecycle section.
     sections: state::ModuleSections,
     /// Compute-region tree: per-loop regions carrying the phased statement
@@ -419,6 +419,9 @@ struct SignalToFirLower<'a> {
     /// First-lowering order, recorded at the sole cache-insertion site and
     /// exported as the P3 schedule-conformance trace.
     emission_order: Vec<SigId>,
+    /// Deduplicates the first-lowering trace across sibling regions and loop
+    /// slices without widening the lexical memoization scopes.
+    emission_seen: HashSet<SigId>,
     /// Selected scalar schedule. Present only on the authoritative scalar
     /// forward path; vector planning schedules its completed loop graph
     /// instead, and reverse AD keeps its fixed epoch driver.

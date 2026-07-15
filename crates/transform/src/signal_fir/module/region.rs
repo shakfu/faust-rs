@@ -37,7 +37,66 @@
 //! `SamplePhases` accumulator lives on as [`RegionPhases`], owned by the
 //! current region.
 
+use std::collections::HashMap;
+
 use fir::FirId;
+use signals::SigId;
+
+/// Region-scoped signal memoization.
+///
+/// Scope zero belongs to the current top-level sample loop. Each open guarded
+/// child owns one additional scope. Lookup walks from the effective append
+/// scope towards its ancestors, which implements the region visibility rule:
+/// parent values are reusable by descendants, but child values never escape
+/// into siblings. An insertion redirected to an ancestor is stored directly
+/// in that ancestor scope and therefore survives closing the child.
+pub(super) struct RegionCache {
+    scopes: Vec<HashMap<SigId, FirId>>,
+}
+
+impl RegionCache {
+    pub(super) fn new() -> Self {
+        Self {
+            scopes: vec![HashMap::new()],
+        }
+    }
+
+    pub(super) fn get_at(&self, depth: usize, sig: SigId) -> Option<FirId> {
+        debug_assert!(depth < self.scopes.len(), "cache depth must be open");
+        self.scopes[..=depth]
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&sig).copied())
+    }
+
+    pub(super) fn insert_at(&mut self, depth: usize, sig: SigId, value: FirId) -> Option<FirId> {
+        self.scopes
+            .get_mut(depth)
+            .expect("cache insertion depth must be open")
+            .insert(sig, value)
+    }
+
+    pub(super) fn open_child(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub(super) fn close_child(&mut self) {
+        assert!(
+            self.scopes.len() > 1,
+            "close_child requires an open cache scope"
+        );
+        self.scopes.pop();
+    }
+
+    pub(super) fn clear(&mut self) {
+        debug_assert_eq!(
+            self.scopes.len(),
+            1,
+            "clearing the loop cache with open guarded children"
+        );
+        self.scopes[0].clear();
+    }
+}
 
 /// Kind of one compute region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +228,11 @@ impl RegionTree {
         self.open_children.len()
     }
 
+    /// Depth of the region that currently receives appended statements.
+    pub(super) fn effective_depth(&self) -> usize {
+        self.redirect.unwrap_or(self.open_children.len())
+    }
+
     /// Opens a nested guarded-block frame; it becomes the append target
     /// (unless a redirection is active).
     pub(super) fn open_child(&mut self) {
@@ -192,5 +256,50 @@ impl RegionTree {
     /// Current redirection depth, if a redirection is active.
     pub(super) fn redirect_depth(&self) -> Option<usize> {
         self.redirect
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RegionCache;
+    use tlib::TreeArena;
+
+    #[test]
+    fn parent_entries_are_visible_in_children() {
+        let mut cache = RegionCache::new();
+        let mut arena = TreeArena::new();
+        let signal = arena.int(1);
+        let value = arena.int(10);
+        cache.insert_at(0, signal, value);
+        cache.open_child();
+
+        assert_eq!(cache.get_at(1, signal), Some(value));
+    }
+
+    #[test]
+    fn child_entries_do_not_escape_to_siblings() {
+        let mut cache = RegionCache::new();
+        let mut arena = TreeArena::new();
+        let signal = arena.int(1);
+        let value = arena.int(10);
+        cache.open_child();
+        cache.insert_at(1, signal, value);
+        cache.close_child();
+        cache.open_child();
+
+        assert_eq!(cache.get_at(1, signal), None);
+    }
+
+    #[test]
+    fn redirected_parent_entries_survive_child_close() {
+        let mut cache = RegionCache::new();
+        let mut arena = TreeArena::new();
+        let signal = arena.int(1);
+        let value = arena.int(10);
+        cache.open_child();
+        cache.insert_at(0, signal, value);
+        cache.close_child();
+
+        assert_eq!(cache.get_at(0, signal), Some(value));
     }
 }

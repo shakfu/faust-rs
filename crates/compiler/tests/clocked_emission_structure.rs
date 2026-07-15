@@ -16,7 +16,7 @@
 //! - `fIOTA_d`    — the per-domain circular cursor for in-block delay state.
 
 use codegen::backends::cpp::CppOptions;
-use compiler::{Compiler, SignalFirLane};
+use compiler::{Compiler, SchedulingStrategy, SignalFirLane};
 
 fn compile_cpp(name: &str, source: &str) -> String {
     Compiler::new()
@@ -36,6 +36,40 @@ fn compute_body(cpp: &str) -> String {
         .unwrap_or_else(|| panic!("no compute() in generated C++:\n{cpp}"));
     // Take from `compute(` to the end of the class — enough to inspect the loop.
     cpp[start..].to_owned()
+}
+
+#[test]
+fn sibling_ondemand_regions_do_not_reuse_local_scheduled_temporaries() {
+    // Reduced form of `ondemand(os.osc(...)), ondemand(os.square(...))`.
+    // Both phases contain the same hash-consed startup delay, but each guarded
+    // region must materialize and update it in its own lexical/domain context.
+    let source = r#"
+        decimal(x) = x - floor(x);
+        startup = 1 - (1');
+        phase(inc) = (select2(startup, +(inc), 0) : decimal) ~ _;
+        process = (button("a") : ondemand(phase(0.01))),
+                  (button("b") : ondemand(phase(0.02)));
+    "#;
+    let strategies = [
+        SchedulingStrategy::DepthFirst,
+        SchedulingStrategy::BreadthFirst,
+        SchedulingStrategy::Special,
+        SchedulingStrategy::ReverseBreadthFirst,
+    ];
+
+    for strategy in strategies {
+        Compiler::new()
+            .with_scheduling_strategy(strategy)
+            .compile_source_to_cpp_with_lane(
+                "sibling_ondemand_phases.dsp",
+                source,
+                &CppOptions::default(),
+                SignalFirLane::TransformFastLane,
+            )
+            .unwrap_or_else(|error| {
+                panic!("sibling ondemand lowering failed under {strategy:?}: {error}")
+            });
+    }
 }
 
 #[test]
