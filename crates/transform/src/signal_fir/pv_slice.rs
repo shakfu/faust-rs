@@ -248,6 +248,7 @@ impl PvPlan {
                     witness_kind: vv::WitnessKind::Pointwise,
                 },
             ],
+            fused_serial_groups: Vec::new(),
         }
     }
 }

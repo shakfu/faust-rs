@@ -55,6 +55,10 @@ pub enum ClockGuard {
 pub enum ClockTransportMode {
     /// Audio-rate value: the P5 `i0 - vindex` chunk route remains valid.
     OuterChunk,
+    /// Per-sample value crossing logical loops in one certified fused group.
+    /// The route is a scalar stack temporary inside the group's sole sample
+    /// loop, never a chunk array filled by a preceding loop.
+    FusedScalar { group_id: u64 },
     /// Domain-rate value: route below the serial guard, one fire at a time.
     IslandScalar { domain_id: u64 },
     /// Persistent `PermVar` value exported from a domain to an ancestor.
@@ -675,6 +679,16 @@ fn derive_transport_policies(
         .iter()
         .map(|signal| (signal.signal_id, signal))
         .collect::<BTreeMap<_, _>>();
+    let fused_transports = plan
+        .fused_serial_groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .internal_transport_ids
+                .iter()
+                .map(move |&transport_id| (transport_id, group.group_id))
+        })
+        .collect::<BTreeMap<_, _>>();
     plan.transports
         .iter()
         .map(|transport| {
@@ -683,7 +697,12 @@ fn derive_transport_policies(
                     signal_id: transport.signal_id,
                 },
             )?;
-            let mode = if signal.clock_id == 0 {
+            let mode = if let Some(&group_id) = fused_transports.get(&transport.transport_id) {
+                if signal.clock_id != 0 {
+                    return Err(VectorClockAdError::TransportCoverageMismatch);
+                }
+                ClockTransportMode::FusedScalar { group_id }
+            } else if signal.clock_id == 0 {
                 ClockTransportMode::OuterChunk
             } else if ids
                 .get(&u32::try_from(signal.signal_id).map_err(|_| {

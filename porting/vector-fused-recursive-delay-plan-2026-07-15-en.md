@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: proposed porting plan
+Status: implemented for the direct top-rate fusion slice
 
 Working branch: `ondemand-vec-fad-synthesis`
 

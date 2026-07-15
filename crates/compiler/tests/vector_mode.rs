@@ -14,6 +14,11 @@ use compiler::{
     VectorPipelineStatus,
 };
 
+const PULSE_COUNTUP_LOOP_SOURCE: &str =
+    "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;";
+const PULSE_COUNTDOWN_LOOP_SOURCE: &str =
+    "ba = library(\"basics.lib\"); process = ba.pulse_countdown_loop(4, 1) + 0.001;";
+
 /// Compiles `source` to interpreter bytecode with the given compute and
 /// scheduling modes, then runs one block with the provided input channels.
 fn run_channels_with_strategy(
@@ -147,6 +152,35 @@ fn assert_scalar_vector_bit_exact(name: &str, source: &str, vec_size: u32) {
     }
 }
 
+fn assert_vector_pipeline_certified(name: &str, source: &str, vec_size: u32) {
+    for strategy in scheduling_strategies() {
+        for loop_variant in [0_u8, 1] {
+            let path = std::env::temp_dir().join(format!(
+                "faust-rs-vecmode-status-{}-{:?}.dsp",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, source).expect("write temp dsp");
+            let result = Compiler::new()
+                .with_compute_mode(ComputeMode::Vector {
+                    vec_size,
+                    loop_variant,
+                })
+                .with_scheduling_strategy(strategy)
+                .compile_file_default_to_fir_with_lane(&path, SignalFirLane::TransformFastLane);
+            let _ = std::fs::remove_file(&path);
+            let output = result.unwrap_or_else(|error| {
+                panic!("{name} vector FIR (-lv {loop_variant}, {strategy:?}): {error}")
+            });
+            assert_eq!(
+                output.vector_pipeline_status,
+                VectorPipelineStatus::Certified,
+                "{name} must use the checked vector path under -lv {loop_variant} and {strategy:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn stateless_gain_is_bit_exact() {
     assert_scalar_vector_bit_exact("gain", "process = _ * 0.5;", 32);
@@ -165,11 +199,58 @@ fn recursion_and_delay_cross_chunk_boundary_bit_exact() {
 
 #[test]
 fn recursive_short_delay_transport_reads_after_copy_in() {
-    assert_scalar_vector_bit_exact(
-        "pulse_countup_loop",
-        "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;",
-        32,
-    );
+    assert_scalar_vector_bit_exact("pulse_countup_loop", PULSE_COUNTUP_LOOP_SOURCE, 32);
+    assert_scalar_vector_bit_exact("pulse_countdown_loop", PULSE_COUNTDOWN_LOOP_SOURCE, 32);
+    // 64 samples with vec_size 24 exercises two full chunks and a 16-sample tail.
+    assert_scalar_vector_bit_exact("pulse_countup_loop_tail", PULSE_COUNTUP_LOOP_SOURCE, 24);
+    // vec_size exceeds the 64-sample block, covering count < vec_size.
+    assert_scalar_vector_bit_exact("pulse_countup_loop_short", PULSE_COUNTUP_LOOP_SOURCE, 96);
+}
+
+#[test]
+fn recursive_short_delay_transport_uses_certified_vector_pipeline() {
+    assert_vector_pipeline_certified("pulse_countup_loop", PULSE_COUNTUP_LOOP_SOURCE, 32);
+}
+
+#[test]
+fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
+    let path = std::env::temp_dir().join(format!(
+        "faust-rs-vec-fused-cpp-{}-{:?}.dsp",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, PULSE_COUNTUP_LOOP_SOURCE).expect("write fused vector DSP");
+    let cpp = Compiler::new()
+        .with_compute_mode(ComputeMode::Vector {
+            vec_size: 32,
+            loop_variant: 1,
+        })
+        .with_scheduling_strategy(SchedulingStrategy::ReverseBreadthFirst)
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .expect("compile fused vector C++");
+    let _ = std::fs::remove_file(path);
+
+    assert!(cpp.contains("float transport_s23_l2_l1;"));
+    assert!(!cpp.contains("float transport_s23_l2_l1[32];"));
+    let first_loop = cpp
+        .find("for (int i0 = vindex;")
+        .expect("fused serial sample loop");
+    let second_loop = cpp[first_loop + 1..]
+        .find("for (int i0 = vindex;")
+        .map(|offset| first_loop + 1 + offset)
+        .expect("safe pure tail loop");
+    let fused = &cpp[first_loop..second_loop];
+    let read = fused
+        .find("transport_s23_l2_l1 = vstate_s22_tmp")
+        .expect("recursive delayed read in fused loop");
+    let write = fused
+        .find("vstate_s22_tmp[(4 + (i0 - vindex))] =")
+        .expect("recursive state write in fused loop");
+    assert!(read < write, "delayed read must precede the state write");
 }
 
 #[test]

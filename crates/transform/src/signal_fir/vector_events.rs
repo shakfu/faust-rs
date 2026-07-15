@@ -1619,6 +1619,7 @@ mod tests {
                     witness_kind: WitnessKind::Pointwise,
                 },
             ],
+            fused_serial_groups: vec![],
         })
     }
 
@@ -1662,6 +1663,7 @@ mod tests {
                     witness_kind: WitnessKind::SerialStateInternal,
                 },
             ],
+            fused_serial_groups: vec![],
         })
     }
 
@@ -1697,6 +1699,7 @@ mod tests {
                 loop_id: 0,
                 witness_kind: WitnessKind::SerialStateInternal,
             }],
+            fused_serial_groups: vec![],
         })
     }
 
@@ -1748,6 +1751,7 @@ mod tests {
                 loop_id: 0,
                 witness_kind: WitnessKind::SerialStateInternal,
             }],
+            fused_serial_groups: vec![],
         });
         let state = verified_vector_state_plan_for_test(
             VectorStatePlan {

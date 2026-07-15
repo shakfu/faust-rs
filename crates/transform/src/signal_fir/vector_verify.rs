@@ -34,8 +34,9 @@
 use ahash::{AHashMap, AHashSet};
 use std::fmt;
 
+use super::decoration_verify::VerifiedDecorationCertificate;
 pub use super::vector_analysis::EffectAtom;
-use super::vector_analysis::{ForeignPurity, effect_sets_conflict};
+use super::vector_analysis::{DepKind, ForeignPurity, effect_sets_conflict};
 
 /// `$defs/signalType`: the v1 value-type vocabulary (matches the Lean
 /// `ValueTy`). FIR widths / `FaustFloat` live in the routed-FIR layer, not
@@ -130,6 +131,24 @@ pub struct TransportRecord {
     pub length: u64,
 }
 
+/// `$defs/fusedSerialGroupRecord`.
+///
+/// A group preserves the original loop identities while requiring their
+/// delayed recursive work to be emitted as one serial per-sample unit. An
+/// `internal_transport_id` retains a planned transport identity whose access
+/// is rematerialized as a scalar value inside that unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FusedSerialGroupRecord {
+    pub group_id: u64,
+    pub owner_loop_id: u64,
+    pub member_loop_ids: Vec<u64>,
+    pub recursive_carrier_signal_id: u64,
+    pub delayed_read_signal_ids: Vec<u64>,
+    pub state_write_signal_ids: Vec<u64>,
+    pub internal_transport_ids: Vec<u64>,
+    pub output_or_transport_roots: Vec<u64>,
+}
+
 /// `$defs/vecSafeWitness`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VecSafeWitness {
@@ -156,6 +175,7 @@ pub struct VectorPlan {
     pub data_edges: Vec<LoopEdge>,
     pub effect_edges: Vec<LoopEdge>,
     pub vec_safe_witnesses: Vec<VecSafeWitness>,
+    pub fused_serial_groups: Vec<FusedSerialGroupRecord>,
 }
 
 /// Why [`verify_vector_plan`] rejected a plan. One variant per checked
@@ -217,6 +237,39 @@ pub enum VectorPlanError {
     WitnessUnknownLoop { loop_id: u64 },
     /// A transport references a signal or loop id that is not in the plan.
     TransportUnknownRef { transport_id: u64, missing: u64 },
+    /// A required set-like fused-group field is empty.
+    FusedGroupEmpty { group_id: u64, what: &'static str },
+    /// A fused group references a loop absent from the plan.
+    FusedGroupUnknownLoop { group_id: u64, loop_id: u64 },
+    /// The owner is not included in the group's members.
+    FusedGroupOwnerNotMember { group_id: u64, owner_loop_id: u64 },
+    /// One loop belongs to two fused serial groups.
+    FusedGroupLoopOverlap { loop_id: u64 },
+    /// A fused group references a signal absent from the plan.
+    FusedGroupUnknownSignal { group_id: u64, signal_id: u64 },
+    /// A grouped signal is not owned by one of the group's member loops.
+    FusedGroupSignalOutside { group_id: u64, signal_id: u64 },
+    /// A rematerialized transport id is absent from the plan.
+    FusedGroupUnknownTransport { group_id: u64, transport_id: u64 },
+    /// A rematerialized transport does not stay within its group.
+    FusedGroupTransportOutside { group_id: u64, transport_id: u64 },
+    /// A rematerialized transport does not carry one of the certified delayed
+    /// reads.
+    FusedGroupTransportNotDelayedRead { group_id: u64, transport_id: u64 },
+    /// The selected owner is not a recursive loop for the certified carrier.
+    FusedGroupOwnerNotRecursive { group_id: u64, owner_loop_id: u64 },
+    /// The decoration facts do not identify the declared carrier as delayed
+    /// recursive state.
+    FusedGroupCarrierNotRecursiveDelayed { group_id: u64, signal_id: u64 },
+    /// A delayed read lacks the declared `DepKind::Delayed` carrier edge.
+    FusedGroupDelayedDependencyMissing { group_id: u64, signal_id: u64 },
+    /// A declared state writer is not a projection in the carrier's recursion
+    /// group.
+    FusedGroupStateWriterMismatch { group_id: u64, signal_id: u64 },
+    /// Grouped signals or loops cross incompatible clock domains.
+    FusedGroupClockMismatch { group_id: u64 },
+    /// An active chunk transport still materializes a delayed read internally.
+    FusedGroupDangerousTransportPresent { group_id: u64, transport_id: u64 },
 }
 
 impl fmt::Display for VectorPlanError {
@@ -308,6 +361,98 @@ impl fmt::Display for VectorPlanError {
                 f,
                 "transport {transport_id} references unknown id {missing}"
             ),
+            Self::FusedGroupEmpty { group_id, what } => {
+                write!(f, "fused group {group_id} has empty {what}")
+            }
+            Self::FusedGroupUnknownLoop { group_id, loop_id } => {
+                write!(
+                    f,
+                    "fused group {group_id} references unknown loop {loop_id}"
+                )
+            }
+            Self::FusedGroupOwnerNotMember {
+                group_id,
+                owner_loop_id,
+            } => write!(
+                f,
+                "fused group {group_id} owner loop {owner_loop_id} is not a member"
+            ),
+            Self::FusedGroupLoopOverlap { loop_id } => {
+                write!(f, "loop {loop_id} belongs to more than one fused group")
+            }
+            Self::FusedGroupUnknownSignal {
+                group_id,
+                signal_id,
+            } => write!(
+                f,
+                "fused group {group_id} references unknown signal {signal_id}"
+            ),
+            Self::FusedGroupSignalOutside {
+                group_id,
+                signal_id,
+            } => write!(
+                f,
+                "fused group {group_id} signal {signal_id} is outside its member loops"
+            ),
+            Self::FusedGroupUnknownTransport {
+                group_id,
+                transport_id,
+            } => write!(
+                f,
+                "fused group {group_id} references unknown transport {transport_id}"
+            ),
+            Self::FusedGroupTransportOutside {
+                group_id,
+                transport_id,
+            } => write!(
+                f,
+                "fused group {group_id} transport {transport_id} crosses its member boundary"
+            ),
+            Self::FusedGroupTransportNotDelayedRead {
+                group_id,
+                transport_id,
+            } => write!(
+                f,
+                "fused group {group_id} transport {transport_id} is not a delayed read"
+            ),
+            Self::FusedGroupOwnerNotRecursive {
+                group_id,
+                owner_loop_id,
+            } => write!(
+                f,
+                "fused group {group_id} owner loop {owner_loop_id} is not the carrier recursion loop"
+            ),
+            Self::FusedGroupCarrierNotRecursiveDelayed {
+                group_id,
+                signal_id,
+            } => write!(
+                f,
+                "fused group {group_id} carrier {signal_id} is not certified delayed recursive state"
+            ),
+            Self::FusedGroupDelayedDependencyMissing {
+                group_id,
+                signal_id,
+            } => write!(
+                f,
+                "fused group {group_id} read {signal_id} lacks its delayed carrier dependency"
+            ),
+            Self::FusedGroupStateWriterMismatch {
+                group_id,
+                signal_id,
+            } => write!(
+                f,
+                "fused group {group_id} writer {signal_id} is outside the carrier recursion group"
+            ),
+            Self::FusedGroupClockMismatch { group_id } => {
+                write!(f, "fused group {group_id} crosses clock domains")
+            }
+            Self::FusedGroupDangerousTransportPresent {
+                group_id,
+                transport_id,
+            } => write!(
+                f,
+                "fused group {group_id} still materializes delayed read transport {transport_id}"
+            ),
         }
     }
 }
@@ -394,6 +539,15 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         what: "vec_safe_witnesses",
         at,
     })?;
+    let fused_group_ids = plan
+        .fused_serial_groups
+        .iter()
+        .map(|group| group.group_id)
+        .collect::<Vec<_>>();
+    strictly_ascending(&fused_group_ids).map_err(|at| VectorPlanError::NotCanonical {
+        what: "fused_serial_groups",
+        at,
+    })?;
 
     let signal_set: AHashSet<u64> = signal_ids.iter().copied().collect();
     let loop_set: AHashSet<u64> = loop_ids.iter().copied().collect();
@@ -401,6 +555,122 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         plan.signals.iter().map(|s| (s.signal_id, s)).collect();
     let loop_by_id: AHashMap<u64, &LoopRecord> =
         plan.loops.iter().map(|l| (l.loop_id, l)).collect();
+
+    // ── Fused-group finite shape. Semantic delay/recursion facts are checked
+    // independently by `verify_fused_serial_groups` against decorations.
+    let transport_by_id = plan
+        .transports
+        .iter()
+        .map(|transport| (transport.transport_id, transport))
+        .collect::<AHashMap<_, _>>();
+    let mut fused_loop_owner = AHashSet::new();
+    for group in &plan.fused_serial_groups {
+        for (what, ids) in [
+            ("member_loop_ids", group.member_loop_ids.as_slice()),
+            (
+                "delayed_read_signal_ids",
+                group.delayed_read_signal_ids.as_slice(),
+            ),
+            (
+                "state_write_signal_ids",
+                group.state_write_signal_ids.as_slice(),
+            ),
+            (
+                "output_or_transport_roots",
+                group.output_or_transport_roots.as_slice(),
+            ),
+        ] {
+            if ids.is_empty() {
+                return Err(VectorPlanError::FusedGroupEmpty {
+                    group_id: group.group_id,
+                    what,
+                });
+            }
+            strictly_ascending(ids).map_err(|at| VectorPlanError::NotCanonical { what, at })?;
+        }
+        strictly_ascending(&group.internal_transport_ids).map_err(|at| {
+            VectorPlanError::NotCanonical {
+                what: "internal_transport_ids",
+                at,
+            }
+        })?;
+        for &loop_id in &group.member_loop_ids {
+            if !loop_set.contains(&loop_id) {
+                return Err(VectorPlanError::FusedGroupUnknownLoop {
+                    group_id: group.group_id,
+                    loop_id,
+                });
+            }
+            if !fused_loop_owner.insert(loop_id) {
+                return Err(VectorPlanError::FusedGroupLoopOverlap { loop_id });
+            }
+        }
+        if group
+            .member_loop_ids
+            .binary_search(&group.owner_loop_id)
+            .is_err()
+        {
+            return Err(VectorPlanError::FusedGroupOwnerNotMember {
+                group_id: group.group_id,
+                owner_loop_id: group.owner_loop_id,
+            });
+        }
+        if !matches!(
+            loop_by_id[&group.owner_loop_id].kind,
+            LoopKind::Recursive(_)
+        ) {
+            return Err(VectorPlanError::FusedGroupOwnerNotRecursive {
+                group_id: group.group_id,
+                owner_loop_id: group.owner_loop_id,
+            });
+        }
+        for &signal_id in std::iter::once(&group.recursive_carrier_signal_id)
+            .chain(&group.delayed_read_signal_ids)
+            .chain(&group.state_write_signal_ids)
+            .chain(&group.output_or_transport_roots)
+        {
+            let Some(signal) = signal_by_id.get(&signal_id) else {
+                return Err(VectorPlanError::FusedGroupUnknownSignal {
+                    group_id: group.group_id,
+                    signal_id,
+                });
+            };
+            let Placement::Owned(owner) = signal.placement else {
+                return Err(VectorPlanError::FusedGroupSignalOutside {
+                    group_id: group.group_id,
+                    signal_id,
+                });
+            };
+            if group.member_loop_ids.binary_search(&owner).is_err() {
+                return Err(VectorPlanError::FusedGroupSignalOutside {
+                    group_id: group.group_id,
+                    signal_id,
+                });
+            }
+        }
+        for &transport_id in &group.internal_transport_ids {
+            let Some(transport) = transport_by_id.get(&transport_id) else {
+                return Err(VectorPlanError::FusedGroupUnknownTransport {
+                    group_id: group.group_id,
+                    transport_id,
+                });
+            };
+            if group
+                .member_loop_ids
+                .binary_search(&transport.producer_loop)
+                .is_err()
+                || group
+                    .member_loop_ids
+                    .binary_search(&transport.consumer_loop)
+                    .is_err()
+            {
+                return Err(VectorPlanError::FusedGroupTransportOutside {
+                    group_id: group.group_id,
+                    transport_id,
+                });
+            }
+        }
+    }
 
     // ── Epoch coverage: every loop in exactly one epoch, epoch loops known.
     let mut epoch_of_loop: AHashMap<u64, u64> = AHashMap::new();
@@ -635,6 +905,164 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
     Ok(())
 }
 
+/// Independently verifies the decoration-backed obligations of every fused
+/// serial group.
+///
+/// JSON Schema and [`verify_vector_plan`] can validate only the finite shape
+/// and plan-local identities. This second L2 gate reconstructs recursion,
+/// delay, and clock facts from an already accepted decoration certificate; it
+/// never calls the vector-plan producer.
+pub fn verify_fused_serial_groups(
+    plan: &VectorPlan,
+    decorations: &VerifiedDecorationCertificate,
+) -> Result<(), VectorPlanError> {
+    verify_vector_plan(plan)?;
+    let certificate = decorations.certificate();
+    let records = certificate
+        .records
+        .iter()
+        .map(|record| (u64::from(record.signal_id), record))
+        .collect::<AHashMap<_, _>>();
+    let signals = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<AHashMap<_, _>>();
+    let loops = plan
+        .loops
+        .iter()
+        .map(|loop_| (loop_.loop_id, loop_))
+        .collect::<AHashMap<_, _>>();
+    let transports = plan
+        .transports
+        .iter()
+        .map(|transport| (transport.transport_id, transport))
+        .collect::<AHashMap<_, _>>();
+
+    for group in &plan.fused_serial_groups {
+        let carrier_id = group.recursive_carrier_signal_id;
+        let Some(carrier) = records.get(&carrier_id).copied() else {
+            return Err(VectorPlanError::FusedGroupCarrierNotRecursiveDelayed {
+                group_id: group.group_id,
+                signal_id: carrier_id,
+            });
+        };
+        let Some(projection) = carrier.recursive_projection else {
+            return Err(VectorPlanError::FusedGroupCarrierNotRecursiveDelayed {
+                group_id: group.group_id,
+                signal_id: carrier_id,
+            });
+        };
+        if carrier.max_delay == 0
+            || signals[&carrier_id].placement != Placement::Owned(group.owner_loop_id)
+            || loops[&group.owner_loop_id].kind != LoopKind::Recursive(u64::from(projection.group))
+        {
+            return Err(VectorPlanError::FusedGroupCarrierNotRecursiveDelayed {
+                group_id: group.group_id,
+                signal_id: carrier_id,
+            });
+        }
+
+        let mut group_clock = None;
+        for signal in plan.signals.iter().filter(|signal| {
+            matches!(signal.placement, Placement::Owned(owner) if group.member_loop_ids.binary_search(&owner).is_ok())
+        }) {
+            if group_clock.replace(signal.clock_id).is_some_and(|clock| clock != signal.clock_id) {
+                return Err(VectorPlanError::FusedGroupClockMismatch {
+                    group_id: group.group_id,
+                });
+            }
+        }
+        for &signal_id in std::iter::once(&carrier_id)
+            .chain(&group.delayed_read_signal_ids)
+            .chain(&group.state_write_signal_ids)
+            .chain(&group.output_or_transport_roots)
+        {
+            let Some(record) = records.get(&signal_id).copied() else {
+                return Err(VectorPlanError::FusedGroupUnknownSignal {
+                    group_id: group.group_id,
+                    signal_id,
+                });
+            };
+            let decoration_clock = record.clock_domain.map_or(0, |clock| u64::from(clock) + 1);
+            if decoration_clock != signals[&signal_id].clock_id
+                || group_clock.is_some_and(|clock| clock != decoration_clock)
+            {
+                return Err(VectorPlanError::FusedGroupClockMismatch {
+                    group_id: group.group_id,
+                });
+            }
+        }
+
+        for &read_signal_id in &group.delayed_read_signal_ids {
+            let has_delayed_carrier_edge = certificate.dependencies.iter().any(|dependency| {
+                u64::from(dependency.from) == read_signal_id
+                    && u64::from(dependency.to) == carrier_id
+                    && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
+            });
+            if !has_delayed_carrier_edge {
+                return Err(VectorPlanError::FusedGroupDelayedDependencyMissing {
+                    group_id: group.group_id,
+                    signal_id: read_signal_id,
+                });
+            }
+        }
+
+        for &writer_signal_id in &group.state_write_signal_ids {
+            let writer_projection = records
+                .get(&writer_signal_id)
+                .and_then(|record| record.recursive_projection);
+            if writer_projection.map(|writer| writer.group) != Some(projection.group)
+                || signals[&writer_signal_id].placement != Placement::Owned(group.owner_loop_id)
+            {
+                return Err(VectorPlanError::FusedGroupStateWriterMismatch {
+                    group_id: group.group_id,
+                    signal_id: writer_signal_id,
+                });
+            }
+        }
+
+        for &transport_id in &group.internal_transport_ids {
+            let transport = transports[&transport_id];
+            if group
+                .delayed_read_signal_ids
+                .binary_search(&transport.signal_id)
+                .is_err()
+            {
+                return Err(VectorPlanError::FusedGroupTransportNotDelayedRead {
+                    group_id: group.group_id,
+                    transport_id,
+                });
+            }
+        }
+        for transport in &plan.transports {
+            if group
+                .delayed_read_signal_ids
+                .binary_search(&transport.signal_id)
+                .is_ok()
+                && group
+                    .member_loop_ids
+                    .binary_search(&transport.producer_loop)
+                    .is_ok()
+                && group
+                    .member_loop_ids
+                    .binary_search(&transport.consumer_loop)
+                    .is_ok()
+                && group
+                    .internal_transport_ids
+                    .binary_search(&transport.transport_id)
+                    .is_err()
+            {
+                return Err(VectorPlanError::FusedGroupDangerousTransportPresent {
+                    group_id: group.group_id,
+                    transport_id: transport.transport_id,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn rank_of(plan: &VectorPlan, epoch_id: u64) -> u64 {
     plan.epochs
         .iter()
@@ -736,8 +1164,15 @@ fn induced_cycle(plan: &VectorPlan, members: &AHashSet<u64>) -> Option<Vec<u64>>
 
 #[cfg(test)]
 mod tests {
+    use propagate::ClockDomainTable;
+    use signals::SigBuilder;
+    use tlib::TreeArena;
+
     use super::*;
+    use crate::clk_env::annotate;
+    use crate::signal_fir::decoration_verify::certify_decorations;
     use crate::signal_fir::vector_analysis::{StateCell, StateResource};
+    use crate::signal_prepare::prepare_signals_for_fir_verified;
 
     /// A minimal valid two-loop plan mirroring the PV DSP shape: loop 0 owns
     /// `x` (a vectorizable producer), loop 1 consumes it (vectorizable), one
@@ -812,12 +1247,260 @@ mod tests {
                     witness_kind: WitnessKind::Pointwise,
                 },
             ],
+            fused_serial_groups: vec![],
         }
+    }
+
+    fn structural_fused_plan() -> VectorPlan {
+        let mut plan = valid_plan();
+        plan.loops[0].kind = LoopKind::Recursive(7);
+        plan.vec_safe_witnesses[0].witness_kind = WitnessKind::SerialStateInternal;
+        plan.transports[0].signal_id = 11;
+        plan.transports[0].producer_loop = 1;
+        plan.transports[0].consumer_loop = 0;
+        plan.fused_serial_groups = vec![FusedSerialGroupRecord {
+            group_id: 0,
+            owner_loop_id: 0,
+            member_loop_ids: vec![0, 1],
+            recursive_carrier_signal_id: 10,
+            delayed_read_signal_ids: vec![11],
+            state_write_signal_ids: vec![10],
+            internal_transport_ids: vec![0],
+            output_or_transport_roots: vec![10],
+        }];
+        plan
+    }
+
+    fn fused_decoration_fixture() -> (VectorPlan, VerifiedDecorationCertificate) {
+        let mut arena = TreeArena::new();
+        let self_ref = tlib::de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let feedback = builder.proj(0, self_ref);
+            let previous = builder.delay1(feedback);
+            builder.binop(signals::BinOp::Add, input, previous)
+        };
+        let nil = arena.nil();
+        let bodies = arena.cons(body, nil);
+        let recursion = tlib::de_bruijn_rec(&mut arena, bodies);
+        let output = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let projection = builder.proj(0, recursion);
+            builder.output(0, projection)
+        };
+        let prepared = prepare_signals_for_fir_verified(&arena, &[output], &ui::UiProgram::empty())
+            .expect("prepare recursive fixture");
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .expect("clock recursive fixture");
+        let decorations = certify_decorations(&prepared, &clocks).expect("decorate fixture");
+        let certificate = decorations.certificate();
+        let dependency = certificate
+            .dependencies
+            .iter()
+            .find(|dependency| {
+                matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
+                    && certificate.records.iter().any(|record| {
+                        record.signal_id == dependency.to
+                            && record.max_delay > 0
+                            && record.recursive_projection.is_some()
+                    })
+            })
+            .expect("recursive delayed dependency");
+        let read_id = u64::from(dependency.from);
+        let carrier_id = u64::from(dependency.to);
+        let record = |signal_id: u64| {
+            certificate
+                .records
+                .iter()
+                .find(|record| u64::from(record.signal_id) == signal_id)
+                .expect("referenced decoration record")
+        };
+        let carrier = record(carrier_id);
+        let read = record(read_id);
+        let recursion_group = u64::from(carrier.recursive_projection.unwrap().group);
+        let signal = |signal_id: u64, owner: u64| {
+            let decoration = record(signal_id);
+            SignalRecord {
+                signal_id,
+                value_type: ValueType::Real,
+                rate: Rate::Samp,
+                vectorability: Vectorability::Scal,
+                clock_id: decoration
+                    .clock_domain
+                    .map_or(0, |clock| u64::from(clock) + 1),
+                effects: decoration.effects.clone(),
+                placement: Placement::Owned(owner),
+                duplicable: effects_duplicable(&decoration.effects),
+            }
+        };
+        let mut signals = vec![signal(carrier_id, 0), signal(read_id, 1)];
+        signals.sort_by_key(|signal| signal.signal_id);
+        let plan = VectorPlan {
+            vec_size: 16,
+            signals,
+            loops: vec![
+                LoopRecord {
+                    loop_id: 0,
+                    stable_name: "fused_owner".to_owned(),
+                    kind: LoopKind::Recursive(recursion_group),
+                    roots: vec![carrier_id],
+                    epoch_id: 0,
+                },
+                LoopRecord {
+                    loop_id: 1,
+                    stable_name: "fused_reader".to_owned(),
+                    kind: LoopKind::Island(0),
+                    roots: vec![read_id],
+                    epoch_id: 0,
+                },
+            ],
+            epochs: vec![EpochRecord {
+                epoch_id: 0,
+                rank: 0,
+                loops: vec![0, 1],
+            }],
+            transports: vec![TransportRecord {
+                transport_id: 0,
+                stable_name: "fused_delayed_read".to_owned(),
+                signal_id: read_id,
+                producer_loop: 1,
+                consumer_loop: 0,
+                element_type: ValueType::Real,
+                length: 16,
+            }],
+            data_edges: vec![LoopEdge {
+                consumer: 0,
+                dependency: 1,
+            }],
+            effect_edges: vec![],
+            vec_safe_witnesses: vec![
+                VecSafeWitness {
+                    loop_id: 0,
+                    witness_kind: WitnessKind::SerialStateInternal,
+                },
+                VecSafeWitness {
+                    loop_id: 1,
+                    witness_kind: WitnessKind::SerialStateInternal,
+                },
+            ],
+            fused_serial_groups: vec![FusedSerialGroupRecord {
+                group_id: 0,
+                owner_loop_id: 0,
+                member_loop_ids: vec![0, 1],
+                recursive_carrier_signal_id: carrier_id,
+                delayed_read_signal_ids: vec![read_id],
+                state_write_signal_ids: vec![carrier_id],
+                internal_transport_ids: vec![0],
+                output_or_transport_roots: vec![carrier_id],
+            }],
+        };
+        assert_eq!(carrier.clock_domain, read.clock_domain);
+        (plan, decorations)
     }
 
     #[test]
     fn the_reference_plan_verifies() {
         verify_vector_plan(&valid_plan()).expect("reference plan is valid");
+    }
+
+    #[test]
+    fn structural_fused_group_verifies() {
+        verify_vector_plan(&structural_fused_plan()).expect("fused group shape is valid");
+    }
+
+    #[test]
+    fn rejects_empty_fused_group() {
+        let mut plan = structural_fused_plan();
+        plan.fused_serial_groups[0].member_loop_ids.clear();
+        assert!(matches!(
+            verify_vector_plan(&plan),
+            Err(VectorPlanError::FusedGroupEmpty {
+                what: "member_loop_ids",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_and_duplicated_fused_member_loops() {
+        let mut unknown = structural_fused_plan();
+        unknown.fused_serial_groups[0].member_loop_ids.push(99);
+        assert!(matches!(
+            verify_vector_plan(&unknown),
+            Err(VectorPlanError::FusedGroupUnknownLoop { loop_id: 99, .. })
+        ));
+
+        let mut duplicate = structural_fused_plan();
+        duplicate.fused_serial_groups[0].member_loop_ids = vec![0, 0, 1];
+        assert!(matches!(
+            verify_vector_plan(&duplicate),
+            Err(VectorPlanError::NotCanonical {
+                what: "member_loop_ids",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn decoration_backed_fused_group_verifies() {
+        let (plan, decorations) = fused_decoration_fixture();
+        verify_fused_serial_groups(&plan, &decorations)
+            .expect("real delayed recursion facts certify the synthetic fused group");
+    }
+
+    #[test]
+    fn fused_checker_rejects_non_recursive_carrier() {
+        let (mut plan, decorations) = fused_decoration_fixture();
+        let read = plan.fused_serial_groups[0].delayed_read_signal_ids[0];
+        plan.fused_serial_groups[0].recursive_carrier_signal_id = read;
+        assert!(matches!(
+            verify_fused_serial_groups(&plan, &decorations),
+            Err(VectorPlanError::FusedGroupCarrierNotRecursiveDelayed { .. })
+        ));
+    }
+
+    #[test]
+    fn fused_checker_rejects_read_without_delayed_dependency() {
+        let (mut plan, decorations) = fused_decoration_fixture();
+        let carrier = plan.fused_serial_groups[0].recursive_carrier_signal_id;
+        plan.fused_serial_groups[0].delayed_read_signal_ids = vec![carrier];
+        assert!(matches!(
+            verify_fused_serial_groups(&plan, &decorations),
+            Err(VectorPlanError::FusedGroupDelayedDependencyMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn fused_checker_rejects_unlisted_dangerous_transport() {
+        let (mut plan, decorations) = fused_decoration_fixture();
+        plan.fused_serial_groups[0].internal_transport_ids.clear();
+        assert!(matches!(
+            verify_fused_serial_groups(&plan, &decorations),
+            Err(VectorPlanError::FusedGroupDangerousTransportPresent {
+                transport_id: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fused_checker_rejects_incompatible_clock_islands() {
+        let (mut plan, decorations) = fused_decoration_fixture();
+        let read = plan.fused_serial_groups[0].delayed_read_signal_ids[0];
+        plan.signals
+            .iter_mut()
+            .find(|signal| signal.signal_id == read)
+            .unwrap()
+            .clock_id += 1;
+        assert!(matches!(
+            verify_fused_serial_groups(&plan, &decorations),
+            Err(VectorPlanError::FusedGroupClockMismatch { .. })
+        ));
     }
 
     // ── one rejecting mutation per obligation (plan §8) ──────────────────

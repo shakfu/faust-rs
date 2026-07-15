@@ -28,9 +28,10 @@ use super::decoration_verify::{
 use super::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_loop};
 use super::vector_analysis::{DepKind, effect_sets_conflict};
 use super::vector_verify::{
-    EpochRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord,
-    ValueType, VecSafeWitness, VectorPlan, VectorPlanError, Vectorability, WitnessKind,
-    effects_duplicable, effects_sample_reorderable, verify_vector_plan,
+    EpochRecord, FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate,
+    SignalRecord, TransportRecord, ValueType, VecSafeWitness, VectorPlan, VectorPlanError,
+    Vectorability, WitnessKind, effects_duplicable, effects_sample_reorderable,
+    verify_fused_serial_groups, verify_vector_plan,
 };
 
 const EFFECT_ISLAND_TAG: u64 = 1 << 63;
@@ -434,6 +435,7 @@ pub fn build_vector_plan(
         });
     }
 
+    let fused_serial_groups = build_fused_serial_groups(certificate, &state, &transports);
     let plan = VectorPlan {
         vec_size,
         signals,
@@ -450,9 +452,133 @@ pub fn build_vector_plan(
         data_edges: data_edges.into_iter().collect(),
         effect_edges: effect_edges.into_iter().collect(),
         vec_safe_witnesses: witnesses,
+        fused_serial_groups,
     };
     verify_vector_plan(&plan)?;
+    verify_fused_serial_groups(&plan, verified)?;
     Ok(VerifiedVectorPlan { plan })
+}
+
+/// Derives the first fail-closed fused-serial slice directly from certified
+/// decoration facts. The initial producer deliberately accepts only top-rate,
+/// direct delayed-read-to-recursion transports. More general chains remain on
+/// the scalar fallback until their larger fusion closure is specified.
+fn build_fused_serial_groups(
+    certificate: &super::decoration_verify::DecorationCertificate,
+    state: &PlacementState<'_>,
+    transports: &[TransportRecord],
+) -> Vec<FusedSerialGroupRecord> {
+    #[derive(Default)]
+    struct Candidate {
+        carrier: Option<u64>,
+        recursion_group: Option<u32>,
+        members: BTreeSet<u64>,
+        delayed_reads: BTreeSet<u64>,
+        internal_transports: BTreeSet<u64>,
+        ambiguous: bool,
+    }
+
+    let mut candidates = BTreeMap::<u64, Candidate>::new();
+    for transport in transports {
+        let read_id = u32::try_from(transport.signal_id).expect("signal id fits u32");
+        let Some(read_record) = state.records.get(&read_id).copied() else {
+            continue;
+        };
+        for dependency in certificate.dependencies.iter().filter(|dependency| {
+            dependency.from == read_id && matches!(dependency.kind, DepKind::Delayed { .. })
+        }) {
+            let Some(carrier_record) = state.records.get(&dependency.to).copied() else {
+                continue;
+            };
+            let Some(projection) = carrier_record.recursive_projection else {
+                continue;
+            };
+            if carrier_record.max_delay == 0
+                || read_record.clock_domain.is_some()
+                || carrier_record.clock_domain.is_some()
+            {
+                continue;
+            }
+            let Some(Placement::Owned(owner_loop_id)) =
+                state.placement.get(&dependency.to).copied()
+            else {
+                continue;
+            };
+            // The first certified slice fuses a delayed-read producer directly
+            // into the recursive writer loop. Longer pure chains fail closed.
+            if transport.consumer_loop != owner_loop_id || transport.producer_loop == owner_loop_id
+            {
+                continue;
+            }
+            let candidate = candidates.entry(owner_loop_id).or_default();
+            let carrier = u64::from(dependency.to);
+            if candidate
+                .carrier
+                .is_some_and(|existing| existing != carrier)
+                || candidate
+                    .recursion_group
+                    .is_some_and(|existing| existing != projection.group)
+            {
+                candidate.ambiguous = true;
+                continue;
+            }
+            candidate.carrier = Some(carrier);
+            candidate.recursion_group = Some(projection.group);
+            candidate.members.insert(transport.producer_loop);
+            candidate.members.insert(owner_loop_id);
+            candidate.delayed_reads.insert(transport.signal_id);
+            candidate.internal_transports.insert(transport.transport_id);
+        }
+    }
+
+    let mut used_loops = BTreeSet::new();
+    let mut groups = Vec::new();
+    for (owner_loop_id, candidate) in candidates {
+        let (Some(carrier), Some(recursion_group)) = (candidate.carrier, candidate.recursion_group)
+        else {
+            continue;
+        };
+        if candidate.ambiguous
+            || candidate
+                .members
+                .iter()
+                .any(|loop_id| used_loops.contains(loop_id))
+        {
+            continue;
+        }
+        let state_write_signal_ids = certificate
+            .records
+            .iter()
+            .filter(|record| {
+                record
+                    .recursive_projection
+                    .is_some_and(|projection| projection.group == recursion_group)
+                    && state.placement.get(&record.signal_id)
+                        == Some(&Placement::Owned(owner_loop_id))
+            })
+            .map(|record| u64::from(record.signal_id))
+            .collect::<Vec<_>>();
+        let output_or_transport_roots = state
+            .roots_by_loop
+            .get(&owner_loop_id)
+            .map(|roots| roots.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if state_write_signal_ids.is_empty() || output_or_transport_roots.is_empty() {
+            continue;
+        }
+        used_loops.extend(candidate.members.iter().copied());
+        groups.push(FusedSerialGroupRecord {
+            group_id: u64::try_from(groups.len()).expect("fused group count fits u64"),
+            owner_loop_id,
+            member_loop_ids: candidate.members.into_iter().collect(),
+            recursive_carrier_signal_id: carrier,
+            delayed_read_signal_ids: candidate.delayed_reads.into_iter().collect(),
+            state_write_signal_ids,
+            internal_transport_ids: candidate.internal_transports.into_iter().collect(),
+            output_or_transport_roots,
+        });
+    }
+    groups
 }
 
 fn add_dependency_edges(

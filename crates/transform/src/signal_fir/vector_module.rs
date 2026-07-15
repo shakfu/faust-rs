@@ -276,24 +276,49 @@ fn reject_cross_loop_delay_read_transports(
         .filter(|record| record.max_delay > 0 && record.recursive_projection.is_some())
         .map(|record| u64::from(record.signal_id))
         .collect::<std::collections::BTreeSet<_>>();
-    if let Some(transport) = plan.transports.iter().find(|transport| {
-        decorations
-            .certificate()
-            .dependencies
-            .iter()
-            .any(|dependency| {
-                u64::from(dependency.from) == transport.signal_id
-                    && recursive_delayed_carriers.contains(&u64::from(dependency.to))
-                    && matches!(dependency.kind, DepKind::Delayed { .. })
-            })
-    }) {
-        return Err(VectorModuleFailure::new(
-            VectorFallbackReason::VectorPlan,
-            format!(
-                "delayed recursive signal {} crosses vector loops {} -> {}; scalar fallback preserves recursive delay semantics",
-                transport.signal_id, transport.producer_loop, transport.consumer_loop
-            ),
-        ));
+    for transport in &plan.transports {
+        for dependency in decorations.certificate().dependencies.iter() {
+            let carrier_signal_id = u64::from(dependency.to);
+            if u64::from(dependency.from) != transport.signal_id
+                || !recursive_delayed_carriers.contains(&carrier_signal_id)
+                || !matches!(dependency.kind, DepKind::Delayed { .. })
+            {
+                continue;
+            }
+            let covered = plan.fused_serial_groups.iter().any(|group| {
+                group
+                    .internal_transport_ids
+                    .binary_search(&transport.transport_id)
+                    .is_ok()
+                    && group
+                        .delayed_read_signal_ids
+                        .binary_search(&transport.signal_id)
+                        .is_ok()
+                    && group.recursive_carrier_signal_id == carrier_signal_id
+                    && group
+                        .state_write_signal_ids
+                        .binary_search(&carrier_signal_id)
+                        .is_ok()
+                    && group
+                        .member_loop_ids
+                        .binary_search(&transport.producer_loop)
+                        .is_ok()
+                    && group
+                        .member_loop_ids
+                        .binary_search(&transport.consumer_loop)
+                        .is_ok()
+            });
+            if covered {
+                continue;
+            }
+            return Err(VectorModuleFailure::new(
+                VectorFallbackReason::VectorPlan,
+                format!(
+                    "delayed recursive signal {} crosses vector loops {} -> {}; scalar fallback preserves recursive delay semantics",
+                    transport.signal_id, transport.producer_loop, transport.consumer_loop
+                ),
+            ));
+        }
     }
     Ok(())
 }

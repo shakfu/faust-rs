@@ -1,193 +1,100 @@
 # Session Handoff
 
-Date: 2026-07-14
+Date: 2026-07-15
 
 ## Repo State
 
 - Branch: `ondemand-vec-fad-synthesis`
 - HEAD: the commit containing this handoff.
-- Current task: scalar/vector C++ throughput across `-ss 0..3`, completed in
-  this commit.
-- The checked path now covers pure graphs, fixed and bounded-variable delays,
-  symbolic recursion, stateful clock islands, held outputs, and expanded FAD.
+
+Recent commits (most recent first):
+
+- `this commit` Certify fused recursive delay vector loops
+- `37ab6a58` Document certified recursive vector fusion
+- `b5a0a8b3` Guard recursive delay vector transports
 
 ## Working Tree
 
-- This commit adds and documents `vec-bench`; this handoff and today's journal
-  record the work.
-- Many unrelated pre-existing untracked scratch files remain untouched.
-- `tests/impulse-tests` currently contains only partial/stale P7 generated
-  directories. Run `p7-full` before attempting `p7-report` from local artifacts.
+- Tracked changes implement certified fused serial recursive-delay reads across
+  the vector-plan DTO/checker, producer, routing, lowering/assembly verification,
+  schema, compiler tests, journal, and this handoff.
+- New task-owned files:
+  `tests/corpus/vector_recursive_delay_fusion_pulse_countup_loop.dsp` and its
+  Rust golden directory.
+- Many unrelated pre-existing untracked scratch files remain untouched. In
+  particular, the untracked `rad_lti_recursive_multi_output1` corpus/golden
+  files are not part of this task.
 
-## What Changed
+## Current Goal
 
-- Added a 12-combination scalar/`lv0`/`lv1` x `-ss 0..3` C++ throughput
-  benchmark with detailed, per-DSP winner, and corpus-aggregate CSV outputs.
-- Added per-combination `[run]`/`[done]` progress with a 1/12 through 12/12
-  counter, plus explicit failure-log paths.
-- Kept the benchmark non-gating while warning on configurable vector slowdowns;
-  raw logs preserve every faustbench command and measurement.
-- Activated selected scalar schedules in control, top, and wrapper regions.
-- Registered symbolic recursion binders globally and scheduled ordinary
-  recurrence-body nodes through the same Hgraph as C++.
-- Separated recursion-carrier reservation from simultaneous body commit so
-  delayed scheduled reads can precede the owning projection.
-- Materialized shared sample-rate signals at their Hsched positions; APF now
-  produces four distinct `compute` bodies under `-ss 0/1/2/3`.
-- Oriented direct conflicting signal effects before strategy selection.
-- Kept held clock payloads under the correct guarded region.
-- Preserved fixed forward/reverse epochs for reverse-time and BRA carriers.
-- Replaced literal exponential special-schedule expansion with an
-  order-equivalent memoized last-position summary and retained the literal
-  algorithm as a test oracle.
-- Added `p7-full`/`p7-report` orchestration and an xtask report checker that
-  requires all 6,624 non-empty responses and binds each combination by exact
-  byte count and SHA-256.
-- Completed all 72 backend/mode/strategy combinations over the 92-DSP corpus;
-  the versioned report records 6,624 accepted differential comparisons.
-- Canonicalized vector copy-in, copy-out, and table-clear loop bodies as
-  one-statement FIR blocks; strengthened the independent checker and added a
-  C/C++ `noiseabs` regression for both loop variants.
-- Made WASM and AssemblyScript compilation timeouts configurable through
-  validated `FAUST_RS_TIMEOUT_SECONDS`, with a 600-second full-matrix default.
-- Added scalar `-ss 0..3` and vector `-lv 0/1 x -ss 0..3` targets for all six
-  executable backends, with aggregate `p7-matrix` and `p7-smoke` targets.
-- Added validated scheduling-option handling to the interpreter, Cranelift,
-  WASM, and AssemblyScript runners.
-- Fixed the impulse `build` target so Cargo's Cranelift `--bin` filter cannot
-  leave a stale `impulse-runner` release binary.
-- Extended known-failure inheritance across vector and scheduling suffixes.
-- Added canonical delay storage and loop phase DTOs derived only from verified
-  decoration and vector-plan artifacts.
-- Matched C++ copy geometry `R=4*ceil(D/4)`, temporary length `R+V`, and ring
-  geometry `N=next_power_of_two(D+V)` with index/save transitions.
-- Grouped recursive projection aliases by symbolic index and emitted one
-  simultaneous `RecursionStep` per group and sample in its serial loop.
-- Added independent coverage/geometry/phase checking and fail-closed clock/AD
-  resource diagnostics.
-- Refined P5.3 managed effects into loop-pre/sample/loop-post events, with phase
-  barriers and recursion-step chains checked under all four `-ss` strategies.
-- Added bounded copy/ring simulation models and exhaustive `DelaySim` checks
-  against newest-first abstract history.
-- Added one checked serial island per clock domain with exact wrapper, parent,
-  guard, member-signal, nested-loop, and clock-state facts.
-- Partitioned P5 transports into top-rate outer-chunk, domain-rate
-  island-scalar, and persistent held-output routes so guarded code cannot reuse
-  an outer chunk index or lose `PermVar` lifetime.
-- Accepted propagated FAD as an ordinary signal graph and added explicit
-  scalar `Forward < Reverse` fallbacks for reverse-time/BRA carriers.
-- Added recursively checked FIR tuple constructors with deterministic types.
-- Kept tuple transport fail-closed: C++-compatible scalar projections, not a
-  new tuple array ABI, cross loop boundaries.
-- Closed P5 routed-FIR verification for a real two-projection recursion under
-  all four `-ss` strategies.
-- Materialized P6.1 copy/ring delay words and simultaneous recursive
-  projection captures into explicit loop `pre/exec/post` FIR.
-- Rematerialized all P6.2 transport modes: outer chunk arrays, island-local
-  stack scalars below guards, and cleared persistent held outputs.
-- Nested single-fire P4 loop bodies under OD/US/DS guards and exact parent
-  domains, with a checker for action, island, and lifetime coverage.
-- Added output stores and both C++-shaped `-lv` chunk drivers around accepted
-  P6.3b bodies.
-- Assembled and independently checked all lifecycle sections before returning
-  a production vector module.
-- Activated the full checked P4/P5/P6 chain for the supported P6.5 subset under
-  every `-ss`, while retaining named fallbacks outside that boundary.
-- Propagated `VectorPipelineStatus` through transform and compiler FIR outputs.
-- Lowered fixed positive delays through the exact accepted P6.1 copy/ring
-  storage equations rather than reconstructing storage from signals.
-- Resolved symbolic recursion through reachable binders and flattened all
-  next-value declarations into the enclosing sample scope before simultaneous
-  state writes.
-- Activated stateless OD/US/DS islands and emitted held output stores after the
-  guard on every outer sample.
-- Activated expanded FAD as an ordinary typed signal graph and retained exact
-  `FRS-VEC-RAD-SCALAR` fallback reporting for reverse AD.
-- Added scalar/vector bit-exact interpreter coverage for clocks and FAD and
-  checked production selection for recursion, FAD, and clocks under all four
-  scheduling strategies.
-- Added `ClockRing` storage with one persistent cursor per domain and one cursor
-  advance per guarded fire.
-- Lowered bounded variable amounts from the accepted type interval and ordered
-  delayed inter-loop producers before readers without an immediate transport.
-- Projected each clock island through the accepted `-ss` schedule, fixing a
-  one-fire recursion lag caused by canonical-id assembly order.
-- Added parity coverage for variable delays and clock-local delay/recursion for
-  both `-lv` variants and all four scheduling strategies.
+- Execute `porting/vector-fused-recursive-delay-plan-2026-07-15-en.md` for the
+  direct top-rate `pulse_countup_loop` pattern while retaining fail-closed
+  fallback for unsupported shapes.
 
-## Decisions And Constraints
+## What Changed This Session
 
-- Scalar `-ss` controls only legal same-tick reordering. Recursion binders,
-  clock guards, lifecycle routing, state maintenance, output stores, and AD
-  epochs remain semantic barriers outside the scheduling policy.
-- Compact `-ss 2` is exactly equivalent while the C++ raw sequence length fits
-  `u128`; beyond that non-materializable parity domain it uses verified DFS to
-  preserve scheduler totality.
-- P7.2 is complete translation-validation evidence for the executable impulse
-  contracts, not the P7 exit gate and not a proof of `V-Simulation`.
-- P7.3 must add FIR/WAST/Julia artifact gates and supported single-precision
-  coverage before final-state/effect, coverage-baseline, and cost-model work.
-- Only exact delay/recursion resources covered by the P6.1 artifact replace
-  conservative P5.3 effects; all other state remains rejected or serial.
-- Exhaustive bounded simulation is executable evidence, not an unbounded proof.
-- `VectorRouteSession` accepts tuple-valued definitions but intentionally
-  rejects tuple transports; P6.3b lowers scalar projections into state words.
-- No C/C++ ABI changes; the Rust FIR output API gains an adapted diagnostic
-  status describing certified selection versus fallback.
-- `VerifiedPureVectorProgram` and `PureLowering` keep their historical public
-  names for Rust source/diagnostic compatibility; their accepted scope is now
-  broader than pure graphs. This is an adapted additive API, not a C/C++ ABI
-  change.
-- UI programs and RAD remain explicit fallbacks. P6.6 does not certify those
-  transitional modules.
-- Full R4/R5 still requires canonical serialization/hash binding, Lean
-  acceptance, and stable C++ corpus retention.
+- Added `FusedSerialGroupRecord` and `fused_serial_groups` to `VectorPlan`, plus
+  JSON shape constraints and an independent decoration-backed L2 checker.
+- Added mutation rejection for empty/unknown/duplicate membership,
+  non-recursive carriers, missing delayed edges, uncovered dangerous
+  transports, and incompatible clocks.
+- The producer now certifies minimal direct top-rate groups and leaves longer
+  chains, ambiguous carriers, overlap, and clocked groups unsupported.
+- Internal transports retain stable plan identities but use
+  `ClockTransportMode::FusedScalar`, lowering to stack `StoreVar`/`LoadVar`
+  rather than `OuterChunk` arrays.
+- Assembly preserves logical loop identities while emitting all group members,
+  in scheduled order, inside one physical serial `for i0` loop. The FIR checker
+  validates copy-in/read/write/copy-out placement and internal transport shape.
+- The conservative guard accepts only fully covered certified groups; all other
+  dangerous delayed-recursive transports still fall back to scalar.
+- Added explicit `Certified` and bit-exact coverage for count-up/count-down,
+  `lv0/lv1`, `ss0..ss3`, and a non-divisible tail chunk.
 
-## Validation
+## Decisions / Constraints
 
-- `make -f Make.bench vec-bench dspfiles=dsp/APF.dsp
-  VEC_BENCH_OPTIONS="-double -run 1 -bs 512"` completes all 12 combinations;
-  two runs validate detailed, winner, and aggregate CSV generation.
-- `make -n vec-bench dspfiles=dsp/APF.dsp` and `make help` expose the expected
-  commands and controls.
-- `make -C tests/impulse-tests -j8 all-ss dspfiles=dsp/APF.dsp` passes all 24
-  scalar APF comparisons across six executable backends and four strategies.
-- `cargo test -p transform signal_fir --lib` passes all 220 selected tests.
-- `cargo test -p compiler --test p3_shadow_mode` and
-  `cargo test -p compiler --test vector_mode` pass.
-- `make -C tests/impulse-tests all-ss` passes all 2,208 scalar comparisons:
-  92 DSPs x 6 executable backends x 4 scheduling strategies.
-- Authoritative-order, direct-effect, compact-special-schedule, ondemand,
-  clocked differential, reverse-AD, and scalar bit-parity tests pass.
-- `make -C tests/impulse-tests -j16 p7-matrix` passes all 6,624 differential
-  comparisons across the complete 72-combination matrix.
-- `make -C tests/impulse-tests p7-report` verifies 72 x 92 non-empty responses
-  and emits the versioned 10,958,514,432-byte SHA-256 inventory.
-- `cargo fmt --all -- --check` passes.
-- `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- `cargo test --workspace --all-targets` passes.
-- `cargo run -p xtask -- golden-check` passes all 190 snapshots unchanged.
+- Confirmed with the user: member `LoopRecord`s remain in the epoch and routed
+  layout; fusion is a quotient of physical emission owned by
+  `owner_loop_id`.
+- The first producer slice is top-rate and direct only. It intentionally does
+  not fuse clock islands, longer pure chains, overlapping groups, or multiple
+  carriers owned by one loop.
+- JSON Schema checks finite shape only. Cross-artifact joins involving
+  `max_delay`, recursion facts, and `DepKind::Delayed` remain Rust L2
+  obligations.
+- This is an adapted internal Rust API extension with no C/C++ ABI change.
+
+## Validation Run
+
+- `cargo fmt --all -- --check` -> pass.
+- `cargo clippy --workspace --all-targets -- -D warnings` -> pass.
+- `cargo test --workspace --all-targets` -> pass.
+- `cargo run -p xtask -- golden-check` -> pass, including the new corpus.
+- Generated C++ for `-vec -lv 1 -ss 3` contains scalar
+  `transport_s23_l2_l1` and one loop with delayed read, recurrence, and state
+  write before the separate pure tail loop.
+- faustlibraries `check-rs-cpp` and `check-rse-cpp`, each over scalar
+  `ss0..ss3` and vector `lv0/lv1 x ss0..ss3`, pass with no differences within
+  `0.0001`.
+
+## Open Issues / Blockers
+
+- None for the scoped direct top-rate pattern.
+- Generalized fusion across longer pure chains and clock islands remains a
+  later extension and currently falls back by design.
 
 ## Next Steps
 
-1. Run `make vec-bench VEC_BENCH_OPTIONS="-double -run 5 -bs 512"` on the full
-   corpus when the machine can be reserved for stable performance sampling.
-2. Resume P7.3 (FIR/WAST/Julia artifact and single-precision gates).
-3. Add optimized/unoptimized final-state/effect parity and the versioned
-   vectorization-coverage baseline before cost-model work or fallback removal.
+1. Review the working-tree diff and create a coherent commit if desired.
+2. Extend the producer/checker only when a new characterized unsupported shape
+   justifies longer-chain or clock-aware fusion.
+3. Keep the faustlibraries pulse tests in the parity matrix as a regression
+   gate.
 
-## Useful Commands
+## Useful Commands to Resume
 
-- `cargo test -p transform signal_fir::vector_events --lib`
-- `cargo test -p transform signal_fir::vector_state --lib`
-- `cargo test -p transform signal_fir::vector_clock_ad --lib`
-- `cargo test -p transform signal_fir::vector_route --lib`
-- `cargo test -p transform signal_fir::vector_assemble --lib`
-- `cargo test -p transform signal_fir::vector_module --lib`
+- `cargo test -p transform signal_fir::vector_verify::tests --lib`
+- `cargo test -p transform signal_fir::vector_assemble::tests --lib`
 - `cargo test -p compiler --test vector_mode`
-- `cargo test -p compiler --test vector_clock_ad`
-- `make -C tests/impulse-tests -j8 p7-smoke`
-- `make -C tests/impulse-tests -j16 p7-full`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace --all-targets`
 - `cargo run -p xtask -- golden-check`
+- `target/debug/faust-rs --dump-cpp --vec --lv 1 --scheduling-strategy 3 tests/corpus/vector_recursive_delay_fusion_pulse_countup_loop.dsp`

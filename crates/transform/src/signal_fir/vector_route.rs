@@ -410,7 +410,10 @@ impl<'a> VectorRouteSession<'a> {
             .iter()
             .map(|transport| ClockTransportPolicy {
                 transport_id: transport.transport_id,
-                mode: ClockTransportMode::OuterChunk,
+                mode: fused_transport_group(verified.plan(), transport.transport_id)
+                    .map_or(ClockTransportMode::OuterChunk, |group_id| {
+                        ClockTransportMode::FusedScalar { group_id }
+                    }),
             })
             .collect::<Vec<_>>();
         Self::new_with_policies(verified, strategy, real_type, &policies, store)
@@ -784,7 +787,10 @@ pub fn verify_routed_fir(
         .iter()
         .map(|transport| ClockTransportPolicy {
             transport_id: transport.transport_id,
-            mode: ClockTransportMode::OuterChunk,
+            mode: fused_transport_group(plan, transport.transport_id)
+                .map_or(ClockTransportMode::OuterChunk, |group_id| {
+                    ClockTransportMode::FusedScalar { group_id }
+                }),
         })
         .collect::<Vec<_>>();
     verify_routed_fir_with_policies(plan, &policies, trace, real_type, store)
@@ -1002,8 +1008,28 @@ fn verify_policy_coverage(
                 transport_id: transport.transport_id,
             });
         }
+        let fused_group = fused_transport_group(plan, transport.transport_id);
+        let fused_policy_group = match policy.mode {
+            ClockTransportMode::FusedScalar { group_id } => Some(group_id),
+            _ => None,
+        };
+        if fused_group != fused_policy_group {
+            return Err(VectorRouteError::TransportPolicyCoverage {
+                transport_id: transport.transport_id,
+            });
+        }
     }
     Ok(())
+}
+
+fn fused_transport_group(plan: &VectorPlan, transport_id: u64) -> Option<u64> {
+    plan.fused_serial_groups.iter().find_map(|group| {
+        group
+            .internal_transport_ids
+            .binary_search(&transport_id)
+            .is_ok()
+            .then_some(group.group_id)
+    })
 }
 
 fn declare_transport(
@@ -1021,7 +1047,9 @@ fn declare_transport(
             })?;
             (FirType::Array(Box::new(elem), length), AccessType::Stack)
         }
-        ClockTransportMode::IslandScalar { .. } => (elem, AccessType::Stack),
+        ClockTransportMode::FusedScalar { .. } | ClockTransportMode::IslandScalar { .. } => {
+            (elem, AccessType::Stack)
+        }
         ClockTransportMode::HeldOutput { .. } => (elem, AccessType::Struct),
     };
     Ok(FirBuilder::new(store).declare_var(transport.stable_name.clone(), typ, access, None))
@@ -1043,11 +1071,13 @@ fn store_transport(
                 value,
             )
         }
-        ClockTransportMode::IslandScalar { .. } => FirBuilder::new(store).store_var(
-            transport.stable_name.clone(),
-            AccessType::Stack,
-            value,
-        ),
+        ClockTransportMode::FusedScalar { .. } | ClockTransportMode::IslandScalar { .. } => {
+            FirBuilder::new(store).store_var(
+                transport.stable_name.clone(),
+                AccessType::Stack,
+                value,
+            )
+        }
         ClockTransportMode::HeldOutput { .. } => FirBuilder::new(store).store_var(
             transport.stable_name.clone(),
             AccessType::Struct,
@@ -1072,7 +1102,7 @@ fn load_transport(
                 elem,
             )
         }
-        ClockTransportMode::IslandScalar { .. } => {
+        ClockTransportMode::FusedScalar { .. } | ClockTransportMode::IslandScalar { .. } => {
             FirBuilder::new(store).load_var(transport.stable_name.clone(), AccessType::Stack, elem)
         }
         ClockTransportMode::HeldOutput { .. } => {
@@ -1103,7 +1133,7 @@ fn verify_transport_declaration(
                 && *actual_elem == *elem
         }
         (
-            ClockTransportMode::IslandScalar { .. },
+            ClockTransportMode::FusedScalar { .. } | ClockTransportMode::IslandScalar { .. },
             FirMatch::DeclareVar {
                 name,
                 typ,
@@ -1152,7 +1182,7 @@ fn verify_transport_store(
             name == transport.stable_name && value == producer_value && is_chunk_index(store, index)
         }
         (
-            ClockTransportMode::IslandScalar { .. },
+            ClockTransportMode::FusedScalar { .. } | ClockTransportMode::IslandScalar { .. },
             Some(FirMatch::StoreVar {
                 name,
                 access: AccessType::Stack,
@@ -1204,7 +1234,7 @@ fn verify_transport_load(
                 && store.value_type(id) == Some(elem.clone())
         }
         (
-            ClockTransportMode::IslandScalar { .. },
+            ClockTransportMode::FusedScalar { .. } | ClockTransportMode::IslandScalar { .. },
             Some((
                 id,
                 FirMatch::LoadVar {
@@ -1482,6 +1512,7 @@ mod tests {
                     witness_kind: WitnessKind::Pointwise,
                 },
             ],
+            fused_serial_groups: vec![],
         })
     }
 

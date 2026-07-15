@@ -1597,6 +1597,7 @@ mod tests {
                     witness_kind: WitnessKind::Pointwise,
                 },
             ],
+            fused_serial_groups: vec![],
         });
         (prepared, plan)
     }

@@ -183,6 +183,9 @@ pub enum VectorFirAssemblyError {
     IslandShape {
         domain_id: u64,
     },
+    FusedGroupShape {
+        group_id: u64,
+    },
     TopLevelShape,
 }
 
@@ -244,6 +247,9 @@ impl fmt::Display for VectorFirAssemblyError {
             }
             Self::IslandShape { domain_id } => {
                 write!(f, "clock island {domain_id} has an invalid FIR guard")
+            }
+            Self::FusedGroupShape { group_id } => {
+                write!(f, "fused serial group {group_id} has an invalid FIR shape")
             }
             Self::TopLevelShape => write!(f, "assembled top-level FIR is not a block"),
         }
@@ -521,6 +527,7 @@ pub fn verify_vector_fir_assembly(
         }
     }
     verify_clock_output_stores(assembly, expected_islands, store)?;
+    verify_assembled_fused_serial_groups(routed, state_plan, assembly, store)?;
     Ok(())
 }
 
@@ -692,6 +699,9 @@ fn classify_transport_declarations(
     for transport in transports {
         match transport.mode {
             ClockTransportMode::OuterChunk => {
+                local.push(transport.declaration);
+            }
+            ClockTransportMode::FusedScalar { .. } => {
                 local.push(transport.declaration);
             }
             ClockTransportMode::IslandScalar { domain_id } => {
@@ -1332,6 +1342,37 @@ fn materialize_top_level(
         .iter()
         .map(|assembled| (assembled.loop_id, assembled))
         .collect::<BTreeMap<_, _>>();
+    let fused_group_by_member = routed
+        .plan()
+        .fused_serial_groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .member_loop_ids
+                .iter()
+                .map(move |&loop_id| (loop_id, group.group_id))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let fused_members_by_group = routed
+        .plan()
+        .fused_serial_groups
+        .iter()
+        .map(|group| {
+            let members = routed
+                .layout()
+                .loops()
+                .iter()
+                .filter_map(|region| {
+                    group
+                        .member_loop_ids
+                        .binary_search(&region.loop_id)
+                        .is_ok()
+                        .then_some(region.loop_id)
+                })
+                .collect::<Vec<_>>();
+            (group.group_id, members)
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut body = Vec::new();
     for region in routed.layout().loops() {
         if !owned.contains(&region.loop_id) {
@@ -1345,10 +1386,22 @@ fn materialize_top_level(
     }
     for region in routed.layout().loops() {
         if !owned.contains(&region.loop_id) {
-            body.push(sample_loop(
-                builder,
-                loop_by_id[&region.loop_id].iteration_statement,
-            ));
+            if let Some(group_id) = fused_group_by_member.get(&region.loop_id) {
+                let members = &fused_members_by_group[group_id];
+                if members.first() == Some(&region.loop_id) {
+                    let iterations = members
+                        .iter()
+                        .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+                        .collect::<Vec<_>>();
+                    let fused_body = builder.block(&iterations);
+                    body.push(sample_loop(builder, fused_body));
+                }
+            } else {
+                body.push(sample_loop(
+                    builder,
+                    loop_by_id[&region.loop_id].iteration_statement,
+                ));
+            }
         }
         for (first_loop, statement) in &roots {
             if *first_loop == Some(region.loop_id) {
@@ -1374,6 +1427,230 @@ fn materialize_top_level(
         );
     }
     Ok(builder.block(&body))
+}
+
+fn verify_assembled_fused_serial_groups(
+    routed: &VerifiedRoutedFir,
+    state_plan: Option<&VerifiedVectorStatePlan>,
+    assembly: &VectorFirAssembly,
+    store: &FirStore,
+) -> Result<(), VectorFirAssemblyError> {
+    if routed.plan().fused_serial_groups.is_empty() {
+        return Ok(());
+    }
+    let FirMatch::Block(top_level) = match_fir(store, assembly.top_level_statement) else {
+        return Err(VectorFirAssemblyError::TopLevelShape);
+    };
+    let loop_by_id = assembly
+        .loops
+        .iter()
+        .map(|loop_| (loop_.loop_id, loop_))
+        .collect::<BTreeMap<_, _>>();
+    let island_loops = assembly
+        .islands
+        .iter()
+        .flat_map(|island| island.nested_loop_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+
+    for group in &routed.plan().fused_serial_groups {
+        let reject = || VectorFirAssemblyError::FusedGroupShape {
+            group_id: group.group_id,
+        };
+        if !group.member_loop_ids.contains(&group.owner_loop_id)
+            || group
+                .member_loop_ids
+                .iter()
+                .any(|loop_id| island_loops.contains(loop_id) || !loop_by_id.contains_key(loop_id))
+        {
+            return Err(reject());
+        }
+        let members = routed
+            .layout()
+            .loops()
+            .iter()
+            .filter_map(|region| {
+                group
+                    .member_loop_ids
+                    .binary_search(&region.loop_id)
+                    .is_ok()
+                    .then_some(region.loop_id)
+            })
+            .collect::<Vec<_>>();
+        if members.len() != group.member_loop_ids.len() {
+            return Err(reject());
+        }
+        let expected_iterations = members
+            .iter()
+            .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+            .collect::<Vec<_>>();
+        let physical_loops = top_level
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &statement)| match match_fir(store, statement) {
+                FirMatch::ForLoop {
+                    var,
+                    body,
+                    is_reverse: false,
+                    ..
+                } if var == "i0"
+                    && matches!(match_fir(store, body), FirMatch::Block(words) if words == expected_iterations) =>
+                {
+                    Some((position, body))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [(physical_position, physical_body)] = physical_loops.as_slice() else {
+            return Err(reject());
+        };
+
+        for &loop_id in &members {
+            let assembled = loop_by_id[&loop_id];
+            for action in &assembled.pre {
+                if !top_level[..*physical_position].contains(&action.statement) {
+                    return Err(reject());
+                }
+            }
+            for action in &assembled.post {
+                if !top_level[*physical_position + 1..].contains(&action.statement) {
+                    return Err(reject());
+                }
+            }
+        }
+
+        for &signal_id in &group.delayed_read_signal_ids {
+            let definitions = routed
+                .trace()
+                .definitions()
+                .iter()
+                .filter(|definition| {
+                    definition.signal_id == signal_id
+                        && matches!(definition.region, VectorRegion::Loop(loop_id) if group.member_loop_ids.contains(&loop_id))
+                })
+                .collect::<Vec<_>>();
+            if definitions.len() != 1 || !fir_contains(store, *physical_body, definitions[0].value)
+            {
+                return Err(reject());
+            }
+        }
+
+        for &signal_id in &group.state_write_signal_ids {
+            let definitions = routed
+                .trace()
+                .definitions()
+                .iter()
+                .filter(|definition| {
+                    definition.signal_id == signal_id
+                        && definition.region == VectorRegion::Loop(group.owner_loop_id)
+                })
+                .collect::<Vec<_>>();
+            if definitions.len() != 1
+                || !fir_contains(store, *physical_body, definitions[0].value)
+                || state_plan.is_none_or(|state| {
+                    !state.plan().recursions.iter().any(|recursion| {
+                        recursion.loop_id == group.owner_loop_id
+                            && recursion.projections.iter().any(|projection| {
+                                projection.signal_ids.binary_search(&signal_id).is_ok()
+                            })
+                    })
+                })
+            {
+                return Err(reject());
+            }
+        }
+        let carrier_writes = members
+            .iter()
+            .flat_map(|loop_id| loop_by_id[loop_id].exec_actions.iter())
+            .filter(|action| {
+                action.action
+                    == (VectorStateAction::DelayWrite {
+                        signal_id: group.recursive_carrier_signal_id,
+                    })
+            })
+            .collect::<Vec<_>>();
+        if carrier_writes.len() != 1
+            || !fir_contains(store, *physical_body, carrier_writes[0].statement)
+        {
+            return Err(reject());
+        }
+
+        for &transport_id in &group.internal_transport_ids {
+            let Some(transport) = routed
+                .trace()
+                .transports()
+                .iter()
+                .find(|transport| transport.transport_id == transport_id)
+            else {
+                return Err(reject());
+            };
+            if transport.mode
+                != (ClockTransportMode::FusedScalar {
+                    group_id: group.group_id,
+                })
+                || transport
+                    .store
+                    .is_none_or(|statement| !fir_contains(store, *physical_body, statement))
+                || transport
+                    .load
+                    .is_none_or(|value| !fir_contains(store, *physical_body, value))
+            {
+                return Err(reject());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fir_contains(store: &FirStore, root: FirId, target: FirId) -> bool {
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    while let Some(node) = pending.pop() {
+        if node == target {
+            return true;
+        }
+        if !seen.insert(node) {
+            continue;
+        }
+        match match_fir(store, node) {
+            FirMatch::Block(words) | FirMatch::FunCall { args: words, .. } => pending.extend(words),
+            FirMatch::BinOp { lhs, rhs, .. } => pending.extend([lhs, rhs]),
+            FirMatch::Neg { value, .. }
+            | FirMatch::Cast { value, .. }
+            | FirMatch::Bitcast { value, .. }
+            | FirMatch::Drop(value) => pending.push(value),
+            FirMatch::Select2 {
+                cond,
+                then_value,
+                else_value,
+                ..
+            } => pending.extend([cond, then_value, else_value]),
+            FirMatch::DeclareVar { init, .. } => pending.extend(init),
+            FirMatch::StoreVar { value, .. } => pending.push(value),
+            FirMatch::LoadTable { index, .. } => pending.push(index),
+            FirMatch::StoreTable { index, value, .. } => pending.extend([index, value]),
+            FirMatch::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                pending.extend([cond, then_block]);
+                pending.extend(else_block);
+            }
+            FirMatch::Control { cond, stmt } => pending.extend([cond, stmt]),
+            FirMatch::ForLoop {
+                init,
+                end,
+                step,
+                body,
+                ..
+            } => pending.extend([init, end, step, body]),
+            FirMatch::SimpleForLoop { upper, body, .. } => pending.extend([upper, body]),
+            FirMatch::IteratorForLoop { body, .. } => pending.push(body),
+            FirMatch::WhileLoop { cond, body } => pending.extend([cond, body]),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn verify_clock_output_stores(
@@ -1915,6 +2192,7 @@ mod tests {
             data_edges: vec![],
             effect_edges: vec![],
             vec_safe_witnesses: vec![],
+            fused_serial_groups: vec![],
         })
     }
 
@@ -2183,6 +2461,7 @@ mod tests {
                 loop_id: 1,
                 witness_kind: WitnessKind::Pointwise,
             }],
+            fused_serial_groups: vec![],
         })
     }
 

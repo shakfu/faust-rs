@@ -255,6 +255,7 @@ mod tests {
                     witness_kind: WitnessKind::Pointwise,
                 })
                 .collect(),
+            fused_serial_groups: Vec::new(),
         }
     }
 
