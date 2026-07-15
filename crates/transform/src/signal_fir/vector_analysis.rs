@@ -1372,7 +1372,7 @@ fn decode_iir(
 fn compute_recursiveness(
     context: &SignalAnalysisContext<'_>,
     roots: &[SigId],
-) -> Result<BTreeMap<u32, u32>, AnalysisError> {
+) -> Result<(BTreeMap<u32, u32>, usize), AnalysisError> {
     #[derive(Clone)]
     enum Frame {
         Enter {
@@ -1381,21 +1381,18 @@ fn compute_recursiveness(
         },
         Exit {
             sig: SigId,
-            env: Vec<SigId>,
-            child_env: Vec<SigId>,
             children: Vec<SigId>,
             binder: bool,
         },
     }
 
-    let key = |sig: SigId, env: &[SigId]| {
-        (
-            sig.as_u32(),
-            env.iter().map(|var| var.as_u32()).collect::<Vec<_>>(),
-        )
-    };
-    let mut memo = BTreeMap::<(u32, Vec<u32>), u32>::new();
-    let mut by_signal = BTreeMap::<u32, u32>::new();
+    // C++ `recursiveness.cpp::annotate` stores `RECURSIVNESS` directly on the
+    // signal tree and returns it on every later visit, independently of the
+    // current recursive environment. Keep the same first-visit memoization:
+    // keying by the whole environment makes shared recursive DAGs expand once
+    // per binder combination and can grow exponentially.
+    let mut memo = BTreeMap::<u32, u32>::new();
+    let mut expanded_signals = 0;
     let mut stack = roots
         .iter()
         .rev()
@@ -1409,10 +1406,11 @@ fn compute_recursiveness(
     while let Some(frame) = stack.pop() {
         match frame {
             Frame::Enter { sig, env } => {
-                let frame_key = key(sig, &env);
-                if memo.contains_key(&frame_key) {
+                let signal_key = sig.as_u32();
+                if memo.contains_key(&signal_key) {
                     continue;
                 }
+                expanded_signals += 1;
                 if let Some(var) = match_sym_ref(context.arena, sig) {
                     let depth = env
                         .iter()
@@ -1420,8 +1418,7 @@ fn compute_recursiveness(
                         .map_or(0, |position| {
                             u32::try_from(position + 1).expect("recursion depth fits u32")
                         });
-                    memo.insert(frame_key, depth);
-                    by_signal.entry(sig.as_u32()).or_insert(depth);
+                    memo.insert(signal_key, depth);
                     continue;
                 }
 
@@ -1440,8 +1437,6 @@ fn compute_recursiveness(
                 };
                 stack.push(Frame::Exit {
                     sig,
-                    env,
-                    child_env: child_env.clone(),
                     children: children.clone(),
                     binder,
                 });
@@ -1454,15 +1449,13 @@ fn compute_recursiveness(
             }
             Frame::Exit {
                 sig,
-                env,
-                child_env,
                 children,
                 binder,
             } => {
                 let maximum = children
                     .iter()
                     .map(|&child| {
-                        memo.get(&key(child, &child_env))
+                        memo.get(&child.as_u32())
                             .copied()
                             .expect("child recursiveness computed before parent")
                     })
@@ -1473,12 +1466,11 @@ fn compute_recursiveness(
                 } else {
                     maximum
                 };
-                memo.insert(key(sig, &env), value);
-                by_signal.entry(sig.as_u32()).or_insert(value);
+                memo.insert(sig.as_u32(), value);
             }
         }
     }
-    Ok(by_signal)
+    Ok((memo, expanded_signals))
 }
 
 /// Builds the canonical P4.3a condition/effect analysis for a verified forest.
@@ -1518,7 +1510,7 @@ fn analyze_forest(
     clk_env: impl Fn(SigId) -> Option<ClkEnv>,
     conditions: &impl ExecutionConditions,
 ) -> Result<SignalUseTable, AnalysisError> {
-    let recursiveness = compute_recursiveness(analysis, roots)?;
+    let (recursiveness, _) = compute_recursiveness(analysis, roots)?;
     let mut records = BTreeMap::<u32, SignalUseRecord>::new();
     let mut dependency_cache = BTreeMap::<u32, SignalDependencies>::new();
     let mut expanded_signals = BTreeSet::<u32>::new();
@@ -1887,6 +1879,36 @@ mod tests {
             ),
             vec![(second.as_u32(), DepKind::Delayed { amount: 1 })]
         );
+    }
+
+    #[test]
+    fn recursiveness_expands_shared_recursive_dag_once_per_signal() {
+        let mut arena = TreeArena::new();
+        let mut shared = SigBuilder::new(&mut arena).input(0);
+        const LAYERS: usize = 18;
+
+        // Each layer reaches the same lower DAG through two distinct binders.
+        // Memoizing `(signal, environment)` creates 2^LAYERS states, whereas
+        // C++ `recursivenessAnnotation` stores exactly one value per signal.
+        for layer in 0..LAYERS {
+            let left_var = arena.symbol(format!("left_{layer}"));
+            let left_body = vec_to_list(&mut arena, &[shared]);
+            let left_group = sym_rec(&mut arena, left_var, left_body);
+            let right_var = arena.symbol(format!("right_{layer}"));
+            let right_body = vec_to_list(&mut arena, &[shared]);
+            let right_group = sym_rec(&mut arena, right_var, right_body);
+            let mut builder = SigBuilder::new(&mut arena);
+            let left = builder.proj(0, left_group);
+            let right = builder.proj(0, right_group);
+            shared = builder.add(left, right);
+        }
+
+        let empty_types = HashMap::new();
+        let context = SignalAnalysisContext::new(&arena, &empty_types, &[shared]).unwrap();
+        let (by_signal, expanded_signals) = compute_recursiveness(&context, &[shared]).unwrap();
+        let expected_signals = 1 + 5 * LAYERS;
+        assert_eq!(by_signal.len(), expected_signals);
+        assert_eq!(expanded_signals, expected_signals);
     }
 
     #[test]
