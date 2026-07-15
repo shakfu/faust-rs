@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    Compiler, CompilerError, ComputeMode, ExpandDspRequest, GenerateAuxFilesRequest,
+    Compiler, CompilerError, ComputeMode, ExpandDspRequest, GenerateAuxFilesRequest, RealType,
     SchedulingStrategy, SignalFirLane, WasmArtifactRequest, build_import_search_paths,
     compile_options_json_string, default_import_search_paths, golden_snapshot, resolve_module_name,
     resolve_ui_root_label,
@@ -247,6 +247,26 @@ fn compiler_compile_source_accepts_valid_dsp() {
         .expect("valid source should parse");
     assert!(out.root.is_some());
     assert!(out.errors.is_empty());
+}
+
+#[test]
+fn compiler_double_precision_selects_doubleprecision_library_variant() {
+    let compiler = Compiler::new().with_real_type(RealType::Float64);
+    let cpp = compiler
+        .compile_source_to_cpp(
+            "precision_variant.dsp",
+            "singleprecision value = 1.0;\ndoubleprecision value = 2.0;\nprocess = value;\n",
+            &codegen::backends::cpp::CppOptions::default(),
+        )
+        .expect("double-precision variant should compile");
+    assert!(
+        cpp.contains("2.0") || cpp.contains("2."),
+        "selected C++ should use the double variant: {cpp}"
+    );
+    assert!(
+        !cpp.contains("1.0"),
+        "single-precision variant leaked into double mode: {cpp}"
+    );
 }
 
 #[test]

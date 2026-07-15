@@ -414,6 +414,13 @@ pub enum SignalFirLane {
     TransformFastLane,
 }
 
+fn parser_float_size(real_type: RealType) -> u8 {
+    match real_type {
+        RealType::Float32 => 1,
+        RealType::Float64 => 2,
+    }
+}
+
 impl WasmArtifactBundle {
     /// Repackages a compiled [`WasmModule`] into the public artifact bundle,
     /// pairing its binary and JSON with the formatted `compile_options` string.
@@ -600,7 +607,14 @@ impl Compiler {
         source_name: &str,
         source: &str,
     ) -> Result<ParseOutput, CompilerError> {
-        let output = self.time_phase("parser", || parser::parse_program(source, source_name));
+        let output = self.time_phase("parser", || {
+            parser::parse_program_with_precision_and_metadata(
+                source,
+                source_name,
+                parser_float_size(self.real_type),
+                parser::CompilationMetadataStore::new(source_name),
+            )
+        });
         ensure_parse_success(source_name, output)
     }
 
@@ -620,7 +634,11 @@ impl Compiler {
         let import_search_paths = merge_import_search_paths(path, search_paths);
         let output = self
             .time_phase("parser", || {
-                parser::parse_file_with_imports(path, &import_search_paths)
+                parser::parse_file_with_imports_and_precision(
+                    path,
+                    &import_search_paths,
+                    parser_float_size(self.real_type),
+                )
             })
             .map_err(CompilerError::Import)?;
         ensure_parse_success(&path.display().to_string(), output)
@@ -685,25 +703,31 @@ impl Compiler {
             ensure_parse_success(
                 source_name,
                 self.time_phase("parser", || {
-                    parser::parse_program_with_metadata(source, source_name, metadata_store.clone())
+                    parser::parse_program_with_precision_and_metadata(
+                        source,
+                        source_name,
+                        parser_float_size(self.real_type),
+                        metadata_store.clone(),
+                    )
                 }),
             )?
         } else {
             ensure_parse_success(
                 source_name,
                 self.time_phase("parser", || {
-                    parser::parse_program_with_imports_and_metadata(
+                    parser::parse_program_with_imports_and_precision_and_metadata(
                         source,
                         source_name,
                         search_paths,
                         virtual_sources,
                         metadata_store.clone(),
+                        parser_float_size(self.real_type),
                     )
                 })
                 .map_err(CompilerError::Import)?,
             )?
         };
-        let eval_source_context = if search_paths.is_empty() && virtual_sources.is_empty() {
+        let mut eval_source_context = if search_paths.is_empty() && virtual_sources.is_empty() {
             eval::EvalSourceContext::memory_with_metadata(metadata_store)
         } else {
             eval::EvalSourceContext::memory_with_search_paths_metadata_and_virtual_sources(
@@ -711,6 +735,10 @@ impl Compiler {
                 virtual_sources.clone(),
                 metadata_store,
             )
+        };
+        eval_source_context.sample_precision = match self.real_type {
+            RealType::Float32 => eval::SamplePrecision::Float32,
+            RealType::Float64 => eval::SamplePrecision::Float64,
         };
         self.pipeline_to_signals(source_name, output, Some(eval_source_context))
     }
@@ -736,19 +764,24 @@ impl Compiler {
         let output = ensure_parse_success(
             &path.display().to_string(),
             self.time_phase("parser", || {
-                parser::parse_file_with_imports_and_metadata(
+                parser::parse_file_with_imports_and_precision_and_metadata(
                     path,
                     &import_search_paths,
                     metadata_store.clone(),
+                    parser_float_size(self.real_type),
                 )
             })
             .map_err(CompilerError::Import)?,
         )?;
-        let eval_source_context = eval::EvalSourceContext::for_file_with_metadata(
+        let mut eval_source_context = eval::EvalSourceContext::for_file_with_metadata(
             path,
             &import_search_paths,
             metadata_store,
         );
+        eval_source_context.sample_precision = match self.real_type {
+            RealType::Float32 => eval::SamplePrecision::Float32,
+            RealType::Float64 => eval::SamplePrecision::Float64,
+        };
         self.pipeline_to_signals(
             &path.display().to_string(),
             output,
