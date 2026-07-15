@@ -108,6 +108,7 @@ impl From<VectorPlanError> for VectorPlanBuildError {
 struct PlacementState<'a> {
     records: BTreeMap<u32, &'a DecorationRecord>,
     children: BTreeMap<u32, Vec<u32>>,
+    delayed_values: BTreeSet<u32>,
     placement: BTreeMap<u32, Placement>,
     contexts: BTreeMap<u32, BTreeSet<u64>>,
     roots_by_loop: BTreeMap<u64, BTreeSet<u64>>,
@@ -121,7 +122,7 @@ impl<'a> PlacementState<'a> {
             .get(&signal_id)
             .copied()
             .ok_or(VectorPlanBuildError::MissingRecord { signal_id })?;
-        if record.variability != Variability::Samp {
+        if !requires_sample_execution(record, self.delayed_values.contains(&signal_id)) {
             self.placement.insert(signal_id, Placement::Control);
             return Ok(());
         }
@@ -186,6 +187,11 @@ pub fn build_vector_plan(
         return Err(VectorPlanBuildError::VecSizeZero);
     }
     let certificate = verified.certificate();
+    let delayed_values = certificate
+        .occurrence_dependencies
+        .iter()
+        .filter_map(|dependency| (dependency.delay > 0).then_some(dependency.to))
+        .collect::<BTreeSet<_>>();
     let records = certificate
         .records
         .iter()
@@ -210,7 +216,8 @@ pub fn build_vector_plan(
 
     let inline_sample_root = certificate.roots.iter().any(|root| {
         records.get(root).is_some_and(|record| {
-            record.variability == Variability::Samp && separations[root] == LoopSeparation::Inline
+            requires_sample_execution(record, delayed_values.contains(root))
+                && separations[root] == LoopSeparation::Inline
         })
     });
     let mut next_loop = 0_u64;
@@ -237,7 +244,7 @@ pub fn build_vector_plan(
 
     let mut owner = BTreeMap::<u32, u64>::new();
     for record in &certificate.records {
-        if record.variability == Variability::Samp
+        if requires_sample_execution(record, delayed_values.contains(&record.signal_id))
             && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && separations[&record.signal_id] == LoopSeparation::SeparateSerial
         {
@@ -249,7 +256,7 @@ pub fn build_vector_plan(
         }
     }
     for record in &certificate.records {
-        if record.variability == Variability::Samp
+        if requires_sample_execution(record, delayed_values.contains(&record.signal_id))
             && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && separations[&record.signal_id] == LoopSeparation::SeparateVectorizable
         {
@@ -282,13 +289,14 @@ pub fn build_vector_plan(
     let mut state = PlacementState {
         records,
         children,
+        delayed_values: delayed_values.clone(),
         placement: BTreeMap::new(),
         contexts: BTreeMap::new(),
         roots_by_loop: BTreeMap::new(),
         visited: BTreeSet::new(),
     };
     for record in &certificate.records {
-        if record.variability != Variability::Samp {
+        if !requires_sample_execution(record, delayed_values.contains(&record.signal_id)) {
             state.placement.insert(record.signal_id, Placement::Control);
         }
     }
@@ -309,7 +317,7 @@ pub fn build_vector_plan(
             .get(&root)
             .copied()
             .ok_or(VectorPlanBuildError::MissingRecord { signal_id: root })?;
-        if record.variability != Variability::Samp {
+        if !requires_sample_execution(record, delayed_values.contains(&root)) {
             continue;
         }
         let loop_id = match state.placement.get(&root).copied() {
@@ -346,7 +354,7 @@ pub fn build_vector_plan(
             .records
             .iter()
             .filter(|record| {
-                record.variability == Variability::Samp
+                requires_sample_execution(record, delayed_values.contains(&record.signal_id))
                     && !certificate.lifecycle_boundaries.contains(&record.signal_id)
                     && !state.placement.contains_key(&record.signal_id)
             })
@@ -393,7 +401,7 @@ pub fn build_vector_plan(
     }
     trace_stage("placement");
     for record in &certificate.records {
-        if record.variability == Variability::Samp
+        if requires_sample_execution(record, delayed_values.contains(&record.signal_id))
             && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && !state.placement.contains_key(&record.signal_id)
         {
@@ -1096,6 +1104,26 @@ fn scalar_value_type(nature: Nature) -> ValueType {
     }
 }
 
+/// Whether this signal must execute once per demanded sample even when its
+/// intrinsic Faust type is `Konst` or `Block`.
+///
+/// C++ occurrence markup starts every output in a sample-rate use context.
+/// Temporal primitives can nevertheless retain a slower intrinsic type: a
+/// delayed constant, for example, still changes after the first sample because
+/// its history starts cleared. The occurrence certificate identifies delay
+/// carriers separately from delay amounts, while state effects retain the
+/// other temporal closures. A generic sample-rate *use context* alone is
+/// deliberately insufficient: the literal amount of a fixed delay is visited
+/// from a sample expression but remains a pure control value.
+fn requires_sample_execution(record: &DecorationRecord, is_delayed_value: bool) -> bool {
+    record.variability == Variability::Samp
+        || is_delayed_value
+        || record
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, EffectAtom::ReadState(_) | EffectAtom::WriteState(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use propagate::ClockDomainTable;
@@ -1230,6 +1258,53 @@ mod tests {
         assert!(!plan.plan().transports.iter().any(|transport| {
             transport.producer_loop == producer && transport.consumer_loop == consumer
         }));
+    }
+
+    #[test]
+    fn sample_demand_keeps_a_delayed_constant_in_runtime_loops() {
+        let mut arena = TreeArena::new();
+        let (constant, delayed) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let constant = builder.real(2.0);
+            (constant, builder.delay1(constant))
+        };
+        let decorations = certify(&arena, &[delayed]);
+        let plan = build_vector_plan(&decorations, 8).unwrap();
+        let placement = |signal: signals::SigId| {
+            plan.plan()
+                .signals
+                .iter()
+                .find(|record| record.signal_id == u64::from(signal.as_u32()))
+                .unwrap()
+                .placement
+        };
+
+        assert!(matches!(placement(constant), Placement::Owned(_)));
+        assert!(matches!(placement(delayed), Placement::Owned(_)));
+    }
+
+    #[test]
+    fn sample_use_does_not_promote_a_pure_fixed_delay_amount() {
+        let mut arena = TreeArena::new();
+        let (amount, delayed) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let amount = builder.int(2);
+            (amount, builder.delay(input, amount))
+        };
+        let decorations = certify(&arena, &[delayed]);
+        let plan = build_vector_plan(&decorations, 8).unwrap();
+        let placement = |signal: signals::SigId| {
+            plan.plan()
+                .signals
+                .iter()
+                .find(|record| record.signal_id == u64::from(signal.as_u32()))
+                .unwrap()
+                .placement
+        };
+
+        assert_eq!(placement(amount), Placement::Control);
+        assert!(matches!(placement(delayed), Placement::Owned(_)));
     }
 
     #[test]

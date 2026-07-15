@@ -11,9 +11,11 @@
 //!
 //! Recursion follows the simultaneous `RecStep` rule from the vector port
 //! plan: every projection of one symbolic group is owned by one serial
-//! `LoopKind::Recursive` loop and advances once per sample. The artifact is
-//! derived exclusively from checked P4.3b decorations and the checked P4.4
-//! vector plan; it does not inspect FIR statements. P6.6 composes that plan
+//! `LoopKind::Recursive` loop and advances once per sample. Prefix cells and
+//! cycling waveform indexes carry explicit lifecycle and update transitions;
+//! zero-history delay effects are explicit no-ops. The artifact is derived
+//! from the verified prepared forest, checked P4.3b decorations, and the
+//! checked P4.4 vector plan; it does not inspect FIR statements. P6.6 composes that plan
 //! with the checked P6.2 clock artifact: state local to an OD/US/DS island uses
 //! one persistent ring cursor per domain and advances in fire time. Reverse
 //! time and AD state remain fail-closed.
@@ -21,18 +23,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use signals::{SigId, SigMatch, match_sig};
 use sigtype::{Nature, Variability};
 
 use super::decoration_verify::{CanonicalSigType, DecorationRecord, VerifiedDecorationCertificate};
+use super::recursion::decode_symbolic_group_bodies;
 use super::vector_analysis::{EffectAtom, StateCell, StateResource};
 use super::vector_clock_ad::VerifiedVectorClockAdPlan;
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_verify::{
     LoopKind, Placement, Rate, ValueType, VectorPlan, VectorPlanError, verify_vector_plan,
 };
+use crate::signal_prepare::VerifiedPreparedSignals;
 
 /// Current canonical P6.1 state-plan schema.
-pub const VECTOR_STATE_PLAN_VERSION: u32 = 2;
+pub const VECTOR_STATE_PLAN_VERSION: u32 = 3;
 
 /// One `CodeLoop` execution phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,6 +82,8 @@ pub enum VectorStateAction {
     DelayRingAdvance { signal_id: u64 },
     RecursionStep { group: u64 },
     DelayWrite { signal_id: u64 },
+    PrefixWrite { signal_id: u64 },
+    WaveformAdvance { signal_id: u64 },
     DelayCopyOut { signal_id: u64 },
     DelayRingSaveAdvance { signal_id: u64 },
 }
@@ -87,7 +94,10 @@ impl VectorStateAction {
     pub fn phase(&self) -> VectorStatePhase {
         match self {
             Self::DelayCopyIn { .. } | Self::DelayRingAdvance { .. } => VectorStatePhase::Pre,
-            Self::RecursionStep { .. } | Self::DelayWrite { .. } => VectorStatePhase::Exec,
+            Self::RecursionStep { .. }
+            | Self::DelayWrite { .. }
+            | Self::PrefixWrite { .. }
+            | Self::WaveformAdvance { .. } => VectorStatePhase::Exec,
             Self::DelayCopyOut { .. } | Self::DelayRingSaveAdvance { .. } => VectorStatePhase::Post,
         }
     }
@@ -105,12 +115,44 @@ pub struct DelayTransition {
     pub storage: VectorDelayStorage,
 }
 
+/// Canonical lifecycle initializer for one scalar state cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VectorStateInitialValue {
+    Int(i32),
+    RealBits(u64),
+    Zero,
+}
+
+/// One `prefix(init, value)` previous-sample state cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrefixTransition {
+    pub signal_id: u64,
+    pub loop_id: u64,
+    pub value_signal_id: u64,
+    pub state_name: String,
+    pub value_type: ValueType,
+    pub initial: VectorStateInitialValue,
+}
+
+/// One cycling direct waveform read index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaveformTransition {
+    pub signal_id: u64,
+    pub loop_id: u64,
+    pub index_name: String,
+    pub length: u64,
+    pub value_type: ValueType,
+}
+
 /// One projection participating in a simultaneous recursion step.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecursionProjectionTransition {
     pub index: u64,
     /// Prepared signal aliases that read this one symbolic projection.
     pub signal_ids: Vec<u64>,
+    /// Signal computing the next value. This is the first visible projection
+    /// alias when one exists, otherwise the recursive body itself.
+    pub value_signal_id: u64,
 }
 
 /// One symbolic recursion group and its serial owner.
@@ -139,6 +181,11 @@ pub struct VectorStatePlan {
     pub loops: Vec<LoopStatePhases>,
     pub delays: Vec<DelayTransition>,
     pub recursions: Vec<RecursionTransition>,
+    pub prefixes: Vec<PrefixTransition>,
+    pub waveforms: Vec<WaveformTransition>,
+    /// Conservative delay effects proven to have no positive-delay use.
+    /// They require no storage or runtime action (`x @ 0 == x`).
+    pub no_op_resources: Vec<StateResource>,
 }
 
 /// Opaque evidence that P6.1 construction passed its independent checker.
@@ -364,12 +411,13 @@ pub fn build_vector_state_plan(
     vector_plan: &VerifiedVectorPlan,
     max_copy_delay: u64,
 ) -> Result<VerifiedVectorStatePlan, VectorStateError> {
-    build_vector_state_plan_with_resources(decorations, vector_plan, None, max_copy_delay)
+    build_vector_state_plan_with_resources(None, decorations, vector_plan, None, max_copy_delay)
 }
 
 /// Builds P6.1 state transitions while delegating clock/hold resources to an
 /// independently accepted P6.2 artifact.
 pub fn build_vector_state_plan_with_clock(
+    prepared: &VerifiedPreparedSignals,
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VerifiedVectorPlan,
     clock_plan: &VerifiedVectorClockAdPlan,
@@ -381,6 +429,7 @@ pub fn build_vector_state_plan_with_clock(
         });
     }
     build_vector_state_plan_with_resources(
+        Some(prepared),
         decorations,
         vector_plan,
         Some(clock_plan),
@@ -389,6 +438,7 @@ pub fn build_vector_state_plan_with_clock(
 }
 
 fn build_vector_state_plan_with_resources(
+    prepared: Option<&VerifiedPreparedSignals>,
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VerifiedVectorPlan,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
@@ -425,7 +475,6 @@ fn build_vector_state_plan_with_resources(
             loop_record.kind,
             clock_domain,
             clock_plan,
-            plan,
         )?;
         let max_delay = u64::from(record.max_delay);
         let storage = delay_storage(
@@ -483,12 +532,39 @@ fn build_vector_state_plan_with_resources(
             .or_default()
             .push(u64::from(record.0.signal_id));
     }
+    for resource in source
+        .records
+        .iter()
+        .flat_map(|record| record.effects.iter())
+        .filter_map(state_resource)
+    {
+        if let StateResource::Recursion { group, projection } = resource {
+            recursion_groups
+                .entry(u64::from(*group))
+                .or_default()
+                .entry(u64::from(*projection))
+                .or_default();
+        }
+    }
+    let prepared_ids = prepared.map(collect_prepared_ids);
     let mut recursions = Vec::new();
     for (group, projections) in recursion_groups {
         let projections = projections
             .into_iter()
-            .map(|(index, signal_ids)| RecursionProjectionTransition { index, signal_ids })
-            .collect();
+            .map(|(index, signal_ids)| {
+                Ok(RecursionProjectionTransition {
+                    index,
+                    value_signal_id: recursion_value_signal(
+                        prepared,
+                        prepared_ids.as_ref(),
+                        group,
+                        index,
+                        &signal_ids,
+                    )?,
+                    signal_ids,
+                })
+            })
+            .collect::<Result<Vec<_>, VectorStateError>>()?;
         let loop_id = recursion_loop(plan, group)?;
         phases
             .entry(loop_id)
@@ -500,6 +576,26 @@ fn build_vector_state_plan_with_resources(
             loop_id,
             projections,
         });
+    }
+
+    let (prefixes, waveforms) = expected_special_transitions(prepared, plan)?;
+    for transition in &prefixes {
+        phases
+            .entry(transition.loop_id)
+            .or_insert_with(|| empty_phases(transition.loop_id))
+            .exec
+            .push(VectorStateAction::PrefixWrite {
+                signal_id: transition.signal_id,
+            });
+    }
+    for transition in &waveforms {
+        phases
+            .entry(transition.loop_id)
+            .or_insert_with(|| empty_phases(transition.loop_id))
+            .exec
+            .push(VectorStateAction::WaveformAdvance {
+                signal_id: transition.signal_id,
+            });
     }
 
     for loop_phases in phases.values_mut() {
@@ -514,8 +610,17 @@ fn build_vector_state_plan_with_resources(
         loops: phases.into_values().collect(),
         delays,
         recursions,
+        prefixes,
+        waveforms,
+        no_op_resources: expected_no_op_resources(&source.records),
     };
-    verify_vector_state_plan_with_resources(decorations, plan, clock_plan, &state_plan)?;
+    verify_vector_state_plan_after_vector_plan(
+        prepared,
+        decorations,
+        plan,
+        clock_plan,
+        &state_plan,
+    )?;
     let delegated_resources = clock_plan
         .map(VerifiedVectorClockAdPlan::managed_state_resources)
         .unwrap_or_default();
@@ -532,11 +637,12 @@ pub fn verify_vector_state_plan(
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
 ) -> Result<(), VectorStateError> {
-    verify_vector_state_plan_with_resources(decorations, vector_plan, None, state_plan)
+    verify_vector_state_plan_with_resources(None, decorations, vector_plan, None, state_plan)
 }
 
 /// Checks P6.1 while accepting only the clock/hold resources named by P6.2.
 pub fn verify_vector_state_plan_with_clock(
+    prepared: &VerifiedPreparedSignals,
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VectorPlan,
     clock_plan: &VerifiedVectorClockAdPlan,
@@ -547,16 +653,43 @@ pub fn verify_vector_state_plan_with_clock(
             signal_id: u64::MAX,
         });
     }
-    verify_vector_state_plan_with_resources(decorations, vector_plan, Some(clock_plan), state_plan)
+    verify_vector_state_plan_with_resources(
+        Some(prepared),
+        decorations,
+        vector_plan,
+        Some(clock_plan),
+        state_plan,
+    )
 }
 
 fn verify_vector_state_plan_with_resources(
+    prepared: Option<&VerifiedPreparedSignals>,
     decorations: &VerifiedDecorationCertificate,
     vector_plan: &VectorPlan,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
     state_plan: &VectorStatePlan,
 ) -> Result<(), VectorStateError> {
     verify_vector_plan(vector_plan)?;
+    verify_vector_state_plan_after_vector_plan(
+        prepared,
+        decorations,
+        vector_plan,
+        clock_plan,
+        state_plan,
+    )
+}
+
+/// Checks state-specific obligations after the caller has independently
+/// accepted the same vector plan. Production construction uses this boundary
+/// to avoid repeating the full graph verification; the public checker above
+/// remains independently fail-closed for arbitrary DTOs.
+fn verify_vector_state_plan_after_vector_plan(
+    prepared: Option<&VerifiedPreparedSignals>,
+    decorations: &VerifiedDecorationCertificate,
+    vector_plan: &VectorPlan,
+    clock_plan: Option<&VerifiedVectorClockAdPlan>,
+    state_plan: &VectorStatePlan,
+) -> Result<(), VectorStateError> {
     if state_plan.schema_version != VECTOR_STATE_PLAN_VERSION {
         return Err(VectorStateError::UnsupportedSchema {
             found: state_plan.schema_version,
@@ -572,7 +705,17 @@ fn verify_vector_state_plan_with_resources(
     verify_source_alignment(records, vector_plan)?;
     verify_supported_state(records, vector_plan, state_plan, clock_plan)?;
     verify_delays(records, vector_plan, state_plan, clock_plan)?;
-    verify_recursions(records, vector_plan, state_plan, clock_plan)?;
+    verify_recursions(prepared, records, vector_plan, state_plan, clock_plan)?;
+    let (expected_prefixes, expected_waveforms) =
+        expected_special_transitions(prepared, vector_plan)?;
+    if state_plan.prefixes != expected_prefixes || state_plan.waveforms != expected_waveforms {
+        return Err(VectorStateError::SignalFactMismatch {
+            signal_id: u64::MAX,
+        });
+    }
+    if state_plan.no_op_resources != expected_no_op_resources(records) {
+        return Err(VectorStateError::DelayCoverageMismatch);
+    }
     verify_phases(state_plan)?;
     Ok(())
 }
@@ -634,6 +777,33 @@ fn verify_supported_state(
                     verify_clock_loop(signal_id, u64::from(clock_id), loop_id, clock_plan)?;
                 }
             } else if !external_resources.contains(resource) {
+                if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                    let related = records
+                        .iter()
+                        .filter(|candidate| match resource {
+                            StateResource::Signal { owner, .. } => candidate.signal_id == *owner,
+                            StateResource::Recursion { group, .. } => candidate
+                                .recursive_projection
+                                .is_some_and(|projection| projection.group == *group),
+                        })
+                        .map(|candidate| {
+                            (
+                                candidate.signal_id,
+                                candidate.variability,
+                                candidate.max_delay,
+                                candidate.is_delay_read,
+                                candidate.recursive_projection,
+                                signals
+                                    .get(&u64::from(candidate.signal_id))
+                                    .map(|signal| signal.placement),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "[vector-state-unsupported] resource={resource:?} source_signal={} related={related:?}",
+                        record.signal_id
+                    );
+                }
                 return Err(VectorStateError::UnsupportedStateResource {
                     resource: resource.clone(),
                 });
@@ -700,7 +870,6 @@ fn verify_delays(
             loops[&loop_id].kind,
             transition.clock_domain,
             clock_plan,
-            vector_plan,
         )?;
         let expected_storage = delay_storage(
             transition.signal_id,
@@ -717,6 +886,7 @@ fn verify_delays(
 }
 
 fn verify_recursions(
+    prepared: Option<&VerifiedPreparedSignals>,
     records: &[DecorationRecord],
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
@@ -736,18 +906,44 @@ fn verify_recursions(
                 .push(u64::from(record.signal_id));
         }
     }
+    for resource in records
+        .iter()
+        .flat_map(|record| record.effects.iter())
+        .filter_map(state_resource)
+    {
+        if let StateResource::Recursion { group, projection } = resource {
+            expected
+                .entry(u64::from(*group))
+                .or_default()
+                .entry(u64::from(*projection))
+                .or_default();
+        }
+    }
+    let prepared_ids = prepared.map(collect_prepared_ids);
     let expected = expected
         .into_iter()
-        .map(|(group, projections)| {
-            (
+        .map(|(group, projections)| -> Result<_, VectorStateError> {
+            Ok((
                 group,
                 projections
                     .into_iter()
-                    .map(|(index, signal_ids)| RecursionProjectionTransition { index, signal_ids })
-                    .collect::<Vec<_>>(),
-            )
+                    .map(|(index, signal_ids)| {
+                        Ok(RecursionProjectionTransition {
+                            index,
+                            value_signal_id: recursion_value_signal(
+                                prepared,
+                                prepared_ids.as_ref(),
+                                group,
+                                index,
+                                &signal_ids,
+                            )?,
+                            signal_ids,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, VectorStateError>>()?,
+            ))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Result<BTreeMap<_, _>, VectorStateError>>()?;
     if state_plan.recursions.len() != expected.len() {
         return Err(VectorStateError::RecursionCoverageMismatch);
     }
@@ -783,6 +979,19 @@ fn verify_recursions(
                 if let Some(domain_id) = signal.clock_id.checked_sub(1) {
                     verify_clock_loop(signal_id, domain_id, loop_id, clock_plan)?;
                 }
+            }
+            let value = vector_plan
+                .signals
+                .iter()
+                .find(|signal| signal.signal_id == projection.value_signal_id)
+                .ok_or(VectorStateError::SignalCoverageMismatch {
+                    signal_id: projection.value_signal_id,
+                })?;
+            if value.placement == Placement::Control {
+                return Err(VectorStateError::RecursionLoopMismatch {
+                    group: transition.group,
+                    loop_id,
+                });
             }
         }
     }
@@ -826,6 +1035,24 @@ fn verify_phases(state_plan: &VectorStatePlan) -> Result<(), VectorStateError> {
             .exec
             .push(VectorStateAction::RecursionStep {
                 group: recursion.group,
+            });
+    }
+    for prefix in &state_plan.prefixes {
+        expected
+            .entry(prefix.loop_id)
+            .or_insert_with(|| empty_phases(prefix.loop_id))
+            .exec
+            .push(VectorStateAction::PrefixWrite {
+                signal_id: prefix.signal_id,
+            });
+    }
+    for waveform in &state_plan.waveforms {
+        expected
+            .entry(waveform.loop_id)
+            .or_insert_with(|| empty_phases(waveform.loop_id))
+            .exec
+            .push(VectorStateAction::WaveformAdvance {
+                signal_id: waveform.signal_id,
             });
     }
     for phases in expected.values_mut() {
@@ -925,16 +1152,18 @@ fn verify_delay_owner(
     kind: LoopKind,
     clock_domain: Option<u64>,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
-    vector_plan: &VectorPlan,
 ) -> Result<(), VectorStateError> {
     if let Some(domain_id) = clock_domain {
         return verify_clock_loop(signal_id, domain_id, loop_id, clock_plan);
     }
-    let fused_serial_member = vector_plan
-        .fused_serial_groups
-        .iter()
-        .any(|group| group.member_loop_ids.binary_search(&loop_id).is_ok());
-    if matches!(kind, LoopKind::Vectorizable | LoopKind::Recursive(_)) || fused_serial_member {
+    // Every top-rate plan loop is emitted as an inner sample loop. `Island`
+    // denotes a conservative serial loop when state/effects prevent sample
+    // reordering; it is therefore a valid delay owner. Clock-domain islands
+    // take the separate checked branch above.
+    if matches!(
+        kind,
+        LoopKind::Vectorizable | LoopKind::Recursive(_) | LoopKind::Island(_)
+    ) {
         Ok(())
     } else {
         Err(VectorStateError::DelayOwnerNotVectorLoop { signal_id, loop_id })
@@ -1012,7 +1241,134 @@ fn managed_resources(plan: &VectorStatePlan) -> BTreeSet<StateResource> {
             });
         }
     }
+    result.extend(
+        plan.prefixes
+            .iter()
+            .map(|transition| StateResource::Signal {
+                owner: u32::try_from(transition.signal_id).expect("decorated signal id fits u32"),
+                cell: StateCell::Prefix,
+            }),
+    );
+    result.extend(
+        plan.waveforms
+            .iter()
+            .map(|transition| StateResource::Signal {
+                owner: u32::try_from(transition.signal_id).expect("decorated signal id fits u32"),
+                cell: StateCell::WaveformIndex,
+            }),
+    );
+    result.extend(plan.no_op_resources.iter().cloned());
     result
+}
+
+fn expected_no_op_resources(records: &[DecorationRecord]) -> Vec<StateResource> {
+    let max_delay_by_signal = records
+        .iter()
+        .map(|record| (record.signal_id, record.max_delay))
+        .collect::<BTreeMap<_, _>>();
+    records
+        .iter()
+        .flat_map(|record| record.effects.iter())
+        .filter_map(state_resource)
+        .filter(|resource| {
+            matches!(
+                resource,
+                StateResource::Signal {
+                    owner,
+                    cell: StateCell::Delay
+                } if max_delay_by_signal.get(owner) == Some(&0)
+            )
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn expected_special_transitions(
+    prepared: Option<&VerifiedPreparedSignals>,
+    plan: &VectorPlan,
+) -> Result<(Vec<PrefixTransition>, Vec<WaveformTransition>), VectorStateError> {
+    let resources = plan
+        .signals
+        .iter()
+        .flat_map(|signal| signal.effects.iter())
+        .filter_map(state_resource)
+        .filter(|resource| {
+            matches!(
+                resource,
+                StateResource::Signal {
+                    cell: StateCell::Prefix | StateCell::WaveformIndex,
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if resources.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let prepared = prepared.ok_or_else(|| VectorStateError::UnsupportedStateResource {
+        resource: resources.first().expect("non-empty resource set").clone(),
+    })?;
+    let ids = collect_prepared_ids(prepared);
+    let signals = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
+    let mut prefixes = Vec::new();
+    let mut waveforms = Vec::new();
+    for resource in resources {
+        let StateResource::Signal { owner, cell } = resource else {
+            unreachable!("resource filter keeps signal-owned state");
+        };
+        let signal_id = u64::from(owner);
+        let signal = signals
+            .get(&signal_id)
+            .copied()
+            .ok_or(VectorStateError::SignalCoverageMismatch { signal_id })?;
+        let Placement::Owned(loop_id) = signal.placement else {
+            return Err(VectorStateError::MissingLoopOwner { signal_id });
+        };
+        let sig = ids
+            .get(&signal_id)
+            .copied()
+            .ok_or(VectorStateError::SignalCoverageMismatch { signal_id })?;
+        match (cell, match_sig(prepared.arena(), sig)) {
+            (StateCell::Prefix, SigMatch::Prefix(initial, value)) => {
+                let initial = match match_sig(prepared.arena(), initial) {
+                    SigMatch::Int(value) => VectorStateInitialValue::Int(value),
+                    SigMatch::Real(value) => VectorStateInitialValue::RealBits(value.to_bits()),
+                    _ => VectorStateInitialValue::Zero,
+                };
+                prefixes.push(PrefixTransition {
+                    signal_id,
+                    loop_id,
+                    value_signal_id: u64::from(value.as_u32()),
+                    state_name: format!("vprefix_s{signal_id}"),
+                    value_type: signal.value_type.clone(),
+                    initial,
+                });
+            }
+            (StateCell::WaveformIndex, SigMatch::Waveform(values)) if !values.is_empty() => {
+                waveforms.push(WaveformTransition {
+                    signal_id,
+                    loop_id,
+                    index_name: format!("vwave_s{signal_id}_index"),
+                    length: u64::try_from(values.len())
+                        .map_err(|_| VectorStateError::ArithmeticOverflow { signal_id })?,
+                    value_type: signal.value_type.clone(),
+                });
+            }
+            _ => {
+                return Err(VectorStateError::UnsupportedStateResource {
+                    resource: StateResource::Signal { owner, cell },
+                });
+            }
+        }
+    }
+    Ok((prefixes, waveforms))
 }
 
 fn state_resource(effect: &EffectAtom) -> Option<&StateResource> {
@@ -1020,6 +1376,58 @@ fn state_resource(effect: &EffectAtom) -> Option<&StateResource> {
         EffectAtom::ReadState(resource) | EffectAtom::WriteState(resource) => Some(resource),
         _ => None,
     }
+}
+
+fn collect_prepared_ids(prepared: &VerifiedPreparedSignals) -> BTreeMap<u64, SigId> {
+    let mut ids = BTreeMap::new();
+    let mut stack = prepared.outputs().to_vec();
+    while let Some(signal) = stack.pop() {
+        if ids.insert(u64::from(signal.as_u32()), signal).is_some() {
+            continue;
+        }
+        if let Some(children) = prepared.arena().children(signal) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    ids
+}
+
+fn recursion_value_signal(
+    prepared: Option<&VerifiedPreparedSignals>,
+    prepared_ids: Option<&BTreeMap<u64, SigId>>,
+    group: u64,
+    index: u64,
+    aliases: &[u64],
+) -> Result<u64, VectorStateError> {
+    if let Some(alias) = aliases.first().copied() {
+        return Ok(alias);
+    }
+    let resource = || StateResource::Recursion {
+        group: u32::try_from(group).unwrap_or(u32::MAX),
+        projection: u32::try_from(index).unwrap_or(u32::MAX),
+    };
+    let prepared = prepared.ok_or_else(|| VectorStateError::UnsupportedStateResource {
+        resource: resource(),
+    })?;
+    let group_signal = prepared_ids
+        .and_then(|ids| ids.get(&group))
+        .copied()
+        .ok_or(VectorStateError::SignalCoverageMismatch { signal_id: group })?;
+    let (_, bodies) =
+        decode_symbolic_group_bodies(prepared.arena(), group_signal).ok_or_else(|| {
+            VectorStateError::UnsupportedStateResource {
+                resource: resource(),
+            }
+        })?;
+    let index = usize::try_from(index)
+        .map_err(|_| VectorStateError::ArithmeticOverflow { signal_id: group })?;
+    bodies
+        .get(if bodies.len() == 1 { 0 } else { index })
+        .map(|signal| u64::from(signal.as_u32()))
+        .ok_or(VectorStateError::RecursionArityMismatch {
+            state: bodies.len(),
+            next: index + 1,
+        })
 }
 
 fn check_strict_by<T, K: Ord>(
@@ -1343,6 +1751,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn prefix_and_waveform_have_exact_transition_evidence() {
+        let mut arena = TreeArena::new();
+        let (prefix, waveform, prefix_signal, waveform_signal) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let input = builder.input(0);
+            let initial = builder.real(0.25);
+            let prefix = builder.prefix(initial, input);
+            let v0 = builder.real(0.1);
+            let v1 = builder.real(0.2);
+            let waveform = builder.waveform(&[v0, v1]);
+            (prefix, waveform, prefix, waveform)
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[prefix, waveform], &ui::UiProgram::empty())
+                .unwrap();
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .unwrap();
+        let decorations = certify_decorations(&prepared, &clocks).unwrap();
+        let vector_plan = build_vector_plan(&decorations, 8).unwrap();
+        let state = build_vector_state_plan_with_resources(
+            Some(&prepared),
+            &decorations,
+            &vector_plan,
+            None,
+            16,
+        )
+        .unwrap();
+
+        assert_eq!(state.plan().prefixes.len(), 1);
+        assert_eq!(
+            state.plan().prefixes[0].signal_id,
+            u64::from(prefix_signal.as_u32())
+        );
+        assert_eq!(
+            state.plan().prefixes[0].initial,
+            VectorStateInitialValue::RealBits(0.25_f64.to_bits())
+        );
+        assert_eq!(state.plan().waveforms.len(), 1);
+        assert_eq!(
+            state.plan().waveforms[0].signal_id,
+            u64::from(waveform_signal.as_u32())
+        );
+        assert_eq!(state.plan().waveforms[0].length, 2);
+        let mut mutated = state.plan().clone();
+        mutated.waveforms[0].length = 3;
+        assert!(
+            verify_vector_state_plan_with_resources(
+                Some(&prepared),
+                &decorations,
+                vector_plan.plan(),
+                None,
+                &mutated,
+            )
+            .is_err()
+        );
     }
 
     #[test]

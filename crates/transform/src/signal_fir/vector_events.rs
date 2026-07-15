@@ -1772,13 +1772,18 @@ mod tests {
                         RecursionProjectionTransition {
                             index: 0,
                             signal_ids: vec![0],
+                            value_signal_id: 0,
                         },
                         RecursionProjectionTransition {
                             index: 1,
                             signal_ids: vec![1],
+                            value_signal_id: 1,
                         },
                     ],
                 }],
+                prefixes: vec![],
+                waveforms: vec![],
+                no_op_resources: vec![],
             },
             &plan,
         );

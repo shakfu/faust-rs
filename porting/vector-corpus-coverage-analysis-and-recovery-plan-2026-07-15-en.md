@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phases 0, 1, and 2 complete
+Status: in progress — Phases 0, 1, 2, and 3 complete
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -94,11 +94,13 @@ reports that distinction directly.
 Phase 2 was completed on 2026-07-15. The post-UI plan waterfall was first
 partitioned into 20 delayed-recursion crossings, 18 unplaced sample nodes, 18
 invalid non-sample/lifecycle owners, and two table-value transports. Placement
-now assigns owners only to compute-visible sample nodes, traverses the complete
-checked dependency projection, and materializes disconnected effect roots
-retained by decorations. Stateful `waveform` table-typed nodes cross loop
-boundaries as typed element-value transports rather than as copied table
-identities.
+initially assigned owners to intrinsically sample-typed nodes, traversed the
+complete checked dependency projection, and materialized disconnected effect
+roots retained by decorations. Phase 3 subsequently refined that condition for
+slow values identified as delay carriers by the occurrence certificate or as
+state-dependent by checked effects. Stateful `waveform` table-typed nodes
+cross loop boundaries as typed element-value transports rather than as copied
+table identities.
 
 `FusedSerialGroup` now supports multiple projections, arbitrary internal
 transports, independent disjoint recursive slices, and transitively merged
@@ -122,6 +124,43 @@ reduced the vector request to about 65.2 seconds. Its remaining approximately
 six seconds are attributable in stage traces to decoration and one plan build;
 the 59-second frontend cost is unchanged and remains scheduled for the Phase 6
 historical audit.
+
+Phase 3 was completed on 2026-07-15. Its 39 incoming failures were 19 temporal
+signals without an owner, 13 delays owned by conservative serial islands, six
+waveform-index resources, and one hidden recursion projection. The key semantic
+finding is that intrinsic Faust variability is not an execution-rate proof: a
+constant carried by a cleared delay still changes after the first sample.
+Placement now keeps certified delay carriers and state-dependent closures in
+runtime loops, while pure slow dependencies, including fixed-delay amounts,
+remain control values. Every top-rate
+`Island` is accepted as a serial delay owner because final assembly already
+emits it as an ordered per-sample loop.
+
+The state artifact schema is now version 3. It explicitly represents cycling
+waveform indexes, initialized `prefix` cells, conservative delay effects proven
+to have zero history, and recursive projections that have an internal body but
+no visible projection alias. Producer and checker both reconstruct these facts
+from the verified prepared forest, decorations, and vector plan. Mutation tests
+cover waveform geometry, and the FIR assembler independently checks the new
+state-update statement shapes and lifecycle declarations. The internal Rust
+API for `build_vector_state_plan_with_clock` is adapted to receive
+`VerifiedPreparedSignals`; this has no CLI or C/C++ ABI impact and is required
+to certify waveform length, prefix initialization, and hidden recursion bodies.
+
+The complete counter now reports zero `StatePlan` and zero `VectorPlan`
+fallback: 11 DSPs remain certified, 80 reach `PureLowering`, one soundfile
+reaches `UiProgram`, and the independent SIGGEN error remains. This phase adds
+state evidence but no complete new runtime path, so there is no newly certified
+DSP or sample-parity claim yet. Those paths become executable in Phase 4.
+
+Advancing the slow corpus cases exposed expected downstream work rather than a
+regression in earlier stages. `reverb_designer.dsp` first rose from about 65.2
+to 70.4 seconds because the newly accepted state plan cost 0.87 seconds and the
+lowerer built a 2.70-second routing session before encountering an unsupported
+sampling-frequency constant. A deterministic unsupported-node preflight now
+fails before route construction, restoring the request to about 66.8 seconds.
+Once Phase 4 supports that node, routing cost will be measured as certified
+work and optimized rather than hidden by fallback.
 
 ## 2. Measured Baseline
 

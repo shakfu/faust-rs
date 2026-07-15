@@ -455,6 +455,35 @@ fn phase2_plan_accepts_multi_projection_recursion_and_table_value_transports() {
 }
 
 #[test]
+fn phase3_state_plan_accepts_temporal_slow_values_and_special_state_cells() {
+    std::thread::Builder::new()
+        .name("phase3-vector-state-corpus".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let compiler = Compiler::new().with_compute_mode(ComputeMode::Vector {
+                vec_size: 32,
+                loop_variant: 0,
+            });
+            let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/impulse-tests/dsp");
+            for name in ["echo_bug.dsp", "norm3.dsp", "prefix.dsp", "waveform1.dsp"] {
+                let path = corpus.join(name);
+                let output = compiler
+                    .compile_file_default_to_fir_with_lane(&path, SignalFirLane::TransformFastLane)
+                    .unwrap_or_else(|error| panic!("{name} vector FIR: {error}"));
+                assert_ne!(
+                    output.vector_pipeline_status,
+                    VectorPipelineStatus::Fallback(VectorFallbackReason::StatePlan),
+                    "{name} must pass the checked phase-3 state plan"
+                );
+            }
+        })
+        .expect("spawn large-stack phase-3 test")
+        .join()
+        .expect("phase-3 test thread");
+}
+
+#[test]
 fn vector_copy_delay_loops_reach_c_family_backends() {
     let source = include_str!("../../../tests/impulse-tests/dsp/noiseabs.dsp");
     for loop_variant in [0_u8, 1] {

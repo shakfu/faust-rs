@@ -338,6 +338,17 @@ fn lower_vector_program_impl<'a>(
     real_type: FirType,
     num_inputs: usize,
 ) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
+    let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
+    let mut stage_started = std::time::Instant::now();
+    let mut trace_stage = |stage: &str| {
+        if timing_enabled {
+            eprintln!(
+                "[vector-lower-stage] {stage}: {:.3}s",
+                stage_started.elapsed().as_secs_f64()
+            );
+        }
+        stage_started = std::time::Instant::now();
+    };
     if !matches!(real_type, FirType::Float32 | FirType::Float64) {
         return Err(PureVectorLowerError::InvalidRealType(real_type));
     }
@@ -350,6 +361,18 @@ fn lower_vector_program_impl<'a>(
         state_plan,
         clock_plan,
     )?;
+    trace_stage("prepared-boundary");
+    for record in &verified_plan.plan().signals {
+        let sig = signal_ids[&record.signal_id];
+        if matches!(match_sig(prepared.arena(), sig), SigMatch::FConst(_, _, _)) {
+            trace_stage("unsupported-preflight");
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id: record.signal_id,
+                expression: dump_sig_readable(prepared.arena(), sig),
+            });
+        }
+    }
+    trace_stage("unsupported-preflight");
 
     let mut store = FirStore::new();
     let (session, transport_declarations) = if let Some(clock_plan) = clock_plan {
@@ -363,6 +386,7 @@ fn lower_vector_program_impl<'a>(
     } else {
         VectorRouteSession::new(verified_plan, strategy, real_type.clone(), &mut store)?
     };
+    trace_stage("route-session");
     let mut lowerer = PureVectorLowerer {
         prepared,
         ui,
@@ -391,8 +415,15 @@ fn lower_vector_program_impl<'a>(
     let mut control_values = Vec::with_capacity(control_ids.len());
     for &signal_id in &control_ids {
         let sig = lowerer.sig(signal_id)?;
-        control_values.push(lowerer.lower_control(sig, &mut control_cache, &mut active)?);
+        match lowerer.lower_control(sig, &mut control_cache, &mut active) {
+            Ok(value) => control_values.push(value),
+            Err(error) => {
+                trace_stage("control-lowering-failed");
+                return Err(error);
+            }
+        }
     }
+    trace_stage("control-lowering");
     let (mut control_statements, rewritten_control_values) =
         materialize_region_roots(&mut lowerer.store, &control_values, VectorRegion::Control)?;
     control_statements.extend(
@@ -482,6 +513,7 @@ fn lower_vector_program_impl<'a>(
             statements,
         });
     }
+    trace_stage("loop-lowering");
 
     control_statements.splice(0..0, lowerer.input_declarations.iter().copied());
     let routed = lowerer.session.finish(&lowerer.store)?;
@@ -493,6 +525,7 @@ fn lower_vector_program_impl<'a>(
         &regions,
         &lowerer.store,
     )?;
+    trace_stage("route-and-body-verification");
     Ok(VerifiedPureVectorProgram {
         store: lowerer.store,
         transport_declarations,

@@ -191,6 +191,7 @@ fn build_verified_vector_module_with_evidence(
     }
     trace_stage("clock-ad-plan");
     let state_plan = build_vector_state_plan_with_clock(
+        prepared,
         &decorations,
         &vector_plan,
         &clock_plan,

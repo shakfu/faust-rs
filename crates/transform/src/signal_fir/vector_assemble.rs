@@ -29,8 +29,8 @@ use super::vector_clock_ad::{
 };
 use super::vector_route::{RoutedDefinition, VectorRegion, VerifiedRoutedFir};
 use super::vector_state::{
-    DelayTransition, RecursionTransition, VectorDelayStorage, VectorStateAction,
-    VerifiedVectorStatePlan,
+    DelayTransition, PrefixTransition, RecursionTransition, VectorDelayStorage, VectorStateAction,
+    VectorStateInitialValue, VerifiedVectorStatePlan, WaveformTransition,
 };
 use super::vector_verify::{ValueType, VectorPlan};
 
@@ -299,6 +299,8 @@ pub fn assemble_vector_fir(
 
         let mut delays = BTreeMap::new();
         let mut recursions = BTreeMap::new();
+        let mut prefixes = BTreeMap::new();
+        let mut waveforms = BTreeMap::new();
         if let Some(state) = state_plan {
             materialize_state_storage(
                 state,
@@ -321,6 +323,20 @@ pub fn assemble_vector_fir(
                     .recursions
                     .iter()
                     .map(|recursion| (recursion.group, recursion)),
+            );
+            prefixes.extend(
+                state
+                    .plan()
+                    .prefixes
+                    .iter()
+                    .map(|transition| (transition.signal_id, transition)),
+            );
+            waveforms.extend(
+                state
+                    .plan()
+                    .waveforms
+                    .iter()
+                    .map(|transition| (transition.signal_id, transition)),
             );
         }
 
@@ -346,6 +362,8 @@ pub fn assemble_vector_fir(
                 phases,
                 &delays,
                 &recursions,
+                &prefixes,
+                &waveforms,
                 &definitions,
                 &signal_types,
                 real_type.clone(),
@@ -838,6 +856,29 @@ fn materialize_state_storage(
             }
         }
     }
+    for prefix in &state_plan.plan().prefixes {
+        let typ = value_type_to_fir(&prefix.value_type, real_type.clone(), prefix.signal_id)?;
+        state.push(builder.declare_var(&prefix.state_name, typ.clone(), AccessType::Struct, None));
+        let initial = match prefix.initial {
+            VectorStateInitialValue::Int(value) => builder.int32(value),
+            VectorStateInitialValue::RealBits(bits) => match typ {
+                FirType::Float64 => builder.float64(f64::from_bits(bits)),
+                _ => builder.float32(f64::from_bits(bits) as f32),
+            },
+            VectorStateInitialValue::Zero => zero_value(builder, &typ),
+        };
+        clear.push(builder.store_var(&prefix.state_name, AccessType::Struct, initial));
+    }
+    for waveform in &state_plan.plan().waveforms {
+        state.push(builder.declare_var(
+            &waveform.index_name,
+            FirType::Int32,
+            AccessType::Struct,
+            None,
+        ));
+        let zero = builder.int32(0);
+        clear.push(builder.store_var(&waveform.index_name, AccessType::Struct, zero));
+    }
     Ok(())
 }
 
@@ -848,6 +889,8 @@ fn materialize_loop(
     phases: Option<&super::vector_state::LoopStatePhases>,
     delays: &BTreeMap<u64, &DelayTransition>,
     recursions: &BTreeMap<u64, &RecursionTransition>,
+    prefixes: &BTreeMap<u64, &PrefixTransition>,
+    waveforms: &BTreeMap<u64, &WaveformTransition>,
     definitions: &BTreeMap<(VectorRegion, u64), FirId>,
     signal_types: &BTreeMap<u64, ValueType>,
     real_type: FirType,
@@ -864,6 +907,8 @@ fn materialize_loop(
                 action,
                 delays,
                 recursions,
+                prefixes,
+                waveforms,
                 definitions,
                 signal_types,
                 &mut recursion_values,
@@ -877,6 +922,8 @@ fn materialize_loop(
                 action,
                 delays,
                 recursions,
+                prefixes,
+                waveforms,
                 definitions,
                 signal_types,
                 &mut recursion_values,
@@ -890,6 +937,8 @@ fn materialize_loop(
                 action,
                 delays,
                 recursions,
+                prefixes,
+                waveforms,
                 definitions,
                 signal_types,
                 &mut recursion_values,
@@ -928,6 +977,8 @@ fn materialize_action(
     action: &VectorStateAction,
     delays: &BTreeMap<u64, &DelayTransition>,
     recursions: &BTreeMap<u64, &RecursionTransition>,
+    prefixes: &BTreeMap<u64, &PrefixTransition>,
+    waveforms: &BTreeMap<u64, &WaveformTransition>,
     definitions: &BTreeMap<(VectorRegion, u64), FirId>,
     signal_types: &BTreeMap<u64, ValueType>,
     recursion_values: &mut BTreeMap<u64, FirId>,
@@ -991,11 +1042,20 @@ fn materialize_action(
                             .get(&(VectorRegion::Loop(loop_id), *signal_id))
                             .copied()
                     })
+                    .or_else(|| {
+                        definitions
+                            .get(&(VectorRegion::Loop(loop_id), projection.value_signal_id))
+                            .copied()
+                    })
                     .ok_or(VectorFirAssemblyError::MissingRecursionProjection {
                         group: *group,
                         index: projection.index,
                     })?;
-                let signal_id = projection.signal_ids[0];
+                let signal_id = projection
+                    .signal_ids
+                    .first()
+                    .copied()
+                    .unwrap_or(projection.value_signal_id);
                 let typ = value_type_to_fir(
                     signal_types.get(&signal_id).ok_or(
                         VectorFirAssemblyError::MissingRecursionProjection {
@@ -1073,6 +1133,27 @@ fn materialize_action(
                     builder.store_table(buffer_name, AccessType::Struct, index, value)
                 }
             }
+        }
+        VectorStateAction::PrefixWrite { signal_id } => {
+            let transition = prefixes[signal_id];
+            let value = definitions
+                .get(&(VectorRegion::Loop(loop_id), transition.value_signal_id))
+                .copied()
+                .ok_or(VectorFirAssemblyError::MissingDefinition {
+                    signal_id: transition.value_signal_id,
+                    loop_id,
+                })?;
+            builder.store_var(&transition.state_name, AccessType::Struct, value)
+        }
+        VectorStateAction::WaveformAdvance { signal_id } => {
+            let transition = waveforms[signal_id];
+            let index =
+                builder.load_var(&transition.index_name, AccessType::Struct, FirType::Int32);
+            let one = builder.int32(1);
+            let next = builder.binop(FirBinOp::Add, index, one, FirType::Int32);
+            let length = fir_i32(builder, "waveform length", transition.length)?;
+            let wrapped = builder.binop(FirBinOp::Rem, next, length, FirType::Int32);
+            builder.store_var(&transition.index_name, AccessType::Struct, wrapped)
         }
         VectorStateAction::DelayCopyOut { signal_id } => {
             let delay = delays[signal_id];
@@ -1884,6 +1965,31 @@ fn verify_action_shape(
                 _ => false,
             }
         }
+        VectorStateAction::PrefixWrite { signal_id } => {
+            let transition = state
+                .plan()
+                .prefixes
+                .iter()
+                .find(|transition| transition.signal_id == *signal_id)
+                .expect("verified prefix action has a transition");
+            matches!(
+                match_fir(store, action.statement),
+                FirMatch::StoreVar {
+                    name,
+                    access: AccessType::Struct,
+                    ..
+                } if name == transition.state_name
+            )
+        }
+        VectorStateAction::WaveformAdvance { signal_id } => {
+            let transition = state
+                .plan()
+                .waveforms
+                .iter()
+                .find(|transition| transition.signal_id == *signal_id)
+                .expect("verified waveform action has a transition");
+            waveform_advance_matches(action.statement, transition, store)
+        }
         VectorStateAction::DelayCopyOut { signal_id } => {
             let delay = find_delay(state, *signal_id);
             match &delay.storage {
@@ -1929,6 +2035,50 @@ fn verify_action_shape(
             action: action.action.clone(),
         })
     }
+}
+
+fn waveform_advance_matches(
+    statement: FirId,
+    transition: &WaveformTransition,
+    store: &FirStore,
+) -> bool {
+    let FirMatch::StoreVar {
+        name,
+        access: AccessType::Struct,
+        value,
+    } = match_fir(store, statement)
+    else {
+        return false;
+    };
+    if name != transition.index_name {
+        return false;
+    }
+    let FirMatch::BinOp {
+        op: FirBinOp::Rem,
+        lhs,
+        rhs,
+        ..
+    } = match_fir(store, value)
+    else {
+        return false;
+    };
+    let FirMatch::BinOp {
+        op: FirBinOp::Add,
+        lhs: index,
+        rhs: one,
+        ..
+    } = match_fir(store, lhs)
+    else {
+        return false;
+    };
+    matches!(
+        (match_fir(store, index), match_fir(store, one), match_fir(store, rhs)),
+        (
+            FirMatch::LoadVar { name, access: AccessType::Struct, .. },
+            FirMatch::Int32 { value: 1, .. },
+            FirMatch::Int32 { value: length, .. }
+        ) if name == transition.index_name && u64::try_from(length).ok() == Some(transition.length)
+    )
 }
 
 fn simple_copy_matches(
@@ -2276,8 +2426,12 @@ mod tests {
                     projections: vec![RecursionProjectionTransition {
                         index: 0,
                         signal_ids: vec![11],
+                        value_signal_id: 11,
                     }],
                 }],
+                prefixes: vec![],
+                waveforms: vec![],
+                no_op_resources: vec![],
             },
             vector,
         )
@@ -2546,6 +2700,9 @@ mod tests {
                     },
                 }],
                 recursions: vec![],
+                prefixes: vec![],
+                waveforms: vec![],
+                no_op_resources: vec![],
             },
             &vector,
         );
