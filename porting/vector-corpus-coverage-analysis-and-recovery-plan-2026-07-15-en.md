@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phase 0 complete
+Status: in progress — Phases 0 and 1 complete
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -60,6 +60,36 @@ The Phase 0 corpus run confirmed that every one of the 89 fallbacks emits
 The public API mapping is additive: existing status matching remains valid,
 while `VectorEffectiveMode` and `vector_pipeline_detail` add observability with
 no C or C++ ABI impact.
+
+Phase 1 was completed on 2026-07-15. Scalar and vector FIR assembly now share
+the canonical UI zone-naming and grouped `buildUserInterface` statement
+builder. The checked vector path adds an explicit `VectorUiFir` artifact whose
+declarations, reset statements, and grouped UI statements are compared exactly
+at the final module boundary. Buttons, checkboxes, sliders, numerical entries,
+bargraphs, nested groups, metadata, and multi-control programs therefore pass
+through the checked pipeline without weakening the existing plan, state,
+effect, or route checks. Soundfile lifecycle declarations are understood, but
+sound data lowering remains fail-closed with a specific `UiProgram` diagnostic.
+
+The default corpus moved from 3 to 11 certified DSPs. The newly certified files
+are `UITester.dsp`, `bargraph.dsp`, `noise.dsp`, `noisemetadata.dsp`,
+`norm1.dsp`, `norm2.dsp`, `panpot.dsp`, and `volume.dsp`. The post-UI waterfall
+is 58 `VectorPlan`, 11 `StatePlan`, 11 `PureLowering`, one soundfile
+`UiProgram`, and one independent SIGGEN error. All eight new files passed 96
+fresh native C++ impulse comparisons: scalar `-ss 0..3` plus vector
+`-lv 0/1 x -ss 0..3`, each against the 60,000-frame Faust C++ oracle.
+
+Removing the early UI guard initially exposed superlinear behavior in the
+checked analysis rather than an inherent UI cost. Profiling identified three
+repeated-graph algorithms: whole-map effect fixed points, per-pair BFS effect
+orientation/verification, and repeated topological membership scans. These
+now use a changed-node worklist, deterministic Kahn ordering, compact
+transitive-closure rows, precomputed loop effects, and exact compact conflict
+summaries. Representative debug-build times fell from about 73.5 to 6.9
+seconds for `bells.dsp`, 153 to 10 seconds for `cubic_distortion.dsp`, and 75.7
+to 65.8 seconds for `reverb_designer.dsp`; the last DSP already costs about
+60.6 seconds in scalar mode. `count_vector_corpus --compare-scalar-time` now
+reports that distinction directly.
 
 ## 2. Measured Baseline
 
@@ -473,6 +503,36 @@ Acceptance criteria:
 - benchmark summaries never include scalar fallback under vector speedup
   aggregates.
 
+### Phase 6 - Audit scalar compilation history and cost
+
+Goal: determine whether the expensive scalar corpus cases predate scheduling
+strategies and checked vectorization, and remove any demonstrated regression.
+
+Actions:
+
+1. Identify the commits immediately before `-ss` activation and vector-mode
+   activation, then build comparable release binaries from isolated worktrees.
+2. Measure a fixed slow-DSP subset and the corpus aggregate with identical
+   frontend, precision, include paths, FIR lane, and output mode.
+3. Add stage timing around parse/import, evaluation, propagation,
+   normalization, preparation, scheduling, FIR lowering, and backend emission
+   so absolute scalar cost is attributable rather than inferred from total
+   wall time.
+4. Classify each cost as historical, scheduling-related, vector-analysis
+   leakage into scalar mode, or another later regression.
+5. Fix every reproducible regression, add a structural or growth test for its
+   cause, and retain a benchmark baseline that can detect recurrence.
+
+Acceptance criteria:
+
+- the comparison names exact commits, commands, machine context, and repeated
+  measurements;
+- scalar mode does not execute vector-only certification work;
+- demonstrated post-baseline regressions are corrected or retained only with
+  an explicit measured justification;
+- the final report separates historical frontend cost from `-ss` and vector
+  mode overhead.
+
 ## 6. Recommended Execution Order
 
 The recommended order is:
@@ -485,6 +545,7 @@ detailed diagnostics
     -> missing state resources
     -> residual pure lowering
     -> permanent retention and performance gates
+    -> scalar compilation history and performance audit
 ```
 
 UI is the highest-leverage implementation area because it currently blocks

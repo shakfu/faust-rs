@@ -255,6 +255,7 @@ impl LowerScope {
 
 struct PureVectorLowerer<'a> {
     prepared: &'a VerifiedPreparedSignals,
+    ui: &'a ui::UiProgram,
     session: VectorRouteSession<'a>,
     store: FirStore,
     real_type: FirType,
@@ -265,6 +266,7 @@ struct PureVectorLowerer<'a> {
     math_ops: HashSet<FirMathOp>,
     int_helpers: BTreeSet<&'static str>,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
+    ui_stores: BTreeMap<LowerScope, Vec<FirId>>,
 }
 
 /// Lowers actual effect-free prepared signals into P4.4 vector regions.
@@ -279,11 +281,13 @@ pub fn lower_pure_vector_program(
     real_type: FirType,
     num_inputs: usize,
 ) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
+    let ui = ui::UiProgram::empty();
     lower_vector_program_impl(
         prepared,
         verified_plan,
         None,
         None,
+        &ui,
         strategy,
         real_type,
         num_inputs,
@@ -293,11 +297,13 @@ pub fn lower_pure_vector_program(
 /// Lowers the P6-supported vector subset using authoritative state and clock
 /// artifacts. Forward AD needs no special carrier after propagation and enters
 /// through the ordinary pointwise cases below.
+#[allow(clippy::too_many_arguments)]
 pub fn lower_vector_program(
     prepared: &VerifiedPreparedSignals,
     verified_plan: &VerifiedVectorPlan,
     state_plan: &VerifiedVectorStatePlan,
     clock_plan: &VerifiedVectorClockAdPlan,
+    ui: &ui::UiProgram,
     strategy: SchedulingStrategy,
     real_type: FirType,
     num_inputs: usize,
@@ -314,6 +320,7 @@ pub fn lower_vector_program(
         verified_plan,
         Some(state_plan),
         Some(clock_plan),
+        ui,
         strategy,
         real_type,
         num_inputs,
@@ -326,6 +333,7 @@ fn lower_vector_program_impl<'a>(
     verified_plan: &'a VerifiedVectorPlan,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
     clock_plan: Option<&'a VerifiedVectorClockAdPlan>,
+    ui: &'a ui::UiProgram,
     strategy: SchedulingStrategy,
     real_type: FirType,
     num_inputs: usize,
@@ -336,6 +344,7 @@ fn lower_vector_program_impl<'a>(
     let signal_ids = collect_prepared_ids(prepared);
     verify_plan_prepared_boundary(
         prepared,
+        ui,
         verified_plan.plan(),
         &signal_ids,
         state_plan,
@@ -356,6 +365,7 @@ fn lower_vector_program_impl<'a>(
     };
     let mut lowerer = PureVectorLowerer {
         prepared,
+        ui,
         session,
         store,
         real_type,
@@ -366,6 +376,7 @@ fn lower_vector_program_impl<'a>(
         math_ops: HashSet::new(),
         int_helpers: BTreeSet::new(),
         state_plan,
+        ui_stores: BTreeMap::new(),
     };
 
     let mut control_cache = BTreeMap::new();
@@ -384,6 +395,12 @@ fn lower_vector_program_impl<'a>(
     }
     let (mut control_statements, rewritten_control_values) =
         materialize_region_roots(&mut lowerer.store, &control_values, VectorRegion::Control)?;
+    control_statements.extend(
+        lowerer
+            .ui_stores
+            .remove(&LowerScope::Control)
+            .unwrap_or_default(),
+    );
     for (&signal_id, &value) in control_ids.iter().zip(&rewritten_control_values) {
         lowerer
             .session
@@ -453,6 +470,12 @@ fn lower_vector_program_impl<'a>(
                 FirMatch::Drop(value) if transported_values.contains(&value)
             )
         });
+        statements.extend(
+            lowerer
+                .ui_stores
+                .remove(&LowerScope::Loop(region.loop_id))
+                .unwrap_or_default(),
+        );
         statements.extend(stores);
         regions.push(PureVectorRegionBody {
             loop_id: region.loop_id,
@@ -612,6 +635,31 @@ impl PureVectorLowerer<'_> {
             SigMatch::Int(value) => FirBuilder::new(&mut self.store).int32(value),
             SigMatch::Real(value) => self.float_const(value),
             SigMatch::Input(index) => self.lower_input(index)?,
+            SigMatch::Button(control) => self.lower_ui_input(control, ui::ControlKind::Button)?,
+            SigMatch::Checkbox(control) => {
+                self.lower_ui_input(control, ui::ControlKind::Checkbox)?
+            }
+            SigMatch::VSlider(control) => self.lower_ui_input(control, ui::ControlKind::VSlider)?,
+            SigMatch::HSlider(control) => self.lower_ui_input(control, ui::ControlKind::HSlider)?,
+            SigMatch::NumEntry(control) => {
+                self.lower_ui_input(control, ui::ControlKind::NumEntry)?
+            }
+            SigMatch::VBargraph(control, inner) => self.lower_bargraph(
+                scope,
+                control,
+                ui::ControlKind::VBargraph,
+                inner,
+                cache,
+                active,
+            )?,
+            SigMatch::HBargraph(control, inner) => self.lower_bargraph(
+                scope,
+                control,
+                ui::ControlKind::HBargraph,
+                inner,
+                cache,
+                active,
+            )?,
             SigMatch::Output(_, inner) => self.lower_dep(scope, inner, cache, active)?,
             SigMatch::Delay1(value) => self.lower_delay_read(scope, value, 1, cache, active)?,
             SigMatch::Delay(value, amount) => match match_sig(self.prepared.arena(), amount) {
@@ -831,6 +879,66 @@ impl PureVectorLowerer<'_> {
                 });
             }
         };
+        Ok(value)
+    }
+
+    fn lower_ui_input(
+        &mut self,
+        control: ui::ControlId,
+        expected: ui::ControlKind,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(control),
+                expression,
+            }
+        })?;
+        if zone.kind != expected {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(control),
+                expression: format!(
+                    "UI control {control} kind mismatch: expected {expected:?}, got {:?}",
+                    zone.kind
+                ),
+            });
+        }
+        let raw = FirBuilder::new(&mut self.store).load_var(
+            zone.name,
+            AccessType::Struct,
+            FirType::FaustFloat,
+        );
+        Ok(FirBuilder::new(&mut self.store).cast(self.real_type.clone(), raw))
+    }
+
+    fn lower_bargraph(
+        &mut self,
+        scope: LowerScope,
+        control: ui::ControlId,
+        expected: ui::ControlKind,
+        inner: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(control),
+                expression,
+            }
+        })?;
+        if zone.kind != expected {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(control),
+                expression: format!(
+                    "bargraph {control} kind mismatch: expected {expected:?}, got {:?}",
+                    zone.kind
+                ),
+            });
+        }
+        let value = self.lower_dep(scope, inner, cache, active)?;
+        let external = FirBuilder::new(&mut self.store).cast(FirType::FaustFloat, value);
+        let store =
+            FirBuilder::new(&mut self.store).store_var(zone.name, AccessType::Struct, external);
+        self.ui_stores.entry(scope).or_default().push(store);
         Ok(value)
     }
 
@@ -1200,6 +1308,7 @@ fn collect_prepared_ids(prepared: &VerifiedPreparedSignals) -> BTreeMap<u64, Sig
 
 fn verify_plan_prepared_boundary(
     prepared: &VerifiedPreparedSignals,
+    ui: &ui::UiProgram,
     plan: &VectorPlan,
     ids: &BTreeMap<u64, SigId>,
     state_plan: Option<&VerifiedVectorStatePlan>,
@@ -1245,6 +1354,21 @@ fn verify_plan_prepared_boundary(
                 managed_resources.contains(resource)
             }
             EffectAtom::WriteOutput(channel) => output_channel == Some(*channel),
+            EffectAtom::WriteUi(control) => {
+                let expected = match match_sig(prepared.arena(), sig) {
+                    SigMatch::VBargraph(actual, _) if actual == *control => {
+                        Some(ui::ControlKind::VBargraph)
+                    }
+                    SigMatch::HBargraph(actual, _) if actual == *control => {
+                        Some(ui::ControlKind::HBargraph)
+                    }
+                    _ => None,
+                };
+                expected.is_some_and(|kind| {
+                    ui.control(*control)
+                        .is_some_and(|spec| spec.kind == kind && spec.id == *control)
+                })
+            }
             _ => false,
         });
         if !record.effects.is_empty() && !effects_supported {

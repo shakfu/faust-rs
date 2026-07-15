@@ -38,6 +38,7 @@ use super::vector_lower::lower_vector_program;
 use super::vector_plan::build_vector_plan;
 use super::vector_route::{VectorRegion, VerifiedRoutedFir};
 use super::vector_state::build_vector_state_plan_with_clock;
+use super::vector_ui::{VectorUiFir, build_vector_ui_fir};
 use super::vector_verify::VectorPlan;
 use super::{
     ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
@@ -71,7 +72,7 @@ impl fmt::Display for VectorModuleFailure {
 pub(crate) fn build_verified_vector_module(
     prepared: &VerifiedPreparedSignals,
     domains: &ClockDomainTable,
-    ui_has_no_controls: bool,
+    ui: &ui::UiProgram,
     num_inputs: usize,
     num_outputs: usize,
     module_name: &str,
@@ -83,7 +84,7 @@ pub(crate) fn build_verified_vector_module(
     let built = build_verified_vector_module_with_evidence(
         prepared,
         domains,
-        ui_has_no_controls,
+        ui,
         num_inputs,
         num_outputs,
         module_name,
@@ -115,7 +116,7 @@ struct BuiltVectorModule {
 fn build_verified_vector_module_with_evidence(
     prepared: &VerifiedPreparedSignals,
     domains: &ClockDomainTable,
-    ui_has_no_controls: bool,
+    ui: &ui::UiProgram,
     num_inputs: usize,
     num_outputs: usize,
     module_name: &str,
@@ -124,12 +125,6 @@ fn build_verified_vector_module_with_evidence(
     compute_mode: ComputeMode,
     strategy: SchedulingStrategy,
 ) -> Result<BuiltVectorModule, VectorModuleFailure> {
-    if !ui_has_no_controls {
-        return Err(VectorModuleFailure::new(
-            VectorFallbackReason::UiProgram,
-            "the checked vector module does not yet assemble grouped UI state",
-        ));
-    }
     let ComputeMode::Vector {
         vec_size,
         loop_variant,
@@ -140,17 +135,45 @@ fn build_verified_vector_module_with_evidence(
             "checked vector module requested for scalar compute mode",
         ));
     };
+    if let Some(soundfile) = ui
+        .controls
+        .iter()
+        .find(|control| control.kind == ui::ControlKind::Soundfile)
+    {
+        return Err(VectorModuleFailure::new(
+            VectorFallbackReason::UiProgram,
+            format!(
+                "soundfile control {} has checked UI lifecycle state, but vector sound data lowering is not yet certified",
+                soundfile.id
+            ),
+        ));
+    }
+    let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
+    let mut stage_started = std::time::Instant::now();
+    let mut trace_stage = |stage: &str| {
+        if timing_enabled {
+            eprintln!(
+                "[vector-stage] {stage}: {:.3}s",
+                stage_started.elapsed().as_secs_f64()
+            );
+        }
+        stage_started = std::time::Instant::now();
+    };
 
     let clocks = crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs()).map_err(
         |error| VectorModuleFailure::new(VectorFallbackReason::ClockAnalysis, error.to_string()),
     )?;
+    trace_stage("clock-analysis");
     let decorations = certify_decorations(prepared, &clocks).map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::Decorations, error.to_string())
     })?;
+    trace_stage("decorations");
     let vector_plan = build_vector_plan(&decorations, u64::from(vec_size)).map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::VectorPlan, error.to_string())
     })?;
+    trace_stage("vector-plan");
     reject_cross_loop_delay_read_transports(&decorations, vector_plan.plan())?;
+    trace_stage("recursive-transport-guard");
     let clock_plan = build_vector_clock_ad_plan(prepared, domains, &decorations, &vector_plan)
         .map_err(|error| {
             VectorModuleFailure::new(VectorFallbackReason::ClockAdPlan, error.to_string())
@@ -166,6 +189,7 @@ fn build_verified_vector_module_with_evidence(
             ),
         ));
     }
+    trace_stage("clock-ad-plan");
     let state_plan = build_vector_state_plan_with_clock(
         &decorations,
         &vector_plan,
@@ -175,11 +199,13 @@ fn build_verified_vector_module_with_evidence(
     .map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::StatePlan, error.to_string())
     })?;
+    trace_stage("state-plan");
     let mut program = lower_vector_program(
         prepared,
         &vector_plan,
         &state_plan,
         &clock_plan,
+        ui,
         strategy,
         real_type.clone(),
         num_inputs,
@@ -187,6 +213,7 @@ fn build_verified_vector_module_with_evidence(
     .map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::PureLowering, error.to_string())
     })?;
+    trace_stage("vector-lowering");
     build_state_event_order_certificate(
         &vector_plan,
         program.routed(),
@@ -196,6 +223,7 @@ fn build_verified_vector_module_with_evidence(
     .map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::EventCertificate, error.to_string())
     })?;
+    trace_stage("event-certificate");
 
     let routed = program.routed().clone();
     let mut loop_inputs = program
@@ -224,6 +252,7 @@ fn build_verified_vector_module_with_evidence(
             store: program.store_mut(),
         },
     )?;
+    trace_stage("output-materialization");
     let assembly = assemble_vector_fir(
         &routed,
         Some(&state_plan),
@@ -236,8 +265,12 @@ fn build_verified_vector_module_with_evidence(
     .map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::FirAssembly, error.to_string())
     })?;
+    trace_stage("fir-assembly");
 
     let assembly = assembly.into_assembly();
+    let ui_fir = build_vector_ui_fir(ui, &real_type, program.store_mut())
+        .map_err(|error| VectorModuleFailure::new(VectorFallbackReason::UiProgram, error))?;
+    trace_stage("ui-lifecycle");
     let module = assemble_module(
         program.store_mut(),
         module_name,
@@ -251,8 +284,10 @@ fn build_verified_vector_module_with_evidence(
         &int_helpers,
         &assembly,
         &control_output_stores,
+        &ui_fir,
     )?;
-    verify_final_module(program.store(), module, &assembly, &output_stores)?;
+    verify_final_module(program.store(), module, &assembly, &output_stores, &ui_fir)?;
+    trace_stage("module-assembly-verification");
 
     Ok(BuiltVectorModule {
         output: SignalFirOutput {
@@ -470,6 +505,7 @@ fn assemble_module(
     int_helpers: &std::collections::BTreeSet<&'static str>,
     assembly: &VectorFirAssembly,
     control_output_stores: &[FirId],
+    ui_fir: &VectorUiFir,
 ) -> Result<FirId, VectorModuleFailure> {
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
@@ -516,12 +552,12 @@ fn assemble_module(
         false,
     );
 
-    let reset_body = FirBuilder::new(store).block(&[]);
+    let reset_body = FirBuilder::new(store).block(&ui_fir.reset_statements);
     let instance_reset_ui =
         lifecycle_function(store, "instanceResetUserInterface", &dsp_arg, reset_body);
     let clear_body = FirBuilder::new(store).block(&assembly.clear_statements);
     let instance_clear = lifecycle_function(store, "instanceClear", &dsp_arg, clear_body);
-    let ui_body = FirBuilder::new(store).block(&[]);
+    let ui_body = FirBuilder::new(store).block(&ui_fir.build_statements);
     let build_ui = FirBuilder::new(store).declare_fun(
         "buildUserInterface",
         FirType::Fun {
@@ -593,6 +629,7 @@ fn assemble_module(
     let sample_rate_field =
         FirBuilder::new(store).declare_var("fSampleRate", FirType::Int32, AccessType::Struct, None);
     let mut fields = vec![sample_rate_field];
+    fields.extend(ui_fir.struct_declarations.iter().copied());
     fields.extend(assembly.state_declarations.iter().copied());
     let dsp_struct = FirBuilder::new(store).block(&fields);
     let static_declarations = FirBuilder::new(store).block(&[]);
@@ -775,6 +812,7 @@ fn verify_final_module(
     module: FirId,
     assembly: &VectorFirAssembly,
     output_stores: &[FirId],
+    ui_fir: &VectorUiFir,
 ) -> Result<(), VectorModuleFailure> {
     let report = verify_fir_module(store, module);
     if report.has_errors() {
@@ -805,6 +843,13 @@ fn verify_final_module(
         .any(|declaration| !fields.contains(declaration))
     {
         return Err(module_shape("P6 state declaration missing from DSP struct"));
+    }
+    if ui_fir
+        .struct_declarations
+        .iter()
+        .any(|declaration| !fields.contains(declaration))
+    {
+        return Err(module_shape("UI zone declaration missing from DSP struct"));
     }
     let FirMatch::Block(functions) = match_fir(store, functions) else {
         return Err(module_shape("function section is not a block"));
@@ -839,6 +884,20 @@ fn verify_final_module(
     {
         return Err(module_shape(
             "instanceClear does not contain exact P6 clears",
+        ));
+    }
+    if match_fir(store, bodies["instanceResetUserInterface"])
+        != FirMatch::Block(ui_fir.reset_statements.clone())
+    {
+        return Err(module_shape(
+            "instanceResetUserInterface does not contain exact UI resets",
+        ));
+    }
+    if match_fir(store, bodies["buildUserInterface"])
+        != FirMatch::Block(ui_fir.build_statements.clone())
+    {
+        return Err(module_shape(
+            "buildUserInterface does not contain exact grouped UI program",
         ));
     }
     let compute = bodies["compute"];
@@ -965,7 +1024,7 @@ mod tests {
                 let output = build_verified_vector_module(
                     &prepared,
                     &ClockDomainTable::new(),
-                    true,
+                    &ui::UiProgram::empty(),
                     1,
                     1,
                     "mydsp",
@@ -1044,7 +1103,7 @@ mod tests {
                 let output = build_verified_vector_module(
                     &prepared,
                     &ClockDomainTable::new(),
-                    true,
+                    &ui::UiProgram::empty(),
                     1,
                     1,
                     "delaydsp",
@@ -1078,7 +1137,7 @@ mod tests {
                 build_verified_vector_module(
                     &prepared,
                     &ClockDomainTable::new(),
-                    true,
+                    &ui::UiProgram::empty(),
                     1,
                     1,
                     "recdsp",
@@ -1101,7 +1160,7 @@ mod tests {
         let mut built = build_verified_vector_module_with_evidence(
             &prepared,
             &ClockDomainTable::new(),
-            true,
+            &ui::UiProgram::empty(),
             1,
             1,
             "mydsp",
@@ -1116,12 +1175,19 @@ mod tests {
         .expect("verified module with evidence");
         assert_eq!(built.output_stores.len(), 1);
         let forged = FirBuilder::new(&mut built.output.store).int32(0);
+        let ui_fir = build_vector_ui_fir(
+            &ui::UiProgram::empty(),
+            &FirType::Float32,
+            &mut built.output.store,
+        )
+        .expect("empty UI evidence");
         assert!(matches!(
             verify_final_module(
                 &built.output.store,
                 built.output.module,
                 &built.assembly,
                 &[forged],
+                &ui_fir,
             ),
             Err(VectorModuleFailure {
                 reason: VectorFallbackReason::ModuleVerification,

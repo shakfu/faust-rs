@@ -1255,24 +1255,20 @@ fn decorate_effects(
     for record in records.values() {
         direct.insert(record.sig.as_u32(), direct_effects(analysis, record.sig)?);
     }
-    let mut accumulated = direct.clone();
-    loop {
-        let previous = accumulated.clone();
-        for (&sig, own) in &direct {
-            let mut effects = own.clone();
-            if let Some(children) = dependencies.get(&sig) {
-                for child in children.condition_children() {
-                    if let Some(child_effects) = previous.get(&child.as_u32()) {
-                        effects.extend(child_effects.iter().cloned());
-                    }
-                }
+    // The former whole-map fixed point cloned every signal's complete effect
+    // set once per graph-depth iteration. Deep UI-bearing DSPs therefore paid
+    // roughly O(depth * signals * effects). Propagate only changed child sets
+    // to their parents instead; this computes the same least union fixed point
+    // and converges over cycles without rescanning unrelated records.
+    let mut parents = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for (&parent, projection) in dependencies {
+        for child in projection.condition_children() {
+            if direct.contains_key(&child.as_u32()) {
+                parents.entry(child.as_u32()).or_default().insert(parent);
             }
-            accumulated.insert(sig, effects);
-        }
-        if accumulated == previous {
-            break;
         }
     }
+    let (accumulated, _) = propagate_effect_sets(&direct, &parents);
     for (&sig, effects) in &accumulated {
         let info = &mut records
             .get_mut(&sig)
@@ -1282,6 +1278,30 @@ fn decorate_effects(
         info.direct_effects = direct[&sig].iter().cloned().collect();
     }
     Ok(())
+}
+
+fn propagate_effect_sets(
+    direct: &BTreeMap<u32, BTreeSet<EffectAtom>>,
+    parents: &BTreeMap<u32, BTreeSet<u32>>,
+) -> (BTreeMap<u32, BTreeSet<EffectAtom>>, usize) {
+    let mut accumulated = direct.clone();
+    let mut pending = accumulated.keys().copied().collect::<BTreeSet<_>>();
+    let mut updates = 0_usize;
+    while let Some(child) = pending.pop_first() {
+        let child_effects = accumulated[&child].clone();
+        for &parent in parents.get(&child).into_iter().flatten() {
+            let parent_effects = accumulated
+                .get_mut(&parent)
+                .expect("effect parent has a signal record");
+            let previous_len = parent_effects.len();
+            parent_effects.extend(child_effects.iter().cloned());
+            if parent_effects.len() != previous_len {
+                updates += 1;
+                pending.insert(parent);
+            }
+        }
+    }
+    (accumulated, updates)
 }
 
 fn decode_fir(
@@ -1478,8 +1498,23 @@ pub fn analyze_vector_signals(
     prepared: &VerifiedPreparedSignals,
     clk_envs: &ClkEnvMap,
 ) -> Result<VectorSignalAnalysis, AnalysisError> {
+    let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
+    let started = std::time::Instant::now();
     let conditions = ExecutionConditionTable::build(prepared)?;
+    if timing_enabled {
+        eprintln!(
+            "[vector-analysis-stage] conditions: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let started = std::time::Instant::now();
     let uses = analyze_signal_uses(prepared, clk_envs, &conditions)?;
+    if timing_enabled {
+        eprintln!(
+            "[vector-analysis-stage] uses: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
     Ok(VectorSignalAnalysis { conditions, uses })
 }
 
@@ -1510,7 +1545,19 @@ fn analyze_forest(
     clk_env: impl Fn(SigId) -> Option<ClkEnv>,
     conditions: &impl ExecutionConditions,
 ) -> Result<SignalUseTable, AnalysisError> {
+    let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
+    let mut stage_started = std::time::Instant::now();
+    let mut trace_stage = |stage: &str| {
+        if timing_enabled {
+            eprintln!(
+                "[vector-uses-stage] {stage}: {:.3}s",
+                stage_started.elapsed().as_secs_f64()
+            );
+        }
+        stage_started = std::time::Instant::now();
+    };
     let (recursiveness, _) = compute_recursiveness(analysis, roots)?;
+    trace_stage("recursiveness");
     let mut records = BTreeMap::<u32, SignalUseRecord>::new();
     let mut dependency_cache = BTreeMap::<u32, SignalDependencies>::new();
     let mut expanded_signals = BTreeSet::<u32>::new();
@@ -1579,8 +1626,10 @@ fn analyze_forest(
             work.push_back((occurrence.to, child_context, occurrence.delay));
         }
     }
+    trace_stage("occurrences-and-dependencies");
 
     decorate_effects(analysis, &mut records, &dependency_cache)?;
+    trace_stage("effects");
 
     let mut dependencies = dependency_cache
         .values()
@@ -1596,6 +1645,7 @@ fn analyze_forest(
     for record in records.values_mut() {
         finalize_occurrences(&mut record.info);
     }
+    trace_stage("canonicalization");
     Ok(SignalUseTable {
         records: records.into_values().collect(),
         dependencies,
@@ -2565,6 +2615,29 @@ mod tests {
             assert!(root_effects.contains(&expected), "missing {expected:?}");
         }
         assert!(root_effects.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn effect_propagation_work_scales_linearly_on_a_deep_chain() {
+        const SIGNALS: u32 = 512;
+        let mut direct = (0..SIGNALS)
+            .map(|signal| (signal, BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        direct
+            .get_mut(&(SIGNALS - 1))
+            .unwrap()
+            .insert(EffectAtom::WriteOutput(0));
+        let parents = (1..SIGNALS)
+            .map(|child| (child, BTreeSet::from([child - 1])))
+            .collect::<BTreeMap<_, _>>();
+
+        let (accumulated, updates) = propagate_effect_sets(&direct, &parents);
+
+        assert_eq!(
+            accumulated[&0],
+            BTreeSet::from([EffectAtom::WriteOutput(0)])
+        );
+        assert_eq!(updates, usize::try_from(SIGNALS - 1).unwrap());
     }
 
     #[test]

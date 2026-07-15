@@ -118,6 +118,7 @@ pub mod vector_plan;
 pub mod vector_route;
 pub mod vector_schedule;
 pub mod vector_state;
+mod vector_ui;
 pub mod vector_verify;
 
 pub use error::{SignalFirError, SignalFirErrorCode};
@@ -582,7 +583,7 @@ fn compile_fastlane_inner(
         match vector_module::build_verified_vector_module(
             &prepared,
             domains,
-            ui.controls.is_empty(),
+            ui,
             plan.num_inputs,
             plan.num_outputs,
             options.module_name.as_str(),

@@ -26,12 +26,12 @@ use super::decoration_verify::{
     CanonicalSigType, DecorationRecord, DependencyFact, VerifiedDecorationCertificate,
 };
 use super::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_loop};
-use super::vector_analysis::{DepKind, effect_sets_conflict};
+use super::vector_analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
 use super::vector_verify::{
     EpochRecord, FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate,
     SignalRecord, TransportRecord, ValueType, VecSafeWitness, VectorPlan, VectorPlanError,
     Vectorability, WitnessKind, effects_duplicable, effects_sample_reorderable,
-    verify_fused_serial_groups, verify_vector_plan,
+    verify_fused_serial_groups_after_plan, verify_vector_plan,
 };
 
 const EFFECT_ISLAND_TAG: u64 = 1 << 63;
@@ -176,6 +176,17 @@ pub fn build_vector_plan(
     verified: &VerifiedDecorationCertificate,
     vec_size: u64,
 ) -> Result<VerifiedVectorPlan, VectorPlanBuildError> {
+    let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
+    let mut stage_started = std::time::Instant::now();
+    let mut trace_stage = |stage: &str| {
+        if timing_enabled {
+            eprintln!(
+                "[vector-plan-stage] {stage}: {:.3}s",
+                stage_started.elapsed().as_secs_f64()
+            );
+        }
+        stage_started = std::time::Instant::now();
+    };
     if vec_size == 0 {
         return Err(VectorPlanBuildError::VecSizeZero);
     }
@@ -200,6 +211,7 @@ pub fn build_vector_plan(
             (record.signal_id, needs_separate_loop(&props))
         })
         .collect::<BTreeMap<_, _>>();
+    trace_stage("records-and-separations");
 
     let inline_sample_root = certificate.roots.iter().any(|root| {
         records.get(root).is_some_and(|record| {
@@ -311,6 +323,7 @@ pub fn build_vector_plan(
         };
         state.visit(root, loop_id)?;
     }
+    trace_stage("placement");
     for record in &certificate.records {
         if record.variability == Variability::Samp
             && !state.placement.contains_key(&record.signal_id)
@@ -333,6 +346,7 @@ pub fn build_vector_plan(
             &mut effect_edges,
         )?;
     }
+    trace_stage("dependency-edges");
     let mut data_edges = cross_uses
         .iter()
         .map(|&(_, producer, consumer)| LoopEdge {
@@ -348,9 +362,11 @@ pub fn build_vector_plan(
             ordering_edges.insert(edge);
         }
     }
+    trace_stage("delayed-edge-closure");
 
     let loop_ids = (0..next_loop).collect::<Vec<_>>();
     orient_effect_conflicts(&loop_ids, &state, &data_edges, &mut effect_edges);
+    trace_stage("effect-orientation");
     data_edges.retain(|edge| edge.consumer != edge.dependency);
     effect_edges.retain(|edge| edge.consumer != edge.dependency);
 
@@ -370,6 +386,7 @@ pub fn build_vector_plan(
             duplicable: effects_duplicable(&record.effects),
         })
         .collect::<Vec<_>>();
+    trace_stage("signal-records");
 
     let mut loops = Vec::new();
     let mut witnesses = Vec::new();
@@ -416,6 +433,7 @@ pub fn build_vector_plan(
             },
         });
     }
+    trace_stage("loop-records");
 
     let mut transports = Vec::new();
     for (transport_id, &(signal_id, producer_loop, consumer_loop)) in cross_uses.iter().enumerate()
@@ -434,8 +452,10 @@ pub fn build_vector_plan(
             length: vec_size,
         });
     }
+    trace_stage("transports");
 
     let fused_serial_groups = build_fused_serial_groups(certificate, &state, &transports);
+    trace_stage("fused-groups");
     let plan = VectorPlan {
         vec_size,
         signals,
@@ -454,8 +474,12 @@ pub fn build_vector_plan(
         vec_safe_witnesses: witnesses,
         fused_serial_groups,
     };
-    verify_vector_plan(&plan)?;
-    verify_fused_serial_groups(&plan, verified)?;
+    let verification = verify_vector_plan(&plan);
+    trace_stage("plan-verification");
+    verification?;
+    let fused_verification = verify_fused_serial_groups_after_plan(&plan, verified);
+    trace_stage("fused-verification");
+    fused_verification?;
     Ok(VerifiedVectorPlan { plan })
 }
 
@@ -638,6 +662,14 @@ fn orient_effect_conflicts(
     data_edges: &BTreeSet<LoopEdge>,
     effect_edges: &mut BTreeSet<LoopEdge>,
 ) {
+    if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+        eprintln!(
+            "[vector-plan-size] loops={} data_edges={} effect_edges={}",
+            loops.len(),
+            data_edges.len(),
+            effect_edges.len()
+        );
+    }
     let mut base_edges = data_edges.clone();
     base_edges.extend(effect_edges.iter().copied());
     let order = stable_topological_order(loops, &base_edges);
@@ -646,13 +678,21 @@ fn orient_effect_conflicts(
         .enumerate()
         .map(|(position, &loop_id)| (loop_id, position))
         .collect::<BTreeMap<_, _>>();
+    let effects_by_loop = loops
+        .iter()
+        .map(|&loop_id| {
+            (
+                loop_id,
+                EffectConflictSummary::new(&loop_effects(loop_id, state)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut reachability = PlanReachability::new(loops, &base_edges);
     for (index, &left) in loops.iter().enumerate() {
         for &right in &loops[index + 1..] {
-            let left_effects = loop_effects(left, state);
-            let right_effects = loop_effects(right, state);
-            if !effect_sets_conflict(&left_effects, &right_effects)
-                || reachable(left, right, &base_edges)
-                || reachable(right, left, &base_edges)
+            if !effects_by_loop[&left].conflicts(&effects_by_loop[&right])
+                || reachability.reaches(left, right)
+                || reachability.reaches(right, left)
             {
                 continue;
             }
@@ -667,7 +707,153 @@ fn orient_effect_conflicts(
             };
             effect_edges.insert(edge);
             base_edges.insert(edge);
+            reachability.add_edge(dependency, consumer);
         }
+    }
+}
+
+#[derive(Default)]
+struct EffectConflictSummary {
+    any: bool,
+    barrier: bool,
+    state_reads: BTreeSet<StateResource>,
+    state_writes: BTreeSet<StateResource>,
+    table_reads: BTreeSet<u32>,
+    table_writes: BTreeSet<u32>,
+    ui_writes: BTreeSet<u32>,
+    output_writes: BTreeSet<u32>,
+}
+
+impl EffectConflictSummary {
+    fn new(effects: &[EffectAtom]) -> Self {
+        let mut summary = Self {
+            any: !effects.is_empty(),
+            ..Self::default()
+        };
+        for effect in effects {
+            match effect {
+                EffectAtom::ReadState(resource) => {
+                    summary.state_reads.insert(resource.clone());
+                }
+                EffectAtom::WriteState(resource) => {
+                    summary.state_writes.insert(resource.clone());
+                }
+                EffectAtom::ReadTable(table) => {
+                    summary.table_reads.insert(*table);
+                }
+                EffectAtom::WriteTable(table) => {
+                    summary.table_writes.insert(*table);
+                }
+                EffectAtom::WriteUi(zone) => {
+                    summary.ui_writes.insert(*zone);
+                }
+                EffectAtom::WriteOutput(output) => {
+                    summary.output_writes.insert(*output);
+                }
+                EffectAtom::Foreign { purity, .. } => {
+                    summary.barrier |=
+                        matches!(purity, ForeignPurity::Impure | ForeignPurity::Unknown);
+                }
+            }
+        }
+        summary
+    }
+
+    fn conflicts(&self, other: &Self) -> bool {
+        (self.barrier && other.any)
+            || (other.barrier && self.any)
+            || intersects(&self.state_writes, &other.state_reads)
+            || intersects(&self.state_writes, &other.state_writes)
+            || intersects(&self.state_reads, &other.state_writes)
+            || intersects(&self.table_writes, &other.table_reads)
+            || intersects(&self.table_writes, &other.table_writes)
+            || intersects(&self.table_reads, &other.table_writes)
+            || intersects(&self.ui_writes, &other.ui_writes)
+            || intersects(&self.output_writes, &other.output_writes)
+    }
+}
+
+fn intersects<T: Ord>(left: &BTreeSet<T>, right: &BTreeSet<T>) -> bool {
+    let (small, large) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    small.iter().any(|item| large.contains(item))
+}
+
+/// Compact transitive closure used while orienting effect conflicts.
+///
+/// The previous implementation ran one graph BFS for every conflicting loop
+/// pair. Large UI DSPs have hundreds of loops and many effects propagated to
+/// their output roots, making that quadratic pair scan cubic in graph size.
+/// Bit rows make each query constant-time and update only predecessors of a
+/// newly inserted acyclic edge.
+struct PlanReachability {
+    index: BTreeMap<u64, usize>,
+    rows: Vec<Vec<u64>>,
+}
+
+impl PlanReachability {
+    fn new(loops: &[u64], edges: &BTreeSet<LoopEdge>) -> Self {
+        let index = loops
+            .iter()
+            .enumerate()
+            .map(|(index, &loop_id)| (loop_id, index))
+            .collect::<BTreeMap<_, _>>();
+        let words = loops.len().div_ceil(u64::BITS as usize);
+        let mut closure = Self {
+            index,
+            rows: vec![vec![0; words]; loops.len()],
+        };
+        for edge in edges {
+            closure.set(edge.dependency, edge.consumer);
+        }
+        for intermediate in 0..loops.len() {
+            let additions = closure.rows[intermediate].clone();
+            for source in 0..loops.len() {
+                if closure.bit(source, intermediate) {
+                    or_bits(&mut closure.rows[source], &additions);
+                }
+            }
+        }
+        closure
+    }
+
+    fn reaches(&self, from: u64, to: u64) -> bool {
+        self.bit(self.index[&from], self.index[&to])
+    }
+
+    fn add_edge(&mut self, from: u64, to: u64) {
+        let from = self.index[&from];
+        let to = self.index[&to];
+        let mut additions = self.rows[to].clone();
+        set_bit(&mut additions, to);
+        for source in 0..self.rows.len() {
+            if source == from || self.bit(source, from) {
+                or_bits(&mut self.rows[source], &additions);
+            }
+        }
+    }
+
+    fn set(&mut self, from: u64, to: u64) {
+        let from = self.index[&from];
+        let to = self.index[&to];
+        set_bit(&mut self.rows[from], to);
+    }
+
+    fn bit(&self, from: usize, to: usize) -> bool {
+        self.rows[from][to / u64::BITS as usize] & (1_u64 << (to % u64::BITS as usize)) != 0
+    }
+}
+
+fn set_bit(bits: &mut [u64], index: usize) {
+    bits[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+}
+
+fn or_bits(target: &mut [u64], additions: &[u64]) {
+    for (target, additions) in target.iter_mut().zip(additions) {
+        *target |= additions;
     }
 }
 
@@ -688,26 +874,51 @@ fn loop_effects(
 fn stable_topological_order(loops: &[u64], edges: &BTreeSet<LoopEdge>) -> Vec<u64> {
     let mut dependencies = loops
         .iter()
+        .map(|&loop_id| (loop_id, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    let successors = successor_map(loops, edges);
+    for edge in edges {
+        *dependencies.entry(edge.consumer).or_default() += 1;
+    }
+    let mut ready = dependencies
+        .iter()
+        .filter_map(|(&loop_id, &count)| (count == 0).then_some(loop_id))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::new();
+    while let Some(next) = ready.pop_first() {
+        order.push(next);
+        for &consumer in &successors[&next] {
+            let count = dependencies
+                .get_mut(&consumer)
+                .expect("successor is a known loop");
+            *count -= 1;
+            if *count == 0 {
+                ready.insert(consumer);
+            }
+        }
+    }
+    let scheduled = order.iter().copied().collect::<BTreeSet<_>>();
+    order.extend(
+        loops
+            .iter()
+            .copied()
+            .filter(|loop_id| !scheduled.contains(loop_id)),
+    );
+    order
+}
+
+fn successor_map(loops: &[u64], edges: &BTreeSet<LoopEdge>) -> BTreeMap<u64, BTreeSet<u64>> {
+    let mut successors = loops
+        .iter()
         .map(|&loop_id| (loop_id, BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
     for edge in edges {
-        dependencies
-            .entry(edge.consumer)
+        successors
+            .entry(edge.dependency)
             .or_default()
-            .insert(edge.dependency);
+            .insert(edge.consumer);
     }
-    let mut order = Vec::new();
-    let mut remaining = loops.iter().copied().collect::<BTreeSet<_>>();
-    while let Some(next) = remaining
-        .iter()
-        .find(|loop_id| dependencies[loop_id].iter().all(|dep| order.contains(dep)))
-        .copied()
-    {
-        remaining.remove(&next);
-        order.push(next);
-    }
-    order.extend(remaining);
-    order
+    successors
 }
 
 fn reachable(from: u64, to: u64, edges: &BTreeSet<LoopEdge>) -> bool {
@@ -784,6 +995,51 @@ mod tests {
         )
         .unwrap();
         certify_decorations(&prepared, &clocks).unwrap()
+    }
+
+    #[test]
+    fn compact_effect_summaries_match_atom_pair_semantics() {
+        use crate::signal_fir::vector_analysis::{
+            ForeignResource, ForeignTypeCode, effect_sets_conflict,
+        };
+
+        let state = StateResource::Signal {
+            owner: 7,
+            cell: crate::signal_fir::vector_analysis::StateCell::Delay,
+        };
+        let atoms = vec![
+            EffectAtom::ReadState(state.clone()),
+            EffectAtom::WriteState(state),
+            EffectAtom::ReadTable(3),
+            EffectAtom::WriteTable(3),
+            EffectAtom::WriteUi(4),
+            EffectAtom::WriteOutput(5),
+            EffectAtom::Foreign {
+                resource: ForeignResource::Variable {
+                    name: "unknown".to_owned(),
+                    value_type: ForeignTypeCode(1),
+                },
+                purity: ForeignPurity::Unknown,
+            },
+            EffectAtom::Foreign {
+                resource: ForeignResource::Variable {
+                    name: "pure".to_owned(),
+                    value_type: ForeignTypeCode(1),
+                },
+                purity: ForeignPurity::Pure,
+            },
+        ];
+        let mut sets = vec![Vec::new(), atoms.clone()];
+        sets.extend(atoms.into_iter().map(|atom| vec![atom]));
+        for left in &sets {
+            for right in &sets {
+                assert_eq!(
+                    EffectConflictSummary::new(left).conflicts(&EffectConflictSummary::new(right)),
+                    effect_sets_conflict(left, right),
+                    "summary mismatch for {left:?} vs {right:?}"
+                );
+            }
+        }
     }
 
     #[test]

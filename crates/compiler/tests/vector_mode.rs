@@ -187,6 +187,14 @@ fn stateless_gain_is_bit_exact() {
 }
 
 #[test]
+fn ui_slider_and_bargraph_are_certified_and_bit_exact() {
+    let source =
+        "process = _ * hslider(\"gain\", 0.5, 0.0, 1.0, 0.01) : hbargraph(\"level\", -10.0, 10.0);";
+    assert_vector_pipeline_certified("ui_slider_bargraph", source, 24);
+    assert_scalar_vector_bit_exact("ui_slider_bargraph", source, 24);
+}
+
+#[test]
 fn recursion_and_delay_cross_chunk_boundary_bit_exact() {
     // Integrator (loop-carried state) plus a 5-sample delay: both the recursive
     // carrier and the delay line must survive the chunk boundary unchanged.
@@ -394,15 +402,12 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
             SignalFirLane::TransformFastLane,
         )
         .expect("UI transitional vector FIR");
+    assert_eq!(ui.vector_pipeline_status, VectorPipelineStatus::Certified);
     assert_eq!(
-        ui.vector_pipeline_status,
-        VectorPipelineStatus::Fallback(VectorFallbackReason::UiProgram)
+        ui.vector_effective_mode,
+        VectorEffectiveMode::CertifiedVector
     );
-    assert_eq!(ui.vector_effective_mode, VectorEffectiveMode::Scalar);
-    assert_eq!(
-        ui.vector_pipeline_detail.as_deref(),
-        Some("the checked vector module does not yet assemble grouped UI state")
-    );
+    assert_eq!(ui.vector_pipeline_detail, None);
 
     let rad = compiler
         .compile_source_to_fir_with_lane(

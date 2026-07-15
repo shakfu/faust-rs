@@ -1,7 +1,7 @@
 //! Count impulse-test DSPs whose requested vector pipeline remains certified.
 //!
 //! Usage:
-//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--json]`
+//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--json] [--filter=TEXT] [--compare-scalar-time]`
 //!
 //! The default is `-vec -lv 0 -ss 0`. A DSP is counted as vector-capable only
 //! when the FIR result reports `VectorPipelineStatus::Certified`; a generated
@@ -40,6 +40,8 @@ fn main() {
         )
         .collect::<Vec<_>>();
     let json = args.iter().any(|arg| arg == "--json");
+    let compare_scalar_time = args.iter().any(|arg| arg == "--compare-scalar-time");
+    let filter = args.iter().find_map(|arg| arg.strip_prefix("--filter="));
     let loop_variant = parse_arg(&positional, 1, 0, "loop variant");
     let strategy = parse_arg(&positional, 2, 0, "scheduling strategy");
     if loop_variant > 1 || strategy > 3 {
@@ -55,12 +57,37 @@ fn main() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "dsp"))
         .collect::<Vec<_>>();
     files.sort();
+    if let Some(filter) = filter {
+        files.retain(|path| path.display().to_string().contains(filter));
+    }
 
     let mut certified = Vec::new();
     let mut fallback = Vec::new();
     let mut errors = Vec::new();
 
-    for path in files {
+    let file_count = files.len();
+    for (index, path) in files.into_iter().enumerate() {
+        eprintln!("[{}/{}] {}", index + 1, file_count, path.display());
+        let scalar_elapsed = compare_scalar_time.then(|| {
+            let started = std::time::Instant::now();
+            let result = Compiler::new()
+                .with_real_type(RealType::Float64)
+                .with_compute_mode(ComputeMode::Scalar)
+                .compile_file_to_fir_with_lane(
+                    &path,
+                    &[root.clone(), PathBuf::from("/usr/local/share/faust")],
+                    SignalFirLane::TransformFastLane,
+                );
+            let elapsed = started.elapsed();
+            match result {
+                Ok(_) => eprintln!("  scalar baseline in {:.3}s", elapsed.as_secs_f64()),
+                Err(error) => eprintln!(
+                    "  scalar baseline failed in {:.3}s: {error}",
+                    elapsed.as_secs_f64()
+                ),
+            }
+            elapsed
+        });
         let compiler = Compiler::new()
             .with_real_type(RealType::Float64)
             .with_compute_mode(ComputeMode::Vector {
@@ -74,6 +101,7 @@ fn main() {
                 _ => SchedulingStrategy::ReverseBreadthFirst,
             });
 
+        let started = std::time::Instant::now();
         match compiler.compile_file_to_fir_with_lane(
             &path,
             &[root.clone(), PathBuf::from("/usr/local/share/faust")],
@@ -89,6 +117,17 @@ fn main() {
                 )),
             },
             Err(error) => errors.push((path, error.to_string())),
+        }
+        let vector_elapsed = started.elapsed();
+        if let Some(scalar_elapsed) = scalar_elapsed {
+            eprintln!(
+                "  vector request in {:.3}s ({:+.3}s, {:.2}x scalar)",
+                vector_elapsed.as_secs_f64(),
+                vector_elapsed.as_secs_f64() - scalar_elapsed.as_secs_f64(),
+                vector_elapsed.as_secs_f64() / scalar_elapsed.as_secs_f64()
+            );
+        } else {
+            eprintln!("  completed in {:.3}s", vector_elapsed.as_secs_f64());
         }
     }
 

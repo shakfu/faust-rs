@@ -102,7 +102,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fir::{
     AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMathOp, FirStore,
-    FirType, NamedType, SliderRange, SliderType, UiBoxType,
+    FirType, NamedType, SliderType,
 };
 use signals::{
     BinOp, SigId, SigMatch,
@@ -117,7 +117,7 @@ use tlib::{
     NodeKind, TreeArena, TreeId, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int,
     tree_to_str,
 };
-use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
+use ui::{ControlId, ControlKind, UiProgram};
 
 use sigtype::{SigType, Variability};
 

@@ -807,13 +807,24 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
     // ── Effect conflicts: every conflicting loop pair is comparable. ──
     // Root identities and graph endpoints are known valid at this point, so
     // this check cannot panic when presented with a hostile DTO.
+    let effects_by_loop = plan
+        .loops
+        .iter()
+        .map(|loop_record| {
+            (
+                loop_record.loop_id,
+                loop_effects(&signal_by_id, loop_record),
+            )
+        })
+        .collect::<AHashMap<_, _>>();
+    let reachability = CheckedReachability::new(plan);
     for (index, left) in plan.loops.iter().enumerate() {
         for right in &plan.loops[index + 1..] {
-            let left_effects = loop_effects(plan, left);
-            let right_effects = loop_effects(plan, right);
-            if effect_sets_conflict(&left_effects, &right_effects)
-                && !loop_reaches(plan, left.loop_id, right.loop_id)
-                && !loop_reaches(plan, right.loop_id, left.loop_id)
+            if effect_sets_conflict(
+                &effects_by_loop[&left.loop_id],
+                &effects_by_loop[&right.loop_id],
+            ) && !reachability.reaches(left.loop_id, right.loop_id)
+                && !reachability.reaches(right.loop_id, left.loop_id)
             {
                 return Err(VectorPlanError::UnorderedEffectConflict {
                     left: left.loop_id,
@@ -917,6 +928,17 @@ pub fn verify_fused_serial_groups(
     decorations: &VerifiedDecorationCertificate,
 ) -> Result<(), VectorPlanError> {
     verify_vector_plan(plan)?;
+    verify_fused_serial_groups_after_plan(plan, decorations)
+}
+
+/// Verifies fused-group obligations after the caller has already accepted the
+/// same plan with [`verify_vector_plan`]. This avoids repeating the expensive
+/// independent plan check at the production boundary while preserving the
+/// standalone public checker's fail-closed contract.
+pub(crate) fn verify_fused_serial_groups_after_plan(
+    plan: &VectorPlan,
+    decorations: &VerifiedDecorationCertificate,
+) -> Result<(), VectorPlanError> {
     let certificate = decorations.certificate();
     let records = certificate
         .records
@@ -1070,12 +1092,10 @@ fn rank_of(plan: &VectorPlan, epoch_id: u64) -> u64 {
         .map_or(u64::MAX, |e| e.rank)
 }
 
-fn loop_effects(plan: &VectorPlan, loop_record: &LoopRecord) -> Vec<EffectAtom> {
-    let signal_by_id = plan
-        .signals
-        .iter()
-        .map(|signal| (signal.signal_id, signal))
-        .collect::<AHashMap<_, _>>();
+fn loop_effects(
+    signal_by_id: &AHashMap<u64, &SignalRecord>,
+    loop_record: &LoopRecord,
+) -> Vec<EffectAtom> {
     let mut effects = loop_record
         .roots
         .iter()
@@ -1086,29 +1106,50 @@ fn loop_effects(plan: &VectorPlan, loop_record: &LoopRecord) -> Vec<EffectAtom> 
     effects
 }
 
-/// Whether `dependency` is ordered before `consumer` by one or more combined
-/// edges. Edges are stored consumer -> dependency, so traversal follows the
-/// reverse adjacency.
-fn loop_reaches(plan: &VectorPlan, dependency: u64, consumer: u64) -> bool {
-    let mut pending = vec![dependency];
-    let mut seen = AHashSet::new();
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        for edge in plan
-            .data_edges
+/// Checker-local transitive closure. This deliberately does not reuse the
+/// producer's implementation: the certificate boundary remains independent,
+/// while avoiding a BFS and signal-map rebuild for every loop pair.
+struct CheckedReachability {
+    index: AHashMap<u64, usize>,
+    rows: Vec<Vec<u64>>,
+}
+
+impl CheckedReachability {
+    fn new(plan: &VectorPlan) -> Self {
+        let index = plan
+            .loops
             .iter()
-            .chain(plan.effect_edges.iter())
-            .filter(|edge| edge.dependency == node)
-        {
-            if edge.consumer == consumer {
-                return true;
-            }
-            pending.push(edge.consumer);
+            .enumerate()
+            .map(|(index, loop_record)| (loop_record.loop_id, index))
+            .collect::<AHashMap<_, _>>();
+        let words = plan.loops.len().div_ceil(u64::BITS as usize);
+        let mut rows = vec![vec![0_u64; words]; plan.loops.len()];
+        for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
+            let from = index[&edge.dependency];
+            let to = index[&edge.consumer];
+            rows[from][to / u64::BITS as usize] |= 1_u64 << (to % u64::BITS as usize);
         }
+        for intermediate in 0..rows.len() {
+            let additions = rows[intermediate].clone();
+            for row in &mut rows {
+                if row[intermediate / u64::BITS as usize]
+                    & (1_u64 << (intermediate % u64::BITS as usize))
+                    != 0
+                {
+                    for (target, addition) in row.iter_mut().zip(&additions) {
+                        *target |= addition;
+                    }
+                }
+            }
+        }
+        Self { index, rows }
     }
-    false
+
+    fn reaches(&self, from: u64, to: u64) -> bool {
+        let from = self.index[&from];
+        let to = self.index[&to];
+        self.rows[from][to / u64::BITS as usize] & (1_u64 << (to % u64::BITS as usize)) != 0
+    }
 }
 
 /// Kahn peeling on the induced graph of `members` (edges from both edge
