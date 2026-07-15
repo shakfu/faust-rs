@@ -164,6 +164,15 @@ fn recursion_and_delay_cross_chunk_boundary_bit_exact() {
 }
 
 #[test]
+fn recursive_short_delay_transport_reads_after_copy_in() {
+    assert_scalar_vector_bit_exact(
+        "pulse_countup_loop",
+        "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;",
+        32,
+    );
+}
+
+#[test]
 fn vec_size_not_dividing_the_block_bit_exact() {
     // vec_size = 24 does not divide 64 → a short tail chunk (16) exercises the
     // `min(vindex + vs, count)` clamp.

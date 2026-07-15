@@ -572,6 +572,11 @@ fn compile_fastlane_inner(
         }
     }
 
+    let fallback_compute_mode = if vector_fallback.is_some() {
+        ComputeMode::Scalar
+    } else {
+        options.compute_mode
+    };
     let mut output = module::build_module(
         &plan,
         options.module_name.as_str(),
@@ -583,9 +588,9 @@ fn compile_fastlane_inner(
         options.real_type.as_fir_type(),
         options.max_copy_delay,
         options.delay_line_threshold,
-        options.compute_mode,
+        fallback_compute_mode,
         clocked,
-        if matches!(options.compute_mode, ComputeMode::Scalar) {
+        if matches!(fallback_compute_mode, ComputeMode::Scalar) {
             gate_graphs.as_ref().map(|(_, schedule)| schedule)
         } else {
             None

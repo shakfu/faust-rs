@@ -1335,12 +1335,35 @@ fn materialize_top_level(
     let mut body = Vec::new();
     for region in routed.layout().loops() {
         if !owned.contains(&region.loop_id) {
-            body.push(loop_by_id[&region.loop_id].chunk_statement);
+            body.extend(
+                loop_by_id[&region.loop_id]
+                    .pre
+                    .iter()
+                    .map(|action| action.statement),
+            );
+        }
+    }
+    for region in routed.layout().loops() {
+        if !owned.contains(&region.loop_id) {
+            body.push(sample_loop(
+                builder,
+                loop_by_id[&region.loop_id].iteration_statement,
+            ));
         }
         for (first_loop, statement) in &roots {
             if *first_loop == Some(region.loop_id) {
                 body.push(sample_loop(builder, *statement));
             }
+        }
+    }
+    for region in routed.layout().loops() {
+        if !owned.contains(&region.loop_id) {
+            body.extend(
+                loop_by_id[&region.loop_id]
+                    .post
+                    .iter()
+                    .map(|action| action.statement),
+            );
         }
     }
     if body.is_empty() && !roots.is_empty() {

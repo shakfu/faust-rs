@@ -26,8 +26,9 @@ use signals::SigId;
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::VerifiedPreparedSignals;
 
-use super::decoration_verify::certify_decorations;
+use super::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
 use super::module::{INT_FUN_PROTO_ORDER, MATH_PROTO_ORDER};
+use super::vector_analysis::DepKind;
 use super::vector_assemble::{
     VectorClockOutputStore, VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir,
 };
@@ -37,6 +38,7 @@ use super::vector_lower::lower_vector_program;
 use super::vector_plan::build_vector_plan;
 use super::vector_route::{VectorRegion, VerifiedRoutedFir};
 use super::vector_state::build_vector_state_plan_with_clock;
+use super::vector_verify::VectorPlan;
 use super::{ComputeMode, SignalFirOutput, VectorFallbackReason, VectorPipelineStatus};
 
 /// Failure stage retained by the production selector as an observable fallback.
@@ -146,6 +148,7 @@ fn build_verified_vector_module_with_evidence(
     let vector_plan = build_vector_plan(&decorations, u64::from(vec_size)).map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::VectorPlan, error.to_string())
     })?;
+    reject_cross_loop_delay_read_transports(&decorations, vector_plan.plan())?;
     let clock_plan = build_vector_clock_ad_plan(prepared, domains, &decorations, &vector_plan)
         .map_err(|error| {
             VectorModuleFailure::new(VectorFallbackReason::ClockAdPlan, error.to_string())
@@ -260,6 +263,39 @@ fn build_verified_vector_module_with_evidence(
         assembly,
         output_stores,
     })
+}
+
+fn reject_cross_loop_delay_read_transports(
+    decorations: &VerifiedDecorationCertificate,
+    plan: &VectorPlan,
+) -> Result<(), VectorModuleFailure> {
+    let recursive_delayed_carriers = decorations
+        .certificate()
+        .records
+        .iter()
+        .filter(|record| record.max_delay > 0 && record.recursive_projection.is_some())
+        .map(|record| u64::from(record.signal_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(transport) = plan.transports.iter().find(|transport| {
+        decorations
+            .certificate()
+            .dependencies
+            .iter()
+            .any(|dependency| {
+                u64::from(dependency.from) == transport.signal_id
+                    && recursive_delayed_carriers.contains(&u64::from(dependency.to))
+                    && matches!(dependency.kind, DepKind::Delayed { .. })
+            })
+    }) {
+        return Err(VectorModuleFailure::new(
+            VectorFallbackReason::VectorPlan,
+            format!(
+                "delayed recursive signal {} crosses vector loops {} -> {}; scalar fallback preserves recursive delay semantics",
+                transport.signal_id, transport.producer_loop, transport.consumer_loop
+            ),
+        ));
+    }
+    Ok(())
 }
 
 struct OutputMaterialization<'a> {
