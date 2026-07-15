@@ -20,6 +20,7 @@ use crate::schedule::{
     ScheduleDag, ScheduleError, SchedulingStrategy, VerifyError, schedule, verify_schedule,
 };
 
+use super::vector_plan::VerifiedVectorPlan;
 use super::vector_verify::{
     EpochRecord, LoopEdge, VectorPlan, VectorPlanError, verify_vector_plan,
 };
@@ -114,7 +115,24 @@ pub fn schedule_vector_plan(
     strategy: SchedulingStrategy,
 ) -> Result<VectorExecutionSchedule, VectorScheduleError> {
     verify_vector_plan(plan).map_err(VectorScheduleError::PlanVerification)?;
+    schedule_after_plan_verification(plan, strategy)
+}
 
+/// Schedules a plan whose opaque producer boundary has already run the full
+/// independent plan checker. This avoids repeating the expensive global plan
+/// verification in downstream routing while preserving the checked public
+/// [`schedule_vector_plan`] entry point for raw plans.
+pub(crate) fn schedule_verified_vector_plan(
+    verified: &VerifiedVectorPlan,
+    strategy: SchedulingStrategy,
+) -> Result<VectorExecutionSchedule, VectorScheduleError> {
+    schedule_after_plan_verification(verified.plan(), strategy)
+}
+
+fn schedule_after_plan_verification(
+    plan: &VectorPlan,
+    strategy: SchedulingStrategy,
+) -> Result<VectorExecutionSchedule, VectorScheduleError> {
     let mut epochs: Vec<&EpochRecord> = plan.epochs.iter().collect();
     epochs.sort_unstable_by_key(|epoch| (epoch.rank, epoch.epoch_id));
 

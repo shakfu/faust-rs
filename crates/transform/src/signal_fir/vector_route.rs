@@ -31,7 +31,7 @@ use crate::schedule::SchedulingStrategy;
 
 use super::vector_clock_ad::{ClockTransportMode, ClockTransportPolicy, VerifiedVectorClockAdPlan};
 use super::vector_plan::VerifiedVectorPlan;
-use super::vector_schedule::{VectorScheduleError, schedule_vector_plan};
+use super::vector_schedule::{VectorScheduleError, schedule_verified_vector_plan};
 use super::vector_verify::{
     LoopKind, Placement, TransportRecord, ValueType, VectorPlan, VectorPlanError,
     verify_vector_plan,
@@ -447,9 +447,8 @@ impl<'a> VectorRouteSession<'a> {
         store: &mut FirStore,
     ) -> Result<(Self, Vec<FirId>), VectorRouteError> {
         let plan = verified.plan();
-        verify_vector_plan(plan)?;
         verify_policy_coverage(plan, policies)?;
-        let schedule = schedule_vector_plan(plan, strategy)?;
+        let schedule = schedule_verified_vector_plan(verified, strategy)?;
         let loop_by_id = plan
             .loops
             .iter()
@@ -741,7 +740,7 @@ impl<'a> VectorRouteSession<'a> {
         self.trace
             .definitions
             .sort_by_key(|definition| (definition.region, definition.signal_id));
-        verify_routed_fir_with_policies(
+        verify_routed_fir_with_policies_after_plan(
             self.plan,
             &self.transport_policies,
             &self.trace,
@@ -818,6 +817,20 @@ fn verify_routed_fir_with_policies(
     store: &FirStore,
 ) -> Result<(), VectorRouteError> {
     verify_vector_plan(plan)?;
+    verify_routed_fir_with_policies_after_plan(plan, policies, trace, real_type, store)
+}
+
+/// Checks route evidence relative to an already accepted opaque vector plan.
+/// Public raw-plan checkers retain the full plan verification above; the
+/// production session uses this boundary to avoid rechecking the same global
+/// plan at route construction and route closure.
+fn verify_routed_fir_with_policies_after_plan(
+    plan: &VectorPlan,
+    policies: &[ClockTransportPolicy],
+    trace: &RoutedFirTrace,
+    real_type: &FirType,
+    store: &FirStore,
+) -> Result<(), VectorRouteError> {
     verify_policy_coverage(plan, policies)?;
     let signal_by_id = plan
         .signals

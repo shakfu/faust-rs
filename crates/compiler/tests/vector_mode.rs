@@ -195,6 +195,16 @@ fn ui_slider_and_bargraph_are_certified_and_bit_exact() {
 }
 
 #[test]
+fn sampling_frequency_constant_is_certified_and_bit_exact() {
+    let source = r#"
+        sr = fconstant(int fSamplingFreq, <math.h>);
+        process = _ * float(sr) / 48000.0;
+    "#;
+    assert_vector_pipeline_certified("sampling_frequency", source, 24);
+    assert_scalar_vector_bit_exact("sampling_frequency", source, 24);
+}
+
+#[test]
 fn recursion_and_delay_cross_chunk_boundary_bit_exact() {
     // Integrator (loop-carried state) plus a 5-sample delay: both the recursive
     // carrier and the delay line must survive the chunk boundary unchanged.

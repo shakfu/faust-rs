@@ -15,7 +15,7 @@ use std::fmt;
 
 use fir::{AccessType, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::match_sym_ref;
+use tlib::{match_sym_ref, tree_to_str};
 
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
@@ -362,18 +362,6 @@ fn lower_vector_program_impl<'a>(
         clock_plan,
     )?;
     trace_stage("prepared-boundary");
-    for record in &verified_plan.plan().signals {
-        let sig = signal_ids[&record.signal_id];
-        if matches!(match_sig(prepared.arena(), sig), SigMatch::FConst(_, _, _)) {
-            trace_stage("unsupported-preflight");
-            return Err(PureVectorLowerError::UnsupportedSignal {
-                signal_id: record.signal_id,
-                expression: dump_sig_readable(prepared.arena(), sig),
-            });
-        }
-    }
-    trace_stage("unsupported-preflight");
-
     let mut store = FirStore::new();
     let (session, transport_declarations) = if let Some(clock_plan) = clock_plan {
         VectorRouteSession::new_with_clock_plan(
@@ -667,6 +655,7 @@ impl PureVectorLowerer<'_> {
         let value = match match_sig(self.prepared.arena(), sig) {
             SigMatch::Int(value) => FirBuilder::new(&mut self.store).int32(value),
             SigMatch::Real(value) => self.float_const(value),
+            SigMatch::FConst(_, name, _) => self.lower_fconst(signal_id, name)?,
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Button(control) => self.lower_ui_input(control, ui::ControlKind::Button)?,
             SigMatch::Checkbox(control) => {
@@ -1297,6 +1286,32 @@ impl PureVectorLowerer<'_> {
             FirType::Float64 => builder.float64(value),
             _ => unreachable!("real type checked at entry"),
         }
+    }
+
+    /// Mirrors scalar `SignalFirLower::lower_fconst` for the canonical Faust
+    /// sampling-rate aliases. The persistent field is initialized by the
+    /// shared vector lifecycle assembler before `compute` executes.
+    fn lower_fconst(&mut self, signal_id: u64, name: SigId) -> Result<FirId, PureVectorLowerError> {
+        let name = tree_to_str(self.prepared.arena(), name).ok_or_else(|| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "foreign constant name is not a symbol".to_owned(),
+            }
+        })?;
+        if name != "fSamplingFreq" && name != "fSamplingRate" {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: format!("unsupported foreign constant `{name}`"),
+            });
+        }
+        let expected = self.fir_type(signal_id)?;
+        let mut builder = FirBuilder::new(&mut self.store);
+        let sample_rate = builder.load_var("fSampleRate", AccessType::Struct, FirType::Int32);
+        Ok(if expected == FirType::Int32 {
+            sample_rate
+        } else {
+            builder.cast(expected, sample_rate)
+        })
     }
 
     fn fir_type(&self, signal_id: u64) -> Result<FirType, PureVectorLowerError> {

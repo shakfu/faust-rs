@@ -162,6 +162,22 @@ fails before route construction, restoring the request to about 66.8 seconds.
 Once Phase 4 supports that node, routing cost will be measured as certified
 work and optimized rather than hidden by fallback.
 
+Phase 4 started on 2026-07-15 with the sampling-frequency foreign constant.
+Checked vector lowering now mirrors the scalar lifecycle contract by loading
+the persistent `fSampleRate` field for `fSamplingFreq` and `fSamplingRate`,
+with an explicit cast only when the verified FIR type is real. This moved the
+default corpus from 11 to 23 certified DSPs. All 12 new paths passed the full
+scalar `-ss 0..3` and vector `-lv 0/1 x -ss 0..3` native C++ impulse matrix.
+
+This support removed the temporary foreign-constant preflight and made route
+construction useful work. Profiling then exposed two redundant global plan
+checks in the route-session setup. Downstream production scheduling now
+accepts the opaque `VerifiedVectorPlan`, while public raw-plan APIs preserve
+their full independent checks. On `reverb_designer.dsp`, route setup fell from
+2.76 to 0.11 seconds and total vector-request time from 71.0 to 67.8 seconds.
+The remaining residual classes are foreign `count`, prefix/waveform execution,
+effectful FIR/IIR/table nodes, and routed-definition/transport consumption.
+
 ## 2. Measured Baseline
 
 The baseline was measured with the persistent corpus tool introduced by commit
