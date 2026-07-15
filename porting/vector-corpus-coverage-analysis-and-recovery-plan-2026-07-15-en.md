@@ -1,0 +1,504 @@
+# Vector Corpus Coverage Analysis and Recovery Plan
+
+Date: 2026-07-15
+
+Status: proposed
+
+Working branch: `ondemand-vec-fad-synthesis`
+
+Related documents:
+
+- [`vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`](vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md)
+- [`vector-mode-fir-model-hardening-plan-2026-07-10-en.md`](vector-mode-fir-model-hardening-plan-2026-07-10-en.md)
+- [`vector-fused-recursive-delay-plan-2026-07-15-en.md`](vector-fused-recursive-delay-plan-2026-07-15-en.md)
+- [`lean-rust-certified-porting-plan-2026-07-11-en.md`](lean-rust-certified-porting-plan-2026-07-11-en.md)
+
+## 1. Executive Summary
+
+Only 3 of the 93 DSP files in `tests/impulse-tests/dsp` currently complete the
+checked signal-level vector pipeline for `--double -vec -lv 0 -ss 0`. This low
+number does not mean that the earlier `LoopGraph` implementation lost the
+ability to construct vector-shaped code for almost the entire corpus. It is
+mainly the result of a deliberate policy change in commit `b5a0a8b3`:
+
+```text
+before b5a0a8b3: checked-pipeline rejection -> transitional builder in Vector mode
+after  b5a0a8b3: checked-pipeline rejection -> scalar builder
+```
+
+The policy change fixed a real correctness defect involving recursive delayed
+reads transported across vector loops. It was correct to stop treating the
+transitional path as generally safe. However, the scalar fallback was applied
+to every checked-pipeline rejection, including UI programs and unrelated
+unsupported forms. The 67 UI rejections therefore dominate the observed loss
+of effective vector-mode coverage.
+
+The recovery must not revert the global safety fix. It should move the useful
+capabilities of the transitional builder into the checked pipeline, starting
+with UI lifecycle integration, while retaining producer/checker evidence and
+explicit scalar fallback for unsupported temporal dependencies.
+
+## 2. Measured Baseline
+
+The baseline was measured with the persistent corpus tool introduced by commit
+`373a1afb`:
+
+```sh
+cargo run -p compiler --example count_vector_corpus
+```
+
+The tool compiles each DSP with:
+
+```text
+--double -vec -lv 0 -ss 0
+```
+
+and counts a DSP as vectorized only when the compiler reports
+`VectorPipelineStatus::Certified`. This is intentionally stricter than merely
+checking that `-vec` appeared on the command line.
+
+| Outcome | DSP count | Corpus share |
+|---|---:|---:|
+| Certified | 3 | 3.2% |
+| `UiProgram` fallback | 67 | 72.0% |
+| `VectorPlan` fallback | 15 | 16.1% |
+| `StatePlan` fallback | 4 | 4.3% |
+| `PureLowering` fallback | 3 | 3.2% |
+| SIGGEN compilation error | 1 | 1.1% |
+| Total | 93 | 100% |
+
+The certified files are:
+
+- `logical.dsp`;
+- `noiseabs.dsp`;
+- `parseint.dsp`.
+
+The independent SIGGEN failure is `subcontainer1.dsp`; it uses foreign
+functions, constants, or variables that are outside this vector-coverage plan.
+
+The current status is a first-failure waterfall. In particular, the 67 UI
+programs do not reach vector planning, state planning, or pure lowering.
+Supporting UI will therefore reveal additional downstream failures; it cannot
+be assumed to increase the certified count by exactly 67.
+
+## 3. Historical Analysis
+
+### 3.1 Transitional vector implementation
+
+Commits `07223abb` through `a9150057` introduced the initial vector-mode
+plumbing and implementation:
+
+- `ComputeMode::Vector`, `-vs`, and `-lv`;
+- deterministic `LoopGraph` construction;
+- loop-separation criteria;
+- chunk drivers;
+- signal-level loop assignment;
+- cross-loop chunk buffers;
+- recursive serial-core and pure-tail splitting;
+- C++-compatible `-lv 0` and `-lv 1` drivers.
+
+Commit `eb6b6044` made the recursive FIR split more conservative. Unsupported
+statement shapes or unsafe dependencies remained in one fused sample loop
+instead of being split. This path produced useful vector-shaped code, but it
+did not carry the complete independent evidence later required by the checked
+P4/P5/P6 pipeline.
+
+### 3.2 Introduction of checked, fail-closed stages
+
+The checked pipeline was then built incrementally:
+
+| Commit | Relevant restriction or capability |
+|---|---|
+| `1ada5b26` | Production `VectorPlan`; cross-loop table carriers are rejected. |
+| `2816bfee` | Verified FIR routing. |
+| `4672b28f` | Pure vector lowering; unrecognized residual signal forms are rejected. |
+| `6a992c9e` | Bounded fission-safety checker. |
+| `58b6d330` | Verified delay/recursion state transitions; unmodelled resources are rejected. |
+| `f8e9a27b` | Checked clock-domain and AD policy. |
+| `d3af76e1` | Verified vector FIR region assembly. |
+| `390f27d9` | Checked final-module assembly activated for the supported subset. |
+| `8f701724` | Checked state and clock lowering activated. |
+| `517e140c` | Clock-local state and bounded variable delays added. |
+
+Commit `390f27d9` also introduced the unconditional UI guard at the beginning
+of checked final-module construction:
+
+```rust
+if !ui_has_no_controls {
+    return Err(VectorModuleFailure::new(
+        VectorFallbackReason::UiProgram,
+        "the checked vector module does not yet assemble grouped UI state",
+    ));
+}
+```
+
+At that point this did not yet force scalar output. A rejected program was
+still passed to the transitional module builder with the originally requested
+`ComputeMode::Vector`. `VectorPipelineStatus::Fallback` indicated that the new
+producer/checker chain had not certified the result, but the fallback builder
+could still emit vector-shaped code.
+
+### 3.3 The coverage-changing commit: `b5a0a8b3`
+
+Commit `b5a0a8b3` fixed a runtime regression exposed by:
+
+```faust
+ba = library("basics.lib");
+process = ba.pulse_countup_loop(4, 1) + 0.001;
+```
+
+Under `-vec -lv 1 -ss 3`, a delayed recursive carrier could cross vector-loop
+boundaries. The consumer precomputed delayed reads for the whole chunk before
+the recurrence loop wrote the next state. The generated code could therefore
+read stale or uninitialized short-delay storage and emit `-inf`.
+
+The commit made two important changes:
+
+1. it rejected unchecked cross-loop transports derived from delayed recursive
+   carriers;
+2. it changed every checked-pipeline fallback to use `ComputeMode::Scalar`:
+
+```rust
+let fallback_compute_mode = if vector_fallback.is_some() {
+    ComputeMode::Scalar
+} else {
+    options.compute_mode
+};
+```
+
+The first change is specific to the discovered temporal-ordering defect. The
+second change is global, and is the immediate reason that all 89 current
+fallbacks produce scalar modules.
+
+This commit should not be reverted wholesale. Before it, broad apparent
+vector-mode coverage included at least one known semantically unsafe shape.
+
+### 3.4 Partial recovery in `621a82d5`
+
+Commit `621a82d5` added a checked `FusedSerialGroup` for the direct top-rate
+pattern:
+
+```text
+delayed recursive read -> recurrence writer -> safe downstream tail
+```
+
+It certifies copy-in, per-sample read/compute/write order, copy-out, scalar
+internal transport, and loop membership. This restores vector mode for the
+covered direct pattern without weakening the fallback. Longer chains,
+multiple carriers, and clock-crossing variants remain rejected.
+
+Commit `b5944700` subsequently fixed exponential recursive signal analysis.
+That change improves compile-time behavior but does not materially broaden the
+accepted vector subset.
+
+## 4. Current Root Causes
+
+### 4.1 UI program assembly: 67 first-stage fallbacks
+
+The checked vector module currently assembles empty UI lifecycle bodies and
+therefore rejects every non-empty `UiProgram` before analysis reaches the
+other vector stages.
+
+The scalar/transitional module already has working support for:
+
+- DSP struct zones;
+- default values and UI reset;
+- metadata;
+- grouped `buildUserInterface` construction;
+- button and slider loads;
+- bargraph stores;
+- soundfile-related lifecycle state.
+
+The missing work is checked integration, not a new Faust UI model. The vector
+module must reuse or extract the existing lowering rather than duplicate a
+second UI implementation.
+
+Removing the guard without assembling this state would generate an invalid
+lifecycle and incorrect runtime control behavior.
+
+### 4.2 Vector planning: 15 fallbacks
+
+The affected files are:
+
+- `bs.dsp`;
+- `comb_delay1.dsp`;
+- `comb_delay2.dsp`;
+- `math.dsp`;
+- `phasor.dsp`;
+- `pow.dsp`;
+- `prefix.dsp`;
+- `priority.dsp`;
+- `table1.dsp`;
+- `table2.dsp`;
+- `tf_exp.dsp`;
+- `waveform2.dsp`;
+- `waveform3.dsp`;
+- `waveform4.dsp`;
+- `waveform6.dsp`.
+
+Known plan-level restrictions include:
+
+- table values cannot be transported between loops;
+- delayed recursive carriers crossing loops must be covered by a certified
+  fused serial group;
+- some shared or effect-constrained graphs cannot be placed in the current
+  single-epoch layout.
+
+The public status currently retains only `VectorFallbackReason::VectorPlan`.
+It discards whether a file failed because of `TableTransport`, a recursive
+delay guard, missing placement, or plan verification. Exact classification is
+required before changing the planner.
+
+### 4.3 State planning: 4 fallbacks
+
+The affected files are:
+
+- `constant.dsp`;
+- `precision.dsp`;
+- `select2.dsp`;
+- `waveform1.dsp`.
+
+The state checker accepts only resources represented by the vector state plan
+or the external checked clock plan. It rejects other effect resources with
+`UnsupportedStateResource`, and also checks loop ownership, recursion identity,
+clock ownership, and delay geometry.
+
+The category alone is insufficient to claim that all four files fail for the
+same resource. The detailed `VectorStateError` must be preserved and measured
+before implementing a new transition model.
+
+### 4.4 Pure lowering: 3 fallbacks
+
+The affected files are:
+
+- `math_simp.dsp`;
+- `par_fir_32.dsp`;
+- `priority1.dsp`.
+
+The pure lowerer already handles common arithmetic, casts, selections, delays,
+recursion, projections, and math calls. Remaining failures can arise from an
+unsupported signal node, an effectful signal in a pure region, a type mismatch,
+missing routed evidence, or invalid control dependence. As with plan and state
+failures, the retained status is not detailed enough to choose a correct fix.
+
+### 4.5 Test observability gap
+
+Earlier differential matrices primarily proved output parity. They did not
+systematically require `VectorPipelineStatus::Certified` or inspect the final
+FIR shape. After `b5a0a8b3`, a correct scalar fallback naturally passes a
+scalar-versus-`-vec` output comparison.
+
+Correctness parity and vector-retention coverage are separate gates. Both are
+required.
+
+## 5. Correction Plan
+
+### Phase 0 - Preserve complete fallback diagnostics
+
+Goal: make every corpus rejection actionable before broadening semantics.
+
+Actions:
+
+1. Extend the observable pipeline result so a fallback retains both the stable
+   reason and `VectorModuleFailure.detail`.
+2. Keep stable reason codes for snapshots and CI, while exposing structured
+   stage-specific errors where practical.
+3. Extend `count_vector_corpus` with:
+   - detailed error text;
+   - counts by concrete error variant;
+   - optional per-stage waterfall analysis;
+   - machine-readable JSON or TSV output for CI comparison.
+4. Record separately whether the emitted module is certified vector, legacy
+   vector, or scalar fallback. Do not infer this solely from the requested CLI
+   options.
+
+Acceptance criteria:
+
+- every one of the 89 fallbacks has a concrete diagnostic;
+- the totals remain reproducible and sum to the corpus size;
+- diagnostic additions do not alter generated FIR or runtime output.
+
+### Phase 1 - Integrate UI into the checked vector module
+
+Goal: remove the unconditional `UiProgram` rejection for ordinary controls and
+bargraphs while preserving the Faust lifecycle contract.
+
+Actions:
+
+1. Extract reusable UI/lifecycle construction from
+   `signal_fir/module/ui_lowering.rs` instead of creating a divergent vector
+   implementation.
+2. Add UI zone declarations to the DSP struct.
+3. Populate `instanceResetUserInterface` with the accepted defaults.
+4. Emit grouped `buildUserInterface` operations and metadata in canonical
+   order.
+5. Lower control reads at the correct control-rate point before dependent
+   vector loops.
+6. Place bargraph writes after their producing computation while preserving
+   effect order.
+7. Add a producer/checker artifact that proves exact zone coverage, unique
+   ownership, lifecycle placement, and UI read/write ordering.
+8. Treat soundfiles as a separate subphase if their lifecycle cannot be
+   certified with ordinary controls.
+
+Acceptance criteria:
+
+- representative button, checkbox, slider, numerical-entry, bargraph, nested
+  group, metadata, and multi-control DSPs report `Certified`;
+- scalar and vector interpreter outputs are bit-exact where applicable;
+- C and C++ generated modules pass lifecycle and runtime differential tests;
+- unsupported soundfile forms retain a specific, observable fallback;
+- removing UI fallback does not weaken state, clock, or effect certificates.
+
+### Phase 2 - Recover vector-plan coverage
+
+Goal: address the 15 current plan failures using exact diagnostics.
+
+Actions:
+
+1. Partition the files into table transport, recursive-delay crossing,
+   placement, and verification failures.
+2. For table carriers, choose and certify one of these representations:
+   - force producer and consumers into a common owner loop;
+   - pass a stable table handle when only identity crosses the boundary;
+   - introduce an explicit table transport record with lifetime and mutation
+     rules.
+3. Generalize `FusedSerialGroup` beyond the direct slice to supported longer
+   chains and multiple internal transports.
+4. Add multi-carrier or clock-crossing fusion only after defining exact
+   temporal and ownership invariants; otherwise retain scalar fallback.
+5. Improve placement only when the independent checker can reconstruct and
+   validate the chosen ownership from decorations.
+
+Acceptance criteria:
+
+- each newly supported class has producer, independent checker, mutation, FIR
+  structure, and scalar/vector differential tests;
+- no delayed recursive read is precomputed before its same-chunk state writes;
+- table lifetime and mutation semantics match the C++ reference;
+- `-ss 0..3` changes only legal scheduling choices, not semantics.
+
+### Phase 3 - Extend checked state transitions
+
+Goal: model the concrete missing state resources found in the four current
+state-plan failures.
+
+Actions:
+
+1. Classify each failure using Phase 0 diagnostics.
+2. Add one resource class at a time to `VectorStatePlan`.
+3. Define its `pre`, per-sample `exec`, and `post` transitions and lifecycle
+   ownership.
+4. Extend the event-order certificate and assembly checker for the resource.
+5. Test both short blocks and chunk tails, including `count < vec_size`.
+
+Acceptance criteria:
+
+- every accepted resource has exact transition and lifecycle evidence;
+- unmodelled resources continue to fail closed;
+- optimized and unoptimized interpreter executions agree;
+- scalar/vector/C++ differential tests cover state across chunk boundaries.
+
+### Phase 4 - Complete the residual pure lowerer
+
+Goal: support the exact residual forms blocking the three current pure-lowering
+files.
+
+Actions:
+
+1. Use detailed diagnostics and minimized DSP fixtures to identify each form.
+2. Add canonical lowering and type checks for supported pure forms.
+3. Keep effectful or control-dependent forms out of pure regions unless routing
+   evidence is extended first.
+4. Add structural tests for CSE root coverage and region ownership.
+
+Acceptance criteria:
+
+- the three existing files either certify or report a more specific intentional
+  unsupported category;
+- no new lowering path bypasses effect, type, or route verification;
+- generated results match scalar and C++ references.
+
+### Phase 5 - Add vector-retention quality gates
+
+Goal: prevent correct-but-scalar fallback from being mistaken for vector-mode
+coverage.
+
+Actions:
+
+1. Run the corpus counter across:
+   - `-lv 0` and `-lv 1`;
+   - `-ss 0..3`;
+   - float and double precision where practical.
+2. Store a repository-relative coverage summary with certified, fallback, and
+   error counts.
+3. Fail CI when:
+   - a previously certified DSP becomes scalar fallback without an approved
+     baseline update;
+   - the report is incomplete;
+   - a claimed certified module lacks the expected chunk-driver/vector-region
+     structure.
+4. Keep differential correctness gates for all supported backends.
+5. Compare interpreter `opt_level=0` and maximum optimization on a
+   representative vector subset.
+6. Benchmark certified modules separately from scalar fallbacks.
+
+Acceptance criteria:
+
+- CI reports effective vector retention independently from numerical parity;
+- coverage changes are reviewable per DSP and per fallback reason;
+- benchmark summaries never include scalar fallback under vector speedup
+  aggregates.
+
+## 6. Recommended Execution Order
+
+The recommended order is:
+
+```text
+detailed diagnostics
+    -> ordinary UI controls and bargraphs
+    -> remeasure the full waterfall
+    -> table and recursive transport classes
+    -> missing state resources
+    -> residual pure lowering
+    -> permanent retention and performance gates
+```
+
+UI is the highest-leverage implementation area because it currently blocks
+72% of the corpus at the first checked stage. Diagnostics come first because
+the downstream distribution will change once UI programs can proceed further.
+
+The first coverage milestone should not promise a fixed certified count. It
+should require that UI-bearing, otherwise stateless and pointwise DSPs certify,
+then use the new waterfall to set the next evidence-based target.
+
+## 7. Safety and Compatibility Rules
+
+- Do not remove a fallback merely to increase the certified count.
+- Do not restore the pre-`b5a0a8b3` transitional vector fallback globally.
+- Keep the delayed-recursive transport guard authoritative unless an accepted
+  fused-group certificate covers the exact dependency.
+- Preserve the Faust lifecycle contract for UI and persistent state.
+- Preserve the external CLI behavior of `-vec`, `-lv`, `-vs`, and `-ss`.
+- Keep public API changes additive or adapted with documented compatibility
+  impact.
+- Use repository-relative paths in stored reports and fixtures.
+- Treat corpus coverage as evidence of implementation breadth, not as a proof
+  of semantic correctness; producer/checker and differential gates remain
+  authoritative.
+
+## 8. Completion Criteria
+
+This recovery plan is complete when:
+
+1. every requested vector compilation reports both its effective mode and a
+   detailed certified/fallback reason;
+2. ordinary UI programs use the checked vector pipeline;
+3. the current plan, state, and lowering failures have been classified and
+   either implemented with evidence or retained as explicit supported-policy
+   fallbacks;
+4. scalar fallback cannot silently pass as vector retention in CI or
+   benchmarks;
+5. the full `-lv 0/1 x -ss 0..3` matrix preserves scalar and C++ parity;
+6. no known unsafe recursive-delay transport is accepted without a verified
+   fused serial group.
