@@ -39,7 +39,9 @@ use super::vector_plan::build_vector_plan;
 use super::vector_route::{VectorRegion, VerifiedRoutedFir};
 use super::vector_state::build_vector_state_plan_with_clock;
 use super::vector_verify::VectorPlan;
-use super::{ComputeMode, SignalFirOutput, VectorFallbackReason, VectorPipelineStatus};
+use super::{
+    ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
+};
 
 /// Failure stage retained by the production selector as an observable fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +261,8 @@ fn build_verified_vector_module_with_evidence(
             emission_order: Vec::new(),
             shadow_report: None,
             vector_pipeline_status: VectorPipelineStatus::Certified,
+            vector_effective_mode: VectorEffectiveMode::CertifiedVector,
+            vector_pipeline_detail: None,
         },
         assembly,
         output_stores,

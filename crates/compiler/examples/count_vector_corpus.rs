@@ -1,13 +1,15 @@
 //! Count impulse-test DSPs whose requested vector pipeline remains certified.
 //!
 //! Usage:
-//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss]`
+//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--json]`
 //!
 //! The default is `-vec -lv 0 -ss 0`. A DSP is counted as vector-capable only
 //! when the FIR result reports `VectorPipelineStatus::Certified`; a generated
 //! artifact alone is not sufficient because unsupported vector shapes may use
-//! the scalar fallback path.
+//! the scalar fallback path. `--json` emits a machine-readable report with the
+//! effective mode and complete first-failure detail for every DSP.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use compiler::{
@@ -29,8 +31,21 @@ fn parse_arg(args: &[String], index: usize, default: u8, name: &str) -> u8 {
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
-    let loop_variant = parse_arg(&args, 1, 0, "loop variant");
-    let strategy = parse_arg(&args, 2, 0, "scheduling strategy");
+    let positional = std::iter::once(args[0].clone())
+        .chain(
+            args.iter()
+                .skip(1)
+                .filter(|arg| !arg.starts_with("--"))
+                .cloned(),
+        )
+        .collect::<Vec<_>>();
+    let json = args.iter().any(|arg| arg == "--json");
+    let loop_variant = parse_arg(&positional, 1, 0, "loop variant");
+    let strategy = parse_arg(&positional, 2, 0, "scheduling strategy");
+    if loop_variant > 1 || strategy > 3 {
+        eprintln!("loop variant must be 0..1 and scheduling strategy must be 0..3");
+        std::process::exit(2);
+    }
     let root = PathBuf::from("tests/impulse-tests/dsp");
 
     let mut files = std::fs::read_dir(&root)
@@ -66,27 +81,78 @@ fn main() {
         ) {
             Ok(output) => match output.vector_pipeline_status {
                 VectorPipelineStatus::Certified => certified.push(path),
-                status => fallback.push((path, status)),
+                status => fallback.push((
+                    path,
+                    status,
+                    output.vector_effective_mode,
+                    output.vector_pipeline_detail,
+                )),
             },
             Err(error) => errors.push((path, error.to_string())),
         }
     }
 
-    println!("MODE -vec -lv {loop_variant} -ss {strategy}");
-    println!("TOTAL {}", certified.len() + fallback.len() + errors.len());
-    println!("CERTIFIED {}", certified.len());
-    println!("FALLBACK {}", fallback.len());
-    println!("ERROR {}", errors.len());
-    println!("CERTIFIED_FILES");
-    for path in certified {
-        println!("{}", path.display());
-    }
-    println!("FALLBACK_FILES");
-    for (path, status) in fallback {
-        println!("{}: {status:?}", path.display());
-    }
-    println!("ERROR_FILES");
-    for (path, error) in errors {
-        println!("{}: {error}", path.display());
+    let reason_counts = fallback.iter().fold(BTreeMap::new(), |mut counts, entry| {
+        let code = match entry.1 {
+            VectorPipelineStatus::Fallback(reason) => reason.code(),
+            VectorPipelineStatus::NotRequested => "FRS-VEC-NOT-REQUESTED",
+            VectorPipelineStatus::Certified => "FRS-VEC-CERTIFIED",
+        };
+        *counts.entry(code).or_insert(0_usize) += 1;
+        counts
+    });
+
+    if json {
+        let report = serde_json::json!({
+            "mode": { "vector": true, "loop_variant": loop_variant, "scheduling_strategy": strategy },
+            "summary": {
+                "total": certified.len() + fallback.len() + errors.len(),
+                "certified": certified.len(),
+                "fallback": fallback.len(),
+                "error": errors.len(),
+                "fallback_by_reason": reason_counts,
+            },
+            "certified_files": certified.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            "fallback_files": fallback.iter().map(|(path, status, effective, detail)| serde_json::json!({
+                "path": path.display().to_string(),
+                "status": format!("{status:?}"),
+                "effective_mode": format!("{effective:?}"),
+                "detail": detail,
+            })).collect::<Vec<_>>(),
+            "error_files": errors.iter().map(|(path, error)| serde_json::json!({
+                "path": path.display().to_string(),
+                "error": error,
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize report")
+        );
+    } else {
+        println!("MODE -vec -lv {loop_variant} -ss {strategy}");
+        println!("TOTAL {}", certified.len() + fallback.len() + errors.len());
+        println!("CERTIFIED {}", certified.len());
+        println!("FALLBACK {}", fallback.len());
+        println!("ERROR {}", errors.len());
+        println!("FALLBACK_BY_REASON");
+        for (reason, count) in reason_counts {
+            println!("{reason} {count}");
+        }
+        println!("CERTIFIED_FILES");
+        for path in certified {
+            println!("{}", path.display());
+        }
+        println!("FALLBACK_FILES");
+        for (path, status, effective, detail) in fallback {
+            println!(
+                "{}: {status:?} effective={effective:?} detail={}",
+                path.display(),
+                detail.as_deref().unwrap_or("-")
+            );
+        }
+        println!("ERROR_FILES");
+        for (path, error) in errors {
+            println!("{}: {error}", path.display());
+        }
     }
 }

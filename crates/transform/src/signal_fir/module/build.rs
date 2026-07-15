@@ -958,5 +958,7 @@ pub(crate) fn build_module<'a>(
         // compare against.
         shadow_report: None,
         vector_pipeline_status: super::super::VectorPipelineStatus::NotRequested,
+        vector_effective_mode: super::super::VectorEffectiveMode::Scalar,
+        vector_pipeline_detail: None,
     })
 }

@@ -10,8 +10,8 @@ use std::io::Cursor;
 
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{
-    Compiler, ComputeMode, SchedulingStrategy, SignalFirLane, VectorFallbackReason,
-    VectorPipelineStatus,
+    Compiler, ComputeMode, SchedulingStrategy, SignalFirLane, VectorEffectiveMode,
+    VectorFallbackReason, VectorPipelineStatus,
 };
 
 const PULSE_COUNTUP_LOOP_SOURCE: &str =
@@ -340,6 +340,11 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
         )
         .expect("pure vector FIR");
     assert_eq!(pure.vector_pipeline_status, VectorPipelineStatus::Certified);
+    assert_eq!(
+        pure.vector_effective_mode,
+        VectorEffectiveMode::CertifiedVector
+    );
+    assert_eq!(pure.vector_pipeline_detail, None);
 
     let stateful = compiler
         .compile_source_to_fir_with_lane(
@@ -393,6 +398,11 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
         ui.vector_pipeline_status,
         VectorPipelineStatus::Fallback(VectorFallbackReason::UiProgram)
     );
+    assert_eq!(ui.vector_effective_mode, VectorEffectiveMode::Scalar);
+    assert_eq!(
+        ui.vector_pipeline_detail.as_deref(),
+        Some("the checked vector module does not yet assemble grouped UI state")
+    );
 
     let rad = compiler
         .compile_source_to_fir_with_lane(
@@ -405,6 +415,8 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
         rad.vector_pipeline_status,
         VectorPipelineStatus::Fallback(VectorFallbackReason::ReverseAd)
     );
+    assert_eq!(rad.vector_effective_mode, VectorEffectiveMode::Scalar);
+    assert!(rad.vector_pipeline_detail.is_some());
     assert_eq!(VectorFallbackReason::ReverseAd.code(), "FRS-VEC-RAD-SCALAR");
 }
 

@@ -290,6 +290,8 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         store: lowered.store,
         module: lowered.module,
         vector_pipeline_status: lowered.vector_pipeline_status,
+        vector_effective_mode: lowered.vector_effective_mode,
+        vector_pipeline_detail: lowered.vector_pipeline_detail,
     })
 }
 

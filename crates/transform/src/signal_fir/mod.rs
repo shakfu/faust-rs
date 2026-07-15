@@ -254,6 +254,22 @@ pub enum VectorPipelineStatus {
     Fallback(VectorFallbackReason),
 }
 
+/// Effective compute shape emitted after vector selection and fallback.
+///
+/// This is intentionally distinct from [`VectorPipelineStatus`]: the status
+/// records why the checked vector path was or was not accepted, while this
+/// value states whether the returned FIR is actually vector-shaped. Keeping
+/// both prevents a successful scalar fallback from being counted as effective
+/// `-vec` coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorEffectiveMode {
+    /// The returned module uses scalar compute lowering.
+    #[default]
+    Scalar,
+    /// The returned module was accepted by the checked vector pipeline.
+    CertifiedVector,
+}
+
 /// Configuration options for [`compile_signals_to_fir_fastlane_with_ui`].
 ///
 /// These options describe the externally visible module contract.
@@ -340,6 +356,14 @@ pub struct SignalFirOutput {
     pub shadow_report: Option<shadow::ShadowReport>,
     /// Observable activation/fallback state for the signal-level vector path.
     pub vector_pipeline_status: VectorPipelineStatus,
+    /// Effective compute shape of the returned FIR module.
+    pub vector_effective_mode: VectorEffectiveMode,
+    /// Complete first-failure diagnostic retained for a vector fallback.
+    ///
+    /// Stable automation should continue to group by
+    /// [`Self::vector_pipeline_status`]; this detail is intended for corpus
+    /// triage and may include signal or loop identifiers.
+    pub vector_pipeline_detail: Option<String>,
 }
 
 /// Compiles propagated signals plus canonical grouped UI into a FIR module.
@@ -568,7 +592,7 @@ fn compile_fastlane_inner(
             options.scheduling_strategy,
         ) {
             Ok(output) => return Ok(output),
-            Err(failure) => vector_fallback = Some(failure.reason),
+            Err(failure) => vector_fallback = Some(failure),
         }
     }
 
@@ -605,10 +629,12 @@ fn compile_fastlane_inner(
         .map(|(hgraph, hsched)| shadow::compare_emission_order(hgraph, hsched, &output));
 
     output.shadow_report = shadow_report;
-    output.vector_pipeline_status = vector_fallback.map_or(
-        VectorPipelineStatus::NotRequested,
-        VectorPipelineStatus::Fallback,
-    );
+    if let Some(failure) = vector_fallback {
+        output.vector_pipeline_status = VectorPipelineStatus::Fallback(failure.reason);
+        output.vector_pipeline_detail = Some(failure.detail);
+    } else {
+        output.vector_pipeline_status = VectorPipelineStatus::NotRequested;
+    }
     Ok(output)
 }
 

@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: proposed
+Status: in progress — Phase 0 complete
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -37,6 +37,29 @@ The recovery must not revert the global safety fix. It should move the useful
 capabilities of the transitional builder into the checked pipeline, starting
 with UI lifecycle integration, while retaining producer/checker evidence and
 explicit scalar fallback for unsupported temporal dependencies.
+
+### 1.1 Implementation Progress
+
+Phase 0 was completed on 2026-07-15. `SignalFirOutput` and the public compiler
+FIR result now retain the effective emitted mode and the complete first-failure
+detail in addition to the stable `VectorPipelineStatus`. The corpus counter can
+emit a machine-readable JSON report with per-file status, effective mode,
+detail, errors, and aggregate fallback-reason counts.
+
+The Phase 0 corpus run confirmed that every one of the 89 fallbacks emits
+`Scalar` and produced the following downstream classification:
+
+- `VectorPlan`: one delayed-recursive crossing, three table transports, three
+  invalid root placements, and eight missing sample placements;
+- `StatePlan`: one delay owned by a non-vector loop and three unsupported
+  `WaveformIndex` resources;
+- `PureLowering`: one foreign sampling-frequency constant and two routed
+  consumer bodies missing their transport load;
+- `UiProgram`: 67 programs still stopped by the first-stage UI guard.
+
+The public API mapping is additive: existing status matching remains valid,
+while `VectorEffectiveMode` and `vector_pipeline_detail` add observability with
+no C or C++ ABI impact.
 
 ## 2. Measured Baseline
 

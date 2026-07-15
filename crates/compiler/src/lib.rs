@@ -86,7 +86,7 @@ use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::schedule::SchedulingStrategy;
 pub use transform::signal_fir::{
-    ComputeMode, RealType, VectorFallbackReason, VectorPipelineStatus,
+    ComputeMode, RealType, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
 };
 use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
 use ui::UiProgram;
@@ -166,6 +166,10 @@ pub struct FirCompileOutput {
     pub module: FirId,
     /// Checked signal-level vector activation or named fallback status.
     pub vector_pipeline_status: VectorPipelineStatus,
+    /// Effective scalar or checked-vector compute shape in the returned FIR.
+    pub vector_effective_mode: VectorEffectiveMode,
+    /// Complete first-failure diagnostic when vector selection fell back.
+    pub vector_pipeline_detail: Option<String>,
 }
 
 /// Request payload for the artifact-centric WASM compile service used by the
