@@ -7,8 +7,10 @@
 //! at L2/L3". This is the vector-plan analogue of the R1 schedule certificate
 //! (`crate::schedule::certificate`): a canonical DTO mirroring the
 //! `vectorPlan` shape of
-//! `porting/schemas/vector-verification-certificate-v1.schema.json`, plus a
-//! checker that re-derives every invariant from the plan's own fields.
+//! `porting/schemas/vector-verification-certificate-v2.schema.json`, plus a
+//! checker that re-derives every invariant from the plan's own fields. Schema
+//! v2 adds lockstep bundles and explicit transport layouts; v1 plans are not
+//! silently accepted by the v2 verifier.
 //!
 //! The checks mechanize the Lean `VectorPlanCertificate` obligations
 //! (`porting/vector-mode-scheduling-formal-spec.lean`): unique ids, exact
@@ -37,6 +39,10 @@ use std::fmt;
 pub use super::analysis::EffectAtom;
 use super::decoration_verify::VerifiedDecorationCertificate;
 use super::vector_analysis::{DepKind, ForeignPurity, StateResource};
+
+/// Current in-memory vector-plan schema. Version 2 introduces lockstep
+/// instance bundles and transport layout certificates.
+pub const VECTOR_PLAN_SCHEMA_VERSION: u32 = 2;
 
 /// `$defs/signalType`: the v1 value-type vocabulary (matches the Lean
 /// `ValueTy`). FIR widths / `FaustFloat` live in the routed-FIR layer, not
@@ -78,6 +84,12 @@ pub enum LoopKind {
     Vectorizable,
     Recursive(u64),
     Island(u64),
+    /// One logical lane of a checked lockstep bundle. The lane loop identities
+    /// remain in the plan so the verifier can re-check independence; scheduling
+    /// and FIR assembly treat the bundle as one physical execution unit.
+    Lockstep {
+        width: u64,
+    },
 }
 
 /// `vecSafeWitness.witness_kind`.
@@ -131,6 +143,50 @@ pub struct TransportRecord {
     pub consumer_loop: u64,
     pub element_type: ValueType,
     pub length: u64,
+    pub layout: TransportLayout,
+}
+
+/// Chunk-local transport layout. The external `compute` ABI remains planar;
+/// `Interleaved` is legal only for a checked lockstep bundle of matching width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportLayout {
+    Planar,
+    Interleaved(u64),
+}
+
+/// One explicit leaf correspondence in an isomorphism witness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IsoLeafMapping {
+    pub representative_signal_id: u64,
+    pub lane_signal_id: u64,
+}
+
+/// Root-level isomorphism evidence for one non-representative lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsoRootWitness {
+    pub representative_root: u64,
+    pub lane_root: u64,
+    pub shape_hash: u64,
+    pub leaf_mapping: Vec<IsoLeafMapping>,
+}
+
+/// One logical lane retained inside a lockstep bundle certificate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockstepLaneRecord {
+    pub loop_id: u64,
+    pub recursion_group: u64,
+    pub roots: Vec<IsoRootWitness>,
+}
+
+/// Canonical lockstep bundle. `member_loop_ids` are scheduled as one unit and
+/// assembled under one physical sample loop, while remaining explicit in the
+/// plan for legality checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockstepBundleRecord {
+    pub bundle_id: u64,
+    pub representative_loop_id: u64,
+    pub member_loop_ids: Vec<u64>,
+    pub lanes: Vec<LockstepLaneRecord>,
 }
 
 /// `$defs/fusedSerialGroupRecord`.
@@ -172,6 +228,7 @@ pub struct LoopEdge {
 /// `$defs/vectorPlan`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorPlan {
+    pub schema_version: u32,
     pub vec_size: u64,
     pub signals: Vec<SignalRecord>,
     pub loops: Vec<LoopRecord>,
@@ -181,12 +238,15 @@ pub struct VectorPlan {
     pub effect_edges: Vec<LoopEdge>,
     pub vec_safe_witnesses: Vec<VecSafeWitness>,
     pub fused_serial_groups: Vec<FusedSerialGroupRecord>,
+    pub lockstep_bundles: Vec<LockstepBundleRecord>,
 }
 
 /// Why [`verify_vector_plan`] rejected a plan. One variant per checked
 /// obligation, so each has a demonstrated rejecting mutation (plan §8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorPlanError {
+    /// The verifier accepts only the exact v2 schema.
+    UnsupportedSchema { found: u32 },
     /// `vec_size` must be positive.
     VecSizeZero,
     /// A set-like array is not in its required canonical order (also catches
@@ -227,6 +287,35 @@ pub enum VectorPlanError {
     TransportTypeMismatch { transport_id: u64 },
     /// A transport's array length does not equal `vec_size`.
     TransportLengthMismatch { transport_id: u64 },
+    /// An interleaved transport has no matching lockstep width.
+    TransportLayoutMismatch { transport_id: u64 },
+    /// A lockstep bundle has fewer than two lanes or inconsistent width.
+    LockstepWidthMismatch { bundle_id: u64 },
+    /// A lockstep bundle references a missing loop or repeats a member.
+    LockstepMemberMismatch { bundle_id: u64, loop_id: u64 },
+    /// A lane record does not correspond exactly to one bundle member.
+    LockstepLaneMismatch { bundle_id: u64, loop_id: u64 },
+    /// Two candidate lanes are connected in the epoch dependence graph.
+    LockstepDependentLanes {
+        bundle_id: u64,
+        left: u64,
+        right: u64,
+    },
+    /// Two candidate lanes do not share the same epoch and clock.
+    LockstepDomainMismatch {
+        bundle_id: u64,
+        left: u64,
+        right: u64,
+    },
+    /// Two candidate lanes have non-commuting effects.
+    LockstepEffectConflict {
+        bundle_id: u64,
+        left: u64,
+        right: u64,
+    },
+    /// A root/leaf witness is not canonical or references signals outside its
+    /// declared lane roots. Prepared-tree shape is checked by the second gate.
+    LockstepIsoWitnessMismatch { bundle_id: u64, loop_id: u64 },
     /// A cross-epoch edge whose dependency epoch has a strictly greater rank
     /// than its consumer epoch (a barrier run backwards).
     BarrierViolation { edge: LoopEdge },
@@ -284,6 +373,9 @@ pub enum VectorPlanError {
 impl fmt::Display for VectorPlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedSchema { found } => {
+                write!(f, "unsupported vector-plan schema {found}")
+            }
             Self::VecSizeZero => write!(f, "vec_size must be positive"),
             Self::NotCanonical { what, at } => {
                 write!(f, "{what} is not strictly ascending at index {at}")
@@ -345,6 +437,48 @@ impl fmt::Display for VectorPlanError {
             Self::TransportLengthMismatch { transport_id } => {
                 write!(f, "transport {transport_id} length != vec_size")
             }
+            Self::TransportLayoutMismatch { transport_id } => {
+                write!(f, "transport {transport_id} has an invalid lockstep layout")
+            }
+            Self::LockstepWidthMismatch { bundle_id } => {
+                write!(f, "lockstep bundle {bundle_id} has an inconsistent width")
+            }
+            Self::LockstepMemberMismatch { bundle_id, loop_id } => write!(
+                f,
+                "lockstep bundle {bundle_id} has invalid member loop {loop_id}"
+            ),
+            Self::LockstepLaneMismatch { bundle_id, loop_id } => write!(
+                f,
+                "lockstep bundle {bundle_id} has invalid lane loop {loop_id}"
+            ),
+            Self::LockstepDependentLanes {
+                bundle_id,
+                left,
+                right,
+            } => write!(
+                f,
+                "lockstep bundle {bundle_id} lanes {left} and {right} are dependency-connected"
+            ),
+            Self::LockstepDomainMismatch {
+                bundle_id,
+                left,
+                right,
+            } => write!(
+                f,
+                "lockstep bundle {bundle_id} lanes {left} and {right} disagree on epoch or clock"
+            ),
+            Self::LockstepEffectConflict {
+                bundle_id,
+                left,
+                right,
+            } => write!(
+                f,
+                "lockstep bundle {bundle_id} lanes {left} and {right} have conflicting effects"
+            ),
+            Self::LockstepIsoWitnessMismatch { bundle_id, loop_id } => write!(
+                f,
+                "lockstep bundle {bundle_id} lane {loop_id} has an invalid isomorphism witness"
+            ),
             Self::BarrierViolation { edge } => {
                 write!(f, "cross-epoch edge {edge:?} runs a barrier backwards")
             }
@@ -517,6 +651,11 @@ pub(crate) fn effects_sample_reorderable(effects: &[EffectAtom]) -> bool {
 /// The first [`VectorPlanError`] found (checks ordered so identity/coverage
 /// problems surface before the graph/transport checks that assume them).
 pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
+    if plan.schema_version != VECTOR_PLAN_SCHEMA_VERSION {
+        return Err(VectorPlanError::UnsupportedSchema {
+            found: plan.schema_version,
+        });
+    }
     if plan.vec_size == 0 {
         return Err(VectorPlanError::VecSizeZero);
     }
@@ -564,6 +703,15 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         what: "fused_serial_groups",
         at,
     })?;
+    let lockstep_bundle_ids = plan
+        .lockstep_bundles
+        .iter()
+        .map(|bundle| bundle.bundle_id)
+        .collect::<Vec<_>>();
+    strictly_ascending(&lockstep_bundle_ids).map_err(|at| VectorPlanError::NotCanonical {
+        what: "lockstep_bundles",
+        at,
+    })?;
 
     let signal_set: AHashSet<u64> = signal_ids.iter().copied().collect();
     let loop_set: AHashSet<u64> = loop_ids.iter().copied().collect();
@@ -571,6 +719,189 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
         plan.signals.iter().map(|s| (s.signal_id, s)).collect();
     let loop_by_id: AHashMap<u64, &LoopRecord> =
         plan.loops.iter().map(|l| (l.loop_id, l)).collect();
+
+    // ── Lockstep finite shape. Prepared-signal skeletons are re-traversed by
+    // `verify_lockstep_isomorphism`; this plan-local gate checks every graph,
+    // effect, epoch, ownership, and canonical witness obligation first.
+    for loop_record in &plan.loops {
+        if let Some(&signal_id) = loop_record
+            .roots
+            .iter()
+            .find(|signal_id| !signal_set.contains(signal_id))
+        {
+            return Err(VectorPlanError::RootUnknownSignal {
+                loop_id: loop_record.loop_id,
+                signal_id,
+            });
+        }
+    }
+    for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
+        if !loop_set.contains(&edge.consumer) {
+            return Err(VectorPlanError::EdgeEndpointUnknown {
+                edge: *edge,
+                missing: edge.consumer,
+            });
+        }
+        if !loop_set.contains(&edge.dependency) {
+            return Err(VectorPlanError::EdgeEndpointUnknown {
+                edge: *edge,
+                missing: edge.dependency,
+            });
+        }
+    }
+    let reachability = CheckedReachability::new(plan);
+    let effects_by_loop = plan
+        .loops
+        .iter()
+        .map(|loop_record| {
+            (
+                loop_record.loop_id,
+                CheckedEffectConflictSummary::new(&signal_by_id, loop_record),
+            )
+        })
+        .collect::<AHashMap<_, _>>();
+    let mut bundled_loops = AHashSet::new();
+    for bundle in &plan.lockstep_bundles {
+        if bundle.member_loop_ids.len() < 2 || bundle.lanes.len() != bundle.member_loop_ids.len() {
+            return Err(VectorPlanError::LockstepWidthMismatch {
+                bundle_id: bundle.bundle_id,
+            });
+        }
+        strictly_ascending(&bundle.member_loop_ids).map_err(|at| {
+            VectorPlanError::NotCanonical {
+                what: "lockstep.member_loop_ids",
+                at,
+            }
+        })?;
+        if bundle.member_loop_ids.first().copied() != Some(bundle.representative_loop_id) {
+            return Err(VectorPlanError::LockstepMemberMismatch {
+                bundle_id: bundle.bundle_id,
+                loop_id: bundle.representative_loop_id,
+            });
+        }
+        let lane_loop_ids = bundle
+            .lanes
+            .iter()
+            .map(|lane| lane.loop_id)
+            .collect::<Vec<_>>();
+        if lane_loop_ids != bundle.member_loop_ids {
+            return Err(VectorPlanError::LockstepLaneMismatch {
+                bundle_id: bundle.bundle_id,
+                loop_id: lane_loop_ids
+                    .iter()
+                    .zip(&bundle.member_loop_ids)
+                    .find_map(|(actual, expected)| (actual != expected).then_some(*actual))
+                    .unwrap_or(bundle.representative_loop_id),
+            });
+        }
+        let width =
+            u64::try_from(bundle.member_loop_ids.len()).expect("lockstep member count fits u64");
+        let representative = loop_by_id.get(&bundle.representative_loop_id).ok_or(
+            VectorPlanError::LockstepMemberMismatch {
+                bundle_id: bundle.bundle_id,
+                loop_id: bundle.representative_loop_id,
+            },
+        )?;
+        for lane in &bundle.lanes {
+            let Some(loop_record) = loop_by_id.get(&lane.loop_id).copied() else {
+                return Err(VectorPlanError::LockstepMemberMismatch {
+                    bundle_id: bundle.bundle_id,
+                    loop_id: lane.loop_id,
+                });
+            };
+            if loop_record.kind != (LoopKind::Lockstep { width }) {
+                return Err(VectorPlanError::LockstepWidthMismatch {
+                    bundle_id: bundle.bundle_id,
+                });
+            }
+            if !bundled_loops.insert(lane.loop_id)
+                || loop_record.epoch_id != representative.epoch_id
+                || lane.roots.len() != loop_record.roots.len()
+                || lane
+                    .roots
+                    .iter()
+                    .map(|root| root.lane_root)
+                    .ne(loop_record.roots.iter().copied())
+                || lane
+                    .roots
+                    .iter()
+                    .map(|root| root.representative_root)
+                    .ne(representative.roots.iter().copied())
+            {
+                return Err(VectorPlanError::LockstepLaneMismatch {
+                    bundle_id: bundle.bundle_id,
+                    loop_id: lane.loop_id,
+                });
+            }
+            for root in &lane.roots {
+                if root.shape_hash == 0
+                    || !signal_set.contains(&root.representative_root)
+                    || !signal_set.contains(&root.lane_root)
+                    || strictly_ascending(&root.leaf_mapping).is_err()
+                    || root.leaf_mapping.iter().any(|mapping| {
+                        !signal_set.contains(&mapping.representative_signal_id)
+                            || !signal_set.contains(&mapping.lane_signal_id)
+                    })
+                {
+                    return Err(VectorPlanError::LockstepIsoWitnessMismatch {
+                        bundle_id: bundle.bundle_id,
+                        loop_id: lane.loop_id,
+                    });
+                }
+            }
+        }
+        for (index, &left) in bundle.member_loop_ids.iter().enumerate() {
+            for &right in &bundle.member_loop_ids[index + 1..] {
+                if reachability.reaches(left, right) || reachability.reaches(right, left) {
+                    return Err(VectorPlanError::LockstepDependentLanes {
+                        bundle_id: bundle.bundle_id,
+                        left,
+                        right,
+                    });
+                }
+                let left_loop = loop_by_id[&left];
+                let right_loop = loop_by_id[&right];
+                let left_clocks = left_loop
+                    .roots
+                    .iter()
+                    .map(|root| signal_by_id[root].clock_id)
+                    .collect::<AHashSet<_>>();
+                let right_clocks = right_loop
+                    .roots
+                    .iter()
+                    .map(|root| signal_by_id[root].clock_id)
+                    .collect::<AHashSet<_>>();
+                if left_loop.epoch_id != right_loop.epoch_id || left_clocks != right_clocks {
+                    return Err(VectorPlanError::LockstepDomainMismatch {
+                        bundle_id: bundle.bundle_id,
+                        left,
+                        right,
+                    });
+                }
+                if effects_by_loop[&left].conflicts(&effects_by_loop[&right]) {
+                    return Err(VectorPlanError::LockstepEffectConflict {
+                        bundle_id: bundle.bundle_id,
+                        left,
+                        right,
+                    });
+                }
+            }
+        }
+    }
+    for loop_record in &plan.loops {
+        if matches!(loop_record.kind, LoopKind::Lockstep { .. })
+            != bundled_loops.contains(&loop_record.loop_id)
+        {
+            return Err(VectorPlanError::LockstepMemberMismatch {
+                bundle_id: plan
+                    .lockstep_bundles
+                    .iter()
+                    .find(|bundle| bundle.member_loop_ids.contains(&loop_record.loop_id))
+                    .map_or(u64::MAX, |bundle| bundle.bundle_id),
+                loop_id: loop_record.loop_id,
+            });
+        }
+    }
 
     // ── Fused-group finite shape. Semantic delay/recursion facts are checked
     // independently by `verify_fused_serial_groups` against decorations.
@@ -887,6 +1218,24 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
                 transport_id: t.transport_id,
             });
         }
+        if let TransportLayout::Interleaved(width) = t.layout {
+            let matching_bundle = plan.lockstep_bundles.iter().any(|bundle| {
+                u64::try_from(bundle.member_loop_ids.len()).ok() == Some(width)
+                    && (bundle
+                        .member_loop_ids
+                        .binary_search(&t.producer_loop)
+                        .is_ok()
+                        || bundle
+                            .member_loop_ids
+                            .binary_search(&t.consumer_loop)
+                            .is_ok())
+            });
+            if width < 2 || !matching_bundle {
+                return Err(VectorPlanError::TransportLayoutMismatch {
+                    transport_id: t.transport_id,
+                });
+            }
+        }
     }
 
     // ── VecSafe witnesses vs loop kinds. ─────────────────────────────────
@@ -922,7 +1271,7 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
                     });
                 }
             }
-            LoopKind::Recursive(_) | LoopKind::Island(_) => {
+            LoopKind::Recursive(_) | LoopKind::Island(_) | LoopKind::Lockstep { .. } => {
                 // Serial loops must not claim a pointwise (per-lane
                 // parallel) witness; only a serial-state witness is
                 // consistent with their kind.
@@ -1444,6 +1793,8 @@ mod tests {
     /// typed transport, both in the single forward epoch.
     fn valid_plan() -> VectorPlan {
         VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 16,
             signals: vec![
                 SignalRecord {
@@ -1498,6 +1849,7 @@ mod tests {
                 consumer_loop: 1,
                 element_type: ValueType::Real,
                 length: 16,
+                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
             }],
             data_edges: vec![LoopEdge {
                 consumer: 1,
@@ -1534,6 +1886,56 @@ mod tests {
             state_write_signal_ids: vec![10],
             internal_transport_ids: vec![0],
             output_or_transport_roots: vec![10],
+        }];
+        plan
+    }
+
+    fn structural_lockstep_plan() -> VectorPlan {
+        let mut plan = valid_plan();
+        plan.transports.clear();
+        plan.data_edges.clear();
+        for (loop_record, group) in plan.loops.iter_mut().zip([7_u64, 8]) {
+            loop_record.kind = LoopKind::Lockstep { width: 2 };
+            let witness = plan
+                .vec_safe_witnesses
+                .iter_mut()
+                .find(|witness| witness.loop_id == loop_record.loop_id)
+                .expect("reference loop has a witness");
+            witness.witness_kind = WitnessKind::SerialStateInternal;
+            assert!(group > 0);
+        }
+        plan.lockstep_bundles = vec![LockstepBundleRecord {
+            bundle_id: 0,
+            representative_loop_id: 0,
+            member_loop_ids: vec![0, 1],
+            lanes: vec![
+                LockstepLaneRecord {
+                    loop_id: 0,
+                    recursion_group: 7,
+                    roots: vec![IsoRootWitness {
+                        representative_root: 10,
+                        lane_root: 10,
+                        shape_hash: 0x10,
+                        leaf_mapping: vec![IsoLeafMapping {
+                            representative_signal_id: 10,
+                            lane_signal_id: 10,
+                        }],
+                    }],
+                },
+                LockstepLaneRecord {
+                    loop_id: 1,
+                    recursion_group: 8,
+                    roots: vec![IsoRootWitness {
+                        representative_root: 10,
+                        lane_root: 11,
+                        shape_hash: 0x10,
+                        leaf_mapping: vec![IsoLeafMapping {
+                            representative_signal_id: 10,
+                            lane_signal_id: 11,
+                        }],
+                    }],
+                },
+            ],
         }];
         plan
     }
@@ -1619,6 +2021,8 @@ mod tests {
         ];
         signals.sort_by_key(|signal| signal.signal_id);
         let plan = VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 16,
             signals,
             loops: vec![
@@ -1658,6 +2062,7 @@ mod tests {
                     consumer_loop: 2,
                     element_type: ValueType::Real,
                     length: 16,
+                    layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
                 },
                 TransportRecord {
                     transport_id: 1,
@@ -1667,6 +2072,7 @@ mod tests {
                     consumer_loop: 0,
                     element_type: ValueType::Real,
                     length: 16,
+                    layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
                 },
             ],
             data_edges: vec![
@@ -1716,6 +2122,61 @@ mod tests {
     #[test]
     fn the_reference_plan_verifies() {
         verify_vector_plan(&valid_plan()).expect("reference plan is valid");
+    }
+
+    #[test]
+    fn structural_lockstep_bundle_verifies() {
+        verify_vector_plan(&structural_lockstep_plan()).expect("lockstep shape is valid");
+    }
+
+    #[test]
+    fn rejects_lockstep_width_mutation() {
+        let mut plan = structural_lockstep_plan();
+        plan.loops[1].kind = LoopKind::Lockstep { width: 3 };
+        assert_eq!(
+            verify_vector_plan(&plan),
+            Err(VectorPlanError::LockstepWidthMismatch { bundle_id: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_dependency_connected_lockstep_lanes() {
+        let mut plan = structural_lockstep_plan();
+        plan.data_edges.push(LoopEdge {
+            consumer: 1,
+            dependency: 0,
+        });
+        assert_eq!(
+            verify_vector_plan(&plan),
+            Err(VectorPlanError::LockstepDependentLanes {
+                bundle_id: 0,
+                left: 0,
+                right: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_corrupted_lockstep_leaf_mapping() {
+        let mut plan = structural_lockstep_plan();
+        plan.lockstep_bundles[0].lanes[1].roots[0].leaf_mapping[0].lane_signal_id = 99;
+        assert_eq!(
+            verify_vector_plan(&plan),
+            Err(VectorPlanError::LockstepIsoWitnessMismatch {
+                bundle_id: 0,
+                loop_id: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_v1_plan_at_the_v2_boundary() {
+        let mut plan = valid_plan();
+        plan.schema_version = 1;
+        assert_eq!(
+            verify_vector_plan(&plan),
+            Err(VectorPlanError::UnsupportedSchema { found: 1 })
+        );
     }
 
     #[test]

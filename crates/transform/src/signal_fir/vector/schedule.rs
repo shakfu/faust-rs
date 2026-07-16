@@ -309,6 +309,8 @@ mod tests {
         }
 
         VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 16,
             signals: (0..loop_count)
                 .map(|loop_id| SignalRecord {

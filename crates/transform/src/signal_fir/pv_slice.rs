@@ -202,6 +202,8 @@ impl PvPlan {
         signals.sort_by_key(|s| s.signal_id);
 
         vv::VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size,
             signals,
             loops: vec![
@@ -233,6 +235,7 @@ impl PvPlan {
                 consumer_loop: 1,
                 element_type: elem,
                 length: vec_size,
+                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
             }],
             data_edges: vec![vv::LoopEdge {
                 consumer: 1,

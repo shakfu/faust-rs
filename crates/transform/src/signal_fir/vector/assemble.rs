@@ -2335,6 +2335,8 @@ mod tests {
 
     fn state_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 8,
             signals: vec![
                 SignalRecord {
@@ -2543,6 +2545,8 @@ mod tests {
 
     fn clock_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 8,
             signals: vec![
                 SignalRecord {
@@ -2627,6 +2631,7 @@ mod tests {
                     consumer_loop: 2,
                     element_type: ValueType::Real,
                     length: 8,
+                    layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
                 },
                 TransportRecord {
                     transport_id: 1,
@@ -2636,6 +2641,7 @@ mod tests {
                     consumer_loop: 1,
                     element_type: ValueType::Real,
                     length: 8,
+                    layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
                 },
             ],
             data_edges: vec![

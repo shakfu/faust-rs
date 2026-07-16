@@ -1884,6 +1884,8 @@ mod tests {
 
     fn pure_transport_plan() -> VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 3,
             signals: vec![
                 signal(0, Placement::Owned(0), vec![]),
@@ -1903,6 +1905,7 @@ mod tests {
                 consumer_loop: 1,
                 element_type: ValueType::Real,
                 length: 3,
+                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
             }],
             data_edges: vec![LoopEdge {
                 consumer: 1,
@@ -1936,6 +1939,8 @@ mod tests {
 
     fn split_effect_plan(left: EffectAtom, right: EffectAtom) -> VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 3,
             signals: vec![
                 signal(0, Placement::Owned(0), vec![left]),
@@ -1973,6 +1978,8 @@ mod tests {
             cell: StateCell::Delay,
         };
         verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 3,
             signals: vec![
                 signal(
@@ -2013,6 +2020,8 @@ mod tests {
             projection: 1,
         };
         let plan = verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 3,
             signals: vec![
                 signal(

@@ -29,9 +29,9 @@ use super::super::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_l
 use super::super::vector_analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
 use super::super::vector_verify::{
     EpochRecord, FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate,
-    SignalRecord, TransportRecord, ValueType, VecSafeWitness, VectorPlan, VectorPlanError,
-    Vectorability, WitnessKind, effects_duplicable, effects_sample_reorderable,
-    verify_fused_serial_groups_after_plan, verify_vector_plan,
+    SignalRecord, TransportLayout, TransportRecord, VECTOR_PLAN_SCHEMA_VERSION, ValueType,
+    VecSafeWitness, VectorPlan, VectorPlanError, Vectorability, WitnessKind, effects_duplicable,
+    effects_sample_reorderable, verify_fused_serial_groups_after_plan, verify_vector_plan,
 };
 
 const EFFECT_ISLAND_TAG: u64 = 1 << 63;
@@ -585,6 +585,7 @@ pub fn build_vector_plan(
             LoopKind::Vectorizable => format!("loop_vec_{loop_id}"),
             LoopKind::Recursive(group) => format!("loop_rec_{group}"),
             LoopKind::Island(island) => format!("loop_island_{island}"),
+            LoopKind::Lockstep { width } => format!("loop_lockstep_{width}_{loop_id}"),
         };
         loops.push(LoopRecord {
             loop_id: *loop_id,
@@ -597,7 +598,9 @@ pub fn build_vector_plan(
             loop_id: *loop_id,
             witness_kind: match kind {
                 LoopKind::Vectorizable => WitnessKind::Pointwise,
-                LoopKind::Recursive(_) | LoopKind::Island(_) => WitnessKind::SerialStateInternal,
+                LoopKind::Recursive(_) | LoopKind::Island(_) | LoopKind::Lockstep { .. } => {
+                    WitnessKind::SerialStateInternal
+                }
             },
         });
     }
@@ -615,6 +618,7 @@ pub fn build_vector_plan(
             consumer_loop,
             element_type: value_type(&record.sig_type),
             length: vec_size,
+            layout: TransportLayout::Planar,
         });
     }
     trace_stage("transports");
@@ -637,6 +641,7 @@ pub fn build_vector_plan(
     }
     trace_stage("fused-groups");
     let plan = VectorPlan {
+        schema_version: VECTOR_PLAN_SCHEMA_VERSION,
         vec_size,
         signals,
         loops,
@@ -653,6 +658,7 @@ pub fn build_vector_plan(
         effect_edges: effect_edges.into_iter().collect(),
         vec_safe_witnesses: witnesses,
         fused_serial_groups,
+        lockstep_bundles: Vec::new(),
     };
     let verification = verify_vector_plan(&plan);
     trace_stage("plan-verification");

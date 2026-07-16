@@ -2299,6 +2299,8 @@ mod tests {
             })
             .collect();
         let plan = verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            lockstep_bundles: Vec::new(),
             vec_size: 16,
             signals,
             loops: vec![
@@ -2330,6 +2332,7 @@ mod tests {
                 consumer_loop: 1,
                 element_type: ValueType::Real,
                 length: 16,
+                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
             }],
             data_edges: vec![LoopEdge {
                 consumer: 1,

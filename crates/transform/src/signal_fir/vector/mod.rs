@@ -6,6 +6,7 @@ pub mod analysis;
 pub mod assemble;
 pub mod clock_ad;
 pub mod events;
+pub mod lockstep;
 pub mod lower;
 pub(crate) mod module;
 pub mod plan;
