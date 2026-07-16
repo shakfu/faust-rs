@@ -511,6 +511,34 @@ mod tests {
     use super::*;
     use fir::{FirBinOp, match_fir};
 
+    /// Builds the straight-line state-history shape used by the load-reuse
+    /// fixtures.  It is intentionally FIR-only: the safety contract is about
+    /// ordered table reads and writes, rather than about one corpus DSP.
+    fn recursive_history_fixture(store: &mut FirStore) -> Vec<FirId> {
+        let mut b = FirBuilder::new(store);
+        let zero = b.int32(0);
+        let one = b.int32(1);
+        let two = b.int32(2);
+        let read_previous = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let first = b.declare_var(
+            "fTemp0",
+            FirType::Float32,
+            AccessType::Stack,
+            Some(read_previous),
+        );
+        let update_current = b.store_table("state", AccessType::Struct, zero, read_previous);
+        let second_read = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let second = b.declare_var(
+            "fTemp1",
+            FirType::Float32,
+            AccessType::Stack,
+            Some(second_read),
+        );
+        let shift_history = b.store_table("state", AccessType::Struct, two, read_previous);
+        let commit_current = b.store_table("state", AccessType::Struct, one, read_previous);
+        vec![first, update_current, second, shift_history, commit_current]
+    }
+
     #[test]
     fn integer_shared_value_uses_itemp_prefix() {
         let mut store = FirStore::new();
@@ -536,6 +564,29 @@ mod tests {
                 typ: FirType::Int32,
                 ..
             } if name == "iTemp0"
+        ));
+    }
+
+    #[test]
+    fn recursive_history_fixture_keeps_ordered_state_shift_visible() {
+        let mut store = FirStore::new();
+        let mut statements = recursive_history_fixture(&mut store);
+
+        // The ordinary expression CSE pass must not reorder or hide state
+        // history updates.  The later state-aware pass is allowed to reuse the
+        // two reads only after proving that the write targets index zero.
+        materialize_shared_values(&mut store, &mut statements, "fTemp", 2, "iTemp", 0);
+
+        assert_eq!(statements.len(), 5);
+        assert!(matches!(
+            match_fir(&store, statements[3]),
+            FirMatch::StoreTable { ref name, index, .. }
+                if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 2, .. })
+        ));
+        assert!(matches!(
+            match_fir(&store, statements[4]),
+            FirMatch::StoreTable { ref name, index, .. }
+                if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 1, .. })
         ));
     }
 }

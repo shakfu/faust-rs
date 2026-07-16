@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: proposed
+Status: in progress (Phase A complete)
 
 ## 1. Problem Statement
 
@@ -75,6 +75,11 @@ visible and ordered.
 
 Pass criteria: the fixtures state which reuse is legal and each has a
 structural assertion over FIR nodes, not just emitted C++ text.
+
+Completion (2026-07-16): added a compiler-internal recursive-history fixture
+that keeps the two explicit history stores (`state[2]`, then `state[1]`) and
+the pre-existing expression-CSE ordering contract visible. The full legal and
+illegal reuse matrix is added with the effect summary in Phase B.
 
 ### Phase B — Define a conservative effect summary
 
