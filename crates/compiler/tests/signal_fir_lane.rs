@@ -553,9 +553,8 @@ fn scalar_cpp_reuses_non_aliasing_recursive_state_load_without_hiding_shift() {
         "the duplicate direct state load must reuse fTemp0:\n{compute}"
     );
     assert!(
-        compute.contains("fRec204[2] = fRec204[1];")
-            && compute.contains("fRec204[1] = fRec204[0];"),
-        "the required ordered recursive history shift must remain explicit:\n{compute}"
+        compute.contains("fRec204[2] = fTemp0;") && compute.contains("fRec204[1] = fRec204[0];"),
+        "the required ordered recursive history shift must remain explicit and reuse the proven prior state:\n{compute}"
     );
 }
 

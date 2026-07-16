@@ -122,6 +122,13 @@ and preserves every explicit state store. It declines all nested scopes rather
 than crossing a declaration boundary. Tests cover permitted non-aliasing
 history updates plus same-index, dynamic-index, call, and control barriers.
 
+Refinement (2026-07-16): the same cache now rewrites a later direct table-load
+operand, such as a history-shift right-hand side, when the literal-index proof
+still holds. Dynamic read indices never enter the cache, and expressions with
+an internal call or tee remain opaque. Thus a permitted shift may emit
+`state[2] = fTemp0`, while the separate `state[1] = state[0]` commit stays
+ordered and explicit.
+
 ### Phase D — Compose with existing CSE and code generation
 
 1. Decide and document the ordering with `materialize_shared_values`:
@@ -141,7 +148,8 @@ Completion (2026-07-16): load reuse runs immediately after ordinary scalar
 materialization, because that pass supplies the stable `fTemp*` cache keys.
 The integration changes shared scalar FIR only; C-family `Drop` emission stays
 an unrelated textual cleanup. A C++ APF structural witness confirms one
-materialized `fRec204[1]` read and retains both explicit history-shift stores.
+materialized `fRec204[1]` read, uses it for the `fRec204[2]` history copy, and
+retains the explicit `fRec204[1] = fRec204[0]` commit.
 It compiles the full library fixture on an explicitly sized test thread, which
 keeps the test-runner stack limit out of compiler semantics.
 

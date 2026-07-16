@@ -287,9 +287,10 @@ struct StackVariable {
 /// declarations for arbitrary load expressions.
 ///
 /// A literal-index write invalidates only the same table slot; a dynamic write
-/// invalidates every cached slot for the table. Unknown effects clear the cache
-/// but retain already-substituted local values, whose initializer has already
-/// executed and is not changed by a later table write.
+/// invalidates every cached slot for the table. Only literal-index reads enter
+/// the cache, so two unrelated dynamic reads can never be conflated. Unknown
+/// effects clear the cache but retain already-substituted local values, whose
+/// initializer has already executed and is not changed by a later table write.
 pub(super) fn reuse_straight_line_scalar_loads(store: &mut FirStore, statements: &mut Vec<FirId>) {
     if statements
         .iter()
@@ -304,8 +305,9 @@ pub(super) fn reuse_straight_line_scalar_loads(store: &mut FirStore, statements:
     let mut result = Vec::with_capacity(statements.len());
 
     for (position, &stmt) in statements.iter().enumerate() {
-        let rewritten = rewrite_stack_loads(store, stmt, &substitutions);
-        let candidate = direct_stack_table_load(store, rewritten);
+        let candidate = direct_stack_table_load(store, stmt);
+        let is_candidate = candidate.is_some();
+        let mut cache_after_statement = None;
 
         if let Some((variable, location)) = candidate {
             if let Some(&prior_load) = cached_loads.get(&location) {
@@ -314,20 +316,37 @@ pub(super) fn reuse_straight_line_scalar_loads(store: &mut FirStore, statements:
                     continue;
                 }
             } else {
-                let typ = match match_fir(store, rewritten) {
+                let typ = match match_fir(store, stmt) {
                     FirMatch::DeclareVar { typ, .. } => typ,
                     _ => unreachable!("direct_stack_table_load requires DeclareVar"),
                 };
                 let load =
                     FirBuilder::new(store).load_var(variable.name.clone(), variable.access, typ);
-                cached_loads.insert(location, load);
+                cache_after_statement = Some((location, load));
             }
         }
+
+        // A statement whose own operands contain a call or tee is a local
+        // sequencing boundary. Its earlier stack substitutions remain valid,
+        // but direct table loads are left intact because their relative order
+        // inside that expression is not modeled by this flat cache.
+        let statement_is_barrier = scalar_load_effects(store, stmt)
+            .iter()
+            .any(|effect| matches!(effect, ScalarLoadEffect::UnknownBarrier));
+        let rewritten = rewrite_stack_loads(
+            store,
+            stmt,
+            &substitutions,
+            (!is_candidate && !statement_is_barrier).then_some(&cached_loads),
+        );
 
         for effect in scalar_load_effects(store, rewritten) {
             invalidate_scalar_load_cache(&mut cached_loads, effect);
         }
         result.push(rewritten);
+        if let Some((location, load)) = cache_after_statement {
+            cached_loads.insert(location, load);
+        }
     }
 
     *statements = result;
@@ -370,6 +389,10 @@ fn direct_stack_table_load(
     else {
         return None;
     };
+    let index = canonical_table_index(store, index);
+    if index == CanonicalTableIndex::Unknown {
+        return None;
+    }
     Some((
         StackVariable {
             name,
@@ -378,7 +401,7 @@ fn direct_stack_table_load(
         TableLocation {
             name: table_name,
             access,
-            index: canonical_table_index(store, index),
+            index,
         },
     ))
 }
@@ -427,6 +450,7 @@ fn rewrite_stack_loads(
     store: &mut FirStore,
     stmt: FirId,
     substitutions: &HashMap<StackVariable, FirId>,
+    cached_loads: Option<&HashMap<TableLocation, FirId>>,
 ) -> FirId {
     match match_fir(store, stmt) {
         FirMatch::StoreVar {
@@ -434,7 +458,7 @@ fn rewrite_stack_loads(
             access,
             value,
         } => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).store_var(name, access, value)
         }
         FirMatch::StoreTable {
@@ -443,8 +467,8 @@ fn rewrite_stack_loads(
             index,
             value,
         } => {
-            let index = rewrite_stack_load_value(store, index, substitutions);
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let index = rewrite_stack_load_value(store, index, substitutions, cached_loads);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).store_table(name, access, index, value)
         }
         FirMatch::DeclareVar {
@@ -453,15 +477,15 @@ fn rewrite_stack_loads(
             access,
             init: Some(init),
         } => {
-            let init = rewrite_stack_load_value(store, init, substitutions);
+            let init = rewrite_stack_load_value(store, init, substitutions, cached_loads);
             FirBuilder::new(store).declare_var(name, typ, access, Some(init))
         }
         FirMatch::Drop(value) => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).drop_(value)
         }
         FirMatch::Return(Some(value)) => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).ret(Some(value))
         }
         _ => stmt,
@@ -473,6 +497,7 @@ fn rewrite_stack_load_value(
     store: &mut FirStore,
     value: FirId,
     substitutions: &HashMap<StackVariable, FirId>,
+    cached_loads: Option<&HashMap<TableLocation, FirId>>,
 ) -> FirId {
     match match_fir(store, value) {
         FirMatch::LoadVar { name, access, .. } => substitutions
@@ -482,20 +507,20 @@ fn rewrite_stack_load_value(
         FirMatch::BinOp {
             op, lhs, rhs, typ, ..
         } => {
-            let lhs = rewrite_stack_load_value(store, lhs, substitutions);
-            let rhs = rewrite_stack_load_value(store, rhs, substitutions);
+            let lhs = rewrite_stack_load_value(store, lhs, substitutions, cached_loads);
+            let rhs = rewrite_stack_load_value(store, rhs, substitutions, cached_loads);
             FirBuilder::new(store).binop(op, lhs, rhs, typ)
         }
         FirMatch::Neg { value, typ } => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).neg(value, typ)
         }
         FirMatch::Cast { typ, value } => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).cast(typ, value)
         }
         FirMatch::Bitcast { typ, value } => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).bitcast(typ, value)
         }
         FirMatch::Select2 {
@@ -504,15 +529,17 @@ fn rewrite_stack_load_value(
             else_value,
             typ,
         } => {
-            let cond = rewrite_stack_load_value(store, cond, substitutions);
-            let then_value = rewrite_stack_load_value(store, then_value, substitutions);
-            let else_value = rewrite_stack_load_value(store, else_value, substitutions);
+            let cond = rewrite_stack_load_value(store, cond, substitutions, cached_loads);
+            let then_value =
+                rewrite_stack_load_value(store, then_value, substitutions, cached_loads);
+            let else_value =
+                rewrite_stack_load_value(store, else_value, substitutions, cached_loads);
             FirBuilder::new(store).select2(cond, then_value, else_value, typ)
         }
         FirMatch::FunCall { name, args, typ } => {
             let args = args
                 .into_iter()
-                .map(|arg| rewrite_stack_load_value(store, arg, substitutions))
+                .map(|arg| rewrite_stack_load_value(store, arg, substitutions, cached_loads))
                 .collect::<Vec<_>>();
             FirBuilder::new(store).fun_call(name, &args, typ)
         }
@@ -522,8 +549,15 @@ fn rewrite_stack_load_value(
             index,
             typ,
         } => {
-            let index = rewrite_stack_load_value(store, index, substitutions);
-            FirBuilder::new(store).load_table(name, access, index, typ)
+            let index = rewrite_stack_load_value(store, index, substitutions, cached_loads);
+            let location = TableLocation {
+                name: name.clone(),
+                access,
+                index: canonical_table_index(store, index),
+            };
+            cached_loads
+                .and_then(|loads| loads.get(&location).copied())
+                .unwrap_or_else(|| FirBuilder::new(store).load_table(name, access, index, typ))
         }
         FirMatch::TeeVar {
             name,
@@ -531,7 +565,7 @@ fn rewrite_stack_load_value(
             value,
             typ,
         } => {
-            let value = rewrite_stack_load_value(store, value, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions, cached_loads);
             FirBuilder::new(store).tee_var(name, access, value, typ)
         }
         _ => value,
@@ -1076,8 +1110,13 @@ mod tests {
         ));
         assert!(matches!(
             match_fir(&store, statements[3]),
-            FirMatch::StoreTable { ref name, index, .. }
-                if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 2, .. })
+            FirMatch::StoreTable { ref name, index, value, .. }
+                if name == "state"
+                    && matches!(match_fir(&store, index), FirMatch::Int32 { value: 2, .. })
+                    && matches!(
+                        match_fir(&store, value),
+                        FirMatch::LoadVar { ref name, .. } if name == "fTemp0"
+                    )
         ));
         assert!(matches!(
             match_fir(&store, statements[4]),
@@ -1123,6 +1162,30 @@ mod tests {
                 .count(),
             4,
             "same-index writes, dynamic writes, and calls each invalidate reuse"
+        );
+    }
+
+    #[test]
+    fn straight_line_load_reuse_never_conflates_dynamic_read_indices() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let dynamic_a = b.load_var("i", AccessType::Stack, FirType::Int32);
+        let dynamic_b = b.load_var("j", AccessType::Stack, FirType::Int32);
+        let read_a = b.load_table("state", AccessType::Struct, dynamic_a, FirType::Float32);
+        let first = b.declare_var("fTemp0", FirType::Float32, AccessType::Stack, Some(read_a));
+        let read_b = b.load_table("state", AccessType::Struct, dynamic_b, FirType::Float32);
+        let second = b.declare_var("fTemp1", FirType::Float32, AccessType::Stack, Some(read_b));
+        let mut statements = vec![first, second];
+
+        reuse_straight_line_scalar_loads(&mut store, &mut statements);
+
+        assert_eq!(
+            statements
+                .iter()
+                .filter(|&&stmt| matches!(match_fir(&store, stmt), FirMatch::DeclareVar { .. }))
+                .count(),
+            2,
+            "dynamic subscripts are not an exact cache key"
         );
     }
 
