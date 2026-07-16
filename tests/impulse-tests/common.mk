@@ -66,6 +66,9 @@ VEC_BENCH_AGGREGATE_CSV ?= build/bench/vector-scheduling-aggregate.csv
 COMPILE_BENCH_CSV ?= build/bench/compile-summary.csv
 
 dspfiles := $(wildcard dsp/*.dsp)
+VECTOR_CERTIFIED_LIST := ../vector-coverage/certified-dspfiles.txt
+vector_certified_repo_files := $(shell sed -n '/\.dsp$$/p' $(VECTOR_CERTIFIED_LIST) 2>/dev/null)
+vector_certified_dspfiles := $(patsubst tests/impulse-tests/%,%,$(vector_certified_repo_files))
 
 # Per-DSP tolerance overrides and known-failure lists.
 include known.mk

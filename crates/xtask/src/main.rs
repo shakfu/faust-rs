@@ -81,6 +81,9 @@ Usage:
   cargo run -p xtask -- libfaust-api-matrix [--cpp-root /path/to/faust] [--out porting/generated]
   cargo run -p xtask -- libfaust-export-check
   cargo run -p xtask -- p7-matrix-report [--artifact-root tests/impulse-tests/ir] [--out porting/generated/p7-executable-backend-matrix-2026-07-14-en.md]
+  cargo run -p xtask -- vector-coverage-merge --reports <dir> [--out tests/vector-coverage/corpus-baseline.json] [--certified-list tests/vector-coverage/certified-dspfiles.txt]
+  cargo run -p xtask -- vector-coverage-check [--baseline tests/vector-coverage/corpus-baseline.json]
+  cargo run -p xtask -- vector-interp-opt-check
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -167,6 +170,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "libfaust-api-matrix" => libfaust_api_matrix(args)?,
         "libfaust-export-check" => libfaust_export_check()?,
         "p7-matrix-report" => p7_matrix_report(args)?,
+        "vector-coverage-merge" => vector_coverage_merge(args)?,
+        "vector-coverage-check" => vector_coverage_check(args)?,
+        "vector-interp-opt-check" => vector_interp_opt_check(args)?,
         _ => {
             print!("{USAGE}");
         }
@@ -185,6 +191,7 @@ mod p7_matrix;
 mod reports;
 mod runtime_trace;
 mod shared;
+mod vector_coverage;
 mod wasm;
 
 pub(crate) use backend_align::*;
@@ -197,6 +204,7 @@ pub(crate) use p7_matrix::*;
 pub(crate) use reports::*;
 pub(crate) use runtime_trace::*;
 pub(crate) use shared::*;
+pub(crate) use vector_coverage::*;
 pub(crate) use wasm::*;
 
 #[cfg(test)]

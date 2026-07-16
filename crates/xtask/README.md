@@ -62,6 +62,33 @@ dot -V
 | `c-fastlane-diff-report` | Write C fast-lane diff report |
 | `backend-full-corpus-diff-report` | Write full corpus diff for all backends |
 | `table-fastlane-diff-report` | Write table fast-lane diff report |
+| `vector-coverage-merge` | Validate and merge `count_vector_corpus` JSON reports into the checked vector-coverage baseline |
+| `vector-coverage-check` | Recompile every baseline-certified mode/DSP pair and require checked vector chunk-driver structure |
+| `vector-interp-opt-check` | Compare interpreter `opt_level=0` and max optimization on representative checked-vector cases |
+
+## Vector Coverage Retention
+
+The checked vector coverage baseline is
+`tests/vector-coverage/corpus-baseline.json`. It contains all float/double,
+`-lv 0/1`, and `-ss 0..3` results, including each fallback reason. Generate
+the sixteen input reports with the compiler diagnostic example, then merge them:
+
+```bash
+cargo run -p compiler --example count_vector_corpus -- 0 0 --precision=f32 --json > /tmp/vector-f32-lv0-ss0.json
+# Repeat for both precisions, -lv 0/1, and -ss 0..3.
+cargo run -p xtask -- vector-coverage-merge --reports /tmp/vector-reports
+```
+
+`vector-coverage-check` validates the baseline is complete, checks its
+universally certified benchmark list, recompiles every claimed certified pair,
+and requires `Certified` status, `CertifiedVector` effective mode, no fallback
+detail, and the canonical `vindex`/`vcount` chunk driver. The Ubuntu CI job
+installs the Faust standard libraries before running this check.
+
+```bash
+cargo run -p xtask -- vector-coverage-check
+cargo run -p xtask -- vector-interp-opt-check
+```
 
 ## Environment Variables
 

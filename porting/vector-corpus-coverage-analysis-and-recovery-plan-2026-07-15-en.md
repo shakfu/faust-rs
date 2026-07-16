@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phases 0 through 4 complete; Phase 5 next
+Status: in progress — Phases 0 through 5 complete; Phase 6 next
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -267,6 +267,30 @@ Profiling `reverb_designer` again found a stable 60--61 second scalar frontend,
 about 5.83 seconds in the complete vector plan, and a 67.0 second timed vector
 request. One 77.5 second wall-time sample was not reproduced and no vector
 stage increased relative to the Phase 4c profile.
+
+Phase 5 was completed on 2026-07-16. The corpus tool now records its precision
+and emits portable paths plus a stable fallback reason code. A checked-in
+coverage baseline stores the full float/double, `-lv 0/1`, and `-ss 0..3`
+matrix: every one of its 16 modes has 49 certified files, 43 scalar fallbacks,
+and the independent SIGGEN error. The per-mode residual reasons are 26 bounded
+events, 13 unfused immediate-delay plans, three intentional pure-lowering
+boundaries, and one soundfile UI boundary.
+
+`vector-coverage-check` validates exact corpus/matrix completeness, each
+per-mode count and fallback reason, and the generated universal certified list.
+It then recompiles all 784 claimed mode/DSP pairs and requires `Certified`,
+`CertifiedVector`, no fallback detail, and the independently visible
+`vindex`/`vcount` chunk driver. Ubuntu CI installs Faust's standard libraries
+and runs that retention check. `vec-bench` now consumes only the 49-file
+universal intersection, so vector speedup aggregates cannot silently include
+scalar fallback output.
+
+The interpreter gate executes four representative certified DSPs covering
+delayed recursion, structural recursion, `prefix` state, and UI lifecycle.
+Across both loop variants and all four strategies, all 32 checked vector traces
+match between `opt_level=0` and maximum bytecode optimization. The Phase 5
+matrix itself was measured in full rather than inferred: no precision, loop,
+or scheduling combination changed the 49/43/1 distribution.
 
 ## 2. Measured Baseline
 

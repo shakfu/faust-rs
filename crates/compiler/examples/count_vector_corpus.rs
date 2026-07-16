@@ -1,7 +1,7 @@
 //! Count impulse-test DSPs whose requested vector pipeline remains certified.
 //!
 //! Usage:
-//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--json] [--filter=TEXT] [--compare-scalar-time]`
+//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--precision=f32|f64] [--json] [--filter=TEXT] [--compare-scalar-time]`
 //!
 //! The default is `-vec -lv 0 -ss 0`. A DSP is counted as vector-capable only
 //! when the FIR result reports `VectorPipelineStatus::Certified`; a generated
@@ -15,6 +15,34 @@ use std::path::PathBuf;
 use compiler::{
     Compiler, ComputeMode, RealType, SchedulingStrategy, SignalFirLane, VectorPipelineStatus,
 };
+
+fn parse_precision(args: &[String]) -> RealType {
+    let Some(value) = args.iter().find_map(|arg| arg.strip_prefix("--precision=")) else {
+        return RealType::Float64;
+    };
+    match value {
+        "f32" | "float" | "single" => RealType::Float32,
+        "f64" | "double" => RealType::Float64,
+        _ => {
+            eprintln!("invalid precision: {value} (expected f32 or f64)");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn precision_name(real_type: RealType) -> &'static str {
+    match real_type {
+        RealType::Float32 => "f32",
+        RealType::Float64 => "f64",
+    }
+}
+
+fn portable_path(path: &std::path::Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 fn parse_arg(args: &[String], index: usize, default: u8, name: &str) -> u8 {
     args.get(index)
@@ -42,6 +70,7 @@ fn main() {
     let json = args.iter().any(|arg| arg == "--json");
     let compare_scalar_time = args.iter().any(|arg| arg == "--compare-scalar-time");
     let filter = args.iter().find_map(|arg| arg.strip_prefix("--filter="));
+    let real_type = parse_precision(&args);
     let loop_variant = parse_arg(&positional, 1, 0, "loop variant");
     let strategy = parse_arg(&positional, 2, 0, "scheduling strategy");
     if loop_variant > 1 || strategy > 3 {
@@ -71,7 +100,7 @@ fn main() {
         let scalar_elapsed = compare_scalar_time.then(|| {
             let started = std::time::Instant::now();
             let result = Compiler::new()
-                .with_real_type(RealType::Float64)
+                .with_real_type(real_type)
                 .with_compute_mode(ComputeMode::Scalar)
                 .compile_file_to_fir_with_lane(
                     &path,
@@ -89,7 +118,7 @@ fn main() {
             elapsed
         });
         let compiler = Compiler::new()
-            .with_real_type(RealType::Float64)
+            .with_real_type(real_type)
             .with_compute_mode(ComputeMode::Vector {
                 vec_size: ComputeMode::DEFAULT_VEC_SIZE,
                 loop_variant,
@@ -143,7 +172,12 @@ fn main() {
 
     if json {
         let report = serde_json::json!({
-            "mode": { "vector": true, "loop_variant": loop_variant, "scheduling_strategy": strategy },
+            "mode": {
+                "vector": true,
+                "precision": precision_name(real_type),
+                "loop_variant": loop_variant,
+                "scheduling_strategy": strategy
+            },
             "summary": {
                 "total": certified.len() + fallback.len() + errors.len(),
                 "certified": certified.len(),
@@ -151,15 +185,20 @@ fn main() {
                 "error": errors.len(),
                 "fallback_by_reason": reason_counts,
             },
-            "certified_files": certified.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            "certified_files": certified.iter().map(|path| portable_path(path)).collect::<Vec<_>>(),
             "fallback_files": fallback.iter().map(|(path, status, effective, detail)| serde_json::json!({
-                "path": path.display().to_string(),
+                "path": portable_path(path),
                 "status": format!("{status:?}"),
+                "reason_code": match status {
+                    VectorPipelineStatus::Fallback(reason) => reason.code(),
+                    VectorPipelineStatus::NotRequested => "FRS-VEC-NOT-REQUESTED",
+                    VectorPipelineStatus::Certified => "FRS-VEC-CERTIFIED",
+                },
                 "effective_mode": format!("{effective:?}"),
                 "detail": detail,
             })).collect::<Vec<_>>(),
             "error_files": errors.iter().map(|(path, error)| serde_json::json!({
-                "path": path.display().to_string(),
+                "path": portable_path(path),
                 "error": error,
             })).collect::<Vec<_>>(),
         });
@@ -168,7 +207,10 @@ fn main() {
             serde_json::to_string_pretty(&report).expect("serialize report")
         );
     } else {
-        println!("MODE -vec -lv {loop_variant} -ss {strategy}");
+        println!(
+            "MODE --precision={} -vec -lv {loop_variant} -ss {strategy}",
+            precision_name(real_type)
+        );
         println!("TOTAL {}", certified.len() + fallback.len() + errors.len());
         println!("CERTIFIED {}", certified.len());
         println!("FALLBACK {}", fallback.len());

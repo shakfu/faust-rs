@@ -13,9 +13,10 @@
 #
 #   vec-bench
 #       Measures faust-rs C++ generated-code throughput for scalar, `-vec
-#       -lv 0`, and `-vec -lv 1`, each crossed with `-ss 0..3`. Detailed and
-#       per-DSP winning configurations are written to VEC_BENCH_CSV and
-#       VEC_BENCH_SUMMARY_CSV.
+#       -lv 0`, and `-vec -lv 1`, each crossed with `-ss 0..3`, restricted to
+#       DSPs certified in every checked precision/vector/scheduling mode.
+#       Detailed and per-DSP winning configurations are written to
+#       VEC_BENCH_CSV and VEC_BENCH_SUMMARY_CSV.
 #
 # Both targets iterate over `testnames`, i.e. all `dsp/*.dsp` inputs except the
 # DSPs listed as known C++ backend failures in known.mk. They are intentionally
@@ -54,6 +55,8 @@ include common.mk
 
 allnames  := $(dspfiles:dsp/%.dsp=%)
 testnames := $(filter-out $(call known_fail_for,cpp),$(allnames))
+vector_allnames := $(vector_certified_dspfiles:dsp/%.dsp=%)
+vector_testnames := $(filter-out $(call known_fail_for,cpp),$(vector_allnames))
 
 # Keep all generated benchmark artifacts under build/bench:
 #   cpp-bin/, rs-bin/       temporary command wrappers used by faustbench
@@ -155,6 +158,7 @@ $(BENCH_CSV): force | $(cppbindir)/faust $(cppbindir)/uname $(rsbindir)/faust $(
 # VEC_BENCH_WARN_MIN, but machine noise does not become a correctness failure.
 $(VEC_BENCH_CSV): force | $(rsbindir)/faust $(rsbindir)/uname $(benchdir)/cxx $(logdir)/.dir
 	@set -e; \
+	if [ -z "$(vector_testnames)" ]; then printf '[vec-bench][failed] certified DSP list is empty or missing: %s\n' "$(VECTOR_CERTIFIED_LIST)" >&2; exit 1; fi; \
 	mkdir -p "$$(dirname "$@")" "$$(dirname "$(VEC_BENCH_SUMMARY_CSV)")" "$$(dirname "$(VEC_BENCH_AGGREGATE_CSV)")"; \
 	printf 'dsp,mode,ss,mbytes_sec,speedup_vs_scalar_ss0_pct,speedup_vs_scalar_same_ss_pct,status\n' > "$@"; \
 	printf 'dsp,baseline_mbytes_sec,fastest_mode,fastest_ss,fastest_mbytes_sec,best_speedup_pct,valid_combinations,status\n' > "$(VEC_BENCH_SUMMARY_CSV)"; \
@@ -169,7 +173,7 @@ $(VEC_BENCH_CSV): force | $(rsbindir)/faust $(rsbindir)/uname $(benchdir)/cxx $(
 		LC_ALL=C awk -v value="$$1" -v base="$$2" 'BEGIN { if (base == 0) { print "inf"; } else { printf "%.2f", (value - base) / base * 100; } }'; \
 	}; \
 	scalar_wins=0; vec0_wins=0; vec1_wins=0; partial=0; \
-	for name in $(testnames); do \
+	for name in $(vector_testnames); do \
 		dsp="dsp/$$name.dsp"; \
 		printf '[vec-bench] %s\n' "$$name"; \
 		scalar0=""; scalar1=""; scalar2=""; scalar3=""; \

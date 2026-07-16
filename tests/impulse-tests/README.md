@@ -80,7 +80,7 @@ make p7-smoke      # run all 72 combinations on the representative P7 corpus
 make p7-matrix     # run all 72 combinations on the full configured corpus
 make -j8 p7-full   # fresh full matrix plus the versioned audited report
 make bench         # compare C++ Faust and faust-rs performance with faustbench -single
-make vec-bench     # compare scalar/vec0/vec1 C++ throughput under -ss 0..3
+make vec-bench     # compare scalar/vec0/vec1 C++ throughput under -ss 0..3 for checked vector DSPs
 make compile-bench # compare C++ Faust and faust-rs compile time
 make all           # cpp + c + interp + cranelift + wasm + assemblyscript
 make -k -j8 cpp    # parallel, keep going past failures
@@ -180,6 +180,13 @@ fixed and measures the 12 combinations formed by scalar, `-vec -lv 0`, and
   speedups, plus win counts, for each of the 12 mode/strategy combinations.
 - `build/bench/logs/*.scalar.ss*.log` and `*.vec*.ss*.log` — raw faustbench
   output for every measurement.
+
+The benchmark input is deliberately restricted to
+`../vector-coverage/certified-dspfiles.txt`, the intersection certified by the
+complete float/double, `-lv`, and `-ss` retention matrix. Consequently its
+vector speedup aggregates cannot include scalar fallback modules. Regenerate
+that list only through `cargo run -p xtask -- vector-coverage-merge` after an
+intentional, reviewed coverage-baseline update.
 
 This is a developer performance benchmark, not a correctness gate. Use several
 runs and a fixed block size when comparing changes:

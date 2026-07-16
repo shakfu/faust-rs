@@ -187,7 +187,7 @@ help:
 	@echo "  p7-smoke       : p7-matrix on P7_SMOKE_DSPFILES"
 	@echo "  p7-full        : clean P7 outputs, run full matrix, write audited report"
 	@echo "  bench          : compare C++ Faust and faust-rs generated-code speed with faustbench -single"
-	@echo "  vec-bench      : compare scalar/vec0/vec1 C++ code under -ss 0..3"
+	@echo "  vec-bench      : compare scalar/vec0/vec1 C++ code under -ss 0..3 for universally certified DSPs"
 	@echo "  compile-bench  : compare C++ Faust and faust-rs compile time on the DSP corpus"
 	@echo "  cpp            : check the faust-rs C++ backend (full 4-pass)"
 	@echo "  c              : check the faust-rs C backend (full 4-pass)"
