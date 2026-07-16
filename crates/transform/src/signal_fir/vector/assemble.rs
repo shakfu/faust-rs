@@ -16,8 +16,11 @@
 //! places held clock outputs after the island guard, so a non-firing sample
 //! observes the previous held value. Final lifecycle placement is checked by
 //! `vector_module`. P6.6 adds one checked shared state cursor per clock domain;
-//! it advances at the end of each guarded fire. Cross-backend activation
-//! remains a later phase.
+//! it advances at the end of each guarded fire. Section 8 lockstep bundles are
+//! adapted as one physical `i0` loop whose body contains the unchanged scalar
+//! iteration of every lane in canonical order. This preserves each lane's IEEE
+//! operation and contraction policy while exposing cross-instance SLP to FIR
+//! backends without changing the planar `compute` ABI.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -186,6 +189,10 @@ pub enum VectorFirAssemblyError {
     FusedGroupShape {
         group_id: u64,
     },
+    /// A verified lockstep bundle was not emitted as one physical sample loop.
+    LockstepBundleShape {
+        bundle_id: u64,
+    },
     TopLevelShape,
 }
 
@@ -250,6 +257,9 @@ impl fmt::Display for VectorFirAssemblyError {
             }
             Self::FusedGroupShape { group_id } => {
                 write!(f, "fused serial group {group_id} has an invalid FIR shape")
+            }
+            Self::LockstepBundleShape { bundle_id } => {
+                write!(f, "lockstep bundle {bundle_id} has an invalid FIR shape")
             }
             Self::TopLevelShape => write!(f, "assembled top-level FIR is not a block"),
         }
@@ -557,6 +567,7 @@ pub fn verify_vector_fir_assembly(
     }
     verify_clock_output_stores(assembly, expected_islands, store)?;
     verify_assembled_fused_serial_groups(routed, state_plan, assembly, store)?;
+    verify_assembled_lockstep_bundles(routed, assembly, store)?;
     Ok(())
 }
 
@@ -1465,6 +1476,23 @@ fn materialize_top_level(
             (group.group_id, members)
         })
         .collect::<BTreeMap<_, _>>();
+    let lockstep_bundle_by_member = routed
+        .plan()
+        .lockstep_bundles
+        .iter()
+        .flat_map(|bundle| {
+            bundle
+                .member_loop_ids
+                .iter()
+                .map(move |&loop_id| (loop_id, bundle.bundle_id))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let lockstep_members_by_bundle = routed
+        .plan()
+        .lockstep_bundles
+        .iter()
+        .map(|bundle| (bundle.bundle_id, bundle.member_loop_ids.as_slice()))
+        .collect::<BTreeMap<_, _>>();
     let mut body = Vec::new();
     for region in routed.layout().loops() {
         if !owned.contains(&region.loop_id) {
@@ -1487,6 +1515,16 @@ fn materialize_top_level(
                         .collect::<Vec<_>>();
                     let fused_body = builder.block(&iterations);
                     body.push(sample_loop(builder, fused_body));
+                }
+            } else if let Some(bundle_id) = lockstep_bundle_by_member.get(&region.loop_id) {
+                let members = lockstep_members_by_bundle[bundle_id];
+                if members.first() == Some(&region.loop_id) {
+                    let iterations = members
+                        .iter()
+                        .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+                        .collect::<Vec<_>>();
+                    let lockstep_body = builder.block(&iterations);
+                    body.push(sample_loop(builder, lockstep_body));
                 }
             } else {
                 body.push(sample_loop(
@@ -1706,6 +1744,128 @@ fn verify_assembled_fused_serial_groups(
                 || transport
                     .load
                     .is_none_or(|value| !fir_contains(store, *physical_body, value))
+            {
+                return Err(reject());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Independently checks the section 8 physical-loop adaptation. Logical lane
+/// loops remain present in the certificate and routed trace, but top-rate
+/// members must occur only as consecutive scalar iterations inside one `i0`
+/// loop. A bundle wholly owned by one clock island is already advanced by its
+/// enclosing top-rate sample loop and is checked as one canonical contiguous
+/// lane sequence inside that island.
+fn verify_assembled_lockstep_bundles(
+    routed: &VerifiedRoutedFir,
+    assembly: &VectorFirAssembly,
+    store: &FirStore,
+) -> Result<(), VectorFirAssemblyError> {
+    if routed.plan().lockstep_bundles.is_empty() {
+        return Ok(());
+    }
+    let FirMatch::Block(top_level) = match_fir(store, assembly.top_level_statement) else {
+        return Err(VectorFirAssemblyError::TopLevelShape);
+    };
+    let loop_by_id = assembly
+        .loops
+        .iter()
+        .map(|loop_| (loop_.loop_id, loop_))
+        .collect::<BTreeMap<_, _>>();
+
+    for bundle in &routed.plan().lockstep_bundles {
+        let reject = || VectorFirAssemblyError::LockstepBundleShape {
+            bundle_id: bundle.bundle_id,
+        };
+        if bundle
+            .member_loop_ids
+            .iter()
+            .any(|loop_id| !loop_by_id.contains_key(loop_id))
+        {
+            return Err(reject());
+        }
+
+        let owning_islands = assembly
+            .islands
+            .iter()
+            .filter(|island| {
+                bundle
+                    .member_loop_ids
+                    .iter()
+                    .any(|loop_id| island.nested_loop_ids.contains(loop_id))
+            })
+            .collect::<Vec<_>>();
+        if !owning_islands.is_empty() {
+            let [island] = owning_islands.as_slice() else {
+                return Err(reject());
+            };
+            let positions = bundle
+                .member_loop_ids
+                .iter()
+                .map(|loop_id| island.nested_loop_ids.iter().position(|id| id == loop_id))
+                .collect::<Option<Vec<_>>>();
+            let Some(positions) = positions else {
+                return Err(reject());
+            };
+            if positions.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+                return Err(reject());
+            }
+            continue;
+        }
+
+        let expected_iterations = bundle
+            .member_loop_ids
+            .iter()
+            .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+            .collect::<Vec<_>>();
+        let physical_loops = top_level
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &statement)| match match_fir(store, statement) {
+                FirMatch::ForLoop {
+                    var,
+                    body,
+                    is_reverse: false,
+                    ..
+                } if var == "i0"
+                    && matches!(match_fir(store, body), FirMatch::Block(words) if words == expected_iterations) =>
+                {
+                    Some(position)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [physical_position] = physical_loops.as_slice() else {
+            return Err(reject());
+        };
+
+        for (position, &statement) in top_level.iter().enumerate() {
+            let FirMatch::ForLoop {
+                var,
+                body,
+                is_reverse: false,
+                ..
+            } = match_fir(store, statement)
+            else {
+                continue;
+            };
+            if var == "i0" && position != *physical_position && expected_iterations.contains(&body)
+            {
+                return Err(reject());
+            }
+        }
+        for &loop_id in &bundle.member_loop_ids {
+            let assembled = loop_by_id[&loop_id];
+            if assembled
+                .pre
+                .iter()
+                .any(|action| !top_level[..*physical_position].contains(&action.statement))
+                || assembled
+                    .post
+                    .iter()
+                    .any(|action| !top_level[*physical_position + 1..].contains(&action.statement))
             {
                 return Err(reject());
             }
@@ -2329,9 +2489,147 @@ mod tests {
         VECTOR_STATE_PLAN_VERSION, VectorStatePlan, verified_vector_state_plan_for_test,
     };
     use crate::signal_fir::vector_verify::{
-        EpochRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
-        TransportRecord, VecSafeWitness, VectorPlan, Vectorability, WitnessKind,
+        EpochRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord, LockstepLaneRecord,
+        LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord,
+        VecSafeWitness, VectorPlan, Vectorability, WitnessKind,
     };
+
+    fn lockstep_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
+        verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            vec_size: 8,
+            signals: (0..2)
+                .map(|lane| SignalRecord {
+                    signal_id: 10 + lane,
+                    value_type: ValueType::Real,
+                    structural: false,
+                    rate: Rate::Samp,
+                    vectorability: Vectorability::Scal,
+                    clock_id: 0,
+                    effects: vec![],
+                    placement: Placement::Owned(lane),
+                    duplicable: true,
+                })
+                .collect(),
+            loops: (0..2)
+                .map(|lane| LoopRecord {
+                    loop_id: lane,
+                    stable_name: format!("lockstep_lane_{lane}"),
+                    kind: LoopKind::Lockstep { width: 2 },
+                    roots: vec![10 + lane],
+                    epoch_id: 0,
+                })
+                .collect(),
+            epochs: vec![EpochRecord {
+                epoch_id: 0,
+                rank: 0,
+                loops: vec![0, 1],
+            }],
+            transports: vec![],
+            data_edges: vec![],
+            effect_edges: vec![],
+            vec_safe_witnesses: (0..2)
+                .map(|loop_id| VecSafeWitness {
+                    loop_id,
+                    witness_kind: WitnessKind::SerialStateInternal,
+                })
+                .collect(),
+            fused_serial_groups: vec![],
+            lockstep_bundles: vec![LockstepBundleRecord {
+                bundle_id: 0,
+                representative_loop_id: 0,
+                member_loop_ids: vec![0, 1],
+                lanes: (0..2)
+                    .map(|lane| LockstepLaneRecord {
+                        loop_id: lane,
+                        recursion_group: 20 + lane,
+                        roots: vec![IsoRootWitness {
+                            representative_root: 10,
+                            lane_root: 10 + lane,
+                            shape_hash: 0x55,
+                            leaf_mapping: vec![IsoLeafMapping {
+                                representative_signal_id: 10,
+                                lane_signal_id: 10 + lane,
+                            }],
+                        }],
+                    })
+                    .collect(),
+            }],
+        })
+    }
+
+    #[test]
+    fn lockstep_lanes_share_one_physical_sample_loop() {
+        let vector = lockstep_vector_plan();
+        let mut store = FirStore::new();
+        let values = [
+            FirBuilder::new(&mut store).float32(0.25),
+            FirBuilder::new(&mut store).float32(0.5),
+        ];
+        let (mut route, _) = VectorRouteSession::new(
+            &vector,
+            SchedulingStrategy::DepthFirst,
+            FirType::Float32,
+            &mut store,
+        )
+        .expect("lockstep route");
+        for (loop_id, value) in values.into_iter().enumerate() {
+            route
+                .define_in_loop(loop_id as u64, 10 + loop_id as u64, value, &mut store)
+                .expect("lane definition");
+        }
+        let routed = route.finish(&store).expect("finish lockstep route");
+        let inputs = values
+            .into_iter()
+            .enumerate()
+            .map(|(loop_id, value)| VectorLoopFirInput {
+                loop_id: loop_id as u64,
+                statements: vec![FirBuilder::new(&mut store).drop_(value)],
+            })
+            .collect::<Vec<_>>();
+        let verified = assemble_vector_fir(
+            &routed,
+            None,
+            None,
+            &inputs,
+            &[],
+            FirType::Float32,
+            &mut store,
+        )
+        .expect("assemble lockstep lanes");
+        let assembly = verified.assembly();
+        let FirMatch::Block(top_level) = match_fir(&store, assembly.top_level_statement) else {
+            panic!("top-level block");
+        };
+        let [physical_loop] = top_level.as_slice() else {
+            panic!("exactly one physical loop");
+        };
+        let FirMatch::ForLoop { body, .. } = match_fir(&store, *physical_loop) else {
+            panic!("physical sample loop");
+        };
+        assert_eq!(
+            match_fir(&store, body),
+            FirMatch::Block(
+                assembly
+                    .loops
+                    .iter()
+                    .map(|loop_| loop_.iteration_statement)
+                    .collect()
+            )
+        );
+
+        let mut forged = assembly.clone();
+        let separate = assembly
+            .loops
+            .iter()
+            .map(|loop_| sample_loop(&mut FirBuilder::new(&mut store), loop_.iteration_statement))
+            .collect::<Vec<_>>();
+        forged.top_level_statement = FirBuilder::new(&mut store).block(&separate);
+        assert_eq!(
+            verify_vector_fir_assembly(&routed, None, None, &forged, &store),
+            Err(VectorFirAssemblyError::LockstepBundleShape { bundle_id: 0 })
+        );
+    }
 
     fn state_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {

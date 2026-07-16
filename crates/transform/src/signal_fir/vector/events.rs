@@ -717,7 +717,7 @@ fn independently_order_events(
         .enumerate()
         .map(|(position, region)| (region.loop_id, position))
         .collect::<BTreeMap<_, _>>();
-    let mut fused_vector_position = BTreeMap::new();
+    let mut sample_interleaved_position = BTreeMap::new();
     for group in &plan.fused_serial_groups {
         let members = routed
             .layout()
@@ -732,7 +732,18 @@ fn independently_order_events(
             .min()
             .expect("verified fused groups are non-empty");
         for (member_position, loop_id) in members.into_iter().enumerate() {
-            fused_vector_position.insert(loop_id, (unit_position, member_position));
+            sample_interleaved_position.insert(loop_id, (unit_position, member_position));
+        }
+    }
+    for bundle in &plan.lockstep_bundles {
+        let unit_position = bundle
+            .member_loop_ids
+            .iter()
+            .map(|loop_id| vector_loop_position[loop_id])
+            .min()
+            .expect("verified lockstep bundles are non-empty");
+        for (member_position, &loop_id) in bundle.member_loop_ids.iter().enumerate() {
+            sample_interleaved_position.insert(loop_id, (unit_position, member_position));
         }
     }
 
@@ -779,7 +790,7 @@ fn independently_order_events(
                     event.event_id,
                 )
             } else {
-                let (unit_position, member_position) = fused_vector_position
+                let (unit_position, member_position) = sample_interleaved_position
                     .get(&loop_id)
                     .copied()
                     .unwrap_or((vector_loop_position[&loop_id], 0));
