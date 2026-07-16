@@ -34,6 +34,12 @@ const INDIRECT_RECURSIVE_DELAY_SOURCE: &str = r#"
 "#;
 const LOCKSTEP_PAIR_SOURCE: &str = include_str!("../../../tests/corpus/vector_lockstep_pair.dsp");
 const LOCKSTEP_QUAD_SOURCE: &str = include_str!("../../../tests/corpus/vector_lockstep_quad.dsp");
+const LOCKSTEP_SIMD_QUAD_SOURCE: &str =
+    include_str!("../../../tests/corpus/vector_lockstep_simd_quad.dsp");
+const LOCKSTEP_MIXED_REDUCE_SOURCE: &str =
+    include_str!("../../../tests/corpus/vector_lockstep_mixed_reduce.dsp");
+const LOCKSTEP_MIXED_BRANCH_SOURCE: &str =
+    include_str!("../../../tests/corpus/vector_lockstep_mixed_branch.dsp");
 const LOCKSTEP_NEAR_ISOMORPHIC_SOURCE: &str =
     include_str!("../../../tests/corpus/vector_lockstep_near_isomorphic.dsp");
 
@@ -408,10 +414,44 @@ fn lockstep_recursive_instances_are_certified_and_bit_exact() {
 }
 
 #[test]
+fn complex_and_partial_lockstep_corpus_is_bit_exact() {
+    let four_inputs = vec![
+        ramp(67),
+        ramp(67).into_iter().rev().collect(),
+        (0..67).map(|index| (index % 7) as f32 * 0.125).collect(),
+        (0..67).map(|index| (index % 5) as f32 * -0.25).collect(),
+    ];
+    assert_channels_bit_exact(
+        "lockstep_simd_quad",
+        LOCKSTEP_SIMD_QUAD_SOURCE,
+        &four_inputs,
+        24,
+    );
+    assert_channels_bit_exact(
+        "lockstep_mixed_reduce",
+        LOCKSTEP_MIXED_REDUCE_SOURCE,
+        &four_inputs,
+        24,
+    );
+
+    let mut five_inputs = four_inputs;
+    five_inputs.push((0..67).map(|index| (index % 3) as f32 - 1.0).collect());
+    assert_channels_bit_exact(
+        "lockstep_mixed_branch",
+        LOCKSTEP_MIXED_BRANCH_SOURCE,
+        &five_inputs,
+        24,
+    );
+}
+
+#[test]
 fn lockstep_corpus_cpp_has_expected_physical_sample_loops() {
     for (name, source, expected_loops) in [
         ("pair", LOCKSTEP_PAIR_SOURCE, 1),
         ("quad", LOCKSTEP_QUAD_SOURCE, 1),
+        ("simd_quad", LOCKSTEP_SIMD_QUAD_SOURCE, 1),
+        ("mixed_reduce", LOCKSTEP_MIXED_REDUCE_SOURCE, 2),
+        ("mixed_branch", LOCKSTEP_MIXED_BRANCH_SOURCE, 2),
         ("near_isomorphic", LOCKSTEP_NEAR_ISOMORPHIC_SOURCE, 2),
     ] {
         let path = std::env::temp_dir().join(format!(

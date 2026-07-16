@@ -2452,8 +2452,8 @@ levelization compatibility setting, with deterministic Rust tie ordering.
 
 ## 8. Lockstep instance vectorization extension
 
-**Status:** implementation in progress after P5/P6; measured feasibility
-evidence exists.
+**Status:** implemented and validated on 2026-07-16; measured feasibility and
+corpus evidence exist.
 
 ### 8.0 Implementation decision and acceptance gate
 
@@ -2488,6 +2488,26 @@ Implementation deliverables and pass criteria are:
 5. the maintained `tests/impulse-tests` DSP corpus compiles in vector mode,
    followed by the repository formatting, Clippy, workspace test, and golden
    gates required by `AGENTS.md`.
+
+**Implementation result (2026-07-16).** The schema-v2 trust boundary,
+prepared-signal parallel shape checker, deterministic producer, scheduler-unit
+projection, state ownership lookup, sample-interleaved event certificate, and
+single-loop FIR assembly are active automatically under `-vec`. Logical lane
+and recursion-group ids remain stable; the external ABI and transports remain
+planar. Unsupported constructors, effect conflicts, dependencies, existing
+fused-delay slices, and near-isomorphic bodies fail closed to their prior loop
+forms. The adaptation introduces no public API, CLI, or ABI change.
+
+Focused corpus cases cover accepted widths two and four, a rejected add/sub
+mutation, a profitable four-lane arithmetic chain, and two mixed DSPs where the
+bundle is only one subgraph (a downstream reduction and an unrelated side
+branch remain separate). Scalar/vector interpreter outputs are bit-identical
+for both loop variants and all four scheduling strategies; the representative
+complex lockstep case also matches between interpreter optimization levels zero
+and maximum.
+The maintained impulse harness compiles and compares 92 expected DSPs for each
+of `-lv 0` and `-lv 1`; `subcontainer1` remains the harness's single
+pre-existing documented exclusion.
 
 Time-direction vectorization leaves every recursive loop serial: the carried
 dependence `y(i-1) -> y(i)` forbids computing a chunk in parallel. Yet many real
