@@ -301,31 +301,40 @@ pub fn lower_pure_vector_program(
     num_inputs: usize,
 ) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
     let ui = ui::UiProgram::empty();
-    lower_vector_program_impl(
-        prepared,
-        verified_plan,
-        None,
-        None,
-        &ui,
+    let context = VectorLoweringContext {
+        ui: &ui,
         strategy,
         real_type,
         num_inputs,
-    )
+    };
+    lower_vector_program_impl(prepared, verified_plan, None, None, &context)
+}
+
+/// Shared immutable configuration for one vector-region lowering pipeline.
+///
+/// State and clock certificates remain explicit arguments because they are
+/// independently verified artifacts. This context groups the execution policy
+/// and module-interface parameters consumed throughout lowering.
+pub struct VectorLoweringContext<'a> {
+    /// Canonical grouped UI program associated with the prepared forest.
+    pub ui: &'a ui::UiProgram,
+    /// Per-epoch scheduling strategy.
+    pub strategy: SchedulingStrategy,
+    /// Internal FIR real type.
+    pub real_type: FirType,
+    /// Number of audio inputs exposed by the module contract.
+    pub num_inputs: usize,
 }
 
 /// Lowers the P6-supported vector subset using authoritative state and clock
 /// artifacts. Forward AD needs no special carrier after propagation and enters
 /// through the ordinary pointwise cases below.
-#[allow(clippy::too_many_arguments)]
 pub fn lower_vector_program(
     prepared: &VerifiedPreparedSignals,
     verified_plan: &VerifiedVectorPlan,
     state_plan: &VerifiedVectorStatePlan,
     clock_plan: &VerifiedVectorClockAdPlan,
-    ui: &ui::UiProgram,
-    strategy: SchedulingStrategy,
-    real_type: FirType,
-    num_inputs: usize,
+    context: &VectorLoweringContext<'_>,
 ) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
     if state_plan.vector_plan() != verified_plan.plan()
         || clock_plan.vector_plan() != verified_plan.plan()
@@ -339,23 +348,16 @@ pub fn lower_vector_program(
         verified_plan,
         Some(state_plan),
         Some(clock_plan),
-        ui,
-        strategy,
-        real_type,
-        num_inputs,
+        context,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn lower_vector_program_impl<'a>(
     prepared: &'a VerifiedPreparedSignals,
     verified_plan: &'a VerifiedVectorPlan,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
     clock_plan: Option<&'a VerifiedVectorClockAdPlan>,
-    ui: &'a ui::UiProgram,
-    strategy: SchedulingStrategy,
-    real_type: FirType,
-    num_inputs: usize,
+    context: &VectorLoweringContext<'a>,
 ) -> Result<VerifiedPureVectorProgram, PureVectorLowerError> {
     let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
     let mut stage_started = std::time::Instant::now();
@@ -368,13 +370,15 @@ fn lower_vector_program_impl<'a>(
         }
         stage_started = std::time::Instant::now();
     };
-    if !matches!(real_type, FirType::Float32 | FirType::Float64) {
-        return Err(PureVectorLowerError::InvalidRealType(real_type));
+    if !matches!(context.real_type, FirType::Float32 | FirType::Float64) {
+        return Err(PureVectorLowerError::InvalidRealType(
+            context.real_type.clone(),
+        ));
     }
     let signal_ids = collect_prepared_ids(prepared);
     verify_plan_prepared_boundary(
         prepared,
-        ui,
+        context.ui,
         verified_plan.plan(),
         &signal_ids,
         state_plan,
@@ -386,21 +390,26 @@ fn lower_vector_program_impl<'a>(
         VectorRouteSession::new_with_clock_plan(
             verified_plan,
             clock_plan,
-            strategy,
-            real_type.clone(),
+            context.strategy,
+            context.real_type.clone(),
             &mut store,
         )?
     } else {
-        VectorRouteSession::new(verified_plan, strategy, real_type.clone(), &mut store)?
+        VectorRouteSession::new(
+            verified_plan,
+            context.strategy,
+            context.real_type.clone(),
+            &mut store,
+        )?
     };
     trace_stage("route-session");
     let mut lowerer = PureVectorLowerer {
         prepared,
-        ui,
+        ui: context.ui,
         session,
         store,
-        real_type,
-        num_inputs,
+        real_type: context.real_type.clone(),
+        num_inputs: context.num_inputs,
         signal_ids,
         input_declarations: Vec::new(),
         input_aliases: BTreeSet::new(),
@@ -834,16 +843,16 @@ impl PureVectorLowerer<'_> {
                 FirBuilder::new(&mut self.store).select2(cond, then_value, else_value, typ)
             }
             SigMatch::BinOp(op, lhs, rhs) => {
-                self.lower_binop(scope, signal_id, op, lhs, rhs, cache, active)?
+                self.lower_binop(scope, signal_id, op, (lhs, rhs), cache, active)?
             }
             SigMatch::Pow(lhs, rhs) => {
                 self.lower_math2(scope, FirMathOp::Pow, lhs, rhs, cache, active)?
             }
             SigMatch::Min(lhs, rhs) => {
-                self.lower_minmax(scope, signal_id, lhs, rhs, true, cache, active)?
+                self.lower_minmax(scope, signal_id, (lhs, rhs), true, cache, active)?
             }
             SigMatch::Max(lhs, rhs) => {
-                self.lower_minmax(scope, signal_id, lhs, rhs, false, cache, active)?
+                self.lower_minmax(scope, signal_id, (lhs, rhs), false, cache, active)?
             }
             SigMatch::Sin(value) => {
                 self.lower_math1(scope, FirMathOp::Sin, value, cache, active)?
@@ -1572,19 +1581,17 @@ impl PureVectorLowerer<'_> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_binop(
         &mut self,
         scope: LowerScope,
         signal_id: u64,
         op: BinOp,
-        lhs: SigId,
-        rhs: SigId,
+        operands: (SigId, SigId),
         cache: &mut BTreeMap<u64, FirId>,
         active: &mut BTreeSet<(LowerScope, u64)>,
     ) -> Result<FirId, PureVectorLowerError> {
-        let lhs = self.lower_dep(scope, lhs, cache, active)?;
-        let rhs = self.lower_dep(scope, rhs, cache, active)?;
+        let lhs = self.lower_dep(scope, operands.0, cache, active)?;
+        let rhs = self.lower_dep(scope, operands.1, cache, active)?;
         let result_type = self.fir_type(signal_id)?;
         let (fir_op, typ) = map_binop(op, result_type.clone()).ok_or_else(|| {
             PureVectorLowerError::UnsupportedSignal {
@@ -1647,20 +1654,18 @@ impl PureVectorLowerer<'_> {
         Ok(FirBuilder::new(&mut self.store).math_call(op, &[lhs, rhs], self.real_type.clone()))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_minmax(
         &mut self,
         scope: LowerScope,
         signal_id: u64,
-        lhs: SigId,
-        rhs: SigId,
+        operands: (SigId, SigId),
         is_min: bool,
         cache: &mut BTreeMap<u64, FirId>,
         active: &mut BTreeSet<(LowerScope, u64)>,
     ) -> Result<FirId, PureVectorLowerError> {
         if self.fir_type(signal_id)? == FirType::Int32 {
-            let lhs = self.lower_dep(scope, lhs, cache, active)?;
-            let rhs = self.lower_dep(scope, rhs, cache, active)?;
+            let lhs = self.lower_dep(scope, operands.0, cache, active)?;
+            let rhs = self.lower_dep(scope, operands.1, cache, active)?;
             let name = if is_min { "min_i" } else { "max_i" };
             self.int_helpers.insert(name);
             return Ok(FirBuilder::new(&mut self.store).fun_call(
@@ -1676,8 +1681,8 @@ impl PureVectorLowerer<'_> {
             } else {
                 FirMathOp::Max
             },
-            lhs,
-            rhs,
+            operands.0,
+            operands.1,
             cache,
             active,
         )

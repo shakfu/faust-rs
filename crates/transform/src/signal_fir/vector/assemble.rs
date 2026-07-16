@@ -368,6 +368,15 @@ pub fn assemble_vector_fir(
             .iter()
             .map(|signal| (signal.signal_id, signal.value_type.clone()))
             .collect::<BTreeMap<_, _>>();
+        let materialization = StateMaterializationContext {
+            delays: &delays,
+            recursions: &recursions,
+            prefixes: &prefixes,
+            waveforms: &waveforms,
+            definitions: &definitions,
+            signal_types: &signal_types,
+            real_type: real_type.clone(),
+        };
         let mut loops = Vec::with_capacity(routed.layout().loops().len());
         for region in routed.layout().loops() {
             let phases = state_plan.and_then(|state| {
@@ -381,24 +390,21 @@ pub fn assemble_vector_fir(
                 region.loop_id,
                 input_map[&region.loop_id],
                 phases,
-                &delays,
-                &recursions,
-                &prefixes,
-                &waveforms,
-                &definitions,
-                &signal_types,
-                real_type.clone(),
+                &materialization,
                 &mut builder,
             )?);
         }
 
-        let islands = materialize_clock_islands(
+        let clock_materialization = ClockIslandMaterializationContext {
             routed,
             state_plan,
             clock_plan,
-            &loops,
-            &definitions,
-            &island_declarations,
+            loops: &loops,
+            definitions: &definitions,
+            island_declarations: &island_declarations,
+        };
+        let islands = materialize_clock_islands(
+            &clock_materialization,
             &mut builder,
             &mut state_declarations,
             &mut clear_statements,
@@ -925,18 +931,21 @@ fn materialize_state_storage(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+struct StateMaterializationContext<'a> {
+    delays: &'a BTreeMap<u64, &'a DelayTransition>,
+    recursions: &'a BTreeMap<u64, &'a RecursionTransition>,
+    prefixes: &'a BTreeMap<u64, &'a PrefixTransition>,
+    waveforms: &'a BTreeMap<u64, &'a WaveformTransition>,
+    definitions: &'a BTreeMap<(VectorRegion, u64), FirId>,
+    signal_types: &'a BTreeMap<u64, ValueType>,
+    real_type: FirType,
+}
+
 fn materialize_loop(
     loop_id: u64,
     inputs: &[FirId],
     phases: Option<&super::vector_state::LoopStatePhases>,
-    delays: &BTreeMap<u64, &DelayTransition>,
-    recursions: &BTreeMap<u64, &RecursionTransition>,
-    prefixes: &BTreeMap<u64, &PrefixTransition>,
-    waveforms: &BTreeMap<u64, &WaveformTransition>,
-    definitions: &BTreeMap<(VectorRegion, u64), FirId>,
-    signal_types: &BTreeMap<u64, ValueType>,
-    real_type: FirType,
+    context: &StateMaterializationContext<'_>,
     builder: &mut FirBuilder<'_>,
 ) -> Result<AssembledVectorLoop, VectorFirAssemblyError> {
     let mut recursion_values = BTreeMap::new();
@@ -948,14 +957,8 @@ fn materialize_loop(
             pre.push(materialize_action(
                 loop_id,
                 action,
-                delays,
-                recursions,
-                prefixes,
-                waveforms,
-                definitions,
-                signal_types,
+                context,
                 &mut recursion_values,
-                real_type.clone(),
                 builder,
             )?);
         }
@@ -963,14 +966,8 @@ fn materialize_loop(
             exec_actions.push(materialize_action(
                 loop_id,
                 action,
-                delays,
-                recursions,
-                prefixes,
-                waveforms,
-                definitions,
-                signal_types,
+                context,
                 &mut recursion_values,
-                real_type.clone(),
                 builder,
             )?);
         }
@@ -978,14 +975,8 @@ fn materialize_loop(
             post.push(materialize_action(
                 loop_id,
                 action,
-                delays,
-                recursions,
-                prefixes,
-                waveforms,
-                definitions,
-                signal_types,
+                context,
                 &mut recursion_values,
-                real_type.clone(),
                 builder,
             )?);
         }
@@ -1014,20 +1005,20 @@ fn materialize_loop(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn materialize_action(
     loop_id: u64,
     action: &VectorStateAction,
-    delays: &BTreeMap<u64, &DelayTransition>,
-    recursions: &BTreeMap<u64, &RecursionTransition>,
-    prefixes: &BTreeMap<u64, &PrefixTransition>,
-    waveforms: &BTreeMap<u64, &WaveformTransition>,
-    definitions: &BTreeMap<(VectorRegion, u64), FirId>,
-    signal_types: &BTreeMap<u64, ValueType>,
+    context: &StateMaterializationContext<'_>,
     recursion_values: &mut BTreeMap<u64, FirId>,
-    real_type: FirType,
     builder: &mut FirBuilder<'_>,
 ) -> Result<VectorStateFirAction, VectorFirAssemblyError> {
+    let delays = context.delays;
+    let recursions = context.recursions;
+    let prefixes = context.prefixes;
+    let waveforms = context.waveforms;
+    let definitions = context.definitions;
+    let signal_types = context.signal_types;
+    let real_type = context.real_type.clone();
     let mut execution_statements = None;
     let statement = match action {
         VectorStateAction::DelayRegisterLoad { signal_id } => {
@@ -1281,18 +1272,27 @@ fn materialize_action(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ClockIslandMaterializationContext<'a> {
+    routed: &'a VerifiedRoutedFir,
+    state_plan: Option<&'a VerifiedVectorStatePlan>,
+    clock_plan: Option<&'a VerifiedVectorClockAdPlan>,
+    loops: &'a [AssembledVectorLoop],
+    definitions: &'a BTreeMap<(VectorRegion, u64), FirId>,
+    island_declarations: &'a BTreeMap<u64, Vec<FirId>>,
+}
+
 fn materialize_clock_islands(
-    routed: &VerifiedRoutedFir,
-    state_plan: Option<&VerifiedVectorStatePlan>,
-    clock_plan: Option<&VerifiedVectorClockAdPlan>,
-    loops: &[AssembledVectorLoop],
-    definitions: &BTreeMap<(VectorRegion, u64), FirId>,
-    island_declarations: &BTreeMap<u64, Vec<FirId>>,
+    context: &ClockIslandMaterializationContext<'_>,
     builder: &mut FirBuilder<'_>,
     state_declarations: &mut Vec<FirId>,
     clear_statements: &mut Vec<FirId>,
 ) -> Result<Vec<AssembledClockIsland>, VectorFirAssemblyError> {
+    let routed = context.routed;
+    let state_plan = context.state_plan;
+    let clock_plan = context.clock_plan;
+    let loops = context.loops;
+    let definitions = context.definitions;
+    let island_declarations = context.island_declarations;
     let Some(clock_plan) = clock_plan else {
         return Ok(Vec::new());
     };

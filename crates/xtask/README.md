@@ -66,6 +66,7 @@ dot -V
 | `table-fastlane-diff-report` | Write table fast-lane diff report |
 | `vector-coverage-merge` | Validate and merge `count_vector_corpus` JSON reports into the checked vector-coverage baseline |
 | `vector-coverage-check` | Recompile every baseline-certified mode/DSP pair and require checked vector chunk-driver structure |
+| `vector-compile-budget-check` | Measure the versioned release scalar/vector compile-time basket and reject unexplained regressions |
 | `vector-interp-opt-check` | Compare interpreter `opt_level=0` and max optimization on representative checked-vector cases |
 | `lockstep-simd-check` | Require Clang to emit four-wide LLVM floating-point operations for complex lockstep corpus cases |
 
@@ -92,6 +93,14 @@ installs the Faust standard libraries before running this check.
 cargo run -p xtask -- vector-coverage-check
 cargo run -p xtask -- vector-interp-opt-check
 cargo run -p xtask -- lockstep-simd-check
+```
+
+`vector-compile-budget-check` warms each basket entry before measuring scalar
+and vector compilation, then applies versioned absolute ceilings and a
+noise-tolerant vector/scalar ratio. It must run with release optimizations:
+
+```bash
+cargo run --release -p xtask -- vector-compile-budget-check
 ```
 
 ## Environment Variables

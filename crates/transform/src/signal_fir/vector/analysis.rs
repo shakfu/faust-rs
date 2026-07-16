@@ -1284,8 +1284,13 @@ fn propagate_effect_sets(
     let mut pending = accumulated.keys().copied().collect::<BTreeSet<_>>();
     let mut updates = 0_usize;
     while let Some(child) = pending.pop_first() {
-        let child_effects = accumulated[&child].clone();
+        let child_effects = accumulated
+            .remove(&child)
+            .expect("pending effect child has an accumulated set");
         for &parent in parents.get(&child).into_iter().flatten() {
+            if parent == child {
+                continue;
+            }
             let parent_effects = accumulated
                 .get_mut(&parent)
                 .expect("effect parent has a signal record");
@@ -1296,6 +1301,7 @@ fn propagate_effect_sets(
                 pending.insert(parent);
             }
         }
+        accumulated.insert(child, child_effects);
     }
     (accumulated, updates)
 }

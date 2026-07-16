@@ -166,14 +166,16 @@ mod tests {
     use tlib::TreeArena;
     use ui::UiProgram;
 
-    use crate::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
+    use crate::signal_fir::{
+        RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui_and_shadow,
+    };
 
     fn compile(
         arena: &TreeArena,
         outputs: &[signals::SigId],
         num_out: usize,
     ) -> super::ShadowReport {
-        let out = compile_signals_to_fir_fastlane_with_ui(
+        let out = compile_signals_to_fir_fastlane_with_ui_and_shadow(
             arena,
             outputs,
             1,

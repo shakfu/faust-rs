@@ -35,9 +35,30 @@ impl ShapeHasher {
 
     fn token(&mut self, token: &str) {
         for byte in token.as_bytes().iter().copied().chain([0xff]) {
-            self.0 ^= u64::from(byte);
-            self.0 = self.0.wrapping_mul(FNV_PRIME);
+            self.byte(byte);
         }
+    }
+
+    fn number(&mut self, discriminant: u8, mut value: u64) {
+        self.byte(discriminant);
+        loop {
+            let payload = (value & 0x7f) as u8;
+            value >>= 7;
+            self.byte(if value == 0 { payload } else { payload | 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn signed_number(&mut self, discriminant: u8, value: i64) {
+        let zigzag = ((value << 1) ^ (value >> 63)) as u64;
+        self.number(discriminant, zigzag);
+    }
+
+    fn byte(&mut self, byte: u8) {
+        self.0 ^= u64::from(byte);
+        self.0 = self.0.wrapping_mul(FNV_PRIME);
     }
 
     fn finish(self) -> u64 {
@@ -127,8 +148,10 @@ impl<'a> ParallelShape<'a> {
             if representative_bodies.len() != lane_bodies.len() {
                 None
             } else {
-                self.hasher
-                    .token(&format!("rec:{}", representative_bodies.len()));
+                self.hasher.number(
+                    1,
+                    u64::try_from(representative_bodies.len()).expect("recursion arity fits u64"),
+                );
                 representative_bodies
                     .into_iter()
                     .zip(lane_bodies)
@@ -170,11 +193,13 @@ impl<'a> ParallelShape<'a> {
                     self.unary("float_cast", left, right)
                 }
                 (SigMatch::Proj(li, lg), SigMatch::Proj(ri, rg)) if li == ri => {
-                    self.hasher.token(&format!("proj:{li}"));
+                    self.hasher.signed_number(2, i64::from(li));
                     self.visit(lg, rg)
                 }
                 (SigMatch::BinOp(lo, la, lb), SigMatch::BinOp(ro, ra, rb)) if lo == ro => {
-                    self.binary(&format!("bin:{}", lo as i64), la, lb, ra, rb)
+                    self.hasher.number(3, lo as u64);
+                    self.visit(la, ra)?;
+                    self.visit(lb, rb)
                 }
                 (SigMatch::Select2(la, lb, lc), SigMatch::Select2(ra, rb, rc)) => {
                     self.hasher.token("select2");
@@ -183,7 +208,8 @@ impl<'a> ParallelShape<'a> {
                     self.visit(lc, rc)
                 }
                 (SigMatch::Output(li, left), SigMatch::Output(ri, right)) if li == ri => {
-                    self.unary(&format!("output:{li}"), left, right)
+                    self.hasher.signed_number(4, i64::from(li));
+                    self.visit(left, right)
                 }
                 (SigMatch::Pow(la, lb), SigMatch::Pow(ra, rb)) => {
                     self.binary("pow", la, lb, ra, rb)

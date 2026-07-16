@@ -24,7 +24,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::vector_analysis::{EffectAtom, StateResource, effects_conflict};
+#[cfg(test)]
+use super::vector_analysis::effects_conflict;
+use super::vector_analysis::{EffectAtom, ForeignPurity, StateResource};
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_route::{RoutedUseSource, VectorRegion, VerifiedRoutedFir};
 use super::vector_state::{VectorStateAction, VerifiedVectorStatePlan};
@@ -1086,19 +1088,8 @@ fn verify_required_dependencies(
             _ => None,
         })
         .collect::<Vec<_>>();
-    for left_index in 0..effects.len() {
-        for right_index in (left_index + 1)..effects.len() {
-            let (left_id, left) = effects[left_index];
-            let (right_id, right) = effects[right_index];
-            if effects_conflict(left, right) {
-                let (before, after) = if scalar_positions[&left_id] < scalar_positions[&right_id] {
-                    (left_id, right_id)
-                } else {
-                    (right_id, left_id)
-                };
-                require(before, after)?;
-            }
-        }
+    for dependency in checker_required_effect_dependencies(&effects, scalar_positions) {
+        require(dependency.before, dependency.after)?;
     }
     let recursion_steps = recursion_step_events(events);
     for ((loop_id, sample, group), event_id) in &recursion_steps {
@@ -1791,16 +1782,7 @@ fn build_dependencies(
             _ => None,
         })
         .collect::<Vec<_>>();
-    for left_index in 0..effects.len() {
-        for right_index in (left_index + 1)..effects.len() {
-            let (left_id, left) = effects[left_index];
-            let (right_id, right) = effects[right_index];
-            if effects_conflict(left, right) {
-                debug_assert!(scalar_positions[&left_id] < scalar_positions[&right_id]);
-                add_dependency(&mut dependencies, left_id, right_id);
-            }
-        }
-    }
+    dependencies.extend(producer_effect_dependencies(&effects));
     let recursion_steps = recursion_step_events(events);
     for ((loop_id, sample, group), event_id) in &recursion_steps {
         if *sample + 1 < plan.vec_size
@@ -1816,6 +1798,192 @@ fn build_dependencies(
         &scalar_positions,
     ));
     dependencies.into_iter().collect()
+}
+
+/// Groups producer-side effect events by resource before materializing only
+/// the conflicting pairs. Input order is the scalar event order.
+fn producer_effect_dependencies(effects: &[(u64, &EffectAtom)]) -> BTreeSet<EventDependency> {
+    let mut all = Vec::with_capacity(effects.len());
+    let mut barriers = Vec::new();
+    let mut states = BTreeMap::<StateResource, (Vec<u64>, Vec<u64>)>::new();
+    let mut tables = BTreeMap::<u32, (Vec<u64>, Vec<u64>)>::new();
+    let mut ui_writes = BTreeMap::<u32, Vec<u64>>::new();
+    let mut output_writes = BTreeMap::<u32, Vec<u64>>::new();
+    let positions = effects
+        .iter()
+        .enumerate()
+        .map(|(position, (event_id, _))| (*event_id, position))
+        .collect::<BTreeMap<_, _>>();
+
+    for &(event_id, effect) in effects {
+        all.push(event_id);
+        match effect {
+            EffectAtom::ReadState(resource) => {
+                states.entry(resource.clone()).or_default().0.push(event_id);
+            }
+            EffectAtom::WriteState(resource) => {
+                states.entry(resource.clone()).or_default().1.push(event_id);
+            }
+            EffectAtom::ReadTable(resource) => {
+                tables.entry(*resource).or_default().0.push(event_id);
+            }
+            EffectAtom::WriteTable(resource) => {
+                tables.entry(*resource).or_default().1.push(event_id);
+            }
+            EffectAtom::WriteUi(resource) => {
+                ui_writes.entry(*resource).or_default().push(event_id);
+            }
+            EffectAtom::WriteOutput(resource) => {
+                output_writes.entry(*resource).or_default().push(event_id);
+            }
+            EffectAtom::Foreign {
+                purity: ForeignPurity::Impure | ForeignPurity::Unknown,
+                ..
+            } => barriers.push(event_id),
+            EffectAtom::Foreign {
+                purity: ForeignPurity::Pure,
+                ..
+            } => {}
+        }
+    }
+
+    let mut dependencies = BTreeSet::new();
+    let mut insert = |left: u64, right: u64| {
+        if left == right {
+            return;
+        }
+        let (before, after) = if positions[&left] < positions[&right] {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        dependencies.insert(EventDependency { before, after });
+    };
+    for (reads, writes) in states.values().chain(tables.values()) {
+        for &read in reads {
+            for &write in writes {
+                insert(read, write);
+            }
+        }
+        for (index, &left) in writes.iter().enumerate() {
+            for &right in &writes[index + 1..] {
+                insert(left, right);
+            }
+        }
+    }
+    for writes in ui_writes.values().chain(output_writes.values()) {
+        for (index, &left) in writes.iter().enumerate() {
+            for &right in &writes[index + 1..] {
+                insert(left, right);
+            }
+        }
+    }
+    for &barrier in &barriers {
+        for &other in &all {
+            insert(barrier, other);
+        }
+    }
+    dependencies
+}
+
+/// Independently reconstructs the required effect dependencies for the
+/// checker. No producer grouping or producer result is consumed here.
+fn checker_required_effect_dependencies(
+    effects: &[(u64, &EffectAtom)],
+    scalar_positions: &BTreeMap<u64, usize>,
+) -> BTreeSet<EventDependency> {
+    let mut every_effect = Vec::with_capacity(effects.len());
+    let mut global_barriers = Vec::new();
+    let mut state_accesses = BTreeMap::<StateResource, (Vec<u64>, Vec<u64>)>::new();
+    let mut table_accesses = BTreeMap::<u32, (Vec<u64>, Vec<u64>)>::new();
+    let mut ui_updates = BTreeMap::<u32, Vec<u64>>::new();
+    let mut output_updates = BTreeMap::<u32, Vec<u64>>::new();
+
+    for &(event_id, effect) in effects {
+        every_effect.push(event_id);
+        match effect {
+            EffectAtom::ReadState(resource) => {
+                state_accesses
+                    .entry(resource.clone())
+                    .or_default()
+                    .0
+                    .push(event_id);
+            }
+            EffectAtom::WriteState(resource) => {
+                state_accesses
+                    .entry(resource.clone())
+                    .or_default()
+                    .1
+                    .push(event_id);
+            }
+            EffectAtom::ReadTable(resource) => {
+                table_accesses
+                    .entry(*resource)
+                    .or_default()
+                    .0
+                    .push(event_id);
+            }
+            EffectAtom::WriteTable(resource) => {
+                table_accesses
+                    .entry(*resource)
+                    .or_default()
+                    .1
+                    .push(event_id);
+            }
+            EffectAtom::WriteUi(resource) => {
+                ui_updates.entry(*resource).or_default().push(event_id);
+            }
+            EffectAtom::WriteOutput(resource) => {
+                output_updates.entry(*resource).or_default().push(event_id);
+            }
+            EffectAtom::Foreign {
+                purity: ForeignPurity::Impure | ForeignPurity::Unknown,
+                ..
+            } => global_barriers.push(event_id),
+            EffectAtom::Foreign {
+                purity: ForeignPurity::Pure,
+                ..
+            } => {}
+        }
+    }
+
+    let mut required = BTreeSet::new();
+    let mut require_pair = |left: u64, right: u64| {
+        if left == right {
+            return;
+        }
+        let (before, after) = if scalar_positions[&left] < scalar_positions[&right] {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        required.insert(EventDependency { before, after });
+    };
+    for (reads, writes) in state_accesses.values().chain(table_accesses.values()) {
+        for &reader in reads {
+            for &writer in writes {
+                require_pair(reader, writer);
+            }
+        }
+        for (index, &left) in writes.iter().enumerate() {
+            for &right in &writes[index + 1..] {
+                require_pair(left, right);
+            }
+        }
+    }
+    for writes in ui_updates.values().chain(output_updates.values()) {
+        for (index, &left) in writes.iter().enumerate() {
+            for &right in &writes[index + 1..] {
+                require_pair(left, right);
+            }
+        }
+    }
+    for &barrier in &global_barriers {
+        for &other in &every_effect {
+            require_pair(barrier, other);
+        }
+    }
+    required
 }
 
 fn add_loop_edge_dependencies(
@@ -2056,7 +2224,9 @@ mod tests {
         VerifiedDecorationCertificate, certify_decorations,
     };
     use crate::signal_fir::pv_slice::build_pv_signals;
-    use crate::signal_fir::vector_analysis::{StateCell, StateResource};
+    use crate::signal_fir::vector_analysis::{
+        ForeignResource, ForeignTypeCode, StateCell, StateResource,
+    };
     use crate::signal_fir::vector_plan::{build_vector_plan, verified_vector_plan_for_test};
     use crate::signal_fir::vector_route::{RouteResolution, VectorRouteSession};
     use crate::signal_fir::vector_state::{
@@ -2091,6 +2261,98 @@ mod tests {
         )
         .unwrap();
         certify_decorations(&prepared, &clocks).unwrap()
+    }
+
+    #[test]
+    fn grouped_effect_dependencies_exhaustively_match_literal_pairing() {
+        fn literal_dependencies(
+            effects: &[(u64, &EffectAtom)],
+            scalar_positions: &BTreeMap<u64, usize>,
+        ) -> BTreeSet<EventDependency> {
+            let mut result = BTreeSet::new();
+            for (index, &(left_id, left)) in effects.iter().enumerate() {
+                for &(right_id, right) in &effects[index + 1..] {
+                    if effects_conflict(left, right) {
+                        let (before, after) =
+                            if scalar_positions[&left_id] < scalar_positions[&right_id] {
+                                (left_id, right_id)
+                            } else {
+                                (right_id, left_id)
+                            };
+                        result.insert(EventDependency { before, after });
+                    }
+                }
+            }
+            result
+        }
+
+        let state_a = StateResource::Signal {
+            owner: 1,
+            cell: StateCell::Delay,
+        };
+        let state_b = StateResource::Signal {
+            owner: 2,
+            cell: StateCell::Delay,
+        };
+        let foreign = |name: &str, purity| EffectAtom::Foreign {
+            resource: ForeignResource::Variable {
+                name: name.to_owned(),
+                value_type: ForeignTypeCode(1),
+            },
+            purity,
+        };
+        let atoms = vec![
+            EffectAtom::ReadState(state_a.clone()),
+            EffectAtom::WriteState(state_a),
+            EffectAtom::ReadState(state_b.clone()),
+            EffectAtom::WriteState(state_b),
+            EffectAtom::ReadTable(3),
+            EffectAtom::WriteTable(3),
+            EffectAtom::ReadTable(4),
+            EffectAtom::WriteTable(4),
+            EffectAtom::WriteUi(5),
+            EffectAtom::WriteUi(5),
+            EffectAtom::WriteUi(6),
+            EffectAtom::WriteOutput(7),
+            EffectAtom::WriteOutput(7),
+            foreign("impure", ForeignPurity::Impure),
+            foreign("unknown", ForeignPurity::Unknown),
+            foreign("pure", ForeignPurity::Pure),
+        ];
+
+        for mask in 0_u64..(1_u64 << atoms.len()) {
+            let selected = atoms
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1_u64 << index) != 0)
+                .map(|(index, effect)| (u64::try_from(index).unwrap(), effect))
+                .collect::<Vec<_>>();
+            for reverse in [false, true] {
+                let mut scalar_effects = selected.clone();
+                if reverse {
+                    scalar_effects.reverse();
+                }
+                let scalar_positions = scalar_effects
+                    .iter()
+                    .enumerate()
+                    .map(|(position, (event_id, _))| (*event_id, position))
+                    .collect::<BTreeMap<_, _>>();
+                let expected = literal_dependencies(&scalar_effects, &scalar_positions);
+                assert_eq!(
+                    producer_effect_dependencies(&scalar_effects),
+                    expected,
+                    "producer mismatch for mask {mask:#x}, reverse={reverse}"
+                );
+
+                let mut checker_input = scalar_effects.clone();
+                checker_input.sort_unstable_by_key(|(event_id, _)| *event_id);
+                assert_eq!(
+                    checker_required_effect_dependencies(&checker_input, &scalar_positions),
+                    expected,
+                    "checker mismatch for mask {mask:#x}, reverse={reverse}"
+                );
+            }
+        }
     }
 
     fn pure_transport_plan() -> VerifiedVectorPlan {

@@ -361,8 +361,10 @@ pub struct SignalFirOutput {
     /// [`shadow::compare_emission_order`].
     pub emission_order: Vec<SigId>,
     /// P3 schedule-conformance report comparing [`Self::emission_order`] with
-    /// the selected `Hsched`. `None` when no hierarchical graph was built.
-    /// The report is observation-only; computing it never changes FIR.
+    /// the selected `Hsched`. Present only when the internal diagnostic entry
+    /// point or `FAUST_RS_SHADOW_REPORT` requested it and a hierarchical graph
+    /// was built. The report is observation-only; computing it never changes
+    /// FIR.
     pub shadow_report: Option<shadow::ShadowReport>,
     /// Observable activation/fallback state for the signal-level vector path.
     pub vector_pipeline_status: VectorPipelineStatus,
@@ -420,6 +422,34 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
         options,
         None,
         None,
+        std::env::var_os("FAUST_RS_SHADOW_REPORT").is_some(),
+    )
+}
+
+/// Compiles with the post-lowering scheduling shadow report enabled.
+///
+/// This diagnostic entry point exists for scheduling conformance tests. Normal
+/// compilation avoids the extra graph/report traversal; developers can request
+/// the same report from regular entry points with `FAUST_RS_SHADOW_REPORT=1`.
+#[doc(hidden)]
+pub fn compile_signals_to_fir_fastlane_with_ui_and_shadow(
+    arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    ui: &UiProgram,
+    options: &SignalFirOptions,
+) -> Result<SignalFirOutput, SignalFirError> {
+    compile_fastlane_inner(
+        arena,
+        signals,
+        num_inputs,
+        num_outputs,
+        ui,
+        options,
+        None,
+        None,
+        true,
     )
 }
 
@@ -478,6 +508,7 @@ pub fn compile_signals_to_fir_fastlane_clocked_with_timing(
         options,
         Some(clock_domains),
         timing_sink,
+        std::env::var_os("FAUST_RS_SHADOW_REPORT").is_some(),
     )
 }
 
@@ -506,6 +537,7 @@ fn compile_fastlane_inner(
     options: &SignalFirOptions,
     clock_domains: Option<&propagate::ClockDomainTable>,
     timing_sink: Option<&SignalFirTimingSink>,
+    build_shadow_report: bool,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = time_signal_fir_phase(timing_sink, "fir-plan", || {
         planner::plan_signals(signals, num_inputs, num_outputs, options)
@@ -681,15 +713,17 @@ fn compile_fastlane_inner(
         match time_signal_fir_phase(timing_sink, "fir-vector-certification", || {
             vector_module::build_verified_vector_module(
                 &prepared,
-                domains,
-                ui,
-                plan.num_inputs,
-                plan.num_outputs,
-                options.module_name.as_str(),
-                options.real_type.as_fir_type(),
-                options.max_copy_delay,
-                options.compute_mode,
-                options.scheduling_strategy,
+                &vector_module::VectorModuleContext {
+                    domains,
+                    ui,
+                    num_inputs: plan.num_inputs,
+                    num_outputs: plan.num_outputs,
+                    module_name: options.module_name.as_str(),
+                    real_type: options.real_type.as_fir_type(),
+                    max_copy_delay: options.max_copy_delay,
+                    compute_mode: options.compute_mode,
+                    strategy: options.scheduling_strategy,
+                },
             )
         }) {
             Ok(output) => return Ok(output),
@@ -724,14 +758,16 @@ fn compile_fastlane_inner(
         )
     })?;
 
-    // Keep the former shadow report as a post-activation conformance trace.
-    // It compares the accepted schedule and actual first-lowering order over
-    // the same prepared arena without changing the returned FIR.
-    let shadow_report = gate_graphs
-        .as_ref()
-        .map(|(hgraph, hsched)| shadow::compare_emission_order(hgraph, hsched, &output));
+    // The post-activation trace is intentionally off the hot path. When
+    // explicitly requested, compare the accepted schedule and actual first
+    // lowering order over the same prepared arena without changing the FIR.
+    let shadow_report = build_shadow_report.then(|| {
+        gate_graphs
+            .as_ref()
+            .map(|(hgraph, hsched)| shadow::compare_emission_order(hgraph, hsched, &output))
+    });
 
-    output.shadow_report = shadow_report;
+    output.shadow_report = shadow_report.flatten();
     if let Some(failure) = vector_fallback {
         output.vector_pipeline_status = VectorPipelineStatus::Fallback(failure.reason);
         output.vector_pipeline_detail = Some(failure.detail);

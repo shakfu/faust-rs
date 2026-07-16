@@ -22,14 +22,14 @@ use codegen::backends::cpp::CppOptions;
 use compiler::{Compiler, SchedulingStrategy, SignalFirLane};
 use transform::signal_fir::shadow::ShadowReport;
 use transform::signal_fir::{
-    RealType, SignalFirOptions, SignalFirOutput, compile_signals_to_fir_fastlane_with_ui,
+    RealType, SignalFirOptions, SignalFirOutput, compile_signals_to_fir_fastlane_with_ui_and_shadow,
 };
 
 fn scalar_fir_for(name: &str, source: &str, strategy: SchedulingStrategy) -> SignalFirOutput {
     let out = Compiler::new()
         .compile_source_to_signals(name, source)
         .unwrap_or_else(|e| panic!("{name}: front-end compile failed: {e}"));
-    compile_signals_to_fir_fastlane_with_ui(
+    compile_signals_to_fir_fastlane_with_ui_and_shadow(
         &out.parse.state.arena,
         &out.signals,
         out.process_arity.inputs,

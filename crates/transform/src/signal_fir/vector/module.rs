@@ -39,7 +39,7 @@ use super::vector_clock_ad::build_vector_clock_ad_plan;
 use super::vector_events::{
     DEFAULT_EVENT_LIMIT, build_state_event_order_certificate, precheck_state_event_bound,
 };
-use super::vector_lower::lower_vector_program;
+use super::vector_lower::{VectorLoweringContext, lower_vector_program};
 use super::vector_plan::build_vector_plan_with_lockstep;
 use super::vector_route::{VectorRegion, VerifiedRoutedFir};
 use super::vector_state::build_vector_state_plan_with_clock;
@@ -70,38 +70,30 @@ impl fmt::Display for VectorModuleFailure {
 
 /// Runs the complete checked vector path for the supported P6.5 subset and
 /// returns a final FIR module.
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct VectorModuleContext<'a> {
+    pub domains: &'a ClockDomainTable,
+    pub ui: &'a ui::UiProgram,
+    pub num_inputs: usize,
+    pub num_outputs: usize,
+    pub module_name: &'a str,
+    pub real_type: FirType,
+    pub max_copy_delay: u32,
+    pub compute_mode: ComputeMode,
+    pub strategy: SchedulingStrategy,
+}
+
 pub(crate) fn build_verified_vector_module(
     prepared: &VerifiedPreparedSignals,
-    domains: &ClockDomainTable,
-    ui: &ui::UiProgram,
-    num_inputs: usize,
-    num_outputs: usize,
-    module_name: &str,
-    real_type: FirType,
-    max_copy_delay: u32,
-    compute_mode: ComputeMode,
-    strategy: SchedulingStrategy,
+    context: &VectorModuleContext<'_>,
 ) -> Result<SignalFirOutput, VectorModuleFailure> {
-    let built = build_verified_vector_module_with_evidence(
-        prepared,
-        domains,
-        ui,
-        num_inputs,
-        num_outputs,
-        module_name,
-        real_type,
-        max_copy_delay,
-        compute_mode,
-        strategy,
-    )?;
+    let built = build_verified_vector_module_with_evidence(prepared, context)?;
     let BuiltVectorModule {
         output,
         assembly,
         output_stores,
     } = built;
     if assembly.schema_version != super::vector_assemble::VECTOR_FIR_ASSEMBLY_VERSION
-        || output_stores.len() != num_outputs
+        || output_stores.len() != context.num_outputs
     {
         return Err(module_shape("verified module evidence lost final coverage"));
     }
@@ -114,19 +106,19 @@ struct BuiltVectorModule {
     output_stores: Vec<FirId>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_verified_vector_module_with_evidence(
     prepared: &VerifiedPreparedSignals,
-    domains: &ClockDomainTable,
-    ui: &ui::UiProgram,
-    num_inputs: usize,
-    num_outputs: usize,
-    module_name: &str,
-    real_type: FirType,
-    max_copy_delay: u32,
-    compute_mode: ComputeMode,
-    strategy: SchedulingStrategy,
+    context: &VectorModuleContext<'_>,
 ) -> Result<BuiltVectorModule, VectorModuleFailure> {
+    let domains = context.domains;
+    let ui = context.ui;
+    let num_inputs = context.num_inputs;
+    let num_outputs = context.num_outputs;
+    let module_name = context.module_name;
+    let real_type = context.real_type.clone();
+    let max_copy_delay = context.max_copy_delay;
+    let compute_mode = context.compute_mode;
+    let strategy = context.strategy;
     let ComputeMode::Vector {
         vec_size,
         loop_variant,
@@ -213,10 +205,12 @@ fn build_verified_vector_module_with_evidence(
         &vector_plan,
         &state_plan,
         &clock_plan,
-        ui,
-        strategy,
-        real_type.clone(),
-        num_inputs,
+        &VectorLoweringContext {
+            ui,
+            strategy,
+            real_type: real_type.clone(),
+            num_inputs,
+        },
     )
     .map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::PureLowering, error.to_string())
@@ -280,22 +274,22 @@ fn build_verified_vector_module_with_evidence(
         .map_err(|error| VectorModuleFailure::new(VectorFallbackReason::UiProgram, error))?;
     trace_stage("ui-lifecycle");
     let static_declarations = program.static_declarations().to_vec();
-    let module = assemble_module(
-        program.store_mut(),
+    let module_context = FinalModuleContext {
         module_name,
         num_inputs,
         num_outputs,
-        real_type,
+        real_type: &real_type,
         vec_size,
         loop_variant,
-        &control_statements,
-        &math_ops,
-        &int_helpers,
-        &assembly,
-        &control_output_stores,
-        &ui_fir,
-        &static_declarations,
-    )?;
+        control_statements: &control_statements,
+        math_ops: &math_ops,
+        int_helpers: &int_helpers,
+        assembly: &assembly,
+        control_output_stores: &control_output_stores,
+        ui_fir: &ui_fir,
+        static_declarations: &static_declarations,
+    };
+    let module = assemble_module(program.store_mut(), &module_context)?;
     verify_final_module(
         program.store(),
         module,
@@ -513,23 +507,39 @@ fn materialize_outputs(
     Ok(stores)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn assemble_module(
-    store: &mut FirStore,
-    module_name: &str,
+struct FinalModuleContext<'a> {
+    module_name: &'a str,
     num_inputs: usize,
     num_outputs: usize,
-    real_type: FirType,
+    real_type: &'a FirType,
     vec_size: u32,
     loop_variant: u8,
-    control_statements: &[FirId],
-    math_ops: &std::collections::HashSet<fir::FirMathOp>,
-    int_helpers: &std::collections::BTreeSet<&'static str>,
-    assembly: &VectorFirAssembly,
-    control_output_stores: &[FirId],
-    ui_fir: &VectorUiFir,
-    static_declarations: &[FirId],
+    control_statements: &'a [FirId],
+    math_ops: &'a std::collections::HashSet<fir::FirMathOp>,
+    int_helpers: &'a std::collections::BTreeSet<&'static str>,
+    assembly: &'a VectorFirAssembly,
+    control_output_stores: &'a [FirId],
+    ui_fir: &'a VectorUiFir,
+    static_declarations: &'a [FirId],
+}
+
+fn assemble_module(
+    store: &mut FirStore,
+    context: &FinalModuleContext<'_>,
 ) -> Result<FirId, VectorModuleFailure> {
+    let module_name = context.module_name;
+    let num_inputs = context.num_inputs;
+    let num_outputs = context.num_outputs;
+    let real_type = context.real_type.clone();
+    let vec_size = context.vec_size;
+    let loop_variant = context.loop_variant;
+    let control_statements = context.control_statements;
+    let math_ops = context.math_ops;
+    let int_helpers = context.int_helpers;
+    let assembly = context.assembly;
+    let control_output_stores = context.control_output_stores;
+    let ui_fir = context.ui_fir;
+    let static_declarations = context.static_declarations;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_owned(),
@@ -1041,6 +1051,29 @@ mod tests {
             .expect("prepare recursion fixture")
     }
 
+    fn module_context<'a>(
+        domains: &'a ClockDomainTable,
+        ui: &'a ui::UiProgram,
+        module_name: &'a str,
+        loop_variant: u8,
+        strategy: SchedulingStrategy,
+    ) -> VectorModuleContext<'a> {
+        VectorModuleContext {
+            domains,
+            ui,
+            num_inputs: 1,
+            num_outputs: 1,
+            module_name,
+            real_type: FirType::Float32,
+            max_copy_delay: 16,
+            compute_mode: ComputeMode::Vector {
+                vec_size: 8,
+                loop_variant,
+            },
+            strategy,
+        }
+    }
+
     #[test]
     fn final_module_covers_lifecycle_outputs_and_both_chunk_drivers() {
         for strategy in [
@@ -1051,20 +1084,11 @@ mod tests {
         ] {
             for loop_variant in [0, 1] {
                 let prepared = pure_fixture();
+                let domains = ClockDomainTable::new();
+                let ui = ui::UiProgram::empty();
                 let output = build_verified_vector_module(
                     &prepared,
-                    &ClockDomainTable::new(),
-                    &ui::UiProgram::empty(),
-                    1,
-                    1,
-                    "mydsp",
-                    FirType::Float32,
-                    16,
-                    ComputeMode::Vector {
-                        vec_size: 8,
-                        loop_variant,
-                    },
-                    strategy,
+                    &module_context(&domains, &ui, "mydsp", loop_variant, strategy),
                 )
                 .expect("verified module");
                 assert_eq!(
@@ -1130,20 +1154,11 @@ mod tests {
         ] {
             for loop_variant in [0, 1] {
                 let prepared = delay_fixture();
+                let domains = ClockDomainTable::new();
+                let ui = ui::UiProgram::empty();
                 let output = build_verified_vector_module(
                     &prepared,
-                    &ClockDomainTable::new(),
-                    &ui::UiProgram::empty(),
-                    1,
-                    1,
-                    "delaydsp",
-                    FirType::Float32,
-                    16,
-                    ComputeMode::Vector {
-                        vec_size: 8,
-                        loop_variant,
-                    },
-                    strategy,
+                    &module_context(&domains, &ui, "delaydsp", loop_variant, strategy),
                 )
                 .expect("fixed delay verified module");
                 assert_eq!(
@@ -1164,20 +1179,11 @@ mod tests {
         ] {
             for loop_variant in [0, 1] {
                 let prepared = recursion_fixture();
+                let domains = ClockDomainTable::new();
+                let ui = ui::UiProgram::empty();
                 build_verified_vector_module(
                     &prepared,
-                    &ClockDomainTable::new(),
-                    &ui::UiProgram::empty(),
-                    1,
-                    1,
-                    "recdsp",
-                    FirType::Float32,
-                    16,
-                    ComputeMode::Vector {
-                        vec_size: 8,
-                        loop_variant,
-                    },
-                    strategy,
+                    &module_context(&domains, &ui, "recdsp", loop_variant, strategy),
                 )
                 .expect("recursion verified module");
             }
@@ -1187,20 +1193,11 @@ mod tests {
     #[test]
     fn final_checker_rejects_forged_output_coverage() {
         let prepared = pure_fixture();
+        let domains = ClockDomainTable::new();
+        let ui = ui::UiProgram::empty();
         let mut built = build_verified_vector_module_with_evidence(
             &prepared,
-            &ClockDomainTable::new(),
-            &ui::UiProgram::empty(),
-            1,
-            1,
-            "mydsp",
-            FirType::Float32,
-            16,
-            ComputeMode::Vector {
-                vec_size: 8,
-                loop_variant: 0,
-            },
-            SchedulingStrategy::DepthFirst,
+            &module_context(&domains, &ui, "mydsp", 0, SchedulingStrategy::DepthFirst),
         )
         .expect("verified module with evidence");
         assert_eq!(built.output_stores.len(), 1);
@@ -1230,20 +1227,11 @@ mod tests {
     #[test]
     fn final_checker_rejects_forged_static_declaration_coverage() {
         let prepared = pure_fixture();
+        let domains = ClockDomainTable::new();
+        let ui = ui::UiProgram::empty();
         let mut built = build_verified_vector_module_with_evidence(
             &prepared,
-            &ClockDomainTable::new(),
-            &ui::UiProgram::empty(),
-            1,
-            1,
-            "mydsp",
-            FirType::Float32,
-            16,
-            ComputeMode::Vector {
-                vec_size: 8,
-                loop_variant: 0,
-            },
-            SchedulingStrategy::DepthFirst,
+            &module_context(&domains, &ui, "mydsp", 0, SchedulingStrategy::DepthFirst),
         )
         .expect("verified module with evidence");
         let output_stores = built.output_stores.clone();
