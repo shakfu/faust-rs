@@ -28,7 +28,7 @@ use fir::{
     AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
 };
 
-use crate::backends::faust_api;
+use crate::backends::{faust_api, purity::is_obviously_side_effect_free_value};
 
 pub const BACKEND_NAME: &str = "asc";
 
@@ -646,6 +646,9 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::Drop(value) => {
+            if is_obviously_side_effect_free_value(store, value) {
+                return Ok(());
+            }
             let value = emit_value(store, options, class_name, value)?;
             let _ = writeln!(out, "{tab}{value};");
             Ok(())
@@ -1411,7 +1414,42 @@ pub fn backend_id() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fir::FirBuilder;
+    use fir::{FirBuilder, FirType};
+
+    #[test]
+    fn pure_drop_is_elided_but_foreign_call_drop_is_retained() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let one = b.float32(1.0);
+        let pure = b.drop_(one);
+        let foreign = b.fun_call("foreign", &[], FirType::Float32);
+        let effectful = b.drop_(foreign);
+        let mut out = String::new();
+
+        emit_stmt(
+            &store,
+            &mut out,
+            &AscOptions::default(),
+            "mydsp",
+            pure,
+            0,
+            Phase::Body,
+        )
+        .expect("pure drop should emit");
+        assert!(out.is_empty());
+
+        emit_stmt(
+            &store,
+            &mut out,
+            &AscOptions::default(),
+            "mydsp",
+            effectful,
+            0,
+            Phase::Body,
+        )
+        .expect("effectful drop should emit");
+        assert!(out.contains("foreign()"));
+    }
 
     #[test]
     /// Regression for the C-family plan §5 finding: special values must use

@@ -32,6 +32,8 @@ use std::fmt::Write as _;
 
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
 
+use crate::backends::purity::is_obviously_side_effect_free_value;
+
 /// Syntax parameters distinguishing the C-family textual backends (`c`, `cpp`).
 ///
 /// Every field is a fixed token leaf, not behavior — plain data, matching the
@@ -997,60 +999,13 @@ pub(crate) fn emit_stmt_common<E>(
     Some(result)
 }
 
-/// Returns `true` only for FIR values whose evaluation cannot have an effect.
-///
-/// This is deliberately narrower than mathematical purity: [`FirMatch::FunCall`]
-/// is retained because a foreign function has no purity contract at this
-/// backend boundary. The predicate is used solely to omit redundant textual
-/// `Drop` statements after vector DAG materialization.
-fn is_obviously_side_effect_free_value(store: &FirStore, value: FirId) -> bool {
-    match match_fir(store, value) {
-        FirMatch::Int32 { .. }
-        | FirMatch::Int64 { .. }
-        | FirMatch::Float32 { .. }
-        | FirMatch::Float64 { .. }
-        | FirMatch::Bool { .. }
-        | FirMatch::Quad { .. }
-        | FirMatch::FixedPoint { .. }
-        | FirMatch::Int32Array { .. }
-        | FirMatch::Float32Array { .. }
-        | FirMatch::Float64Array { .. }
-        | FirMatch::QuadArray { .. }
-        | FirMatch::FixedPointArray { .. }
-        | FirMatch::LoadVar { .. }
-        | FirMatch::LoadVarAddress { .. }
-        | FirMatch::NullValue { .. } => true,
-        FirMatch::LoadTable { index, .. } => is_obviously_side_effect_free_value(store, index),
-        FirMatch::ValueArray { values, .. } => values
-            .iter()
-            .all(|&item| is_obviously_side_effect_free_value(store, item)),
-        FirMatch::BinOp { lhs, rhs, .. } => {
-            is_obviously_side_effect_free_value(store, lhs)
-                && is_obviously_side_effect_free_value(store, rhs)
-        }
-        FirMatch::Neg { value, .. }
-        | FirMatch::Cast { value, .. }
-        | FirMatch::Bitcast { value, .. } => is_obviously_side_effect_free_value(store, value),
-        FirMatch::Select2 {
-            cond,
-            then_value,
-            else_value,
-            ..
-        } => {
-            is_obviously_side_effect_free_value(store, cond)
-                && is_obviously_side_effect_free_value(store, then_value)
-                && is_obviously_side_effect_free_value(store, else_value)
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CFamilySyntax, emit_binop, emit_binop_expr, emit_type, format_float32,
-        is_obviously_side_effect_free_value, string_literal, trim_float,
+        CFamilySyntax, emit_binop, emit_binop_expr, emit_type, format_float32, string_literal,
+        trim_float,
     };
+    use crate::backends::purity::is_obviously_side_effect_free_value;
     use fir::{AccessType, FirBinOp, FirBuilder, FirStore, FirType};
 
     const TEST_SYNTAX: CFamilySyntax = CFamilySyntax {
