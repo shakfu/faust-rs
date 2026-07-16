@@ -266,6 +266,278 @@ fn scalar_load_effects(store: &FirStore, stmt: FirId) -> Vec<ScalarLoadEffect> {
     }
 }
 
+// ─── Straight-line scalar state-load reuse ──────────────────────────────────
+
+/// One stack-local name that may be substituted after its redundant direct
+/// table-load declaration is removed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StackVariable {
+    name: String,
+    access: AccessType,
+}
+
+/// Reuses direct table-load temporaries within one flat scalar statement list.
+///
+/// The pass deliberately runs only on scopes without nested execution bodies.
+/// Each nested body owns its own schedule and local declarations; declining to
+/// enter such a scope is safer than allowing a removed declaration to leak
+/// across a control-flow boundary. The cache is populated from existing
+/// `DeclareVar(kStack, LoadTable(...))` statements, which are stable named
+/// materializations created by scalar scheduling. It does not synthesize new
+/// declarations for arbitrary load expressions.
+///
+/// A literal-index write invalidates only the same table slot; a dynamic write
+/// invalidates every cached slot for the table. Unknown effects clear the cache
+/// but retain already-substituted local values, whose initializer has already
+/// executed and is not changed by a later table write.
+pub(super) fn reuse_straight_line_scalar_loads(store: &mut FirStore, statements: &mut Vec<FirId>) {
+    if statements
+        .iter()
+        .copied()
+        .any(|stmt| is_nested_execution_scope(store, stmt))
+    {
+        return;
+    }
+
+    let mut cached_loads = HashMap::<TableLocation, FirId>::new();
+    let mut substitutions = HashMap::<StackVariable, FirId>::new();
+    let mut result = Vec::with_capacity(statements.len());
+
+    for (position, &stmt) in statements.iter().enumerate() {
+        let rewritten = rewrite_stack_loads(store, stmt, &substitutions);
+        let candidate = direct_stack_table_load(store, rewritten);
+
+        if let Some((variable, location)) = candidate {
+            if let Some(&prior_load) = cached_loads.get(&location) {
+                if !has_later_stack_store(store, &statements[position + 1..], &variable) {
+                    substitutions.insert(variable, prior_load);
+                    continue;
+                }
+            } else {
+                let typ = match match_fir(store, rewritten) {
+                    FirMatch::DeclareVar { typ, .. } => typ,
+                    _ => unreachable!("direct_stack_table_load requires DeclareVar"),
+                };
+                let load =
+                    FirBuilder::new(store).load_var(variable.name.clone(), variable.access, typ);
+                cached_loads.insert(location, load);
+            }
+        }
+
+        for effect in scalar_load_effects(store, rewritten) {
+            invalidate_scalar_load_cache(&mut cached_loads, effect);
+        }
+        result.push(rewritten);
+    }
+
+    *statements = result;
+}
+
+/// Returns whether `stmt` introduces a body that must keep a separate cache.
+fn is_nested_execution_scope(store: &FirStore, stmt: FirId) -> bool {
+    matches!(
+        match_fir(store, stmt),
+        FirMatch::If { .. }
+            | FirMatch::Control { .. }
+            | FirMatch::Block(_)
+            | FirMatch::ForLoop { .. }
+            | FirMatch::SimpleForLoop { .. }
+            | FirMatch::IteratorForLoop { .. }
+            | FirMatch::WhileLoop { .. }
+    )
+}
+
+/// Returns the variable and table key for a directly materialized stack load.
+fn direct_stack_table_load(
+    store: &FirStore,
+    stmt: FirId,
+) -> Option<(StackVariable, TableLocation)> {
+    let FirMatch::DeclareVar {
+        name,
+        typ: _,
+        access: AccessType::Stack,
+        init: Some(init),
+    } = match_fir(store, stmt)
+    else {
+        return None;
+    };
+    let FirMatch::LoadTable {
+        name: table_name,
+        access,
+        index,
+        ..
+    } = match_fir(store, init)
+    else {
+        return None;
+    };
+    Some((
+        StackVariable {
+            name,
+            access: AccessType::Stack,
+        },
+        TableLocation {
+            name: table_name,
+            access,
+            index: canonical_table_index(store, index),
+        },
+    ))
+}
+
+/// Returns `true` when a future direct local store would need the declaration
+/// that this pass proposes to remove.
+fn has_later_stack_store(store: &FirStore, statements: &[FirId], variable: &StackVariable) -> bool {
+    statements.iter().copied().any(|stmt| {
+        matches!(
+            match_fir(store, stmt),
+            FirMatch::StoreVar { ref name, access, .. }
+                if name == &variable.name && access == variable.access
+        )
+    })
+}
+
+/// Applies one effect to the direct-load cache.
+fn invalidate_scalar_load_cache(
+    cached_loads: &mut HashMap<TableLocation, FirId>,
+    effect: ScalarLoadEffect,
+) {
+    match effect {
+        ScalarLoadEffect::WritesTable(write) => {
+            cached_loads.retain(|read, _| !table_locations_may_alias(read, &write));
+        }
+        ScalarLoadEffect::UnknownBarrier => cached_loads.clear(),
+        ScalarLoadEffect::ReadsTable(_) => {}
+    }
+}
+
+/// Returns `true` unless the two locations are proven to be different.
+fn table_locations_may_alias(read: &TableLocation, write: &TableLocation) -> bool {
+    if read.name != write.name || read.access != write.access {
+        return false;
+    }
+    match (&read.index, &write.index) {
+        (CanonicalTableIndex::Constant(read), CanonicalTableIndex::Constant(write)) => {
+            read == write
+        }
+        _ => true,
+    }
+}
+
+/// Rewrites references to removed redundant stack temporaries in one statement.
+fn rewrite_stack_loads(
+    store: &mut FirStore,
+    stmt: FirId,
+    substitutions: &HashMap<StackVariable, FirId>,
+) -> FirId {
+    match match_fir(store, stmt) {
+        FirMatch::StoreVar {
+            name,
+            access,
+            value,
+        } => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).store_var(name, access, value)
+        }
+        FirMatch::StoreTable {
+            name,
+            access,
+            index,
+            value,
+        } => {
+            let index = rewrite_stack_load_value(store, index, substitutions);
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).store_table(name, access, index, value)
+        }
+        FirMatch::DeclareVar {
+            name,
+            typ,
+            access,
+            init: Some(init),
+        } => {
+            let init = rewrite_stack_load_value(store, init, substitutions);
+            FirBuilder::new(store).declare_var(name, typ, access, Some(init))
+        }
+        FirMatch::Drop(value) => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).drop_(value)
+        }
+        FirMatch::Return(Some(value)) => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).ret(Some(value))
+        }
+        _ => stmt,
+    }
+}
+
+/// Rewrites stack loads in the value subset emitted by scalar scheduling.
+fn rewrite_stack_load_value(
+    store: &mut FirStore,
+    value: FirId,
+    substitutions: &HashMap<StackVariable, FirId>,
+) -> FirId {
+    match match_fir(store, value) {
+        FirMatch::LoadVar { name, access, .. } => substitutions
+            .get(&StackVariable { name, access })
+            .copied()
+            .unwrap_or(value),
+        FirMatch::BinOp {
+            op, lhs, rhs, typ, ..
+        } => {
+            let lhs = rewrite_stack_load_value(store, lhs, substitutions);
+            let rhs = rewrite_stack_load_value(store, rhs, substitutions);
+            FirBuilder::new(store).binop(op, lhs, rhs, typ)
+        }
+        FirMatch::Neg { value, typ } => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).neg(value, typ)
+        }
+        FirMatch::Cast { typ, value } => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).cast(typ, value)
+        }
+        FirMatch::Bitcast { typ, value } => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).bitcast(typ, value)
+        }
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            typ,
+        } => {
+            let cond = rewrite_stack_load_value(store, cond, substitutions);
+            let then_value = rewrite_stack_load_value(store, then_value, substitutions);
+            let else_value = rewrite_stack_load_value(store, else_value, substitutions);
+            FirBuilder::new(store).select2(cond, then_value, else_value, typ)
+        }
+        FirMatch::FunCall { name, args, typ } => {
+            let args = args
+                .into_iter()
+                .map(|arg| rewrite_stack_load_value(store, arg, substitutions))
+                .collect::<Vec<_>>();
+            FirBuilder::new(store).fun_call(name, &args, typ)
+        }
+        FirMatch::LoadTable {
+            name,
+            access,
+            index,
+            typ,
+        } => {
+            let index = rewrite_stack_load_value(store, index, substitutions);
+            FirBuilder::new(store).load_table(name, access, index, typ)
+        }
+        FirMatch::TeeVar {
+            name,
+            access,
+            value,
+            typ,
+        } => {
+            let value = rewrite_stack_load_value(store, value, substitutions);
+            FirBuilder::new(store).tee_var(name, access, value, typ)
+        }
+        _ => value,
+    }
+}
+
 // ─── CSE materialization ────────────────────────────────────────────────────
 
 /// Materializes multi-referenced value nodes into temporary variables, **per
@@ -658,9 +930,18 @@ mod tests {
             AccessType::Stack,
             Some(second_read),
         );
+        let second_use = b.load_var("fTemp1", AccessType::Stack, FirType::Float32);
+        let emit_second = b.drop_(second_use);
         let shift_history = b.store_table("state", AccessType::Struct, two, read_previous);
         let commit_current = b.store_table("state", AccessType::Struct, one, read_previous);
-        vec![first, update_current, second, shift_history, commit_current]
+        vec![
+            first,
+            update_current,
+            second,
+            emit_second,
+            shift_history,
+            commit_current,
+        ]
     }
 
     #[test]
@@ -701,14 +982,14 @@ mod tests {
         // two reads only after proving that the write targets index zero.
         materialize_shared_values(&mut store, &mut statements, "fTemp", 2, "iTemp", 0);
 
-        assert_eq!(statements.len(), 5);
+        assert_eq!(statements.len(), 6);
         assert!(matches!(
-            match_fir(&store, statements[3]),
+            match_fir(&store, statements[4]),
             FirMatch::StoreTable { ref name, index, .. }
                 if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 2, .. })
         ));
         assert!(matches!(
-            match_fir(&store, statements[4]),
+            match_fir(&store, statements[5]),
             FirMatch::StoreTable { ref name, index, .. }
                 if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 1, .. })
         ));
@@ -768,6 +1049,98 @@ mod tests {
         assert_eq!(
             scalar_load_effects(&store, guarded),
             vec![ScalarLoadEffect::UnknownBarrier]
+        );
+    }
+
+    #[test]
+    fn straight_line_load_reuse_keeps_non_aliasing_history_shift_and_rewrites_use() {
+        let mut store = FirStore::new();
+        let mut statements = recursive_history_fixture(&mut store);
+
+        reuse_straight_line_scalar_loads(&mut store, &mut statements);
+
+        assert_eq!(statements.len(), 5, "the second direct read is redundant");
+        assert!(statements.iter().all(|&stmt| {
+            !matches!(
+                match_fir(&store, stmt),
+                FirMatch::DeclareVar { ref name, .. } if name == "fTemp1"
+            )
+        }));
+        assert!(matches!(
+            match_fir(&store, statements[2]),
+            FirMatch::Drop(value)
+                if matches!(
+                    match_fir(&store, value),
+                    FirMatch::LoadVar { ref name, .. } if name == "fTemp0"
+                )
+        ));
+        assert!(matches!(
+            match_fir(&store, statements[3]),
+            FirMatch::StoreTable { ref name, index, .. }
+                if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 2, .. })
+        ));
+        assert!(matches!(
+            match_fir(&store, statements[4]),
+            FirMatch::StoreTable { ref name, index, .. }
+                if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn straight_line_load_reuse_rejects_aliasing_writes_and_barriers() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let one = b.int32(1);
+        let dynamic = b.load_var("i", AccessType::Stack, FirType::Int32);
+        let read0 = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let first = b.declare_var("fTemp0", FirType::Float32, AccessType::Stack, Some(read0));
+        let same_write = b.store_table("state", AccessType::Struct, one, read0);
+        let read1 = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let second = b.declare_var("fTemp1", FirType::Float32, AccessType::Stack, Some(read1));
+        let dynamic_write = b.store_table("state", AccessType::Struct, dynamic, read0);
+        let read2 = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let third = b.declare_var("fTemp2", FirType::Float32, AccessType::Stack, Some(read2));
+        let call = b.fun_call("foreign", &[], FirType::Float32);
+        let barrier = b.drop_(call);
+        let read3 = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let fourth = b.declare_var("fTemp3", FirType::Float32, AccessType::Stack, Some(read3));
+        let mut statements = vec![
+            first,
+            same_write,
+            second,
+            dynamic_write,
+            third,
+            barrier,
+            fourth,
+        ];
+
+        reuse_straight_line_scalar_loads(&mut store, &mut statements);
+
+        assert_eq!(
+            statements
+                .iter()
+                .filter(|&&stmt| matches!(match_fir(&store, stmt), FirMatch::DeclareVar { .. }))
+                .count(),
+            4,
+            "same-index writes, dynamic writes, and calls each invalidate reuse"
+        );
+    }
+
+    #[test]
+    fn straight_line_load_reuse_does_not_cross_nested_scope() {
+        let mut store = FirStore::new();
+        let mut statements = recursive_history_fixture(&mut store);
+        let mut b = FirBuilder::new(&mut store);
+        let cond = b.bool_(true);
+        let body = b.null_statement();
+        statements.insert(2, b.if_(cond, body, None));
+
+        reuse_straight_line_scalar_loads(&mut store, &mut statements);
+
+        assert_eq!(
+            statements.len(),
+            7,
+            "nested control keeps its own cache scope"
         );
     }
 }

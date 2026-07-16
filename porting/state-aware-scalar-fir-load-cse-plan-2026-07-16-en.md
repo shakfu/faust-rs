@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: in progress (Phases A-B complete)
+Status: in progress (Phases A-C complete)
 
 ## 1. Problem Statement
 
@@ -114,6 +114,13 @@ than relying on an unproven purity or alias claim.
 
 Pass criteria: no reuse crosses a FIR scope boundary; the generated recursive
 fixture uses one `n - 1` load where the dependency proof permits it.
+
+Completion (2026-07-16): the scalar pass reuses only existing direct
+`DeclareVar(kStack, LoadTable(...))` materializations in a flat scope. It
+rewrites later uses to the first typed temporary, invalidates exact aliases,
+and preserves every explicit state store. It declines all nested scopes rather
+than crossing a declaration boundary. Tests cover permitted non-aliasing
+history updates plus same-index, dynamic-index, call, and control barriers.
 
 ### Phase D — Compose with existing CSE and code generation
 
