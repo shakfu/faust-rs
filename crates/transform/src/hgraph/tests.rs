@@ -276,8 +276,8 @@ fn conflicting_unknown_effects_receive_a_strategy_independent_order() {
     .expect("foreign-call fixture prepares");
     let domains = ClockDomainTable::new();
     let envs = annotate(prepared.arena(), &domains, prepared.outputs()).unwrap();
-    let analysis = crate::signal_fir::vector_analysis::analyze_vector_signals(&prepared, &envs)
-        .expect("effect analysis succeeds");
+    let analysis = crate::signal_fir::vector_analysis::analyze_scalar_scheduling_effects(&prepared)
+        .expect("scalar effect analysis succeeds");
     let mut hgraph = build_hgraph(
         prepared.arena(),
         &domains,
@@ -296,7 +296,7 @@ fn conflicting_unknown_effects_receive_a_strategy_independent_order() {
         "the fixture starts without a data-order relation"
     );
 
-    orient_effect_conflicts(&mut hgraph, &analysis.uses).unwrap();
+    orient_effect_conflicts(&mut hgraph, &analysis).unwrap();
     let baseline = schedule(&hgraph, SchedulingStrategy::DepthFirst).unwrap();
     let baseline = baseline.schedule(GraphKey::Top).unwrap();
     let left_before_right =

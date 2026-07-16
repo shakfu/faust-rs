@@ -123,6 +123,41 @@ fn scalar_scheduling_strategies_are_bit_exact() {
     }
 }
 
+#[test]
+fn scalar_mode_does_not_run_vector_certification() {
+    let path = std::env::temp_dir().join(format!(
+        "faust-rs-scalar-vector-boundary-{}-{:?}.dsp",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, "process = _ * 0.5;").expect("write temp dsp");
+
+    for strategy in scheduling_strategies() {
+        let result = Compiler::new()
+            .with_compute_mode(ComputeMode::Scalar)
+            .with_scheduling_strategy(strategy)
+            .compile_file_default_to_fir_with_lane(&path, SignalFirLane::TransformFastLane);
+        let output =
+            result.unwrap_or_else(|error| panic!("scalar FIR under {strategy:?}: {error}"));
+        assert_eq!(
+            output.vector_pipeline_status,
+            VectorPipelineStatus::NotRequested,
+            "scalar mode must not invoke checked vector certification under {strategy:?}"
+        );
+        assert_eq!(
+            output.vector_effective_mode,
+            VectorEffectiveMode::Scalar,
+            "scalar mode must retain scalar FIR under {strategy:?}"
+        );
+        assert!(
+            output.vector_pipeline_detail.is_none(),
+            "scalar mode must not produce a vector fallback diagnostic under {strategy:?}"
+        );
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
 /// A `frames`-sample deterministic ramp with a non-integer step.
 fn ramp(frames: usize) -> Vec<f32> {
     (0..frames).map(|k| 0.13 * k as f32 - 1.0).collect()

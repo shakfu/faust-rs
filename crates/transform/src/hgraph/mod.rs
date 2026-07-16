@@ -61,7 +61,7 @@
 //!   [`audit_control_variability`] additionally checks that `Control` never
 //!   owns a `Samp`-variability signal.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use ahash::{AHashMap, AHashSet};
@@ -669,9 +669,41 @@ pub fn schedule(hgraph: &Hgraph, strategy: SchedulingStrategy) -> Result<Hsched,
 /// from generated FIR statements.
 pub fn orient_effect_conflicts(
     hgraph: &mut Hgraph,
-    uses: &crate::signal_fir::vector_analysis::SignalUseTable,
+    effects: &crate::signal_fir::vector_analysis::ScalarSchedulingEffects,
 ) -> Result<(), HgraphError> {
-    use crate::signal_fir::vector_analysis::effect_sets_conflict;
+    use crate::signal_fir::vector_analysis::{EffectAtom, ForeignPurity};
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum EffectOrderKey {
+        State(crate::signal_fir::vector_analysis::StateResource),
+        Table(u32),
+        Ui(u32),
+        Output(u32),
+    }
+
+    fn add_baseline_edge(
+        hgraph: &mut Hgraph,
+        graph_index: usize,
+        position: &AHashMap<SigId, usize>,
+        left: SigId,
+        right: SigId,
+    ) {
+        if left == right {
+            return;
+        }
+        let graph = &hgraph.graphs[graph_index].1;
+        if dependency_reachable(graph, left, right) || dependency_reachable(graph, right, left) {
+            return;
+        }
+        let (consumer, dependency) = if position[&left] < position[&right] {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        hgraph.graphs[graph_index]
+            .1
+            .add_edge(consumer, dependency, false);
+    }
 
     for graph_index in 0..hgraph.graphs.len() {
         let graph = &hgraph.graphs[graph_index].1;
@@ -701,37 +733,55 @@ pub fn orient_effect_conflicts(
             .nodes()
             .iter()
             .copied()
-            .filter(|&sig| {
-                uses.get(sig)
-                    .is_some_and(|info| !info.direct_effects().is_empty())
-            })
+            .filter(|&sig| !effects.direct_effects(sig).is_empty())
             .collect::<Vec<_>>();
 
-        for (left_index, &left) in nodes.iter().enumerate() {
-            for &right in &nodes[left_index + 1..] {
-                let left_effects = uses.get(left).map_or(&[][..], |info| info.direct_effects());
-                let right_effects = uses
-                    .get(right)
-                    .map_or(&[][..], |info| info.direct_effects());
-                if !effect_sets_conflict(left_effects, right_effects) {
-                    continue;
-                }
-
-                let graph = &hgraph.graphs[graph_index].1;
-                if dependency_reachable(graph, left, right)
-                    || dependency_reachable(graph, right, left)
-                {
-                    continue;
-                }
-
-                let (consumer, dependency) = if position[&left] < position[&right] {
-                    (right, left)
-                } else {
-                    (left, right)
+        // The former all-pairs scan was quadratic in the number of stateful
+        // nodes, even when every node touched a different resource. Grouping
+        // by resource retains the baseline order of each conflict class with
+        // adjacent edges only, which is its transitive reduction. Read/read
+        // pairs in one group become ordered too; that is conservative and does
+        // not change the observable state value they read.
+        let mut groups = BTreeMap::<EffectOrderKey, Vec<SigId>>::new();
+        let mut foreign_barriers = Vec::new();
+        for &sig in &nodes {
+            for effect in effects.direct_effects(sig) {
+                let key = match effect {
+                    EffectAtom::ReadState(resource) | EffectAtom::WriteState(resource) => {
+                        Some(EffectOrderKey::State(resource.clone()))
+                    }
+                    EffectAtom::ReadTable(table) | EffectAtom::WriteTable(table) => {
+                        Some(EffectOrderKey::Table(*table))
+                    }
+                    EffectAtom::WriteUi(control) => Some(EffectOrderKey::Ui(*control)),
+                    EffectAtom::WriteOutput(output) => Some(EffectOrderKey::Output(*output)),
+                    EffectAtom::Foreign {
+                        purity: ForeignPurity::Impure | ForeignPurity::Unknown,
+                        ..
+                    } => {
+                        foreign_barriers.push(sig);
+                        None
+                    }
+                    EffectAtom::Foreign { .. } => None,
                 };
-                hgraph.graphs[graph_index]
-                    .1
-                    .add_edge(consumer, dependency, false);
+                if let Some(key) = key {
+                    groups.entry(key).or_default().push(sig);
+                }
+            }
+        }
+
+        for group in groups.values_mut() {
+            group.sort_unstable_by_key(|sig| position[sig]);
+            group.dedup();
+            for pair in group.windows(2) {
+                add_baseline_edge(hgraph, graph_index, &position, pair[0], pair[1]);
+            }
+        }
+        foreign_barriers.sort_unstable_by_key(|sig| position[sig]);
+        foreign_barriers.dedup();
+        for foreign in foreign_barriers {
+            for &node in &nodes {
+                add_baseline_edge(hgraph, graph_index, &position, foreign, node);
             }
         }
     }

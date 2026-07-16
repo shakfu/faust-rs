@@ -125,6 +125,7 @@ pub use error::{SignalFirError, SignalFirErrorCode};
 
 use fir::{FirId, FirStore, FirType};
 use signals::SigId;
+use std::time::{Duration, Instant};
 use tlib::TreeArena;
 use ui::UiProgram;
 
@@ -321,6 +322,13 @@ pub struct SignalFirOptions {
     pub scheduling_strategy: SchedulingStrategy,
 }
 
+/// Optional observer for internal signal-to-FIR compilation stages.
+///
+/// The observer is diagnostic only: it receives elapsed wall-clock durations
+/// after a stage completes and cannot affect planning, preparation, scheduling,
+/// or lowering.
+pub type SignalFirTimingSink = dyn Fn(&'static str, Duration) + Send + Sync;
+
 impl Default for SignalFirOptions {
     fn default() -> Self {
         Self {
@@ -402,7 +410,16 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
     ui: &UiProgram,
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    compile_fastlane_inner(_arena, signals, num_inputs, num_outputs, ui, options, None)
+    compile_fastlane_inner(
+        _arena,
+        signals,
+        num_inputs,
+        num_outputs,
+        ui,
+        options,
+        None,
+        None,
+    )
 }
 
 /// Clock-domain-aware variant of [`compile_signals_to_fir_fastlane_with_ui`].
@@ -423,6 +440,34 @@ pub fn compile_signals_to_fir_fastlane_clocked(
     clock_domains: &propagate::ClockDomainTable,
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
+    compile_signals_to_fir_fastlane_clocked_with_timing(
+        arena,
+        signals,
+        num_inputs,
+        num_outputs,
+        ui,
+        clock_domains,
+        options,
+        None,
+    )
+}
+
+/// Clock-domain-aware fast-lane entry point with observation-only stage timing.
+///
+/// This is the timed counterpart of
+/// [`compile_signals_to_fir_fastlane_clocked`].  It is separate so the regular
+/// lowering API keeps its zero-overhead, no-timing contract.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_signals_to_fir_fastlane_clocked_with_timing(
+    arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    ui: &UiProgram,
+    clock_domains: &propagate::ClockDomainTable,
+    options: &SignalFirOptions,
+    timing_sink: Option<&SignalFirTimingSink>,
+) -> Result<SignalFirOutput, SignalFirError> {
     compile_fastlane_inner(
         arena,
         signals,
@@ -431,9 +476,26 @@ pub fn compile_signals_to_fir_fastlane_clocked(
         ui,
         options,
         Some(clock_domains),
+        timing_sink,
     )
 }
 
+fn time_signal_fir_phase<T>(
+    timing_sink: Option<&SignalFirTimingSink>,
+    name: &'static str,
+    f: impl FnOnce() -> T,
+) -> T {
+    if let Some(sink) = timing_sink {
+        let start = Instant::now();
+        let result = f();
+        sink(name, start.elapsed());
+        result
+    } else {
+        f()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compile_fastlane_inner(
     arena: &TreeArena,
     signals: &[SigId],
@@ -442,13 +504,21 @@ fn compile_fastlane_inner(
     ui: &UiProgram,
     options: &SignalFirOptions,
     clock_domains: Option<&propagate::ClockDomainTable>,
+    timing_sink: Option<&SignalFirTimingSink>,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
-    let prepared = prepare_signals_for_fir_verified(arena, signals, ui).map_err(|err| {
-        SignalFirError::new(
-            SignalFirErrorCode::UnsupportedSignalNode,
-            format!("signal preparation failed: {err}"),
-        )
+    let plan = time_signal_fir_phase(timing_sink, "fir-plan", || {
+        planner::plan_signals(signals, num_inputs, num_outputs, options)
+    })?;
+    // Preparation owns the five retyping passes, promotions, and simplify
+    // normalizations.  Keep them as one atomic timing region so the measured
+    // stage matches the verified preparation boundary consumed by lowering.
+    let prepared = time_signal_fir_phase(timing_sink, "fir-prepare-normalize", || {
+        prepare_signals_for_fir_verified(arena, signals, ui).map_err(|err| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("signal preparation failed: {err}"),
+            )
+        })
     })?;
 
     // P3: build the hierarchical dependency graph, orient conflicting effects
@@ -456,142 +526,171 @@ fn compile_fastlane_inner(
     // The accepted Hsched drives scalar forward lowering; vector mode instead
     // schedules its strategy-independent LoopGraph.
     let mut gate_graphs: Option<(crate::hgraph::Hgraph, crate::hgraph::Hsched)> = None;
-    let clocked = match clock_domains {
-        Some(domains) if !domains.is_empty() => {
-            let envs = crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs())
-                .map_err(|err| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::ClockAnalysis,
-                        format!("clock-environment inference failed: {err}"),
-                    )
-                })?;
-            let mut hgraph = crate::hgraph::build_hgraph(
-                prepared.arena(),
-                domains,
-                &envs,
-                prepared.outputs(),
-                prepared.sig_types_map(),
-            )
-            .map_err(|err| {
-                SignalFirError::new(
-                    SignalFirErrorCode::ClockAnalysis,
-                    format!("hierarchical dependency graph failed: {err}"),
-                )
-            })?;
-            if matches!(options.compute_mode, ComputeMode::Scalar) {
-                let effects =
-                    vector_analysis::analyze_vector_signals(&prepared, &envs).map_err(|err| {
+    let clocked = time_signal_fir_phase(
+        timing_sink,
+        "fir-clock-analysis",
+        || -> Result<Option<module::ClockedPlan<'_>>, SignalFirError> {
+            match clock_domains {
+                Some(domains) if !domains.is_empty() => {
+                    let envs =
+                        crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs())
+                            .map_err(|err| {
+                                SignalFirError::new(
+                                    SignalFirErrorCode::ClockAnalysis,
+                                    format!("clock-environment inference failed: {err}"),
+                                )
+                            })?;
+                    let mut hgraph = time_signal_fir_phase(timing_sink, "fir-hgraph", || {
+                        crate::hgraph::build_hgraph(
+                            prepared.arena(),
+                            domains,
+                            &envs,
+                            prepared.outputs(),
+                            prepared.sig_types_map(),
+                        )
+                    })
+                    .map_err(|err| {
                         SignalFirError::new(
                             SignalFirErrorCode::ClockAnalysis,
-                            format!("scalar effect analysis failed: {err}"),
+                            format!("hierarchical dependency graph failed: {err}"),
                         )
                     })?;
-                crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects.uses).map_err(
-                    |err| {
-                        SignalFirError::new(
-                            SignalFirErrorCode::ClockAnalysis,
-                            format!("scalar effect ordering failed: {err}"),
-                        )
-                    },
-                )?;
-            }
-            let hsched =
-                crate::hgraph::schedule(&hgraph, options.scheduling_strategy).map_err(|err| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::ClockAnalysis,
-                        format!("clock-domain scheduling failed: {err}"),
-                    )
-                })?;
-            gate_graphs = Some((hgraph, hsched));
-            Some(module::ClockedPlan { domains, envs })
-        }
-        _ => {
-            // A program reaching this branch with an actual OD/US/DS wrapper
-            // node was compiled through a clock-unaware entry point (no
-            // `ClockDomainTable` was ever supplied): `clk_env::annotate`
-            // cannot resolve a real wrapper's clock relationship from an
-            // empty table, and would report a confusing
-            // `ClockedViolation`-family error instead of letting
-            // `module::build_module`'s own, specific `FRS-SFIR-0007`
-            // ("clocked node reached without a domain table") rejection
-            // fire, exactly as before this gate existed. So skip the gate
-            // for those; ordinary wrapper-free programs run it.
-            let has_wrapper = crate::hgraph::contains_wrapper(prepared.arena(), prepared.outputs())
-                .map_err(|err| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::ClockAnalysis,
-                        format!("wrapper scan failed: {err}"),
-                    )
-                })?;
-            if !has_wrapper {
-                let empty_domains = propagate::ClockDomainTable::new();
-                let envs =
-                    crate::clk_env::annotate(prepared.arena(), &empty_domains, prepared.outputs())
+                    if matches!(options.compute_mode, ComputeMode::Scalar) {
+                        let effects =
+                            time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
+                                vector_analysis::analyze_scalar_scheduling_effects(&prepared)
+                            })
+                            .map_err(|err| {
+                                SignalFirError::new(
+                                    SignalFirErrorCode::ClockAnalysis,
+                                    format!("scalar effect analysis failed: {err}"),
+                                )
+                            })?;
+                        time_signal_fir_phase(timing_sink, "fir-effect-orientation", || {
+                            crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects)
+                        })
                         .map_err(|err| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::ClockAnalysis,
-                                format!("clock-environment inference failed: {err}"),
-                            )
-                        })?;
-                let mut hgraph = crate::hgraph::build_hgraph(
-                    prepared.arena(),
-                    &empty_domains,
-                    &envs,
-                    prepared.outputs(),
-                    prepared.sig_types_map(),
-                )
-                .map_err(|err| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::ClockAnalysis,
-                        format!("hierarchical dependency graph failed: {err}"),
-                    )
-                })?;
-                if matches!(options.compute_mode, ComputeMode::Scalar) {
-                    let effects = vector_analysis::analyze_vector_signals(&prepared, &envs)
-                        .map_err(|err| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::ClockAnalysis,
-                                format!("scalar effect analysis failed: {err}"),
-                            )
-                        })?;
-                    crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects.uses).map_err(
-                        |err| {
                             SignalFirError::new(
                                 SignalFirErrorCode::ClockAnalysis,
                                 format!("scalar effect ordering failed: {err}"),
                             )
-                        },
-                    )?;
-                }
-                let hsched = crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
+                        })?;
+                    }
+                    let hsched = time_signal_fir_phase(timing_sink, "fir-scheduling", || {
+                        crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
+                    })
                     .map_err(|err| {
                         SignalFirError::new(
                             SignalFirErrorCode::ClockAnalysis,
                             format!("clock-domain scheduling failed: {err}"),
                         )
                     })?;
-                gate_graphs = Some((hgraph, hsched));
+                    gate_graphs = Some((hgraph, hsched));
+                    Ok(Some(module::ClockedPlan { domains, envs }))
+                }
+                _ => {
+                    // A program reaching this branch with an actual OD/US/DS wrapper
+                    // node was compiled through a clock-unaware entry point (no
+                    // `ClockDomainTable` was ever supplied): `clk_env::annotate`
+                    // cannot resolve a real wrapper's clock relationship from an
+                    // empty table, and would report a confusing
+                    // `ClockedViolation`-family error instead of letting
+                    // `module::build_module`'s own, specific `FRS-SFIR-0007`
+                    // ("clocked node reached without a domain table") rejection
+                    // fire, exactly as before this gate existed. So skip the gate
+                    // for those; ordinary wrapper-free programs run it.
+                    let has_wrapper =
+                        crate::hgraph::contains_wrapper(prepared.arena(), prepared.outputs())
+                            .map_err(|err| {
+                                SignalFirError::new(
+                                    SignalFirErrorCode::ClockAnalysis,
+                                    format!("wrapper scan failed: {err}"),
+                                )
+                            })?;
+                    if !has_wrapper {
+                        let empty_domains = propagate::ClockDomainTable::new();
+                        let envs = crate::clk_env::annotate(
+                            prepared.arena(),
+                            &empty_domains,
+                            prepared.outputs(),
+                        )
+                        .map_err(|err| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::ClockAnalysis,
+                                format!("clock-environment inference failed: {err}"),
+                            )
+                        })?;
+                        let mut hgraph = time_signal_fir_phase(timing_sink, "fir-hgraph", || {
+                            crate::hgraph::build_hgraph(
+                                prepared.arena(),
+                                &empty_domains,
+                                &envs,
+                                prepared.outputs(),
+                                prepared.sig_types_map(),
+                            )
+                        })
+                        .map_err(|err| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::ClockAnalysis,
+                                format!("hierarchical dependency graph failed: {err}"),
+                            )
+                        })?;
+                        if matches!(options.compute_mode, ComputeMode::Scalar) {
+                            let effects =
+                                time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
+                                    vector_analysis::analyze_scalar_scheduling_effects(&prepared)
+                                })
+                                .map_err(|err| {
+                                    SignalFirError::new(
+                                        SignalFirErrorCode::ClockAnalysis,
+                                        format!("scalar effect analysis failed: {err}"),
+                                    )
+                                })?;
+                            time_signal_fir_phase(timing_sink, "fir-effect-orientation", || {
+                                crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects)
+                            })
+                            .map_err(|err| {
+                                SignalFirError::new(
+                                    SignalFirErrorCode::ClockAnalysis,
+                                    format!("scalar effect ordering failed: {err}"),
+                                )
+                            })?;
+                        }
+                        let hsched = time_signal_fir_phase(timing_sink, "fir-scheduling", || {
+                            crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
+                        })
+                        .map_err(|err| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::ClockAnalysis,
+                                format!("clock-domain scheduling failed: {err}"),
+                            )
+                        })?;
+                        gate_graphs = Some((hgraph, hsched));
+                    }
+                    Ok(None)
+                }
             }
-            None
-        }
-    };
+        },
+    )?;
 
     let mut vector_fallback = None;
     if options.compute_mode.is_vector() {
         let empty_domains = propagate::ClockDomainTable::new();
         let domains = clock_domains.unwrap_or(&empty_domains);
-        match vector_module::build_verified_vector_module(
-            &prepared,
-            domains,
-            ui,
-            plan.num_inputs,
-            plan.num_outputs,
-            options.module_name.as_str(),
-            options.real_type.as_fir_type(),
-            options.max_copy_delay,
-            options.compute_mode,
-            options.scheduling_strategy,
-        ) {
+        match time_signal_fir_phase(timing_sink, "fir-vector-certification", || {
+            vector_module::build_verified_vector_module(
+                &prepared,
+                domains,
+                ui,
+                plan.num_inputs,
+                plan.num_outputs,
+                options.module_name.as_str(),
+                options.real_type.as_fir_type(),
+                options.max_copy_delay,
+                options.compute_mode,
+                options.scheduling_strategy,
+            )
+        }) {
             Ok(output) => return Ok(output),
             Err(failure) => vector_fallback = Some(failure),
         }
@@ -602,25 +701,27 @@ fn compile_fastlane_inner(
     } else {
         options.compute_mode
     };
-    let mut output = module::build_module(
-        &plan,
-        options.module_name.as_str(),
-        prepared.arena(),
-        prepared.outputs(),
-        ui,
-        prepared.types_map(),
-        prepared.sig_types_map(),
-        options.real_type.as_fir_type(),
-        options.max_copy_delay,
-        options.delay_line_threshold,
-        fallback_compute_mode,
-        clocked,
-        if matches!(fallback_compute_mode, ComputeMode::Scalar) {
-            gate_graphs.as_ref().map(|(_, schedule)| schedule)
-        } else {
-            None
-        },
-    )?;
+    let mut output = time_signal_fir_phase(timing_sink, "fir-lowering", || {
+        module::build_module(
+            &plan,
+            options.module_name.as_str(),
+            prepared.arena(),
+            prepared.outputs(),
+            ui,
+            prepared.types_map(),
+            prepared.sig_types_map(),
+            options.real_type.as_fir_type(),
+            options.max_copy_delay,
+            options.delay_line_threshold,
+            fallback_compute_mode,
+            clocked,
+            if matches!(fallback_compute_mode, ComputeMode::Scalar) {
+                gate_graphs.as_ref().map(|(_, schedule)| schedule)
+            } else {
+                None
+            },
+        )
+    })?;
 
     // Keep the former shadow report as a post-activation conformance trace.
     // It compares the accepted schedule and actual first-lowering order over

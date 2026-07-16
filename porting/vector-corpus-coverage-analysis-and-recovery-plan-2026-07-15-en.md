@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phases 0 through 5 complete; Phase 6 next
+Status: complete — Phases 0 through 6 complete
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -733,6 +733,15 @@ Acceptance criteria:
   an explicit measured justification;
 - the final report separates historical frontend cost from `-ss` and vector
   mode overhead.
+
+Completed on 2026-07-16. The release-history audit is recorded in
+[`scalar-compilation-history-and-cost-audit-2026-07-16-en.md`](scalar-compilation-history-and-cost-audit-2026-07-16-en.md).
+It confirms that the slow scalar cases were evaluation-bound before both
+feature activations, removes scalar construction of vector occurrence/condition
+facts, and reduces effect-conflict orientation from a quadratic all-pairs scan
+to resource-grouped constraints. Scalar mode is structurally tested not to run
+vector certification; the remaining measured FIR delta is explicit verified
+preparation/normalization work.
 
 ## 6. Recommended Execution Order
 

@@ -170,7 +170,7 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
     let timing_sink = ctx.timing_sink.as_ref();
     let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
-        lower_signals_to_fir_transform_fastlane(
+        lower_signals_to_fir_transform_fastlane_with_timing(
             output,
             module_name,
             ctx.real_type,
@@ -178,6 +178,7 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            timing_sink,
         )
     })
     .map_err(LowerToInterpError::Transform)?;
@@ -269,6 +270,33 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
     compute_mode: ComputeMode,
     scheduling_strategy: SchedulingStrategy,
 ) -> Result<FirCompileOutput, SignalFirError> {
+    lower_signals_to_fir_transform_fastlane_with_timing(
+        output,
+        module_name,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+        compute_mode,
+        scheduling_strategy,
+        None,
+    )
+}
+
+/// Timed variant of [`lower_signals_to_fir_transform_fastlane`].
+///
+/// The optional callback is forwarded to transform's observation-only stage
+/// timing API; it does not participate in FIR construction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
+    output: &SignalCompileOutput,
+    module_name: String,
+    real_type: RealType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
+    compute_mode: ComputeMode,
+    scheduling_strategy: SchedulingStrategy,
+    timing_sink: Option<&TimingSink>,
+) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
         module_name,
         real_type,
@@ -277,7 +305,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         compute_mode,
         scheduling_strategy,
     };
-    let lowered = transform::signal_fir::compile_signals_to_fir_fastlane_clocked(
+    let lowered = transform::signal_fir::compile_signals_to_fir_fastlane_clocked_with_timing(
         &output.parse.state.arena,
         &output.signals,
         output.process_arity.inputs,
@@ -285,6 +313,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         &output.ui,
         &output.clock_domains,
         &signal_fir_options,
+        timing_sink.map(|sink| sink.as_ref()),
     )?;
     Ok(FirCompileOutput {
         store: lowered.store,
@@ -305,7 +334,7 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let timing_sink = ctx.timing_sink.as_ref();
     let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
-        lower_signals_to_fir_transform_fastlane(
+        lower_signals_to_fir_transform_fastlane_with_timing(
             output,
             module_name,
             ctx.real_type,
@@ -313,6 +342,7 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            timing_sink,
         )
     })
     .map_err(LowerError::Transform)?;
@@ -336,7 +366,7 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let timing_sink = ctx.timing_sink.as_ref();
     let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
-        lower_signals_to_fir_transform_fastlane(
+        lower_signals_to_fir_transform_fastlane_with_timing(
             output,
             module_name,
             ctx.real_type,
@@ -344,6 +374,7 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            timing_sink,
         )
     })
     .map_err(LowerError::Transform)?;
@@ -367,7 +398,7 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let timing_sink = ctx.timing_sink.as_ref();
     let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
-        lower_signals_to_fir_transform_fastlane(
+        lower_signals_to_fir_transform_fastlane_with_timing(
             output,
             module_name,
             ctx.real_type,
@@ -375,6 +406,7 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            timing_sink,
         )
     })
     .map_err(LowerError::Transform)?;

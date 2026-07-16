@@ -600,12 +600,6 @@ pub struct SignalUseInfo {
     direct_effects: Vec<EffectAtom>,
 }
 
-impl SignalUseInfo {
-    pub(crate) fn direct_effects(&self) -> &[EffectAtom] {
-        &self.direct_effects
-    }
-}
-
 /// Deterministic record pairing a `SigId` with its P4.2 facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignalUseRecord {
@@ -1518,6 +1512,45 @@ pub fn analyze_vector_signals(
         );
     }
     Ok(VectorSignalAnalysis { conditions, uses })
+}
+
+/// Direct effect facts needed by scalar scheduling, keyed by prepared signal.
+///
+/// Unlike [`VectorSignalAnalysis`], this intentionally contains neither
+/// occurrence facts nor execution conditions: scalar conflict orientation only
+/// needs the effects performed by each node itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScalarSchedulingEffects {
+    direct: BTreeMap<u32, Vec<EffectAtom>>,
+}
+
+impl ScalarSchedulingEffects {
+    #[must_use]
+    pub(crate) fn direct_effects(&self, sig: SigId) -> &[EffectAtom] {
+        self.direct.get(&sig.as_u32()).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Builds only the compute-time effect facts required by scalar scheduling.
+///
+/// Scalar [`crate::hgraph::orient_effect_conflicts`] consumes direct effects
+/// and never inspects occurrence facts, clock environments, or execution
+/// conditions. Avoiding those vector-oriented analyses keeps `-ss` from
+/// paying for certification data it cannot observe.
+pub fn analyze_scalar_scheduling_effects(
+    prepared: &VerifiedPreparedSignals,
+) -> Result<ScalarSchedulingEffects, AnalysisError> {
+    let analysis = SignalAnalysisContext::new(
+        prepared.arena(),
+        prepared.sig_types_map(),
+        prepared.outputs(),
+    )?;
+    let mut direct = BTreeMap::new();
+    for &sig in prepared.sig_types_map().keys() {
+        let effects = direct_effects(&analysis, sig)?.into_iter().collect();
+        direct.insert(sig.as_u32(), effects);
+    }
+    Ok(ScalarSchedulingEffects { direct })
 }
 
 /// Builds deterministic occurrence/effect facts with an injected condition
@@ -2619,6 +2652,36 @@ mod tests {
             assert!(root_effects.contains(&expected), "missing {expected:?}");
         }
         assert!(root_effects.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn scalar_effect_analysis_preserves_vector_direct_effect_facts() {
+        let mut arena = TreeArena::new();
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input = b.input(0);
+            let delayed = b.delay1(input);
+            b.output(0, delayed)
+        };
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &[output], &ui::UiProgram::empty()).unwrap();
+        let clocks = annotate(
+            prepared.arena(),
+            &ClockDomainTable::new(),
+            prepared.outputs(),
+        )
+        .unwrap();
+
+        let vector = analyze_vector_signals(&prepared, &clocks).unwrap();
+        let scalar = analyze_scalar_scheduling_effects(&prepared).unwrap();
+        for vector_record in vector.uses.records() {
+            assert_eq!(
+                vector_record.info.direct_effects.as_slice(),
+                scalar.direct_effects(vector_record.sig),
+                "scalar scheduling must preserve direct effect facts for signal {}",
+                vector_record.sig.as_u32()
+            );
+        }
     }
 
     #[test]
