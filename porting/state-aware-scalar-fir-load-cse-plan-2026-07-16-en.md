@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: in progress (Phases A-D complete)
+Status: complete (Phases A-E complete)
 
 ## 1. Problem Statement
 
@@ -177,6 +177,22 @@ Pass criteria: exact scalar samples match the C++ reference, no vector
 certification/fallback classification changes, the configured impulse-test
 corpus passes its applicable scalar/vector matrix, and the scalar cost baseline
 does not regress beyond measurement noise.
+
+Completion (2026-07-16): the C++ scalar impulse matrix completed for all 92
+applicable DSPs under each `-ss 0..3` strategy (the declared shared
+`subcontainer1` gap remains excluded). APF and Karplus match their C++ oracle
+through C++, C, interpreter, Cranelift, Wasm, and AssemblyScript. Julia is
+text-only in this harness; its vector APF emission and pure-Drop structural
+test pass. The untouched vector scheduler/certifier retains its existing
+coverage gate; a long-running re-execution of the 32-case vector interpreter
+optimization matrix was stopped without a partial result, rather than being
+counted as validation.
+
+Release scalar compile measurements were 0.04 s for APF, 0.03 s for Karplus,
+and 7.95 s for `reverb_designer`; the latter remains consistent with the prior
+frontend-cost audit. APF and Karplus each contain one materialized prior-state
+load and use it for the history copy, removing one direct table read without a
+compilation-time regression.
 
 ## 5. Safety Rules
 
