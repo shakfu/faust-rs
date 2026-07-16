@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: implementation in progress; Steps 0-2 completed, Steps 3-4 pending
+Status: implementation in progress; Steps 0-3 completed, Step 4 pending
 
 Scope: checked signal-level vector mode, lockstep event certification, FIR state lowering, and C++ SIMD evidence
 
@@ -297,6 +297,16 @@ across both loop variants, all four schedulers, and tail chunks.
 
 Pass condition: both mixed corpus cases remain partially lockstep, produce
 certified SIMD in that region, and retain their separate non-bundle behavior.
+
+Implementation status (2026-07-16): complete. The native gate locates the one
+generated physical sample loop containing checked `vlock_*` state and requires
+the mixed cases to retain their second physical sample loop. Clang now emits
+line-table provenance, and only four-wide floating-point instructions whose
+`DILocation` lies inside that lockstep source range count. Focused negative
+tests reject an incorrect physical-loop count and demonstrate that SIMD tagged
+to an unrelated source range is excluded. The principal, mixed-reduction, and
+mixed-branch cases each have 14 lockstep-attributed operations; their complete
+module totals are 14, 30, and 22 respectively.
 
 ### Step 4 — repository gates
 
