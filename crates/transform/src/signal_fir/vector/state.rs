@@ -1169,7 +1169,10 @@ fn verify_delay_owner(
     // take the separate checked branch above.
     if matches!(
         kind,
-        LoopKind::Vectorizable | LoopKind::Recursive(_) | LoopKind::Island(_)
+        LoopKind::Vectorizable
+            | LoopKind::Recursive(_)
+            | LoopKind::Island(_)
+            | LoopKind::Lockstep { .. }
     ) {
         Ok(())
     } else {
@@ -1206,12 +1209,20 @@ fn verify_clock_loop(
 }
 
 fn recursion_loop(plan: &VectorPlan, group: u64) -> Result<u64, VectorStateError> {
-    let matches = plan
+    let mut matches = plan
         .loops
         .iter()
         .filter(|record| record.kind == LoopKind::Recursive(group))
         .map(|record| record.loop_id)
         .collect::<Vec<_>>();
+    matches.extend(plan.lockstep_bundles.iter().flat_map(|bundle| {
+        bundle
+            .lanes
+            .iter()
+            .filter_map(|lane| (lane.recursion_group == group).then_some(lane.loop_id))
+    }));
+    matches.sort_unstable();
+    matches.dedup();
     if matches.len() != 1 {
         return Err(VectorStateError::RecursionLoopMismatch {
             group,

@@ -40,7 +40,7 @@ use super::vector_events::{
     DEFAULT_EVENT_LIMIT, build_state_event_order_certificate, precheck_state_event_bound,
 };
 use super::vector_lower::lower_vector_program;
-use super::vector_plan::build_vector_plan;
+use super::vector_plan::build_vector_plan_with_lockstep;
 use super::vector_route::{VectorRegion, VerifiedRoutedFir};
 use super::vector_state::build_vector_state_plan_with_clock;
 use super::vector_ui::{VectorUiFir, build_vector_ui_fir};
@@ -170,9 +170,10 @@ fn build_verified_vector_module_with_evidence(
         VectorModuleFailure::new(VectorFallbackReason::Decorations, error.to_string())
     })?;
     trace_stage("decorations");
-    let vector_plan = build_vector_plan(&decorations, u64::from(vec_size)).map_err(|error| {
-        VectorModuleFailure::new(VectorFallbackReason::VectorPlan, error.to_string())
-    })?;
+    let vector_plan = build_vector_plan_with_lockstep(prepared, &decorations, u64::from(vec_size))
+        .map_err(|error| {
+            VectorModuleFailure::new(VectorFallbackReason::VectorPlan, error.to_string())
+        })?;
     trace_stage("vector-plan");
     reject_cross_loop_delay_read_transports(&decorations, vector_plan.plan())?;
     trace_stage("recursive-transport-guard");

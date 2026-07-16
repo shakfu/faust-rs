@@ -17,8 +17,10 @@ use tlib::match_sym_ref;
 use crate::signal_prepare::VerifiedPreparedSignals;
 
 use super::recursion::decode_symbolic_group_bodies;
+use super::vector_analysis::effect_sets_conflict;
 use super::vector_verify::{
-    IsoLeafMapping, IsoRootWitness, VectorPlan, VectorPlanError, verify_vector_plan,
+    IsoLeafMapping, IsoRootWitness, LockstepBundleRecord, LockstepLaneRecord, LoopKind,
+    SignalRecord, VectorPlan, VectorPlanError, verify_vector_plan,
 };
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -238,6 +240,221 @@ pub(crate) fn build_iso_root_witness(
     })
 }
 
+fn reaches(plan: &VectorPlan, from: u64, to: u64) -> bool {
+    let mut pending = vec![from];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
+            if edge.dependency == current {
+                if edge.consumer == to {
+                    return true;
+                }
+                pending.push(edge.consumer);
+            }
+        }
+    }
+    false
+}
+
+fn loop_effects<'a>(
+    plan: &'a VectorPlan,
+    signal_by_id: &BTreeMap<u64, &'a SignalRecord>,
+    loop_id: u64,
+) -> Vec<super::vector_analysis::EffectAtom> {
+    let mut effects = BTreeSet::new();
+    let loop_record = plan
+        .loops
+        .iter()
+        .find(|loop_record| loop_record.loop_id == loop_id)
+        .expect("candidate loop belongs to plan");
+    for root in &loop_record.roots {
+        effects.extend(signal_by_id[root].effects.iter().cloned());
+    }
+    effects.into_iter().collect()
+}
+
+fn pair_is_legal(
+    plan: &VectorPlan,
+    signal_by_id: &BTreeMap<u64, &SignalRecord>,
+    left: u64,
+    right: u64,
+) -> bool {
+    let left_loop = plan
+        .loops
+        .iter()
+        .find(|loop_record| loop_record.loop_id == left)
+        .expect("candidate loop belongs to plan");
+    let right_loop = plan
+        .loops
+        .iter()
+        .find(|loop_record| loop_record.loop_id == right)
+        .expect("candidate loop belongs to plan");
+    left_loop.epoch_id == right_loop.epoch_id
+        && !reaches(plan, left, right)
+        && !reaches(plan, right, left)
+        && !effect_sets_conflict(
+            &loop_effects(plan, signal_by_id, left),
+            &loop_effects(plan, signal_by_id, right),
+        )
+}
+
+fn lane_witnesses(
+    prepared: &VerifiedPreparedSignals,
+    ids: &BTreeMap<u64, SigId>,
+    representative_roots: &[u64],
+    lane_roots: &[u64],
+) -> Option<Vec<IsoRootWitness>> {
+    if representative_roots.len() != lane_roots.len() {
+        return None;
+    }
+    representative_roots
+        .iter()
+        .copied()
+        .zip(lane_roots.iter().copied())
+        .map(|(representative_root, lane_root)| {
+            build_iso_root_witness(
+                prepared,
+                *ids.get(&representative_root)?,
+                *ids.get(&lane_root)?,
+            )
+        })
+        .collect()
+}
+
+fn decorations_agree(
+    signal_by_id: &BTreeMap<u64, &SignalRecord>,
+    representative_roots: &[u64],
+    lane_roots: &[u64],
+) -> bool {
+    representative_roots
+        .iter()
+        .zip(lane_roots)
+        .all(|(representative, lane)| {
+            let representative = signal_by_id[representative];
+            let lane = signal_by_id[lane];
+            representative.value_type == lane.value_type
+                && representative.rate == lane.rate
+                && representative.vectorability == lane.vectorability
+                && representative.clock_id == lane.clock_id
+        })
+}
+
+/// Detects exact independent recursion instances and annotates them as
+/// lockstep bundles. Detection is deterministic and fail-closed: unsupported
+/// signal constructors, near-isomorphic roots, fused recursive slices, graph
+/// reachability, or effect conflicts leave the original loops unchanged.
+pub(crate) fn detect_lockstep_bundles(
+    plan: &mut VectorPlan,
+    prepared: &VerifiedPreparedSignals,
+) -> Result<(), VectorPlanError> {
+    if !plan.lockstep_bundles.is_empty() {
+        verify_lockstep_isomorphism(plan, prepared)?;
+        return Ok(());
+    }
+    let excluded = plan
+        .fused_serial_groups
+        .iter()
+        .flat_map(|group| group.member_loop_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let candidates = plan
+        .loops
+        .iter()
+        .filter_map(|loop_record| match loop_record.kind {
+            LoopKind::Recursive(group) if !excluded.contains(&loop_record.loop_id) => {
+                Some((loop_record.loop_id, group))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let ids = prepared_ids(prepared);
+    let signal_by_id = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
+    let mut assigned = BTreeSet::new();
+    let mut bundles = Vec::new();
+
+    for &(representative_loop_id, representative_group) in &candidates {
+        if assigned.contains(&representative_loop_id) {
+            continue;
+        }
+        let representative_roots = plan
+            .loops
+            .iter()
+            .find(|loop_record| loop_record.loop_id == representative_loop_id)
+            .expect("candidate loop belongs to plan")
+            .roots
+            .clone();
+        let Some(representative_witnesses) =
+            lane_witnesses(prepared, &ids, &representative_roots, &representative_roots)
+        else {
+            continue;
+        };
+        let mut members = vec![(
+            representative_loop_id,
+            representative_group,
+            representative_witnesses,
+        )];
+        for &(lane_loop_id, lane_group) in &candidates {
+            if lane_loop_id <= representative_loop_id || assigned.contains(&lane_loop_id) {
+                continue;
+            }
+            let lane_roots = &plan
+                .loops
+                .iter()
+                .find(|loop_record| loop_record.loop_id == lane_loop_id)
+                .expect("candidate loop belongs to plan")
+                .roots;
+            if !decorations_agree(&signal_by_id, &representative_roots, lane_roots)
+                || members.iter().any(|(member, _, _)| {
+                    !pair_is_legal(plan, &signal_by_id, *member, lane_loop_id)
+                })
+            {
+                continue;
+            }
+            let Some(witnesses) = lane_witnesses(prepared, &ids, &representative_roots, lane_roots)
+            else {
+                continue;
+            };
+            members.push((lane_loop_id, lane_group, witnesses));
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        let width = u64::try_from(members.len()).expect("lockstep width fits u64");
+        let bundle_id = u64::try_from(bundles.len()).expect("bundle count fits u64");
+        for &(loop_id, _, _) in &members {
+            let loop_record = plan
+                .loops
+                .iter_mut()
+                .find(|loop_record| loop_record.loop_id == loop_id)
+                .expect("candidate loop belongs to plan");
+            loop_record.kind = LoopKind::Lockstep { width };
+            loop_record.stable_name = format!("loop_lockstep_{bundle_id}_lane_{loop_id}");
+            assigned.insert(loop_id);
+        }
+        bundles.push(LockstepBundleRecord {
+            bundle_id,
+            representative_loop_id,
+            member_loop_ids: members.iter().map(|(loop_id, _, _)| *loop_id).collect(),
+            lanes: members
+                .into_iter()
+                .map(|(loop_id, recursion_group, roots)| LockstepLaneRecord {
+                    loop_id,
+                    recursion_group,
+                    roots,
+                })
+                .collect(),
+        });
+    }
+    plan.lockstep_bundles = bundles;
+    verify_lockstep_isomorphism(plan, prepared)
+}
+
 fn prepared_ids(prepared: &VerifiedPreparedSignals) -> BTreeMap<u64, SigId> {
     let mut result = BTreeMap::new();
     let mut stack = prepared.outputs().to_vec();
@@ -302,13 +519,13 @@ mod tests {
 
     use crate::clk_env::annotate;
     use crate::signal_fir::decoration_verify::certify_decorations;
-    use crate::signal_fir::vector_plan::build_vector_plan;
-    use crate::signal_fir::vector_verify::{LockstepBundleRecord, LockstepLaneRecord, LoopKind};
+    use crate::signal_fir::vector_plan::build_vector_plan_with_lockstep;
+    use crate::signal_fir::vector_verify::LoopKind;
     use crate::signal_prepare::prepare_signals_for_fir_verified;
 
     use super::*;
 
-    fn independent_one_poles() -> (VerifiedPreparedSignals, VectorPlan) {
+    fn one_poles(outer_ops: [signals::BinOp; 2]) -> (VerifiedPreparedSignals, VectorPlan) {
         let mut arena = TreeArena::new();
         let mut roots = Vec::new();
         for channel in 0..2 {
@@ -320,7 +537,7 @@ mod tests {
                 let input = builder.input(channel);
                 let half = builder.real(0.5);
                 let scaled = builder.binop(signals::BinOp::Mul, previous, half);
-                builder.binop(signals::BinOp::Add, input, scaled)
+                builder.binop(outer_ops[channel as usize], input, scaled)
             };
             let nil = arena.nil();
             let bodies = arena.cons(body, nil);
@@ -336,64 +553,31 @@ mod tests {
         )
         .unwrap();
         let decorations = certify_decorations(&prepared, &clocks).unwrap();
-        let mut plan = build_vector_plan(&decorations, 8).unwrap().into_plan();
-        let recursive = plan
-            .loops
-            .iter()
-            .filter_map(|loop_record| match loop_record.kind {
-                LoopKind::Recursive(group) => Some((loop_record.loop_id, group)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(recursive.len(), 2);
-        let width = recursive.len() as u64;
-        let representative = plan.loops[recursive[0].0 as usize].roots.clone();
-        let lanes = recursive
-            .iter()
-            .map(|&(loop_id, recursion_group)| {
-                let roots = plan.loops[loop_id as usize]
-                    .roots
-                    .iter()
-                    .copied()
-                    .zip(representative.iter().copied())
-                    .map(|(lane_root, representative_root)| {
-                        let ids = prepared_ids(&prepared);
-                        build_iso_root_witness(
-                            &prepared,
-                            ids[&representative_root],
-                            ids[&lane_root],
-                        )
-                        .expect("one-pole roots are isomorphic")
-                    })
-                    .collect();
-                LockstepLaneRecord {
-                    loop_id,
-                    recursion_group,
-                    roots,
-                }
-            })
-            .collect::<Vec<_>>();
-        for &(loop_id, _) in &recursive {
-            plan.loops[loop_id as usize].kind = LoopKind::Lockstep { width };
-        }
-        plan.lockstep_bundles = vec![LockstepBundleRecord {
-            bundle_id: 0,
-            representative_loop_id: recursive[0].0,
-            member_loop_ids: recursive.iter().map(|&(loop_id, _)| loop_id).collect(),
-            lanes,
-        }];
+        let plan = build_vector_plan_with_lockstep(&prepared, &decorations, 8)
+            .unwrap()
+            .into_plan();
         (prepared, plan)
     }
 
     #[test]
     fn prepared_parallel_traversal_accepts_isomorphic_recursive_lanes() {
-        let (prepared, plan) = independent_one_poles();
+        let (prepared, plan) = one_poles([signals::BinOp::Add; 2]);
+        assert_eq!(plan.lockstep_bundles.len(), 1);
+        assert_eq!(plan.lockstep_bundles[0].member_loop_ids.len(), 2);
+        assert!(
+            plan.lockstep_bundles[0]
+                .member_loop_ids
+                .iter()
+                .all(|loop_id| {
+                    plan.loops[*loop_id as usize].kind == LoopKind::Lockstep { width: 2 }
+                })
+        );
         verify_lockstep_isomorphism(&plan, &prepared).unwrap();
     }
 
     #[test]
     fn prepared_parallel_traversal_rejects_corrupted_shape_hash() {
-        let (prepared, mut plan) = independent_one_poles();
+        let (prepared, mut plan) = one_poles([signals::BinOp::Add; 2]);
         plan.lockstep_bundles[0].lanes[1].roots[0].shape_hash ^= 1;
         assert!(matches!(
             verify_lockstep_isomorphism(&plan, &prepared),
@@ -402,5 +586,18 @@ mod tests {
                 loop_id: 1,
             })
         ));
+    }
+
+    #[test]
+    fn near_isomorphic_recursive_lanes_remain_unbundled() {
+        let (_, plan) = one_poles([signals::BinOp::Add, signals::BinOp::Sub]);
+        assert!(plan.lockstep_bundles.is_empty());
+        assert!(
+            plan.loops
+                .iter()
+                .filter(|loop_record| matches!(loop_record.kind, LoopKind::Recursive(_)))
+                .count()
+                >= 2
+        );
     }
 }

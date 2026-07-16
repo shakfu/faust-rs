@@ -22,6 +22,8 @@ use std::fmt;
 
 use sigtype::{Nature, Variability, Vectorability as SigVectorability};
 
+use crate::signal_prepare::VerifiedPreparedSignals;
+
 use super::super::decoration_verify::{
     CanonicalSigType, DecorationRecord, DependencyFact, VerifiedDecorationCertificate,
 };
@@ -33,6 +35,7 @@ use super::super::vector_verify::{
     VecSafeWitness, VectorPlan, VectorPlanError, Vectorability, WitnessKind, effects_duplicable,
     effects_sample_reorderable, verify_fused_serial_groups_after_plan, verify_vector_plan,
 };
+use super::lockstep::{detect_lockstep_bundles, verify_lockstep_isomorphism};
 
 const EFFECT_ISLAND_TAG: u64 = 1 << 63;
 
@@ -666,6 +669,23 @@ pub fn build_vector_plan(
     let fused_verification = verify_fused_serial_groups_after_plan(&plan, verified);
     trace_stage("fused-verification");
     fused_verification?;
+    Ok(VerifiedVectorPlan { plan })
+}
+
+/// Builds the production vector plan and automatically annotates every exact,
+/// independent recursive-instance family that satisfies the lockstep gate.
+///
+/// The ordinary [`build_vector_plan`] entry point remains available for
+/// schema/planner unit tests. Production `-vec` uses this stronger boundary so
+/// no public feature flag or secondary scheduling mode is introduced.
+pub fn build_vector_plan_with_lockstep(
+    prepared: &VerifiedPreparedSignals,
+    verified: &VerifiedDecorationCertificate,
+    vec_size: u64,
+) -> Result<VerifiedVectorPlan, VectorPlanBuildError> {
+    let mut plan = build_vector_plan(verified, vec_size)?.into_plan();
+    detect_lockstep_bundles(&mut plan, prepared)?;
+    verify_lockstep_isomorphism(&plan, prepared)?;
     Ok(VerifiedVectorPlan { plan })
 }
 

@@ -138,16 +138,17 @@ fn schedule_after_plan_verification(
         .into_iter()
         .map(|epoch| {
             let dag = EpochDag::new(&epoch.loops, plan);
-            let loops = schedule(strategy, &dag).map_err(|source| {
+            let units = schedule(strategy, &dag).map_err(|source| {
                 VectorScheduleError::EpochScheduling {
                     epoch_id: epoch.epoch_id,
                     source,
                 }
             })?;
-            verify_schedule(&dag, &loops).map_err(|source| VectorScheduleError::Postcondition {
+            verify_schedule(&dag, &units).map_err(|source| VectorScheduleError::Postcondition {
                 epoch_id: epoch.epoch_id,
                 source,
             })?;
+            let loops = dag.expand_lockstep_units(&units);
             Ok(ScheduledEpoch {
                 epoch_id: epoch.epoch_id,
                 rank: epoch.rank,
@@ -166,14 +167,46 @@ fn schedule_after_plan_verification(
 /// cross-epoch barriers out of local scheduling while preserving all
 /// same-epoch data and effect constraints.
 struct EpochDag<'a> {
-    nodes: &'a [u64],
+    nodes: Vec<u64>,
     dependencies: std::collections::BTreeMap<u64, Vec<u64>>,
+    lockstep_members: std::collections::BTreeMap<u64, &'a [u64]>,
 }
 
 impl<'a> EpochDag<'a> {
-    fn new(nodes: &'a [u64], plan: &VectorPlan) -> Self {
+    fn new(nodes: &'a [u64], plan: &'a VectorPlan) -> Self {
         use std::collections::{BTreeMap, BTreeSet};
 
+        let lockstep_representative = plan
+            .lockstep_bundles
+            .iter()
+            .flat_map(|bundle| {
+                bundle
+                    .member_loop_ids
+                    .iter()
+                    .map(move |&loop_id| (loop_id, bundle.representative_loop_id))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let lockstep_members = plan
+            .lockstep_bundles
+            .iter()
+            .map(|bundle| {
+                (
+                    bundle.representative_loop_id,
+                    bundle.member_loop_ids.as_slice(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let unit_of = |loop_id: u64| {
+            lockstep_representative
+                .get(&loop_id)
+                .copied()
+                .unwrap_or(loop_id)
+        };
+        let unit_nodes = nodes
+            .iter()
+            .copied()
+            .filter(|loop_id| unit_of(*loop_id) == *loop_id)
+            .collect::<Vec<_>>();
         let node_set = nodes.iter().copied().collect::<BTreeSet<_>>();
         let group_by_member = plan
             .fused_serial_groups
@@ -186,7 +219,7 @@ impl<'a> EpochDag<'a> {
                     .map(move |&loop_id| (loop_id, group_index))
             })
             .collect::<BTreeMap<_, _>>();
-        let mut direct = nodes
+        let mut direct = unit_nodes
             .iter()
             .copied()
             .map(|node| (node, BTreeSet::new()))
@@ -197,26 +230,27 @@ impl<'a> EpochDag<'a> {
             if !node_set.contains(&edge.consumer) || !node_set.contains(&edge.dependency) {
                 continue;
             }
+            let consumer = unit_of(edge.consumer);
+            let dependency = unit_of(edge.dependency);
+            if consumer == dependency {
+                continue;
+            }
             direct
-                .get_mut(&edge.consumer)
+                .get_mut(&consumer)
                 .expect("epoch nodes initialize direct dependencies")
-                .insert(edge.dependency);
-            if let Some(&group_index) = group_by_member.get(&edge.consumer) {
+                .insert(dependency);
+            if let Some(&group_index) = group_by_member.get(&consumer) {
                 let group = &plan.fused_serial_groups[group_index];
-                if group
-                    .member_loop_ids
-                    .binary_search(&edge.dependency)
-                    .is_err()
-                {
+                if group.member_loop_ids.binary_search(&dependency).is_err() {
                     group_external
                         .entry(group_index)
                         .or_default()
-                        .insert(edge.dependency);
+                        .insert(dependency);
                 }
             }
         }
 
-        let dependencies = nodes
+        let dependencies = unit_nodes
             .iter()
             .copied()
             .map(|node| {
@@ -258,9 +292,24 @@ impl<'a> EpochDag<'a> {
             .collect();
 
         Self {
-            nodes,
+            nodes: unit_nodes,
             dependencies,
+            lockstep_members,
         }
+    }
+
+    fn expand_lockstep_units(&self, units: &[u64]) -> Vec<u64> {
+        units
+            .iter()
+            .flat_map(|unit| {
+                self.lockstep_members
+                    .get(unit)
+                    .copied()
+                    .unwrap_or(std::slice::from_ref(unit))
+                    .iter()
+                    .copied()
+            })
+            .collect()
     }
 }
 
@@ -268,7 +317,7 @@ impl ScheduleDag for EpochDag<'_> {
     type Node = u64;
 
     fn nodes(&self) -> Vec<Self::Node> {
-        self.nodes.to_vec()
+        self.nodes.clone()
     }
 
     fn dependencies(&self, node: Self::Node) -> Vec<Self::Node> {
@@ -284,7 +333,8 @@ mod tests {
     use crate::schedule::{SchedulingStrategy, verify_schedule};
     use crate::signal_fir::pv_slice::{build_pv_plan, build_pv_signals};
     use crate::signal_fir::vector_verify::{
-        FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
+        FusedSerialGroupRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord,
+        LockstepLaneRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
         ValueType, VecSafeWitness, Vectorability, WitnessKind,
     };
 
@@ -383,6 +433,44 @@ mod tests {
             ],
             &[],
         )
+    }
+
+    fn lockstep_plan() -> VectorPlan {
+        let mut plan = plan_with_epochs(2, &[(0, 0, &[0, 1])], &[], &[]);
+        for loop_id in 0..2 {
+            plan.loops[loop_id].kind = LoopKind::Lockstep { width: 2 };
+            plan.vec_safe_witnesses[loop_id].witness_kind = WitnessKind::SerialStateInternal;
+        }
+        plan.lockstep_bundles = vec![LockstepBundleRecord {
+            bundle_id: 0,
+            representative_loop_id: 0,
+            member_loop_ids: vec![0, 1],
+            lanes: (0..2)
+                .map(|loop_id| LockstepLaneRecord {
+                    loop_id,
+                    recursion_group: 10 + loop_id,
+                    roots: vec![IsoRootWitness {
+                        representative_root: 0,
+                        lane_root: loop_id,
+                        shape_hash: 1,
+                        leaf_mapping: vec![IsoLeafMapping {
+                            representative_signal_id: 0,
+                            lane_signal_id: loop_id,
+                        }],
+                    }],
+                })
+                .collect(),
+        }];
+        plan
+    }
+
+    #[test]
+    fn lockstep_bundle_is_one_scheduler_node_and_expands_canonically() {
+        let plan = lockstep_plan();
+        let dag = EpochDag::new(&plan.epochs[0].loops, &plan);
+        assert_eq!(dag.nodes(), vec![0]);
+        let schedule = schedule_vector_plan(&plan, SchedulingStrategy::DepthFirst).unwrap();
+        assert_eq!(schedule.epochs[0].loops, vec![0, 1]);
     }
 
     #[test]
