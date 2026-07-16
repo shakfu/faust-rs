@@ -2509,6 +2509,23 @@ The maintained impulse harness compiles and compares 92 expected DSPs for each
 of `-lv 0` and `-lv 1`; `subcontainer1` remains the harness's single
 pre-existing documented exclusion.
 
+Native SIMD is checked separately from structural fusion. The repository's
+`lockstep-simd-check` compiles three profitability-oriented four-lane corpus
+cases through checked vector C++, asks Clang for optimized LLVM IR with `-O3`
+and `-ffp-contract=off`, and requires at least ten `<4 x float>` arithmetic
+operations per case. The current results are 14 operations for the recursive
+bank, 17 when followed by a reduction, and 14 beside an unrelated branch. The
+elementary pair and quad remain legality tests: their tiny bodies fuse correctly
+but do not cross Clang's SLP profitability threshold, so they are deliberately
+not presented as SIMD evidence.
+
+The full workspace Clippy gate passes with warnings denied. The workspace test
+gate currently stops at the unrelated existing Wasm control-flow assertion
+`wasm_compute_lowers_control_flow_statements` (missing expected `Drop`); the
+isolated test reproduces it, and no lockstep path touches Wasm statement
+lowering. Focused lockstep, optimizer, golden, and impulse gates pass as reported
+above.
+
 Time-direction vectorization leaves every recursive loop serial: the carried
 dependence `y(i-1) -> y(i)` forbids computing a chunk in parallel. Yet many real
 graphs contain `k` **structurally identical, mutually independent** serial

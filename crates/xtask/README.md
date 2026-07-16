@@ -29,6 +29,8 @@ cargo run -p xtask
   from DOT files.
 - `wasm32-unknown-unknown` target when running
   `build-faustwasm-compiler-module`.
+- Clang C++ when running `lockstep-simd-check` (override `clang++` with
+  `CLANGXX`).
 
 Useful setup commands:
 
@@ -65,6 +67,7 @@ dot -V
 | `vector-coverage-merge` | Validate and merge `count_vector_corpus` JSON reports into the checked vector-coverage baseline |
 | `vector-coverage-check` | Recompile every baseline-certified mode/DSP pair and require checked vector chunk-driver structure |
 | `vector-interp-opt-check` | Compare interpreter `opt_level=0` and max optimization on representative checked-vector cases |
+| `lockstep-simd-check` | Require Clang to emit four-wide LLVM floating-point operations for complex lockstep corpus cases |
 
 ## Vector Coverage Retention
 
@@ -88,6 +91,7 @@ installs the Faust standard libraries before running this check.
 ```bash
 cargo run -p xtask -- vector-coverage-check
 cargo run -p xtask -- vector-interp-opt-check
+cargo run -p xtask -- lockstep-simd-check
 ```
 
 ## Environment Variables
@@ -96,6 +100,7 @@ cargo run -p xtask -- vector-interp-opt-check
 |---|---|---|
 | `FAUST_CPP_BIN` | `golden-gen-cpp`, `interp-trace-dump-cppfbc`, `interp-trace-gen-cppfbc` | Path to the reference C++ `faust` binary |
 | `GOLDEN_REF` | `golden-check` | `rust` (default) or `cpp` |
+| `CLANGXX` | `lockstep-simd-check` | Clang C++ executable used to emit optimized LLVM IR (default: `clang++`) |
 
 ## Design Invariants
 

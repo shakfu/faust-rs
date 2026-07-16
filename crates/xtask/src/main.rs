@@ -84,6 +84,7 @@ Usage:
   cargo run -p xtask -- vector-coverage-merge --reports <dir> [--out tests/vector-coverage/corpus-baseline.json] [--certified-list tests/vector-coverage/certified-dspfiles.txt]
   cargo run -p xtask -- vector-coverage-check [--baseline tests/vector-coverage/corpus-baseline.json]
   cargo run -p xtask -- vector-interp-opt-check
+  cargo run -p xtask -- lockstep-simd-check
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -173,6 +174,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "vector-coverage-merge" => vector_coverage_merge(args)?,
         "vector-coverage-check" => vector_coverage_check(args)?,
         "vector-interp-opt-check" => vector_interp_opt_check(args)?,
+        "lockstep-simd-check" => lockstep_simd_check(args)?,
         _ => {
             print!("{USAGE}");
         }
@@ -187,6 +189,7 @@ mod fir_dump;
 mod golden;
 mod libfaust_api_matrix;
 mod libfaust_export_check;
+mod lockstep_simd;
 mod p7_matrix;
 mod reports;
 mod runtime_trace;
@@ -200,6 +203,7 @@ pub(crate) use fir_dump::*;
 pub(crate) use golden::*;
 pub(crate) use libfaust_api_matrix::*;
 pub(crate) use libfaust_export_check::*;
+pub(crate) use lockstep_simd::*;
 pub(crate) use p7_matrix::*;
 pub(crate) use reports::*;
 pub(crate) use runtime_trace::*;
