@@ -178,6 +178,26 @@ their full independent checks. On `reverb_designer.dsp`, route setup fell from
 The remaining residual classes are foreign `count`, prefix/waveform execution,
 effectful FIR/IIR/table nodes, and routed-definition/transport consumption.
 
+The next Phase 4 slice lowers Faust's canonical block-size foreign variable,
+initialized `prefix` reads/writes, and direct cycling waveform literals. The
+`count` case is restricted to the compute function argument and all other
+foreign variables remain fail-closed. Prefix reads use the checked P6 state
+cell while the write consumes either a same-loop definition or the exact value
+from an accepted route. Direct waveforms emit immutable static tables, and the
+final module checker requires exact coverage of those declarations before the
+module is certified.
+
+The complete corpus now has 27 certified DSPs, 64 `PureLowering` fallbacks, one
+soundfile `UiProgram` fallback, and the independent SIGGEN error. The four new
+paths are `bs`, `precision`, `prefix`, and `waveform1`; `precision` also became
+eligible because its residual direct waveform is now supported. All four pass
+the 48-case scalar/vector/native-C++ matrix formed by scalar `-ss 0..3` and
+vector `-lv 0/1 x -ss 0..3`, over 60,000 samples. The full sweep showed no
+compile-time regression: each new path completed in at most 0.06 seconds and
+`reverb_designer` remained about 66.8 seconds, versus 67.8 seconds in the
+preceding slice. Remaining table cases are effectful `rdtable`/`wrtable`
+programs and stay closed until their ordered state semantics are certified.
+
 ## 2. Measured Baseline
 
 The baseline was measured with the persistent corpus tool introduced by commit

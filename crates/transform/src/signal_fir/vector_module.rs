@@ -272,6 +272,7 @@ fn build_verified_vector_module_with_evidence(
     let ui_fir = build_vector_ui_fir(ui, &real_type, program.store_mut())
         .map_err(|error| VectorModuleFailure::new(VectorFallbackReason::UiProgram, error))?;
     trace_stage("ui-lifecycle");
+    let static_declarations = program.static_declarations().to_vec();
     let module = assemble_module(
         program.store_mut(),
         module_name,
@@ -286,8 +287,16 @@ fn build_verified_vector_module_with_evidence(
         &assembly,
         &control_output_stores,
         &ui_fir,
+        &static_declarations,
     )?;
-    verify_final_module(program.store(), module, &assembly, &output_stores, &ui_fir)?;
+    verify_final_module(
+        program.store(),
+        module,
+        &assembly,
+        &output_stores,
+        &ui_fir,
+        &static_declarations,
+    )?;
     trace_stage("module-assembly-verification");
 
     Ok(BuiltVectorModule {
@@ -512,6 +521,7 @@ fn assemble_module(
     assembly: &VectorFirAssembly,
     control_output_stores: &[FirId],
     ui_fir: &VectorUiFir,
+    static_declarations: &[FirId],
 ) -> Result<FirId, VectorModuleFailure> {
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
@@ -638,7 +648,7 @@ fn assemble_module(
     fields.extend(ui_fir.struct_declarations.iter().copied());
     fields.extend(assembly.state_declarations.iter().copied());
     let dsp_struct = FirBuilder::new(store).block(&fields);
-    let static_declarations = FirBuilder::new(store).block(&[]);
+    let static_declarations = FirBuilder::new(store).block(static_declarations);
     Ok(FirBuilder::new(store).module(
         num_inputs,
         num_outputs,
@@ -819,6 +829,7 @@ fn verify_final_module(
     assembly: &VectorFirAssembly,
     output_stores: &[FirId],
     ui_fir: &VectorUiFir,
+    expected_static_declarations: &[FirId],
 ) -> Result<(), VectorModuleFailure> {
     let report = verify_fir_module(store, module);
     if report.has_errors() {
@@ -835,11 +846,17 @@ fn verify_final_module(
     let FirMatch::Module {
         dsp_struct,
         functions,
+        static_decls,
         ..
     } = match_fir(store, module)
     else {
         return Err(module_shape("root is not a FIR module"));
     };
+    if match_fir(store, static_decls) != FirMatch::Block(expected_static_declarations.to_vec()) {
+        return Err(module_shape(
+            "module does not contain the exact checked static declarations",
+        ));
+    }
     let FirMatch::Block(fields) = match_fir(store, dsp_struct) else {
         return Err(module_shape("DSP struct is not a block"));
     };
@@ -1194,6 +1211,55 @@ mod tests {
                 &built.assembly,
                 &[forged],
                 &ui_fir,
+                &[],
+            ),
+            Err(VectorModuleFailure {
+                reason: VectorFallbackReason::ModuleVerification,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn final_checker_rejects_forged_static_declaration_coverage() {
+        let prepared = pure_fixture();
+        let mut built = build_verified_vector_module_with_evidence(
+            &prepared,
+            &ClockDomainTable::new(),
+            &ui::UiProgram::empty(),
+            1,
+            1,
+            "mydsp",
+            FirType::Float32,
+            16,
+            ComputeMode::Vector {
+                vec_size: 8,
+                loop_variant: 0,
+            },
+            SchedulingStrategy::DepthFirst,
+        )
+        .expect("verified module with evidence");
+        let output_stores = built.output_stores.clone();
+        let forged = FirBuilder::new(&mut built.output.store).declare_table(
+            "forged",
+            AccessType::Static,
+            FirType::Float32,
+            &[],
+        );
+        let ui_fir = build_vector_ui_fir(
+            &ui::UiProgram::empty(),
+            &FirType::Float32,
+            &mut built.output.store,
+        )
+        .expect("empty UI evidence");
+        assert!(matches!(
+            verify_final_module(
+                &built.output.store,
+                built.output.module,
+                &built.assembly,
+                &output_stores,
+                &ui_fir,
+                &[forged],
             ),
             Err(VectorModuleFailure {
                 reason: VectorFallbackReason::ModuleVerification,

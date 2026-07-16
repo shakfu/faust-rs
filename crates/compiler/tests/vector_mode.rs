@@ -205,6 +205,30 @@ fn sampling_frequency_constant_is_certified_and_bit_exact() {
 }
 
 #[test]
+fn block_count_foreign_variable_is_certified_and_bit_exact() {
+    let source = r#"
+        block_size = fvariable(int count, <math.h>);
+        process = _ + float(block_size);
+    "#;
+    assert_vector_pipeline_certified("block_count", source, 24);
+    assert_scalar_vector_bit_exact("block_count", source, 24);
+}
+
+#[test]
+fn prefix_state_is_certified_and_bit_exact() {
+    let source = "process = prefix(0.5);";
+    assert_vector_pipeline_certified("prefix", source, 24);
+    assert_scalar_vector_bit_exact("prefix", source, 24);
+}
+
+#[test]
+fn direct_waveform_is_certified_and_bit_exact() {
+    let source = "process = waveform {0.1, 0.25, -0.5, 0.75, 1.0};";
+    assert_vector_pipeline_certified("direct_waveform", source, 24);
+    assert_scalar_vector_bit_exact("direct_waveform", source, 24);
+}
+
+#[test]
 fn recursion_and_delay_cross_chunk_boundary_bit_exact() {
     // Integrator (loop-carried state) plus a 5-sample delay: both the recursive
     // carrier and the delay line must survive the chunk boundary unchanged.

@@ -340,7 +340,18 @@ pub fn assemble_vector_fir(
             );
         }
 
-        let definitions = definition_map(routed.trace().definitions());
+        let mut definitions = definition_map(routed.trace().definitions());
+        // A state action may consume a value through an accepted cross-loop
+        // route rather than a local definition (notably `prefix` writes).
+        // Preserve the independently checked routed value for that consumer.
+        for routed_use in routed.trace().uses() {
+            definitions
+                .entry((
+                    VectorRegion::Loop(routed_use.consumer_loop),
+                    routed_use.signal_id,
+                ))
+                .or_insert(routed_use.value);
+        }
         let signal_types = routed
             .plan()
             .signals

@@ -15,7 +15,7 @@ use std::fmt;
 
 use fir::{AccessType, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{match_sym_ref, tree_to_str};
+use tlib::{match_sym_ref, tree_to_int, tree_to_str};
 
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
@@ -62,6 +62,7 @@ impl PureVectorRegionBody {
 /// pure.
 pub struct VerifiedPureVectorProgram {
     store: FirStore,
+    static_declarations: Vec<FirId>,
     transport_declarations: Vec<FirId>,
     control_statements: Vec<FirId>,
     regions: Vec<PureVectorRegionBody>,
@@ -91,6 +92,12 @@ impl VerifiedPureVectorProgram {
     #[must_use]
     pub fn transport_declarations(&self) -> &[FirId] {
         &self.transport_declarations
+    }
+
+    /// Immutable literal tables required by checked waveform reads.
+    #[must_use]
+    pub fn static_declarations(&self) -> &[FirId] {
+        &self.static_declarations
     }
 
     /// Fixed control-scope statements, including input pointer aliases.
@@ -263,6 +270,8 @@ struct PureVectorLowerer<'a> {
     signal_ids: BTreeMap<u64, SigId>,
     input_declarations: Vec<FirId>,
     input_aliases: BTreeSet<usize>,
+    static_declarations: Vec<FirId>,
+    waveform_tables: BTreeMap<u64, String>,
     math_ops: HashSet<FirMathOp>,
     int_helpers: BTreeSet<&'static str>,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
@@ -385,6 +394,8 @@ fn lower_vector_program_impl<'a>(
         signal_ids,
         input_declarations: Vec::new(),
         input_aliases: BTreeSet::new(),
+        static_declarations: Vec::new(),
+        waveform_tables: BTreeMap::new(),
         math_ops: HashSet::new(),
         int_helpers: BTreeSet::new(),
         state_plan,
@@ -511,11 +522,13 @@ fn lower_vector_program_impl<'a>(
         &transport_declarations,
         &control_statements,
         &regions,
+        state_plan,
         &lowerer.store,
     )?;
     trace_stage("route-and-body-verification");
     Ok(VerifiedPureVectorProgram {
         store: lowerer.store,
+        static_declarations: lowerer.static_declarations,
         transport_declarations,
         control_statements,
         regions,
@@ -656,6 +669,7 @@ impl PureVectorLowerer<'_> {
             SigMatch::Int(value) => FirBuilder::new(&mut self.store).int32(value),
             SigMatch::Real(value) => self.float_const(value),
             SigMatch::FConst(_, name, _) => self.lower_fconst(signal_id, name)?,
+            SigMatch::FVar(kind, name, _) => self.lower_fvar(signal_id, kind, name)?,
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Button(control) => self.lower_ui_input(control, ui::ControlKind::Button)?,
             SigMatch::Checkbox(control) => {
@@ -729,6 +743,10 @@ impl PureVectorLowerer<'_> {
                     }
                 }
             },
+            SigMatch::Prefix(_, value) => {
+                self.lower_prefix(scope, signal_id, value, cache, active)?
+            }
+            SigMatch::Waveform(values) => self.lower_waveform(scope, signal_id, values)?,
             SigMatch::Proj(index, group) => {
                 if let Some(var) = match_sym_ref(self.prepared.arena(), group) {
                     let _ = self.lower_dep(scope, group, cache, active)?;
@@ -1073,6 +1091,144 @@ impl PureVectorLowerer<'_> {
         })
     }
 
+    fn lower_prefix(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        value: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let LowerScope::Loop(loop_id) = scope else {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "prefix state cannot be read from control scope".to_owned(),
+            });
+        };
+        let transition = self
+            .state_plan
+            .and_then(|plan| {
+                plan.plan()
+                    .prefixes
+                    .iter()
+                    .find(|transition| transition.signal_id == signal_id)
+            })
+            .ok_or_else(|| PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "prefix has no accepted P6.1 state transition".to_owned(),
+            })?;
+        if transition.loop_id != loop_id || transition.value_signal_id != u64::from(value.as_u32())
+        {
+            return Err(PureVectorLowerError::BodyEvidence {
+                detail: format!(
+                    "prefix signal {signal_id} transition does not match loop {loop_id} and value {}",
+                    value.as_u32()
+                ),
+            });
+        }
+        let state_name = transition.state_name.clone();
+        let typ = value_fir_type(&transition.value_type, self.real_type.clone());
+        let _ = self.lower_dep(scope, value, cache, active)?;
+        Ok(FirBuilder::new(&mut self.store).load_var(state_name, AccessType::Struct, typ))
+    }
+
+    fn lower_waveform(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        values: &[SigId],
+    ) -> Result<FirId, PureVectorLowerError> {
+        let LowerScope::Loop(loop_id) = scope else {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "waveform state cannot be read from control scope".to_owned(),
+            });
+        };
+        let transition = self
+            .state_plan
+            .and_then(|plan| {
+                plan.plan()
+                    .waveforms
+                    .iter()
+                    .find(|transition| transition.signal_id == signal_id)
+            })
+            .ok_or_else(|| PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "waveform has no accepted P6.1 state transition".to_owned(),
+            })?;
+        if transition.loop_id != loop_id
+            || transition.length
+                != u64::try_from(values.len()).map_err(|_| {
+                    PureVectorLowerError::UnsupportedSignal {
+                        signal_id,
+                        expression: "waveform length exceeds u64".to_owned(),
+                    }
+                })?
+            || values.is_empty()
+        {
+            return Err(PureVectorLowerError::BodyEvidence {
+                detail: format!(
+                    "waveform signal {signal_id} transition does not match loop {loop_id} and length {}",
+                    values.len()
+                ),
+            });
+        }
+        let index_name = transition.index_name.clone();
+        let elem_type = value_fir_type(&transition.value_type, self.real_type.clone());
+        let table_name = if let Some(name) = self.waveform_tables.get(&signal_id) {
+            name.clone()
+        } else {
+            let prefix = if elem_type == FirType::Int32 {
+                "iVecWave"
+            } else {
+                "fVecWave"
+            };
+            let name = format!("{prefix}{signal_id}");
+            let mut literals = Vec::with_capacity(values.len());
+            for &value in values {
+                let literal = match (elem_type.clone(), match_sig(self.prepared.arena(), value)) {
+                    (FirType::Int32, SigMatch::Int(value)) => {
+                        FirBuilder::new(&mut self.store).int32(value)
+                    }
+                    (FirType::Float32 | FirType::Float64, SigMatch::Int(value)) => {
+                        self.float_const(f64::from(value))
+                    }
+                    (FirType::Float32 | FirType::Float64, SigMatch::Real(value)) => {
+                        self.float_const(value)
+                    }
+                    _ => {
+                        return Err(PureVectorLowerError::UnsupportedSignal {
+                            signal_id,
+                            expression: "checked waveform tables require scalar numeric literals"
+                                .to_owned(),
+                        });
+                    }
+                };
+                literals.push(literal);
+            }
+            let declaration = FirBuilder::new(&mut self.store).declare_table(
+                name.clone(),
+                AccessType::Static,
+                elem_type.clone(),
+                &literals,
+            );
+            self.static_declarations.push(declaration);
+            self.waveform_tables.insert(signal_id, name.clone());
+            name
+        };
+        let index = FirBuilder::new(&mut self.store).load_var(
+            index_name,
+            AccessType::Struct,
+            FirType::Int32,
+        );
+        Ok(FirBuilder::new(&mut self.store).load_table(
+            table_name,
+            AccessType::Static,
+            index,
+            elem_type,
+        ))
+    }
+
     fn lower_symbolic_ref(
         &mut self,
         scope: LowerScope,
@@ -1314,6 +1470,49 @@ impl PureVectorLowerer<'_> {
         })
     }
 
+    /// Mirrors the scalar special case for Faust's block-size foreign
+    /// variable. Other extern globals remain outside the checked vector module
+    /// until their declarations are represented in the final artifact.
+    fn lower_fvar(
+        &mut self,
+        signal_id: u64,
+        kind: SigId,
+        name: SigId,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let name = tree_to_str(self.prepared.arena(), name).ok_or_else(|| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "foreign variable name is not a symbol".to_owned(),
+            }
+        })?;
+        if name != "count" {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: format!("unsupported foreign variable `{name}`"),
+            });
+        }
+        let kind = tree_to_int(self.prepared.arena(), kind).ok_or_else(|| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "foreign variable type is not an integer code".to_owned(),
+            }
+        })?;
+        let declared = if kind == 0 {
+            FirType::Int32
+        } else {
+            self.real_type.clone()
+        };
+        let expected = self.fir_type(signal_id)?;
+        if expected != declared {
+            return Err(PureVectorLowerError::PlannedTypeMismatch {
+                signal_id,
+                planned: self.record(signal_id)?.value_type,
+                prepared: self.prepared.ty(self.sig(signal_id)?),
+            });
+        }
+        Ok(FirBuilder::new(&mut self.store).load_var("count", AccessType::FunArgs, declared))
+    }
+
     fn fir_type(&self, signal_id: u64) -> Result<FirType, PureVectorLowerError> {
         let record = self.record(signal_id)?;
         value_type_to_fir(&record.value_type, &self.real_type).ok_or(
@@ -1483,8 +1682,17 @@ pub fn verify_pure_vector_bodies(
     transport_declarations: &[FirId],
     control_statements: &[FirId],
     regions: &[PureVectorRegionBody],
+    state_plan: Option<&VerifiedVectorStatePlan>,
     store: &FirStore,
 ) -> Result<(), PureVectorLowerError> {
+    // Prefix writes are assembled from the accepted state plan after this
+    // region-body check. Their routed input therefore has an explicit checked
+    // consumer even though it is not reachable from the prefix read value.
+    let state_consumed_uses = state_plan
+        .into_iter()
+        .flat_map(|state| state.plan().prefixes.iter())
+        .map(|transition| (transition.loop_id, transition.value_signal_id))
+        .collect::<BTreeSet<_>>();
     let expected_order = routed
         .layout()
         .loops()
@@ -1545,7 +1753,9 @@ pub fn verify_pure_vector_bodies(
                 ),
             });
         }
-        if !body_contains(store, &consumer.statements, load_id) {
+        if !body_contains(store, &consumer.statements, load_id)
+            && !state_consumed_uses.contains(&(transport.consumer_loop, transport.signal_id))
+        {
             return Err(PureVectorLowerError::BodyEvidence {
                 detail: format!(
                     "transport {} load is absent from its consumer body",
@@ -1586,7 +1796,9 @@ pub fn verify_pure_vector_bodies(
     for routed_use in routed.trace().uses() {
         if let RoutedUseSource::Transport(_) = routed_use.source {
             let consumer = region_by_id(regions, routed_use.consumer_loop)?;
-            if !body_contains(store, &consumer.statements, routed_use.value) {
+            if !body_contains(store, &consumer.statements, routed_use.value)
+                && !state_consumed_uses.contains(&(routed_use.consumer_loop, routed_use.signal_id))
+            {
                 return Err(PureVectorLowerError::BodyEvidence {
                     detail: format!(
                         "signal {} routed load is absent from loop {}",
@@ -1882,6 +2094,7 @@ mod tests {
                 program.transport_declarations(),
                 program.control_statements(),
                 &regions,
+                None,
                 program.store()
             ),
             Err(PureVectorLowerError::BodyEvidence { .. })
