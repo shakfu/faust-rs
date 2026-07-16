@@ -713,6 +713,7 @@ pub(crate) fn interp_trace_diff_opt_levels_cases(
 /// metamorphic gate. They cover delayed recursion, structural recursion,
 /// checked prefix state, and the vector UI lifecycle respectively.
 const VECTOR_INTERP_OPT_CASES: &[&str] = &[
+    "tests/corpus/vector_lockstep_pair.dsp",
     "tests/impulse-tests/dsp/APF.dsp",
     "tests/impulse-tests/dsp/capture.dsp",
     "tests/impulse-tests/dsp/prefix.dsp",

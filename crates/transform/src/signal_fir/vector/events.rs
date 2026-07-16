@@ -1398,7 +1398,18 @@ fn append_epoch_events(
                     .map(move |&loop_id| (loop_id, group.group_id))
             })
             .collect::<BTreeMap<_, _>>();
+        let bundle_by_member = plan
+            .lockstep_bundles
+            .iter()
+            .flat_map(|bundle| {
+                bundle
+                    .member_loop_ids
+                    .iter()
+                    .map(move |&loop_id| (loop_id, bundle.bundle_id))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut emitted_groups = BTreeSet::new();
+        let mut emitted_bundles = BTreeSet::new();
         for &loop_id in loops {
             if let Some(&group_id) = group_by_member.get(&loop_id) {
                 if !emitted_groups.insert(group_id) {
@@ -1409,6 +1420,28 @@ fn append_epoch_events(
                     .iter()
                     .find(|group| group.group_id == group_id)
                     .expect("member map came from a verified fused group")
+                    .member_loop_ids;
+                for sample in 0..plan.vec_size {
+                    for &member in loops {
+                        if members.binary_search(&member).is_ok() {
+                            append_context(
+                                contexts,
+                                EventRegion::Loop(member),
+                                Some(sample),
+                                order,
+                            );
+                        }
+                    }
+                }
+            } else if let Some(&bundle_id) = bundle_by_member.get(&loop_id) {
+                if !emitted_bundles.insert(bundle_id) {
+                    continue;
+                }
+                let members = &plan
+                    .lockstep_bundles
+                    .iter()
+                    .find(|bundle| bundle.bundle_id == bundle_id)
+                    .expect("member map came from a verified lockstep bundle")
                     .member_loop_ids;
                 for sample in 0..plan.vec_size {
                     for &member in loops {

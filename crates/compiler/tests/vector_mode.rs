@@ -32,6 +32,10 @@ const INDIRECT_RECURSIVE_DELAY_SOURCE: &str = r#"
         replacement = waveform {0.125, 0.75, 0.5} : !, _;
     };
 "#;
+const LOCKSTEP_PAIR_SOURCE: &str = include_str!("../../../tests/corpus/vector_lockstep_pair.dsp");
+const LOCKSTEP_QUAD_SOURCE: &str = include_str!("../../../tests/corpus/vector_lockstep_quad.dsp");
+const LOCKSTEP_NEAR_ISOMORPHIC_SOURCE: &str =
+    include_str!("../../../tests/corpus/vector_lockstep_near_isomorphic.dsp");
 
 /// Compiles `source` to interpreter bytecode with the given compute and
 /// scheduling modes, then runs one block with the provided input channels.
@@ -224,7 +228,8 @@ fn assert_vector_pipeline_certified(name: &str, source: &str, vec_size: u32) {
             assert_eq!(
                 output.vector_pipeline_status,
                 VectorPipelineStatus::Certified,
-                "{name} must use the checked vector path under -lv {loop_variant} and {strategy:?}"
+                "{name} must use the checked vector path under -lv {loop_variant} and {strategy:?}: {:?}",
+                output.vector_pipeline_detail
             );
         }
     }
@@ -393,6 +398,47 @@ fn two_pole_filter_is_bit_exact() {
         "process = _ : + ~ (_ <: 0.5 * _' , -0.2 * _'' :> _);",
         32,
     );
+}
+
+#[test]
+fn lockstep_recursive_instances_are_certified_and_bit_exact() {
+    let inputs = [ramp(67), ramp(67).into_iter().rev().collect()];
+    assert_vector_pipeline_certified("lockstep_pair", LOCKSTEP_PAIR_SOURCE, 24);
+    assert_channels_bit_exact("lockstep_pair", LOCKSTEP_PAIR_SOURCE, &inputs, 24);
+}
+
+#[test]
+fn lockstep_corpus_cpp_has_expected_physical_sample_loops() {
+    for (name, source, expected_loops) in [
+        ("pair", LOCKSTEP_PAIR_SOURCE, 1),
+        ("quad", LOCKSTEP_QUAD_SOURCE, 1),
+        ("near_isomorphic", LOCKSTEP_NEAR_ISOMORPHIC_SOURCE, 2),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "faust-rs-lockstep-{name}-{}-{:?}.dsp",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, source).expect("write lockstep DSP");
+        let cpp = Compiler::new()
+            .with_compute_mode(ComputeMode::Vector {
+                vec_size: 24,
+                loop_variant: 1,
+            })
+            .compile_file_default_to_cpp_with_lane(
+                &path,
+                &codegen::backends::cpp::CppOptions::default(),
+                SignalFirLane::TransformFastLane,
+            )
+            .unwrap_or_else(|error| panic!("compile {name} vector C++: {error}"));
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(
+            cpp.match_indices("for (int i0 = vindex;").count(),
+            expected_loops,
+            "{name}: unexpected physical sample-loop count"
+        );
+    }
 }
 
 #[test]
