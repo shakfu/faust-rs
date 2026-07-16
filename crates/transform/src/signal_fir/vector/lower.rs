@@ -538,16 +538,13 @@ fn lower_vector_program_impl<'a>(
     let routed = lowerer.session.finish(&lowerer.store)?;
     if timing_enabled {
         for transport in &verified_plan.plan().transports {
-            if let Some(&sig) = lowerer.signal_ids.get(&transport.signal_id) {
-                eprintln!(
-                    "[vector-lower-transport] id={} signal={} producer={} consumer={} expr={}",
-                    transport.transport_id,
-                    transport.signal_id,
-                    transport.producer_loop,
-                    transport.consumer_loop,
-                    dump_sig_readable(lowerer.prepared.arena(), sig)
-                );
-            }
+            eprintln!(
+                "[vector-lower-transport] id={} signal={} producer={} consumer={}",
+                transport.transport_id,
+                transport.signal_id,
+                transport.producer_loop,
+                transport.consumer_loop
+            );
         }
     }
     verify_pure_vector_bodies(

@@ -37,7 +37,7 @@ use super::vector_assemble::{
 };
 use super::vector_clock_ad::build_vector_clock_ad_plan;
 use super::vector_events::{
-    DEFAULT_EVENT_LIMIT, build_state_event_order_certificate, precheck_state_event_bound,
+    DEFAULT_EVENT_LIMITS, build_state_event_order_certificate, precheck_state_event_bound,
 };
 use super::vector_lower::{VectorLoweringContext, lower_vector_program};
 use super::vector_plan::build_vector_plan_with_lockstep;
@@ -196,7 +196,7 @@ fn build_verified_vector_module_with_evidence(
         VectorModuleFailure::new(VectorFallbackReason::StatePlan, error.to_string())
     })?;
     trace_stage("state-plan");
-    precheck_state_event_bound(&vector_plan, &state_plan, DEFAULT_EVENT_LIMIT).map_err(
+    precheck_state_event_bound(&vector_plan, &state_plan, DEFAULT_EVENT_LIMITS).map_err(
         |error| VectorModuleFailure::new(VectorFallbackReason::EventCertificate, error.to_string()),
     )?;
     trace_stage("event-bound-precheck");
@@ -220,7 +220,7 @@ fn build_verified_vector_module_with_evidence(
         &vector_plan,
         program.routed(),
         &state_plan,
-        DEFAULT_EVENT_LIMIT,
+        DEFAULT_EVENT_LIMITS,
     )
     .map_err(|error| {
         VectorModuleFailure::new(VectorFallbackReason::EventCertificate, error.to_string())

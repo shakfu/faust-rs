@@ -10,11 +10,14 @@ use compiler::{
     Compiler, ComputeMode, RealType, SchedulingStrategy, SignalFirLane, VectorEffectiveMode,
     VectorPipelineStatus,
 };
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const VECTOR_COVERAGE_BASELINE: &str = "tests/vector-coverage/corpus-baseline.json";
 const VECTOR_CERTIFIED_LIST: &str = "tests/vector-coverage/certified-dspfiles.txt";
 const VECTOR_CORPUS_ROOT: &str = "tests/impulse-tests/dsp";
 const VECTOR_COVERAGE_SCHEMA: u32 = 1;
+const VECTOR_COVERAGE_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct VectorCoverageBaseline {
@@ -150,8 +153,45 @@ pub(crate) fn vector_coverage_check(
     let root = workspace_root();
     let corpus_root = root.join(&baseline.corpus_root);
     let search_paths = vec![corpus_root, PathBuf::from("/usr/local/share/faust")];
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(4)
+        .min(baseline.modes.len());
+    println!(
+        "vector retention: checking {} modes with {} bounded worker(s)",
+        baseline.modes.len(),
+        worker_count
+    );
+
+    let next_mode = AtomicUsize::new(0);
+    let mode_results = Mutex::new(vec![None; baseline.modes.len()]);
+    std::thread::scope(|scope| -> Result<(), std::io::Error> {
+        for worker_index in 0..worker_count {
+            std::thread::Builder::new()
+                .name(format!("vector-coverage-{worker_index}"))
+                .stack_size(VECTOR_COVERAGE_WORKER_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    loop {
+                        let mode_index = next_mode.fetch_add(1, Ordering::Relaxed);
+                        let Some(report) = baseline.modes.get(mode_index) else {
+                            break;
+                        };
+                        let result = check_vector_retention_mode(&root, &search_paths, report);
+                        mode_results
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)[mode_index] =
+                            Some(result);
+                    }
+                })?;
+        }
+        Ok(())
+    })?;
+
+    let mode_results = mode_results
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut checked = 0usize;
-    for (mode_index, report) in baseline.modes.iter().enumerate() {
+    for (mode_index, (report, result)) in baseline.modes.iter().zip(mode_results).enumerate() {
         println!(
             "vector retention [{}/{}]: precision={} -lv {} -ss {} ({} certified)",
             mode_index + 1,
@@ -161,50 +201,9 @@ pub(crate) fn vector_coverage_check(
             report.mode.scheduling_strategy,
             report.certified_files.len()
         );
-        for relative in &report.certified_files {
-            let path = root.join(relative);
-            let output = Compiler::new()
-                .with_real_type(real_type(&report.mode.precision)?)
-                .with_compute_mode(ComputeMode::Vector {
-                    vec_size: ComputeMode::DEFAULT_VEC_SIZE,
-                    loop_variant: report.mode.loop_variant,
-                })
-                .with_scheduling_strategy(SchedulingStrategy::decode(u32::from(
-                    report.mode.scheduling_strategy,
-                )))
-                .compile_file_to_fir_with_lane(
-                    &path,
-                    &search_paths,
-                    SignalFirLane::TransformFastLane,
-                )
-                .map_err(|error| format!("{relative}: vector retention compile failed: {error}"))?;
-            if output.vector_pipeline_status != VectorPipelineStatus::Certified
-                || output.vector_effective_mode != VectorEffectiveMode::CertifiedVector
-                || output.vector_pipeline_detail.is_some()
-            {
-                return Err(format!(
-                    "{relative}: certified baseline regressed under precision={} -lv {} -ss {}: status={:?}, effective={:?}, detail={}",
-                    report.mode.precision,
-                    report.mode.loop_variant,
-                    report.mode.scheduling_strategy,
-                    output.vector_pipeline_status,
-                    output.vector_effective_mode,
-                    output.vector_pipeline_detail.as_deref().unwrap_or("-")
-                )
-                .into());
-            }
-            let dump = dump_fir(&output.store, output.module);
-            if !has_checked_chunk_driver(&dump) {
-                return Err(format!(
-                    "{relative}: claimed certified module lacks the canonical vindex/vcount chunk driver under precision={} -lv {} -ss {}",
-                    report.mode.precision,
-                    report.mode.loop_variant,
-                    report.mode.scheduling_strategy
-                )
-                .into());
-            }
-            checked += 1;
-        }
+        checked += result
+            .ok_or_else(|| format!("vector retention worker omitted mode {mode_index}"))?
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     }
     println!(
         "vector-coverage-check: OK ({} retained certified mode/DSP pairs, {} modes, {} corpus DSPs)",
@@ -213,6 +212,54 @@ pub(crate) fn vector_coverage_check(
         corpus.len()
     );
     Ok(())
+}
+
+/// Recompiles and structurally verifies one complete vector-retention mode.
+///
+/// Mode-level isolation lets the command bound parallelism without sharing a
+/// compiler instance or changing the fail-closed checks applied to each DSP.
+fn check_vector_retention_mode(
+    root: &Path,
+    search_paths: &[PathBuf],
+    report: &VectorModeReport,
+) -> Result<usize, String> {
+    let real_type = real_type(&report.mode.precision).map_err(|error| error.to_string())?;
+    for relative in &report.certified_files {
+        let path = root.join(relative);
+        let output = Compiler::new()
+            .with_real_type(real_type)
+            .with_compute_mode(ComputeMode::Vector {
+                vec_size: ComputeMode::DEFAULT_VEC_SIZE,
+                loop_variant: report.mode.loop_variant,
+            })
+            .with_scheduling_strategy(SchedulingStrategy::decode(u32::from(
+                report.mode.scheduling_strategy,
+            )))
+            .compile_file_to_fir_with_lane(&path, search_paths, SignalFirLane::TransformFastLane)
+            .map_err(|error| format!("{relative}: vector retention compile failed: {error}"))?;
+        if output.vector_pipeline_status != VectorPipelineStatus::Certified
+            || output.vector_effective_mode != VectorEffectiveMode::CertifiedVector
+            || output.vector_pipeline_detail.is_some()
+        {
+            return Err(format!(
+                "{relative}: certified baseline regressed under precision={} -lv {} -ss {}: status={:?}, effective={:?}, detail={}",
+                report.mode.precision,
+                report.mode.loop_variant,
+                report.mode.scheduling_strategy,
+                output.vector_pipeline_status,
+                output.vector_effective_mode,
+                output.vector_pipeline_detail.as_deref().unwrap_or("-")
+            ));
+        }
+        let dump = dump_fir(&output.store, output.module);
+        if !has_checked_chunk_driver(&dump) {
+            return Err(format!(
+                "{relative}: claimed certified module lacks the canonical vindex/vcount chunk driver under precision={} -lv {} -ss {}",
+                report.mode.precision, report.mode.loop_variant, report.mode.scheduling_strategy
+            ));
+        }
+    }
+    Ok(report.certified_files.len())
 }
 
 fn required_arg(

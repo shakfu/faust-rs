@@ -42,6 +42,7 @@ const LOCKSTEP_MIXED_BRANCH_SOURCE: &str =
     include_str!("../../../tests/corpus/vector_lockstep_mixed_branch.dsp");
 const LOCKSTEP_NEAR_ISOMORPHIC_SOURCE: &str =
     include_str!("../../../tests/corpus/vector_lockstep_near_isomorphic.dsp");
+const SMOOTHDELAY_SOURCE: &str = include_str!("../../../tests/impulse-tests/dsp/smoothdelay.dsp");
 
 /// Compiles `source` to interpreter bytecode with the given compute and
 /// scheduling modes, then runs one block with the provided input channels.
@@ -453,6 +454,15 @@ fn complex_and_partial_lockstep_corpus_is_certified_at_default_vec_size() {
     ] {
         assert_vector_pipeline_certified(name, source, ComputeMode::DEFAULT_VEC_SIZE);
     }
+}
+
+#[test]
+fn smoothdelay_uses_general_compact_events_at_default_vec_size() {
+    assert_vector_pipeline_certified(
+        "smoothdelay",
+        SMOOTHDELAY_SOURCE,
+        ComputeMode::DEFAULT_VEC_SIZE,
+    );
 }
 
 #[test]

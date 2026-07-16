@@ -7,19 +7,23 @@
 //! `FissionSafe`: every dynamic dependence ordered by scalar execution must
 //! remain ordered by vector execution.
 //!
-//! This module makes that obligation executable for small routed plans. It
-//! expands each loop operation over the complete vector chunk, builds a
-//! sample-major scalar order, a scheduled loop-major vector order, and a
-//! conservative dependence relation. Conflicting effect events are ordered as
-//! they are in the scalar reference. Consequently, cross-loop carried state is
-//! rejected even when a static effect edge happens to order the two loops.
+//! This module makes that obligation executable for routed plans. While the
+//! complete event table fits the explicit bound, it expands each loop operation
+//! over the vector chunk. Larger sample-repetitive plans use a canonical
+//! two-sample basis that checks one complete body and every adjacent carried
+//! boundary. Both forms build a sample-major scalar order, a scheduled
+//! loop-major vector order, and a conservative dependence relation. Conflicting
+//! effect events are ordered as they are in the scalar reference. Consequently,
+//! cross-loop carried state is rejected even when a static effect edge happens
+//! to order the two loops.
 //!
 //! The model is deliberately bounded. Its base form is the structural P5 gate;
 //! its state-refined form consumes P6.1 `DelaySim`/`RecStep` evidence and
 //! replaces the corresponding conservative effects with explicit
 //! `LoopPre`/sample/`LoopPost` events. Neither form proves complete DSP
 //! semantics. Production construction and independent checking require an
-//! explicit event limit and fail closed when the complete chunk exceeds it.
+//! explicit event limit and fail closed when neither the complete chunk nor the
+//! independently reconstructed two-sample basis fits it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -35,9 +39,43 @@ use super::vector_verify::{LoopEdge, VectorPlan, VectorPlanError, verify_vector_
 /// Suggested upper bound for focused production and differential checks.
 pub const DEFAULT_EVENT_LIMIT: usize = 4096;
 
+/// Upper bound for a production two-sample compact basis.
+///
+/// Unlike [`DEFAULT_EVENT_LIMIT`], this bound never permits complete chunk
+/// expansion. It was selected after the general routed-plan sweep showed that
+/// the largest measured qualifying basis (`reverb_designer.dsp`, f64)
+/// contains 28,843 events. The release compile-budget gate guards the
+/// resulting work.
+pub const DEFAULT_COMPACT_EVENT_LIMIT: usize = 32_768;
+
+/// Separate finite budgets for complete and compact event evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventLimits {
+    complete: usize,
+    compact: usize,
+}
+
+impl EventLimits {
+    /// Creates explicit complete-expansion and compact-basis limits.
+    #[must_use]
+    pub const fn new(complete: usize, compact: usize) -> Self {
+        Self { complete, compact }
+    }
+
+    /// Applies one bound to both forms, primarily for focused boundary tests.
+    #[must_use]
+    pub const fn uniform(limit: usize) -> Self {
+        Self::new(limit, limit)
+    }
+}
+
+/// Production event budgets approved for the general compact rollout.
+pub const DEFAULT_EVENT_LIMITS: EventLimits =
+    EventLimits::new(DEFAULT_EVENT_LIMIT, DEFAULT_COMPACT_EVENT_LIMIT);
+
 /// One sample checks the repeated body and the second checks every adjacent
-/// carried dependence. Compact evidence is enabled only for plans containing a
-/// verified lockstep bundle; other plans retain complete chunk expansion.
+/// carried dependence. Every routed plan must pass the same independently
+/// reconstructed repetition checks before compact evidence is accepted.
 const COMPACT_EVENT_SAMPLE_BASIS: usize = 2;
 
 /// Stable region containing a bounded dynamic event.
@@ -134,7 +172,7 @@ pub struct EventOrderCertificate {
 }
 
 impl EventOrderCertificate {
-    /// Number of chunk samples expanded by the model.
+    /// Logical number of chunk samples covered by the model.
     #[must_use]
     pub fn sample_count(&self) -> u64 {
         self.sample_count
@@ -208,9 +246,9 @@ pub enum VectorEventError {
     StatePlanMismatch,
     /// The route layout does not exactly and topologically cover the plan.
     InvalidLayout { detail: &'static str, loop_id: u64 },
-    /// The complete dynamic expansion is larger than the caller's bound.
+    /// The selected complete or compact finite table is larger than its bound.
     EventBoundExceeded { needed: usize, limit: usize },
-    /// A route-independent lower bound already exceeds the caller's bound.
+    /// A route-independent lower bound already exceeds both applicable bounds.
     EventLowerBoundExceeded { minimum: usize, limit: usize },
     /// Event-count arithmetic exceeded the host representation.
     EventCountOverflow,
@@ -298,7 +336,7 @@ impl From<VectorPlanError> for VectorEventError {
 }
 
 /// Rejects plans whose route-independent event lower bound already exceeds
-/// `event_limit`.
+/// the applicable complete-expansion or compact-basis limit.
 ///
 /// This is intentionally one-sided: it counts only non-tuple loop roots,
 /// their unmanaged effects, planned transport store/load pairs, epoch
@@ -308,7 +346,7 @@ impl From<VectorPlanError> for VectorEventError {
 pub fn precheck_state_event_bound(
     verified_plan: &VerifiedVectorPlan,
     state: &VerifiedVectorStatePlan,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<(), VectorEventError> {
     let plan = verified_plan.plan();
     if state.vector_plan() != plan {
@@ -367,41 +405,36 @@ pub fn precheck_state_event_bound(
         .checked_mul(sample_count)
         .and_then(|count| count.checked_add(fixed))
         .ok_or(VectorEventError::EventCountOverflow)?;
-    if minimum <= event_limit {
+    if minimum <= limits.complete {
         return Ok(());
-    }
-    if plan.lockstep_bundles.is_empty() {
-        return Err(VectorEventError::EventLowerBoundExceeded {
-            minimum,
-            limit: event_limit,
-        });
     }
     let checked_samples = sample_count.min(COMPACT_EVENT_SAMPLE_BASIS);
     let compact_minimum = per_sample
         .checked_mul(checked_samples)
         .and_then(|count| count.checked_add(fixed))
         .ok_or(VectorEventError::EventCountOverflow)?;
-    if compact_minimum > event_limit {
+    if compact_minimum > limits.compact {
         return Err(VectorEventError::EventLowerBoundExceeded {
             minimum: compact_minimum,
-            limit: event_limit,
+            limit: limits.compact,
         });
     }
     Ok(())
 }
 
-/// Produces and independently checks the complete bounded P5.3 certificate.
+/// Produces and independently checks bounded P5.3 evidence.
 ///
-/// The event limit applies to the full `vec_size` expansion; no prefix is
-/// silently accepted as evidence for a larger chunk.
+/// `limits.complete` applies to full `vec_size` expansion and `limits.compact`
+/// applies only to the canonical two-sample basis. Neither form changes the
+/// logical chunk length.
 pub fn build_event_order_certificate(
     verified_plan: &VerifiedVectorPlan,
     routed: &VerifiedRoutedFir,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<VerifiedEventOrderCertificate, VectorEventError> {
     let plan = verified_plan.plan();
-    let certificate = derive_certificate(plan, routed, None, event_limit)?;
-    verify_event_order_certificate(plan, routed, &certificate, event_limit)?;
+    let certificate = derive_certificate(plan, routed, None, limits)?;
+    verify_event_order_certificate(plan, routed, &certificate, limits)?;
     Ok(VerifiedEventOrderCertificate { certificate })
 }
 
@@ -410,14 +443,14 @@ pub fn build_state_event_order_certificate(
     verified_plan: &VerifiedVectorPlan,
     routed: &VerifiedRoutedFir,
     state: &VerifiedVectorStatePlan,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<VerifiedEventOrderCertificate, VectorEventError> {
     let plan = verified_plan.plan();
     if state.vector_plan() != plan {
         return Err(VectorEventError::StatePlanMismatch);
     }
-    let certificate = derive_certificate(plan, routed, Some(state), event_limit)?;
-    verify_state_event_order_certificate(plan, routed, state, &certificate, event_limit)?;
+    let certificate = derive_certificate(plan, routed, Some(state), limits)?;
+    verify_state_event_order_certificate(plan, routed, state, &certificate, limits)?;
     Ok(VerifiedEventOrderCertificate { certificate })
 }
 
@@ -427,9 +460,9 @@ pub fn verify_event_order_certificate(
     plan: &VectorPlan,
     routed: &VerifiedRoutedFir,
     certificate: &EventOrderCertificate,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<(), VectorEventError> {
-    verify_event_order_certificate_impl(plan, routed, None, certificate, event_limit)
+    verify_event_order_certificate_impl(plan, routed, None, certificate, limits)
 }
 
 /// Independently checks a state-refined P5.3/P6.1 event certificate.
@@ -438,12 +471,12 @@ pub fn verify_state_event_order_certificate(
     routed: &VerifiedRoutedFir,
     state: &VerifiedVectorStatePlan,
     certificate: &EventOrderCertificate,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<(), VectorEventError> {
     if state.vector_plan() != plan {
         return Err(VectorEventError::StatePlanMismatch);
     }
-    verify_event_order_certificate_impl(plan, routed, Some(state), certificate, event_limit)
+    verify_event_order_certificate_impl(plan, routed, Some(state), certificate, limits)
 }
 
 fn verify_event_order_certificate_impl(
@@ -451,7 +484,7 @@ fn verify_event_order_certificate_impl(
     routed: &VerifiedRoutedFir,
     state: Option<&VerifiedVectorStatePlan>,
     certificate: &EventOrderCertificate,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<(), VectorEventError> {
     verify_vector_plan(plan)?;
     if routed.plan() != plan {
@@ -461,18 +494,23 @@ fn verify_event_order_certificate_impl(
     if certificate.sample_count != plan.vec_size {
         return Err(VectorEventError::EventTableMismatch);
     }
-    let expected_checked = independent_checked_sample_count(plan, routed, state, event_limit)?;
+    let expected_checked = independent_checked_sample_count(plan, routed, state, limits)?;
     if certificate.checked_sample_count != expected_checked {
         return Err(VectorEventError::CompactRepetitionMismatch);
     }
     let mut checked_plan = plan.clone();
     checked_plan.vec_size = expected_checked;
+    let finite_limit = if expected_checked == plan.vec_size {
+        limits.complete
+    } else {
+        limits.compact
+    };
     verify_event_table_independently(
         &checked_plan,
         routed,
         state,
         &certificate.events,
-        event_limit,
+        finite_limit,
     )?;
     if expected_checked < plan.vec_size {
         verify_compact_repetition_basis(&checked_plan, &certificate.events)?;
@@ -554,7 +592,7 @@ fn independent_checked_sample_count(
     plan: &VectorPlan,
     routed: &VerifiedRoutedFir,
     state: Option<&VerifiedVectorStatePlan>,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<u64, VectorEventError> {
     let mut one_sample_plan = plan.clone();
     one_sample_plan.vec_size = 1;
@@ -573,24 +611,18 @@ fn independent_checked_sample_count(
         .checked_mul(logical_samples)
         .and_then(|count| count.checked_add(fixed))
         .ok_or(VectorEventError::EventCountOverflow)?;
-    if complete <= event_limit {
+    if complete <= limits.complete {
         return Ok(plan.vec_size);
-    }
-    if plan.lockstep_bundles.is_empty() {
-        return Err(VectorEventError::EventBoundExceeded {
-            needed: complete,
-            limit: event_limit,
-        });
     }
     let basis = logical_samples.min(COMPACT_EVENT_SAMPLE_BASIS);
     let compact = per_sample
         .checked_mul(basis)
         .and_then(|count| count.checked_add(fixed))
         .ok_or(VectorEventError::EventCountOverflow)?;
-    if compact > event_limit {
+    if compact > limits.compact {
         return Err(VectorEventError::EventBoundExceeded {
             needed: compact,
-            limit: event_limit,
+            limit: limits.compact,
         });
     }
     u64::try_from(basis).map_err(|_| VectorEventError::EventCountOverflow)
@@ -1109,7 +1141,7 @@ fn derive_certificate(
     plan: &VectorPlan,
     routed: &VerifiedRoutedFir,
     state: Option<&VerifiedVectorStatePlan>,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<EventOrderCertificate, VectorEventError> {
     verify_vector_plan(plan)?;
     if routed.plan() != plan {
@@ -1121,12 +1153,22 @@ fn derive_certificate(
         return Err(VectorEventError::StatePlanMismatch);
     }
     let templates = event_templates(plan, routed, state)?;
-    let checked_sample_count = producer_checked_sample_count(plan, &templates, state, event_limit)?;
+    let checked_sample_count = producer_checked_sample_count(plan, &templates, state, limits)?;
     let mut checked_plan = plan.clone();
     checked_plan.vec_size = checked_sample_count;
     let needed = expanded_event_count(&checked_plan, &templates, state)?;
     let events = expand_events(&checked_plan, templates, state)?;
     debug_assert_eq!(events.len(), needed);
+    if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+        eprintln!(
+            "[vector-event-size] logical_samples={} checked_samples={} events={} complete_limit={} compact_limit={}",
+            plan.vec_size,
+            checked_sample_count,
+            events.len(),
+            limits.complete,
+            limits.compact
+        );
+    }
     let contexts = context_events(&events);
     let scalar_loops = canonical_scalar_loops(&checked_plan);
     let vector_loops = routed_layout_loops(&checked_plan, routed);
@@ -1148,26 +1190,20 @@ fn producer_checked_sample_count(
     plan: &VectorPlan,
     templates: &BTreeMap<EventRegion, Vec<VectorEventKind>>,
     state: Option<&VerifiedVectorStatePlan>,
-    event_limit: usize,
+    limits: EventLimits,
 ) -> Result<u64, VectorEventError> {
     let needed = expanded_event_count(plan, templates, state)?;
-    if needed <= event_limit {
+    if needed <= limits.complete {
         return Ok(plan.vec_size);
-    }
-    if plan.lockstep_bundles.is_empty() {
-        return Err(VectorEventError::EventBoundExceeded {
-            needed,
-            limit: event_limit,
-        });
     }
     let basis = plan.vec_size.min(COMPACT_EVENT_SAMPLE_BASIS as u64);
     let mut compact_plan = plan.clone();
     compact_plan.vec_size = basis;
     let compact_needed = expanded_event_count(&compact_plan, templates, state)?;
-    if compact_needed > event_limit {
+    if compact_needed > limits.compact {
         return Err(VectorEventError::EventBoundExceeded {
             needed: compact_needed,
-            limit: event_limit,
+            limit: limits.compact,
         });
     }
     Ok(basis)
@@ -2712,18 +2748,21 @@ mod tests {
     fn event_bound_precheck_accepts_a_small_plan_without_certifying_it() {
         let plan = pure_transport_plan();
         let state = empty_state_plan(&plan);
-        assert_eq!(precheck_state_event_bound(&plan, &state, 14), Ok(()));
+        assert_eq!(
+            precheck_state_event_bound(&plan, &state, EventLimits::uniform(14)),
+            Ok(())
+        );
     }
 
     #[test]
-    fn event_bound_precheck_rejects_a_proven_lower_bound() {
+    fn event_bound_precheck_rejects_when_even_the_compact_basis_is_too_large() {
         let plan = pure_transport_plan();
         let state = empty_state_plan(&plan);
         assert_eq!(
-            precheck_state_event_bound(&plan, &state, 13),
+            precheck_state_event_bound(&plan, &state, EventLimits::uniform(9)),
             Err(VectorEventError::EventLowerBoundExceeded {
-                minimum: 14,
-                limit: 13,
+                minimum: 10,
+                limit: 9,
             })
         );
     }
@@ -2847,7 +2886,7 @@ mod tests {
         for strategy in ALL_STRATEGIES {
             let routed = route(&plan, strategy, true);
             let verified =
-                build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMIT).unwrap();
+                build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS).unwrap();
             let certificate = verified.certificate();
             assert_eq!(certificate.sample_count(), 3);
             assert_eq!(certificate.events().len(), 17);
@@ -2867,7 +2906,7 @@ mod tests {
     fn independent_checker_rejects_order_and_dependency_mutations() {
         let plan = pure_transport_plan();
         let routed = route(&plan, SchedulingStrategy::DepthFirst, true);
-        let verified = build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMIT).unwrap();
+        let verified = build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS).unwrap();
 
         let mut order_mutation = verified.certificate().clone();
         order_mutation.vector_order.swap(2, 3);
@@ -2876,7 +2915,7 @@ mod tests {
                 plan.plan(),
                 &routed,
                 &order_mutation,
-                DEFAULT_EVENT_LIMIT
+                DEFAULT_EVENT_LIMITS
             ),
             Err(VectorEventError::VectorOrderMismatch)
         );
@@ -2888,22 +2927,113 @@ mod tests {
                 plan.plan(),
                 &routed,
                 &dependency_mutation,
-                DEFAULT_EVENT_LIMIT
+                DEFAULT_EVENT_LIMITS
             ),
             Err(VectorEventError::DependencyMismatch)
         );
     }
 
     #[test]
-    fn complete_chunk_expansion_obeys_the_explicit_bound() {
+    fn general_routed_plan_uses_two_sample_basis_only_when_complete_chunk_exceeds_bound() {
         let plan = pure_transport_plan();
         let routed = route(&plan, SchedulingStrategy::DepthFirst, true);
+        let complete = build_event_order_certificate(&plan, &routed, EventLimits::uniform(17))
+            .expect("complete routed certificate");
+        assert_eq!(complete.certificate().checked_sample_count(), 3);
+        assert!(!complete.certificate().is_compact());
+
+        let compact = build_event_order_certificate(&plan, &routed, EventLimits::uniform(16))
+            .expect("compact routed certificate");
+        assert_eq!(compact.certificate().sample_count(), 3);
+        assert_eq!(compact.certificate().checked_sample_count(), 2);
+        assert!(compact.certificate().is_compact());
+
+        let split_budget = build_event_order_certificate(&plan, &routed, EventLimits::new(11, 12))
+            .expect("separate compact budget");
+        assert!(split_budget.certificate().is_compact());
+
         assert_eq!(
-            build_event_order_certificate(&plan, &routed, 16),
+            build_event_order_certificate(&plan, &routed, EventLimits::uniform(11)),
             Err(VectorEventError::EventBoundExceeded {
-                needed: 17,
-                limit: 16,
+                needed: 12,
+                limit: 11,
             })
+        );
+    }
+
+    #[test]
+    fn expanded_and_compact_general_routed_models_have_the_same_two_sample_projection() {
+        fn retained(event: &VectorEvent) -> bool {
+            event.sample.is_none_or(|sample| sample < 2)
+        }
+
+        fn event_key(event: &VectorEvent) -> EventKey {
+            (event.region, event.sample, event.kind.clone())
+        }
+
+        fn projected_order(certificate: &EventOrderCertificate, order: &[u64]) -> Vec<EventKey> {
+            let by_id = certificate
+                .events
+                .iter()
+                .map(|event| (event.event_id, event))
+                .collect::<BTreeMap<_, _>>();
+            order
+                .iter()
+                .map(|event_id| by_id[event_id])
+                .filter(|event| retained(event))
+                .map(event_key)
+                .collect()
+        }
+
+        fn projected_dependencies(
+            certificate: &EventOrderCertificate,
+        ) -> BTreeSet<(EventKey, EventKey)> {
+            let by_id = certificate
+                .events
+                .iter()
+                .map(|event| (event.event_id, event))
+                .collect::<BTreeMap<_, _>>();
+            certificate
+                .dependencies
+                .iter()
+                .filter_map(|dependency| {
+                    let before = by_id[&dependency.before];
+                    let after = by_id[&dependency.after];
+                    (retained(before) && retained(after))
+                        .then(|| (event_key(before), event_key(after)))
+                })
+                .collect()
+        }
+
+        let plan = pure_transport_plan();
+        let routed = route(&plan, SchedulingStrategy::DepthFirst, true);
+        let expanded = build_event_order_certificate(&plan, &routed, EventLimits::uniform(17))
+            .expect("expanded certificate")
+            .into_certificate();
+        let compact = build_event_order_certificate(&plan, &routed, EventLimits::uniform(16))
+            .expect("compact certificate")
+            .into_certificate();
+
+        assert_eq!(
+            expanded
+                .events
+                .iter()
+                .filter(|event| retained(event))
+                .map(event_key)
+                .collect::<Vec<_>>(),
+            compact.events.iter().map(event_key).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            projected_order(&expanded, &expanded.scalar_order),
+            projected_order(&compact, &compact.scalar_order)
+        );
+        assert_eq!(
+            projected_order(&expanded, &expanded.vector_order),
+            projected_order(&compact, &compact.vector_order)
+        );
+        assert_eq!(
+            projected_dependencies(&expanded),
+            projected_dependencies(&compact)
         );
     }
 
@@ -2911,7 +3041,7 @@ mod tests {
     fn lockstep_uses_two_sample_compact_basis_when_full_chunk_exceeds_bound() {
         let plan = compact_lockstep_plan();
         let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
-        let verified = build_event_order_certificate(&plan, &routed, 10)
+        let verified = build_event_order_certificate(&plan, &routed, EventLimits::uniform(10))
             .expect("compact lockstep certificate");
         let certificate = verified.certificate();
         assert_eq!(certificate.sample_count(), 32);
@@ -2924,13 +3054,18 @@ mod tests {
     fn compact_checker_rejects_sample_basis_and_template_mutations() {
         let plan = compact_lockstep_plan();
         let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
-        let verified = build_event_order_certificate(&plan, &routed, 10)
+        let verified = build_event_order_certificate(&plan, &routed, EventLimits::uniform(10))
             .expect("compact lockstep certificate");
 
         let mut basis_mutation = verified.certificate().clone();
         basis_mutation.checked_sample_count = 1;
         assert_eq!(
-            verify_event_order_certificate(plan.plan(), &routed, &basis_mutation, 10),
+            verify_event_order_certificate(
+                plan.plan(),
+                &routed,
+                &basis_mutation,
+                EventLimits::uniform(10)
+            ),
             Err(VectorEventError::CompactRepetitionMismatch)
         );
 
@@ -2942,7 +3077,12 @@ mod tests {
             .expect("sample-one template");
         sample_one.kind = VectorEventKind::Definition { signal_id: 999 };
         assert_eq!(
-            verify_event_order_certificate(plan.plan(), &routed, &template_mutation, 10),
+            verify_event_order_certificate(
+                plan.plan(),
+                &routed,
+                &template_mutation,
+                EventLimits::uniform(10)
+            ),
             Err(VectorEventError::EventTableMismatch)
         );
     }
@@ -2952,8 +3092,9 @@ mod tests {
         let plan = compact_lockstep_plan();
         let state = compact_lockstep_state_plan(&plan);
         let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
-        let verified = build_state_event_order_certificate(&plan, &routed, &state, 12)
-            .expect("compact state certificate");
+        let verified =
+            build_state_event_order_certificate(&plan, &routed, &state, EventLimits::uniform(12))
+                .expect("compact state certificate");
         assert!(verified.certificate().is_compact());
 
         let mut mutation = verified.into_certificate();
@@ -2964,7 +3105,41 @@ mod tests {
             .dependencies
             .retain(|edge| *edge != EventDependency { before, after });
         assert_eq!(
-            verify_state_event_order_certificate(plan.plan(), &routed, &state, &mutation, 12),
+            verify_state_event_order_certificate(
+                plan.plan(),
+                &routed,
+                &state,
+                &mutation,
+                EventLimits::uniform(12)
+            ),
+            Err(VectorEventError::DependencyMismatch)
+        );
+    }
+
+    #[test]
+    fn general_recursive_plan_compacts_and_keeps_the_carried_state_boundary() {
+        let (plan, state) = recursive_event_plan();
+        let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
+        let verified =
+            build_state_event_order_certificate(&plan, &routed, &state, EventLimits::new(0, 64))
+                .expect("compact general recursion certificate");
+        assert!(verified.certificate().is_compact());
+
+        let mut mutation = verified.into_certificate();
+        let recursion_steps = recursion_step_events(&mutation.events);
+        let before = recursion_steps[&(0, 0, 7)];
+        let after = recursion_steps[&(0, 1, 7)];
+        mutation
+            .dependencies
+            .retain(|edge| *edge != EventDependency { before, after });
+        assert_eq!(
+            verify_state_event_order_certificate(
+                plan.plan(),
+                &routed,
+                &state,
+                &mutation,
+                EventLimits::new(0, 64)
+            ),
             Err(VectorEventError::DependencyMismatch)
         );
     }
@@ -2974,7 +3149,7 @@ mod tests {
         let plan = split_state_plan();
         let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
         assert!(matches!(
-            build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMIT),
+            build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS),
             Err(VectorEventError::FissionSafeViolation { .. })
         ));
     }
@@ -2984,7 +3159,7 @@ mod tests {
         let plan = split_effect_plan(EffectAtom::WriteOutput(0), EffectAtom::WriteOutput(0));
         let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
         assert!(matches!(
-            build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMIT),
+            build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS),
             Err(VectorEventError::FissionSafeViolation { .. })
         ));
     }
@@ -2993,7 +3168,7 @@ mod tests {
     fn conflicting_state_colocated_in_one_serial_loop_is_accepted() {
         let plan = colocated_state_plan();
         let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
-        build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMIT).unwrap();
+        build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS).unwrap();
     }
 
     #[test]
@@ -3013,7 +3188,7 @@ mod tests {
         for strategy in ALL_STRATEGIES {
             let routed = route_all_transports(&plan, strategy);
             let verified =
-                build_state_event_order_certificate(&plan, &routed, &state, DEFAULT_EVENT_LIMIT)
+                build_state_event_order_certificate(&plan, &routed, &state, DEFAULT_EVENT_LIMITS)
                     .unwrap();
             let certificate = verified.certificate();
             assert!(certificate.events().iter().any(|event| matches!(
@@ -3052,7 +3227,7 @@ mod tests {
         for strategy in ALL_STRATEGIES {
             let routed = route_all_transports(&plan, strategy);
             let verified =
-                build_state_event_order_certificate(&plan, &routed, &state, DEFAULT_EVENT_LIMIT)
+                build_state_event_order_certificate(&plan, &routed, &state, DEFAULT_EVENT_LIMITS)
                     .unwrap();
             let certificate = verified.certificate();
             let mut steps = certificate

@@ -86,8 +86,12 @@ cargo run -p xtask -- vector-coverage-merge --reports /tmp/vector-reports
 `vector-coverage-check` validates the baseline is complete, checks its
 universally certified benchmark list, recompiles every claimed certified pair,
 and requires `Certified` status, `CertifiedVector` effective mode, no fallback
-detail, and the canonical `vindex`/`vcount` chunk driver. The Ubuntu CI job
-installs the Faust standard libraries before running this check.
+detail, and the canonical `vindex`/`vcount` chunk driver. It checks up to four
+modes concurrently while preserving deterministic mode-ordered reporting. Each
+worker owns its compiler instances and an explicit 16 MiB stack for the
+compiler's recursive traversals, and every mode/DSP pair still receives the same
+fail-closed checks. The Ubuntu CI job installs the Faust standard libraries
+before running this check.
 
 ```bash
 cargo run -p xtask -- vector-coverage-check

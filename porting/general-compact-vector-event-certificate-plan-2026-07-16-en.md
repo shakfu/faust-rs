@@ -1,7 +1,7 @@
 # General Compact Vector Event Certificate Plan
 
 Date: 2026-07-16
-Status: planned
+Status: implemented and validated (Phase C)
 Scope: checked signal-level vector event certification for every routed plan
 
 ## 1. Objective and baseline
@@ -16,13 +16,16 @@ Commit `a85da004` introduced a canonical two-sample repetition basis for
 lockstep plans. Routed loop templates are already static per sample, so this
 phase extends the same executable-certificate argument to every routed plan
 whose producer and independent checker can establish sample translation
-invariance. The event limit remains 4,096 and the requested `vec_size` is never
-reduced.
+invariance. Complete evidence retains the 4,096-event limit, compact evidence
+uses the separately approved 32,768-event limit, and the requested `vec_size`
+is never reduced.
 
-Target coverage is approximately 75 of the 93 DSPs in every float/double,
-`-lv 0/1`, and `-ss 0..3` mode. This is a target, not permission to weaken a
-checker: any plan whose repetition obligations cannot be reconstructed remains
-a fail-closed scalar fallback with `FRS-VEC-FALLBACK-EVENTS`.
+The review's target estimate was approximately 75 of the 93 DSPs in every
+float/double, `-lv 0/1`, and `-ss 0..3` mode. The measured result is 62/93 in
+all 16 modes. All 21 size-only event fallbacks pass the compact gate: 13 become
+fully certified and eight reach a later fail-closed scheduling or lowering
+diagnostic. The five remaining `FRS-VEC-FALLBACK-EVENTS` cases are genuine
+`FissionSafe` reversals, not event-bound failures.
 
 ## 2. Canonical finite model
 
@@ -46,6 +49,10 @@ dependency. Translation invariance then applies the same obligations to every
 For `N < 2`, the complete model is retained. `sample_count` always records the
 requested logical chunk length; `checked_sample_count` records the finite basis
 length and is never used to alter FIR lowering or the physical chunk driver.
+The complete form retains its 4,096-event limit. Following explicit user
+approval after the first sweep, the compact form has a separately versioned
+32,768-event limit. The largest measured basis is 28,843 events for f64
+`reverb_designer.dsp`.
 
 ## 3. Producer obligations
 
@@ -109,7 +116,7 @@ recursion/delay, fused-group, lockstep, and clock-island shapes. The literal
 expanded model remains a test oracle only and is not used by the production
 checker.
 
-## 6. Rollout
+## 6. Rollout and result
 
 ### C0 — plan and baseline
 
@@ -117,13 +124,20 @@ checker.
 - Capture the 16-mode 49/93 coverage baseline and the exact 26 event-fallback
   DSPs.
 
+Completed in commit `68abe4cd`.
+
 ### C1 — general compact producer/checker
 
 - Remove lockstep-only eligibility from the route-independent precheck,
   producer basis selection, and checker basis reconstruction.
 - Add explicit repetition-eligibility reconstruction and rejecting mutations.
 - Add expanded/compact differential tests for representative routed plans.
-- Keep the event limit and all fallback reason codes unchanged.
+- Keep the complete-evidence limit and all fallback reason codes unchanged;
+  version any separately approved compact-evidence limit explicitly.
+
+Completed with separate complete/compact limits after the first implementation
+sweep proved that a shared 4,096 limit retained nine size-only fallbacks. The
+error taxonomy and fail-closed behavior are unchanged.
 
 ### C2 — corpus qualification
 
@@ -135,6 +149,12 @@ checker.
   list from those reports.
 - Run the native C++ impulse oracle for every newly certified DSP: scalar
   `-ss 0..3` plus `-lv 0/1 x -ss 0..3`, 60,000 samples per response.
+
+Completed for 13 newly certified DSPs, producing 156 successful native C++
+comparisons. `smoothdelay.dsp` is certified in all 16 coverage modes. The
+versioned baseline and universal benchmark list now contain 62 DSPs.
+The exact retention gate recompiles all 992 certified mode/DSP pairs using at
+most four isolated workers and reports results in deterministic mode order.
 
 ## 7. Acceptance gates
 
@@ -162,5 +182,6 @@ The phase is complete only when:
   expanded test oracles.
 - **Accidental chunk shrink:** assert logical `sample_count == plan.vec_size`
   and retain existing chunk-driver coverage checks.
-- **Resource growth after coverage expansion:** retain the 4,096 finite bound
-  and run the release compile-budget gate after qualification.
+- **Resource growth after coverage expansion:** retain the 4,096 complete bound
+  and the separately versioned 32,768 compact bound, then run the release
+  compile-budget gate after qualification.
