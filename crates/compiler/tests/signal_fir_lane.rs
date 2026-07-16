@@ -18,6 +18,16 @@ fn corpus_path(file: &str) -> PathBuf {
         .join(file)
 }
 
+fn impulse_dsp_path(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("impulse-tests")
+        .join("dsp")
+        .join(file)
+}
+
 #[test]
 fn dump_cpp_fastlane_compiles_fixture() {
     let compiler = Compiler::new();
@@ -507,6 +517,46 @@ fn fastlane_compiles_sine_phasor_fixture() {
         "ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_38_sine_phasor\");"
     ));
     assert!(fast_c.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
+}
+
+#[test]
+fn scalar_cpp_reuses_non_aliasing_recursive_state_load_without_hiding_shift() {
+    // APF imports the full maxmsp library. Compile it on an explicitly sized
+    // test thread so the structural regression remains portable across test
+    // runners with a small default thread stack.
+    let cpp = std::thread::Builder::new()
+        .name("apf-load-cse".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            Compiler::new()
+                .compile_file_default_to_cpp_with_lane(
+                    &impulse_dsp_path("APF.dsp"),
+                    &codegen::backends::cpp::CppOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .unwrap_or_else(|error| panic!("APF scalar C++ compilation failed: {error}"))
+        })
+        .expect("APF load-CSE test thread must start")
+        .join()
+        .expect("APF load-CSE test thread must not panic");
+    let compute = cpp
+        .find("void compute(")
+        .map(|start| &cpp[start..])
+        .unwrap_or_else(|| panic!("APF generated no compute method:\n{cpp}"));
+
+    assert!(
+        compute.contains("float fTemp0 = fRec204[1];"),
+        "the first recursive-state load remains materialized:\n{compute}"
+    );
+    assert!(
+        !compute.contains("float fTemp1 = fRec204[1];"),
+        "the duplicate direct state load must reuse fTemp0:\n{compute}"
+    );
+    assert!(
+        compute.contains("fRec204[2] = fRec204[1];")
+            && compute.contains("fRec204[1] = fRec204[0];"),
+        "the required ordered recursive history shift must remain explicit:\n{compute}"
+    );
 }
 
 #[test]

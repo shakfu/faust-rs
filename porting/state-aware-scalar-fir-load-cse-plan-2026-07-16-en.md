@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: in progress (Phases A-C complete)
+Status: in progress (Phases A-D complete)
 
 ## 1. Problem Statement
 
@@ -136,6 +136,14 @@ history updates plus same-index, dynamic-index, call, and control barriers.
 
 Pass criteria: all affected backends accept the resulting FIR without a new
 backend-specific exception.
+
+Completion (2026-07-16): load reuse runs immediately after ordinary scalar
+materialization, because that pass supplies the stable `fTemp*` cache keys.
+The integration changes shared scalar FIR only; C-family `Drop` emission stays
+an unrelated textual cleanup. A C++ APF structural witness confirms one
+materialized `fRec204[1]` read and retains both explicit history-shift stores.
+It compiles the full library fixture on an explicitly sized test thread, which
+keeps the test-runner stack limit out of compiler semantics.
 
 ### Phase E — Differential validation and performance check
 

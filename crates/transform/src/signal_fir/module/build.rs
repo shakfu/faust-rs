@@ -607,6 +607,11 @@ pub(crate) fn build_module<'a>(
                 "iTemp",
                 lower.name_gen.itemp_counter,
             );
+            // The ordinary CSE pass creates the stable `fTemp*` declarations
+            // that the state-aware pass may reuse. Keeping this ordering means
+            // the latter only removes a proven-redundant direct table read; it
+            // never changes scalar scheduling or synthesizes a new temporary.
+            cse::reuse_straight_line_scalar_loads(&mut lower.store, sample_loop_statements);
         }
     }
 
