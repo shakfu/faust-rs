@@ -142,6 +142,130 @@ fn is_trivial_value(store: &FirStore, node: FirId) -> bool {
     )
 }
 
+// ─── Conservative scalar table-effect summary ───────────────────────────────
+
+/// Canonical table subscript accepted by the scalar load-reuse proof.
+///
+/// Only literal `Int32` subscripts are exact in the initial implementation.
+/// Any other expression is deliberately `Unknown`: treating two dynamic
+/// indices as different when they can alias would change recursive DSP output,
+/// whereas treating them as aliases only misses a reuse opportunity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CanonicalTableIndex {
+    Constant(i32),
+    Unknown,
+}
+
+/// One table location in the private scalar FIR effect model.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TableLocation {
+    name: String,
+    access: AccessType,
+    index: CanonicalTableIndex,
+}
+
+/// Effects that can invalidate a straight-line scalar state-load cache.
+///
+/// This is intentionally private to scalar FIR CSE. It is not a general FIR
+/// effect system: its only contract is to avoid reusing a table read after a
+/// potentially aliasing write or an unsupported effect. C++ provenance is the
+/// ordered `LoadVarInst` / `StoreVarInst` instruction stream emitted by
+/// `InstructionsCompiler`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScalarLoadEffect {
+    ReadsTable(TableLocation),
+    WritesTable(TableLocation),
+    UnknownBarrier,
+}
+
+/// Returns the scalar cache key portion that can be proven from `index`.
+fn canonical_table_index(store: &FirStore, index: FirId) -> CanonicalTableIndex {
+    match match_fir(store, index) {
+        FirMatch::Int32 { value, .. } => CanonicalTableIndex::Constant(value),
+        _ => CanonicalTableIndex::Unknown,
+    }
+}
+
+/// Returns whether evaluating `value` has an effect that the local load cache
+/// does not model. Foreign calls and `TeeVar` writes are barriers by default.
+fn has_unknown_value_effect(store: &FirStore, value: FirId) -> bool {
+    match match_fir(store, value) {
+        FirMatch::FunCall { .. } | FirMatch::TeeVar { .. } | FirMatch::NewDsp { .. } => true,
+        _ => value_children_of(store, value)
+            .into_iter()
+            .any(|child| has_unknown_value_effect(store, child)),
+    }
+}
+
+/// Summarizes the effects of one straight-line statement for scalar load CSE.
+///
+/// Nested control flow is a scope boundary and therefore an unknown barrier.
+/// `StoreVar` is also a barrier: although ordinary local writes do not alias a
+/// table today, this conservative rule prevents the cache from becoming an
+/// accidental data-flow/scheduling pass.
+fn scalar_load_effects(store: &FirStore, stmt: FirId) -> Vec<ScalarLoadEffect> {
+    let matched = match_fir(store, stmt);
+    match matched {
+        FirMatch::DeclareVar {
+            init: Some(init), ..
+        }
+        | FirMatch::Drop(init)
+        | FirMatch::Return(Some(init)) => {
+            if has_unknown_value_effect(store, init) {
+                vec![ScalarLoadEffect::UnknownBarrier]
+            } else if let FirMatch::LoadTable {
+                name,
+                access,
+                index,
+                ..
+            } = match_fir(store, init)
+            {
+                vec![ScalarLoadEffect::ReadsTable(TableLocation {
+                    name,
+                    access,
+                    index: canonical_table_index(store, index),
+                })]
+            } else {
+                Vec::new()
+            }
+        }
+        FirMatch::StoreTable {
+            name,
+            access,
+            index,
+            value,
+        } => {
+            let mut effects = Vec::new();
+            if has_unknown_value_effect(store, index) || has_unknown_value_effect(store, value) {
+                effects.push(ScalarLoadEffect::UnknownBarrier);
+            }
+            effects.push(ScalarLoadEffect::WritesTable(TableLocation {
+                name,
+                access,
+                index: canonical_table_index(store, index),
+            }));
+            effects
+        }
+        FirMatch::ShiftArrayVar { name, access, .. } => {
+            vec![ScalarLoadEffect::WritesTable(TableLocation {
+                name,
+                access,
+                index: CanonicalTableIndex::Unknown,
+            })]
+        }
+        FirMatch::StoreVar { .. }
+        | FirMatch::If { .. }
+        | FirMatch::Control { .. }
+        | FirMatch::Block(_)
+        | FirMatch::ForLoop { .. }
+        | FirMatch::SimpleForLoop { .. }
+        | FirMatch::IteratorForLoop { .. }
+        | FirMatch::WhileLoop { .. }
+        | FirMatch::DeclareFun { .. } => vec![ScalarLoadEffect::UnknownBarrier],
+        _ => Vec::new(),
+    }
+}
+
 // ─── CSE materialization ────────────────────────────────────────────────────
 
 /// Materializes multi-referenced value nodes into temporary variables, **per
@@ -588,5 +712,62 @@ mod tests {
             FirMatch::StoreTable { ref name, index, .. }
                 if name == "state" && matches!(match_fir(&store, index), FirMatch::Int32 { value: 1, .. })
         ));
+    }
+
+    #[test]
+    fn scalar_load_effects_distinguish_exact_and_dynamic_table_writes() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let one = b.int32(1);
+        let dynamic = b.load_var("i", AccessType::Stack, FirType::Int32);
+        let read = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let read_stmt = b.declare_var("fTemp0", FirType::Float32, AccessType::Stack, Some(read));
+        let exact_write = b.store_table("state", AccessType::Struct, one, read);
+        let dynamic_write = b.store_table("state", AccessType::Struct, dynamic, read);
+
+        assert_eq!(
+            scalar_load_effects(&store, read_stmt),
+            vec![ScalarLoadEffect::ReadsTable(TableLocation {
+                name: "state".to_string(),
+                access: AccessType::Struct,
+                index: CanonicalTableIndex::Constant(1),
+            })]
+        );
+        assert_eq!(
+            scalar_load_effects(&store, exact_write),
+            vec![ScalarLoadEffect::WritesTable(TableLocation {
+                name: "state".to_string(),
+                access: AccessType::Struct,
+                index: CanonicalTableIndex::Constant(1),
+            })]
+        );
+        assert_eq!(
+            scalar_load_effects(&store, dynamic_write),
+            vec![ScalarLoadEffect::WritesTable(TableLocation {
+                name: "state".to_string(),
+                access: AccessType::Struct,
+                index: CanonicalTableIndex::Unknown,
+            })]
+        );
+    }
+
+    #[test]
+    fn scalar_load_effects_treat_calls_and_nested_control_as_barriers() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let call = b.fun_call("foreign", &[], FirType::Float32);
+        let call_stmt = b.drop_(call);
+        let cond = b.bool_(true);
+        let body = b.null_statement();
+        let guarded = b.if_(cond, body, None);
+
+        assert_eq!(
+            scalar_load_effects(&store, call_stmt),
+            vec![ScalarLoadEffect::UnknownBarrier]
+        );
+        assert_eq!(
+            scalar_load_effects(&store, guarded),
+            vec![ScalarLoadEffect::UnknownBarrier]
+        );
     }
 }

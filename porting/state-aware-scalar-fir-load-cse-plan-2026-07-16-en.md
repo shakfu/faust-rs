@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: in progress (Phase A complete)
+Status: in progress (Phases A-B complete)
 
 ## 1. Problem Statement
 
@@ -94,6 +94,12 @@ illegal reuse matrix is added with the effect summary in Phase B.
 
 Pass criteria: unit tests prove every invalidation category and the summary is
 private to `transform`/scalar lowering.
+
+Completion (2026-07-16): the private summary recognizes direct table reads,
+constant-index writes, dynamic-index writes, history shifts, and conservative
+barriers. The initial exact-index proof accepts only literal `Int32` indices;
+calls, tee writes, local stores, and nested control invalidate reuse rather
+than relying on an unproven purity or alias claim.
 
 ### Phase C — Add straight-line load reuse
 
