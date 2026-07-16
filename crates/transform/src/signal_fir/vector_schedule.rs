@@ -314,6 +314,7 @@ mod tests {
                 .map(|loop_id| SignalRecord {
                     signal_id: loop_id,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,

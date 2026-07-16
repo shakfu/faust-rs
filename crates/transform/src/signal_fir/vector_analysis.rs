@@ -584,6 +584,8 @@ pub struct SignalUseInfo {
     pub has_out_delay_occurrence: bool,
     /// Whether this node is itself a general `sigDelay` read.
     pub is_delay_read: bool,
+    /// Whether this node is a structural `SYMREC`/`SYMREF` tuple carrier.
+    pub is_symbolic_recursion_carrier: bool,
     /// Projection facts when this signal is a symbolic recursion projection.
     pub recursive_projection: Option<RecursiveProjection>,
     /// Exactly `Int | Real | Input | FConst`.
@@ -1699,6 +1701,8 @@ fn ensure_record(
                 delay_reads: 0,
                 has_out_delay_occurrence: false,
                 is_delay_read: matches!(match_sig(analysis.arena, sig), SigMatch::Delay(_, _)),
+                is_symbolic_recursion_carrier: match_sym_rec(analysis.arena, sig).is_some()
+                    || match_sym_ref(analysis.arena, sig).is_some(),
                 recursive_projection,
                 very_simple,
                 effects: Vec::new(),

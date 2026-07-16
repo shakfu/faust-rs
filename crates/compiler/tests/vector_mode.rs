@@ -462,7 +462,8 @@ fn production_fir_reports_certified_and_named_fallback_paths() {
             assert_eq!(
                 output.vector_pipeline_status,
                 VectorPipelineStatus::Certified,
-                "{name} must use the checked vector path under {strategy:?}"
+                "{name} must use the checked vector path under {strategy:?}: {:?}",
+                output.vector_pipeline_detail
             );
         }
     }

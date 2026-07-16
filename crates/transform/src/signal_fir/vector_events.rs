@@ -2111,6 +2111,7 @@ mod tests {
         SignalRecord {
             signal_id,
             value_type: ValueType::Real,
+            structural: false,
             rate: Rate::Samp,
             vectorability: if effects.is_empty() {
                 Vectorability::Vect

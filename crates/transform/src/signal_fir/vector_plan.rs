@@ -71,6 +71,9 @@ pub enum VectorPlanBuildError {
     MissingRecord { signal_id: u32 },
     /// A compute-visible sample signal was not reached by occurrence facts.
     SampleSignalUnplaced { signal_id: u32 },
+    /// A possible zero-delay state read crosses loops without one serial
+    /// execution envelope.
+    UnfusedImmediateDelayCrossing { producer: u64, consumer: u64 },
     /// The independent plan verifier rejected the constructed DTO.
     Verification(VectorPlanError),
 }
@@ -85,6 +88,10 @@ impl fmt::Display for VectorPlanBuildError {
             Self::SampleSignalUnplaced { signal_id } => {
                 write!(f, "sample signal {signal_id} has no vector placement")
             }
+            Self::UnfusedImmediateDelayCrossing { producer, consumer } => write!(
+                f,
+                "state-mediated immediate delay crosses loop {producer} -> {consumer} without a fused serial group"
+            ),
             Self::Verification(error) => write!(f, "constructed vector plan is invalid: {error}"),
         }
     }
@@ -109,6 +116,8 @@ struct PlacementState<'a> {
     records: BTreeMap<u32, &'a DecorationRecord>,
     children: BTreeMap<u32, Vec<u32>>,
     delayed_values: BTreeSet<u32>,
+    delayed_pairs: BTreeSet<(u32, u32)>,
+    structural_carriers: BTreeSet<u32>,
     placement: BTreeMap<u32, Placement>,
     contexts: BTreeMap<u32, BTreeSet<u64>>,
     roots_by_loop: BTreeMap<u64, BTreeSet<u64>>,
@@ -122,7 +131,15 @@ impl<'a> PlacementState<'a> {
             .get(&signal_id)
             .copied()
             .ok_or(VectorPlanBuildError::MissingRecord { signal_id })?;
-        if !requires_sample_execution(record, self.delayed_values.contains(&signal_id)) {
+        if self.structural_carriers.contains(&signal_id) {
+            self.placement.insert(signal_id, Placement::Inline);
+            return Ok(());
+        }
+        if !requires_sample_execution(
+            record,
+            self.delayed_values.contains(&signal_id),
+            self.structural_carriers.contains(&signal_id),
+        ) {
             self.placement.insert(signal_id, Placement::Control);
             return Ok(());
         }
@@ -192,11 +209,31 @@ pub fn build_vector_plan(
         .iter()
         .filter_map(|dependency| (dependency.delay > 0).then_some(dependency.to))
         .collect::<BTreeSet<_>>();
+    let delayed_pairs = certificate
+        .occurrence_dependencies
+        .iter()
+        .filter_map(|dependency| (dependency.delay > 0).then_some((dependency.from, dependency.to)))
+        .collect::<BTreeSet<_>>();
     let records = certificate
         .records
         .iter()
         .map(|record| (record.signal_id, record))
         .collect::<BTreeMap<_, _>>();
+    let recursion_groups = certificate
+        .records
+        .iter()
+        .filter_map(|record| {
+            record
+                .recursive_projection
+                .map(|projection| projection.group)
+        })
+        .collect::<BTreeSet<_>>();
+    let structural_carriers = certificate
+        .records
+        .iter()
+        .filter(|record| record.is_symbolic_recursion_carrier)
+        .map(|record| record.signal_id)
+        .collect::<BTreeSet<_>>();
     let separations = certificate
         .records
         .iter()
@@ -216,8 +253,11 @@ pub fn build_vector_plan(
 
     let inline_sample_root = certificate.roots.iter().any(|root| {
         records.get(root).is_some_and(|record| {
-            requires_sample_execution(record, delayed_values.contains(root))
-                && separations[root] == LoopSeparation::Inline
+            requires_sample_execution(
+                record,
+                delayed_values.contains(root),
+                structural_carriers.contains(root),
+            ) && separations[root] == LoopSeparation::Inline
         })
     });
     let mut next_loop = 0_u64;
@@ -227,15 +267,6 @@ pub fn build_vector_plan(
         id
     });
 
-    let recursion_groups = certificate
-        .records
-        .iter()
-        .filter_map(|record| {
-            record
-                .recursive_projection
-                .map(|projection| projection.group)
-        })
-        .collect::<BTreeSet<_>>();
     let mut recursion_loop = BTreeMap::new();
     for group in recursion_groups {
         recursion_loop.insert(group, next_loop);
@@ -244,8 +275,11 @@ pub fn build_vector_plan(
 
     let mut owner = BTreeMap::<u32, u64>::new();
     for record in &certificate.records {
-        if requires_sample_execution(record, delayed_values.contains(&record.signal_id))
-            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+        if requires_sample_execution(
+            record,
+            delayed_values.contains(&record.signal_id),
+            structural_carriers.contains(&record.signal_id),
+        ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && separations[&record.signal_id] == LoopSeparation::SeparateSerial
         {
             let group = record
@@ -256,8 +290,11 @@ pub fn build_vector_plan(
         }
     }
     for record in &certificate.records {
-        if requires_sample_execution(record, delayed_values.contains(&record.signal_id))
-            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+        if requires_sample_execution(
+            record,
+            delayed_values.contains(&record.signal_id),
+            structural_carriers.contains(&record.signal_id),
+        ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && separations[&record.signal_id] == LoopSeparation::SeparateVectorizable
         {
             owner.insert(record.signal_id, next_loop);
@@ -290,13 +327,21 @@ pub fn build_vector_plan(
         records,
         children,
         delayed_values: delayed_values.clone(),
+        delayed_pairs,
+        structural_carriers: structural_carriers.clone(),
         placement: BTreeMap::new(),
         contexts: BTreeMap::new(),
         roots_by_loop: BTreeMap::new(),
         visited: BTreeSet::new(),
     };
     for record in &certificate.records {
-        if !requires_sample_execution(record, delayed_values.contains(&record.signal_id)) {
+        if structural_carriers.contains(&record.signal_id) {
+            state.placement.insert(record.signal_id, Placement::Inline);
+        } else if !requires_sample_execution(
+            record,
+            delayed_values.contains(&record.signal_id),
+            structural_carriers.contains(&record.signal_id),
+        ) {
             state.placement.insert(record.signal_id, Placement::Control);
         }
     }
@@ -317,7 +362,11 @@ pub fn build_vector_plan(
             .get(&root)
             .copied()
             .ok_or(VectorPlanBuildError::MissingRecord { signal_id: root })?;
-        if !requires_sample_execution(record, delayed_values.contains(&root)) {
+        if !requires_sample_execution(
+            record,
+            delayed_values.contains(&root),
+            structural_carriers.contains(&root),
+        ) {
             continue;
         }
         let loop_id = match state.placement.get(&root).copied() {
@@ -354,8 +403,11 @@ pub fn build_vector_plan(
             .records
             .iter()
             .filter(|record| {
-                requires_sample_execution(record, delayed_values.contains(&record.signal_id))
-                    && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+                requires_sample_execution(
+                    record,
+                    delayed_values.contains(&record.signal_id),
+                    structural_carriers.contains(&record.signal_id),
+                ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
                     && !state.placement.contains_key(&record.signal_id)
             })
             .map(|record| record.signal_id)
@@ -401,8 +453,11 @@ pub fn build_vector_plan(
     }
     trace_stage("placement");
     for record in &certificate.records {
-        if requires_sample_execution(record, delayed_values.contains(&record.signal_id))
-            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+        if requires_sample_execution(
+            record,
+            delayed_values.contains(&record.signal_id),
+            structural_carriers.contains(&record.signal_id),
+        ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && !state.placement.contains_key(&record.signal_id)
         {
             if timing_enabled {
@@ -446,6 +501,7 @@ pub fn build_vector_plan(
 
     let mut cross_uses = BTreeSet::<(u32, u64, u64)>::new();
     let mut delayed_edges = BTreeSet::<LoopEdge>::new();
+    let mut immediate_delay_edges = BTreeSet::<LoopEdge>::new();
     let mut effect_edges = BTreeSet::<LoopEdge>::new();
     for dependency in &certificate.dependencies {
         add_dependency_edges(
@@ -453,6 +509,7 @@ pub fn build_vector_plan(
             &state,
             &mut cross_uses,
             &mut delayed_edges,
+            &mut immediate_delay_edges,
             &mut effect_edges,
         )?;
     }
@@ -486,6 +543,7 @@ pub fn build_vector_plan(
         .map(|record| SignalRecord {
             signal_id: u64::from(record.signal_id),
             value_type: value_type(&record.sig_type),
+            structural: record.is_symbolic_recursion_carrier,
             rate: rate(record.variability),
             vectorability: vectorability(record.vectorability),
             clock_id: record
@@ -563,6 +621,20 @@ pub fn build_vector_plan(
 
     let fused_serial_groups =
         build_fused_serial_groups(certificate, &state, &loop_ids, &data_edges, &transports);
+    for edge in &immediate_delay_edges {
+        if !fused_serial_groups.iter().any(|group| {
+            group
+                .member_loop_ids
+                .binary_search(&edge.dependency)
+                .is_ok()
+                && group.member_loop_ids.binary_search(&edge.consumer).is_ok()
+        }) {
+            return Err(VectorPlanBuildError::UnfusedImmediateDelayCrossing {
+                producer: edge.dependency,
+                consumer: edge.consumer,
+            });
+        }
+    }
     trace_stage("fused-groups");
     let plan = VectorPlan {
         vec_size,
@@ -808,6 +880,7 @@ fn add_dependency_edges(
     state: &PlacementState<'_>,
     cross_uses: &mut BTreeSet<(u32, u64, u64)>,
     delayed_edges: &mut BTreeSet<LoopEdge>,
+    immediate_delay_edges: &mut BTreeSet<LoopEdge>,
     effect_edges: &mut BTreeSet<LoopEdge>,
 ) -> Result<(), VectorPlanBuildError> {
     if state.placement.get(&dependency.from) == Some(&Placement::Control) {
@@ -833,6 +906,19 @@ fn add_dependency_edges(
             continue;
         }
         match dependency.kind {
+            DepKind::Immediate
+                if state.records[&dependency.from].is_delay_read
+                    && state
+                        .delayed_pairs
+                        .contains(&(dependency.from, dependency.to)) =>
+            {
+                let edge = LoopEdge {
+                    consumer,
+                    dependency: producer,
+                };
+                delayed_edges.insert(edge);
+                immediate_delay_edges.insert(edge);
+            }
             DepKind::Immediate | DepKind::Control => {
                 cross_uses.insert((dependency.to, producer, consumer));
             }
@@ -1183,13 +1269,17 @@ fn scalar_value_type(nature: Nature) -> ValueType {
 /// other temporal closures. A generic sample-rate *use context* alone is
 /// deliberately insufficient: the literal amount of a fixed delay is visited
 /// from a sample expression but remains a pure control value.
-fn requires_sample_execution(record: &DecorationRecord, is_delayed_value: bool) -> bool {
-    record.variability == Variability::Samp
-        || is_delayed_value
-        || record
-            .effects
-            .iter()
-            .any(|effect| matches!(effect, EffectAtom::ReadState(_) | EffectAtom::WriteState(_)))
+fn requires_sample_execution(
+    record: &DecorationRecord,
+    is_delayed_value: bool,
+    is_structural_carrier: bool,
+) -> bool {
+    !is_structural_carrier
+        && (record.variability == Variability::Samp
+            || is_delayed_value
+            || record.effects.iter().any(|effect| {
+                matches!(effect, EffectAtom::ReadState(_) | EffectAtom::WriteState(_))
+            }))
 }
 
 #[cfg(test)]
@@ -1436,20 +1526,15 @@ mod tests {
                 .filter_map(|record| record.recursive_projection)
                 .all(|projection| u64::from(projection.group) == group_id)
         );
-        let fused = plan
-            .fused_serial_groups
-            .iter()
-            .find(|group| group.owner_loop_id == recursive[0].loop_id)
-            .expect("multi-projection delayed recursion must have one fused serial slice");
         let writer_projection_indices = decorations
             .certificate()
             .records
             .iter()
             .filter(|record| {
-                fused
-                    .state_write_signal_ids
-                    .binary_search(&u64::from(record.signal_id))
-                    .is_ok()
+                plan.signals.iter().any(|signal| {
+                    signal.signal_id == u64::from(record.signal_id)
+                        && signal.placement == Placement::Owned(recursive[0].loop_id)
+                })
             })
             .filter_map(|record| {
                 record
@@ -1462,13 +1547,9 @@ mod tests {
             .certificate()
             .dependencies
             .iter()
-            .filter(|dependency| {
-                fused
-                    .delayed_read_signal_ids
-                    .binary_search(&u64::from(dependency.from))
-                    .is_ok()
-                    && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
-            })
+            .filter(
+                |dependency| matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0),
+            )
             .filter_map(|dependency| {
                 decorations
                     .certificate()
@@ -1481,6 +1562,10 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(!delayed_projection_indices.is_empty());
         assert!(delayed_projection_indices.is_subset(&writer_projection_indices));
+        assert!(
+            plan.fused_serial_groups.is_empty(),
+            "a recursion already colocated in one serial loop needs no fused envelope"
+        );
     }
 
     #[test]

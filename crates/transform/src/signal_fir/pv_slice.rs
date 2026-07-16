@@ -189,6 +189,7 @@ impl PvPlan {
         let owned = |sig: SigId, loop_id: u64| vv::SignalRecord {
             signal_id: id(sig),
             value_type: vv::ValueType::Real,
+            structural: false,
             rate: vv::Rate::Samp,
             vectorability: vv::Vectorability::Vect,
             clock_id: 0,

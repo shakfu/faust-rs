@@ -735,6 +735,7 @@ fn verify_source_alignment(
             return Err(VectorStateError::SignalCoverageMismatch { signal_id });
         }
         if signal.value_type != value_type(&record.sig_type)
+            || signal.structural != record.is_symbolic_recursion_carrier
             || signal.rate != rate(record.variability)
             || signal.clock_id != record.clock_domain.map_or(0, |clock| u64::from(clock) + 1)
             || signal.effects != record.effects
@@ -761,6 +762,12 @@ fn verify_supported_state(
         .map(|signal| (signal.signal_id, signal))
         .collect::<BTreeMap<_, _>>();
     for record in records {
+        // Structural recursion carriers aggregate the effects of their
+        // executable projection bodies but do not execute in a loop of their
+        // own. Resource ownership is therefore checked on those bodies.
+        if record.is_symbolic_recursion_carrier {
+            continue;
+        }
         for effect in &record.effects {
             let Some(resource) = state_resource(effect) else {
                 continue;

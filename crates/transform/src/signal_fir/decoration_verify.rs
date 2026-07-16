@@ -35,7 +35,7 @@ use super::vector_analysis::{
 };
 
 /// Current in-memory decoration-certificate schema.
-pub const DECORATION_CERTIFICATE_VERSION: u32 = 1;
+pub const DECORATION_CERTIFICATE_VERSION: u32 = 2;
 
 /// Semantic coverage claimed by a certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +115,7 @@ pub struct DecorationRecord {
     pub delay_reads: u32,
     pub has_out_delay_occurrence: bool,
     pub is_delay_read: bool,
+    pub is_symbolic_recursion_carrier: bool,
     pub recursive_projection: Option<RecursiveProjectionFact>,
     pub very_simple: bool,
     pub effects: Vec<EffectAtom>,
@@ -186,6 +187,7 @@ pub enum DecorationField {
     ExecutionCondition,
     Occurrences,
     DelayFacts,
+    SymbolicRecursionCarrier,
     RecursiveProjection,
     VerySimple,
     Effects,
@@ -364,6 +366,7 @@ fn decoration_record(signal_id: u32, info: &SignalUseInfo) -> DecorationRecord {
         delay_reads: info.delay_reads,
         has_out_delay_occurrence: info.has_out_delay_occurrence,
         is_delay_read: info.is_delay_read,
+        is_symbolic_recursion_carrier: info.is_symbolic_recursion_carrier,
         recursive_projection: projection_fact(info.recursive_projection),
         very_simple: info.very_simple,
         effects: info.effects.clone(),
@@ -592,6 +595,9 @@ fn verify_record(
     }
     if actual.recursive_projection != projection_fact(expected.recursive_projection) {
         return mismatch(actual.signal_id, DecorationField::RecursiveProjection);
+    }
+    if actual.is_symbolic_recursion_carrier != expected.is_symbolic_recursion_carrier {
+        return mismatch(actual.signal_id, DecorationField::SymbolicRecursionCarrier);
     }
     if actual.very_simple != expected.very_simple {
         return mismatch(actual.signal_id, DecorationField::VerySimple);
@@ -1055,7 +1061,7 @@ mod tests {
             .position(|record| record.recursive_projection.is_some())
             .unwrap();
 
-        let mut mutated = certificate;
+        let mut mutated = certificate.clone();
         mutated.records[projection]
             .recursive_projection
             .as_mut()
@@ -1065,6 +1071,21 @@ mod tests {
             verify_decorations(&prepared, &clocks, &mutated),
             Err(DecorationError::SignalFactMismatch {
                 field: DecorationField::RecursiveProjection,
+                ..
+            })
+        ));
+
+        let carrier = certificate
+            .records
+            .iter()
+            .position(|record| record.is_symbolic_recursion_carrier)
+            .unwrap();
+        let mut mutated = certificate;
+        mutated.records[carrier].is_symbolic_recursion_carrier = false;
+        assert!(matches!(
+            verify_decorations(&prepared, &clocks, &mutated),
+            Err(DecorationError::SignalFactMismatch {
+                field: DecorationField::SymbolicRecursionCarrier,
                 ..
             })
         ));

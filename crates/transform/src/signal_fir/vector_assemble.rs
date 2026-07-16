@@ -2340,6 +2340,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 11,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Scal,
                     clock_id: 0,
@@ -2350,6 +2351,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 12,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Scal,
                     clock_id: 0,
@@ -2546,6 +2548,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 1,
                     value_type: ValueType::Int,
+                    structural: false,
                     rate: Rate::Block,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -2556,6 +2559,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 10,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Scal,
                     clock_id: 7,
@@ -2566,6 +2570,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 11,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -2576,6 +2581,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 12,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Scal,
                     clock_id: 7,

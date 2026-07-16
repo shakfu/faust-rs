@@ -93,6 +93,8 @@ pub enum WitnessKind {
 pub struct SignalRecord {
     pub signal_id: u64,
     pub value_type: ValueType,
+    /// True only for checked symbolic recursion carriers with no runtime FIR value.
+    pub structural: bool,
     pub rate: Rate,
     pub vectorability: Vectorability,
     pub clock_id: u64,
@@ -730,7 +732,15 @@ pub fn verify_vector_plan(plan: &VectorPlan) -> Result<(), VectorPlanError> {
                 signal_id: sig.signal_id,
             });
         }
-        if sig.placement == Placement::Inline && !derived_duplicable {
+        if sig.structural
+            && (sig.placement != Placement::Inline
+                || !matches!(sig.value_type, ValueType::Tuple(_)))
+        {
+            return Err(VectorPlanError::InlineNotDuplicable {
+                signal_id: sig.signal_id,
+            });
+        }
+        if sig.placement == Placement::Inline && !derived_duplicable && !sig.structural {
             return Err(VectorPlanError::InlineNotDuplicable {
                 signal_id: sig.signal_id,
             });
@@ -1409,6 +1419,7 @@ mod tests {
         SignalRecord {
             signal_id,
             value_type: ValueType::Real,
+            structural: false,
             rate: Rate::Samp,
             vectorability: Vectorability::Scal,
             clock_id: 0,
@@ -1438,6 +1449,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 10,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -1448,6 +1460,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 11,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -1588,6 +1601,7 @@ mod tests {
             SignalRecord {
                 signal_id,
                 value_type: ValueType::Real,
+                structural: false,
                 rate: Rate::Samp,
                 vectorability: Vectorability::Scal,
                 clock_id: decoration
@@ -1920,6 +1934,7 @@ mod tests {
             SignalRecord {
                 signal_id: 5,
                 value_type: ValueType::Real,
+                structural: false,
                 rate: Rate::Samp,
                 vectorability: Vectorability::Vect,
                 clock_id: 0,
@@ -1929,6 +1944,16 @@ mod tests {
             },
         );
         p.loops[0].roots = vec![5];
+        assert!(matches!(
+            verify_vector_plan(&p),
+            Err(VectorPlanError::InlineNotDuplicable { signal_id: 10 })
+        ));
+
+        p.signals
+            .iter_mut()
+            .find(|signal| signal.signal_id == 10)
+            .unwrap()
+            .structural = true;
         assert!(matches!(
             verify_vector_plan(&p),
             Err(VectorPlanError::InlineNotDuplicable { signal_id: 10 })

@@ -881,6 +881,12 @@ fn verify_routed_fir_with_policies_after_plan(
     }
     for signal in &plan.signals {
         if !signals_with_definition.contains(&signal.signal_id) {
+            // Tuple-valued inline records are structural recursion/group
+            // carriers. Their scalar projections carry all executable FIR
+            // definitions; the tuple identity itself has no runtime value.
+            if signal.structural {
+                continue;
+            }
             return match signal.placement {
                 Placement::Inline => Err(VectorRouteError::MissingInlineDefinition {
                     signal_id: signal.signal_id,
@@ -1442,6 +1448,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 8,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Block,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -1452,6 +1459,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 9,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -1462,6 +1470,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 10,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
@@ -1472,6 +1481,7 @@ mod tests {
                 SignalRecord {
                     signal_id: 11,
                     value_type: ValueType::Real,
+                    structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Vect,
                     clock_id: 0,

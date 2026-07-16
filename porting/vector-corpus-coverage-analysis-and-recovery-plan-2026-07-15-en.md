@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phases 0, 1, 2, and 3 complete; Phase 4 active
+Status: in progress — Phases 0 through 4 complete; Phase 5 next
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -240,6 +240,33 @@ production and checking account for about 0.3 seconds, while approximately
 dependencies are now precomputed once per epoch instead of being reconstructed
 for every node. The historical source of the scalar cost remains assigned to
 Phase 6.
+
+The final Phase 4 slice corrected symbolic-recursion carrier ownership and
+state-mediated zero-delay reads. `SYMREC` and `SYMREF` tuples are now explicit
+checked decoration and vector-plan facts: they carry structure and aggregate
+analysis facts, but no standalone runtime FIR value. Their selected scalar
+bodies remain the executable units. The independent plan and route checkers
+reject forged structural flags, non-tuple structural records, and missing
+definitions for every non-structural signal. Variable-delay carriers whose
+certified interval can include zero use checked delay state rather than an
+invented value transport; any cross-loop case must be enclosed by one fused
+serial group or fails closed with a specific plan diagnostic.
+
+This moved the corpus from 44 to 49 certified DSPs. The five additions are
+`capture.dsp`, `echo.dsp`, `karplus.dsp`, `quadecho.dsp`, and
+`stereoecho.dsp`. The remaining waterfall is 26 bounded-event fallbacks, 13
+unfused immediate-delay plan fallbacks, three intentional pure-lowering
+fallbacks (two mutable tables and one unknown-purity foreign function), one
+soundfile UI fallback, and one independent SIGGEN error. `smoothdelay.dsp`,
+which previously failed routing, now reaches the independent event bound and
+fails specifically at 4,967 events versus the current 4,096 limit.
+
+All five newly certified files passed 60 native comparisons against the C++
+60,000-frame oracle: scalar `-ss 0..3` and vector `-lv 0/1 x -ss 0..3`.
+Profiling `reverb_designer` again found a stable 60--61 second scalar frontend,
+about 5.83 seconds in the complete vector plan, and a 67.0 second timed vector
+request. One 77.5 second wall-time sample was not reproduced and no vector
+stage increased relative to the Phase 4c profile.
 
 ## 2. Measured Baseline
 

@@ -456,23 +456,23 @@ fn lower_vector_program_impl<'a>(
         let mut materialized_roots = Vec::with_capacity(region.roots.len());
         for &root in &region.roots {
             let sig = lowerer.sig(root)?;
-            let value =
-                lowerer.lower_in_loop(region.loop_id, sig, &mut local_cache, &mut active)?;
             let structural_tuple = lowerer
                 .session
                 .plan()
                 .signals
                 .iter()
                 .find(|signal| signal.signal_id == root)
-                .is_some_and(|signal| {
-                    matches!(signal.value_type, ValueType::Tuple(_))
-                        && (match_sym_ref(lowerer.prepared.arena(), sig).is_some()
-                            || decode_symbolic_group_bodies(lowerer.prepared.arena(), sig)
-                                .is_some())
-                });
-            if !structural_tuple {
-                materialized_roots.push((root, value));
+                .is_some_and(|signal| signal.structural);
+            // Symbolic recursion groups and references are structural tuple
+            // carriers. Their selected bodies are scheduled as independent
+            // executable roots, so evaluating the carrier here would duplicate
+            // those bodies in the carrier's loop and invent cross-loop uses.
+            if structural_tuple {
+                continue;
             }
+            let value =
+                lowerer.lower_in_loop(region.loop_id, sig, &mut local_cache, &mut active)?;
+            materialized_roots.push((root, value));
         }
         let root_values = materialized_roots
             .iter()
@@ -786,7 +786,6 @@ impl PureVectorLowerer<'_> {
                 )?,
             SigMatch::Proj(index, group) => {
                 if let Some(var) = match_sym_ref(self.prepared.arena(), group) {
-                    let _ = self.lower_dep(scope, group, cache, active)?;
                     let bodies = self.symbolic_bodies_for_var(signal_id, var)?;
                     let index = usize::try_from(index).map_err(|_| {
                         PureVectorLowerError::UnsupportedSignal {
@@ -2274,6 +2273,7 @@ mod tests {
             .map(|record| SignalRecord {
                 signal_id: u64::from(record.signal_id),
                 value_type: canonical_value_type(&record.sig_type),
+                structural: record.is_symbolic_recursion_carrier,
                 rate: match record.variability {
                     Variability::Konst => Rate::Konst,
                     Variability::Block => Rate::Block,
