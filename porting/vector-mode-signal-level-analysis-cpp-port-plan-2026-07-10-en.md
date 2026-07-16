@@ -2452,8 +2452,8 @@ levelization compatibility setting, with deterministic Rust tie ordering.
 
 ## 8. Lockstep instance vectorization extension
 
-**Status:** lockstep lowering, native SIMD, and mixed-subgraph attribution are
-implemented and parity-validated on 2026-07-16; final repository gates remain.
+**Status:** lockstep lowering, native SIMD, mixed-subgraph attribution, and the
+maintained repository gates were completed on 2026-07-16.
 See the
 [lockstep SIMD remediation plan](lockstep-simd-remediation-plan-2026-07-16-en.md).
 
@@ -2538,12 +2538,15 @@ gate. Both mixed cases retain exactly two physical sample loops. Crossed
 lane-state identity and missing final-store mutations are rejected
 independently.
 
-The full workspace Clippy gate passes with warnings denied. The workspace test
-gate currently stops at the unrelated existing Wasm control-flow assertion
-`wasm_compute_lowers_control_flow_statements` (missing expected `Drop`); the
-isolated test reproduces it, and no lockstep path touches Wasm statement
-lowering. Focused lockstep, optimizer, golden, and impulse gates pass as reported
-above.
+The full workspace Clippy gate passes with warnings denied. The stale Wasm
+control-flow test was corrected to match the shared pure-`Drop` elimination
+contract, and all active codegen tests pass. The complete workspace test run
+then stops at the unrelated existing scalar scheduling assertion
+`recursive_apf_compute_body_reflects_all_four_cpp_schedules`: recursive APF
+currently yields three distinct C++ forms where that test requires four. No
+lockstep path participates in scalar APF scheduling, so this is reported as a
+separate repository issue rather than a passing workspace gate. Focused
+lockstep, optimizer, golden, and release impulse gates all pass.
 
 Time-direction vectorization leaves every recursive loop serial: the carried
 dependence `y(i-1) -> y(i)` forbids computing a chunk in parallel. Yet many real

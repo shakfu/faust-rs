@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: implementation in progress; Steps 0-3 completed, Step 4 pending
+Status: complete; Steps 0-4 implemented on 2026-07-16
 
 Scope: checked signal-level vector mode, lockstep event certification, FIR state lowering, and C++ SIMD evidence
 
@@ -319,6 +319,19 @@ module totals are 14, 30, and 22 respectively.
 Pass condition: no lockstep fallback or parity regression is introduced. Any
 unrelated existing workspace failure is reported separately and must not be
 represented as a passing gate.
+
+Implementation status (2026-07-16): complete. Formatting and workspace Clippy
+pass with warnings denied. All 367 transform tests, 27 vector-mode integration
+tests, 35 xtask tests, the 40-trace optimized/unoptimized interpreter matrix,
+the tracked Rust golden corpus, and the attributed native-SIMD gate pass. After
+an explicit release rebuild of `impulse-runner`, the forced maintained impulse
+matrix compiles and compares 92 expected DSPs under each of `-lv 0` and
+`-lv 1`; `subcontainer1` remains the documented exclusion. The workspace test
+run exposed and fixed the stale Wasm pure-`Drop` expectation; all 285 active
+codegen tests then pass. The complete workspace run proceeds to an unrelated
+existing `p3_shadow_mode` assertion: recursive APF produces three distinct C++
+scheduling forms where that test expects four. This scalar scheduling issue is
+reported separately and is not represented as a passing workspace gate.
 
 ## 8. Risks and mitigations
 

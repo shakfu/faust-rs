@@ -9,26 +9,25 @@ Date: 2026-07-16
 
 Recent commits (most recent first):
 
-- `this commit` Verify lockstep C++ lowering produces SIMD
-- `b8a50658` Add complex partial lockstep corpus coverage
-- `eb8414ba` Add lockstep vectorization corpus coverage
-- `13474bfe` Fuse lockstep lanes into one FIR sample loop
-- `f9543530` Detect and schedule lockstep recursion bundles
-- `fe1b30fe` Add lockstep vector plan trust boundary
-- `effd2104` Freeze lockstep vectorization implementation gate
+- `this commit` Complete lockstep SIMD remediation gates
+- `c7db2ee8` Align Wasm pure-drop regression expectation
+- `09d8798b` Attribute mixed lockstep SIMD to its source region
+- `6cd34879` Carry lockstep delay-one state in registers
+- `a85da004` Compact lockstep event certificates
+- `08b04a8f` Reject scalar fallback in lockstep SIMD gate
+- `a1ceeb87` Plan lockstep SIMD remediation
 
 ## Working Tree
 
-- Tracked changes: the native SIMD evidence gate, its documentation, journal,
-  and this handoff update belong to the final commit.
+- Tracked changes: final plan, journal, and handoff updates belong to this
+  commit.
 - Many unrelated pre-existing untracked scratch files remain untouched. The
-  untracked `rad_lti_recursive_multi_output1` corpus/golden files are not part
-  of this task.
+  untracked `rad_lti_recursive_multi_output1` corpus/golden files and
+  `vector_lockstep_simd_quad1.dsp` are not part of this task.
 
 ## Current Goal
 
-- Complete section 8, lockstep instance vectorization, with checked producer,
-  physical FIR lowering, corpus evidence, and maintained impulse validation.
+- Section 8 and the lockstep SIMD remediation plan are complete.
 
 ## What Changed This Session
 
@@ -42,6 +41,12 @@ Recent commits (most recent first):
   case, Rust goldens, bit-exact integration tests, and optimizer parity.
 - Added three profitability-oriented recursive cases, including two where the
   bundle is only one DSP subgraph, plus a Clang optimized-LLVM SIMD gate.
+- Added compact two-sample event evidence so default `-vs 32` remains certified.
+- Added checked register-carried delay-one state and row-transposed lockstep FIR
+  assembly; unsupported state shapes remain array-backed.
+- Attributed native vector operations through Clang line tables to the exact
+  generated lockstep source loop, excluding separate mixed-DSP loops.
+- Corrected the stale Wasm pure-`Drop` test exposed by the final workspace run.
 
 ## Decisions / Constraints
 
@@ -55,29 +60,35 @@ Recent commits (most recent first):
 
 ## Validation Run
 
-- `cargo test -p transform --lib` -> 363 passed.
-- `cargo test -p compiler --test vector_mode` -> 25 passed.
+- `cargo test -p transform --lib` -> 367 passed.
+- `cargo test -p compiler --test vector_mode` -> 27 passed.
+- `cargo test -p xtask --all-targets` -> 35 passed.
 - `cargo run -p xtask -- vector-interp-opt-check` -> 40 traces matched.
-- `cargo run -p xtask -- golden-check` -> complete Rust golden corpus passed.
-- `cargo run -p xtask -- lockstep-simd-check` -> 14/17/14 four-wide LLVM FP
-  operations for the three complex cases.
-- `make build` in `tests/impulse-tests` -> release harness built.
-- `make -j8 interp-vec0 interp-vec1` in `tests/impulse-tests` -> 92/93 expected
+- `cargo run -p xtask -- golden-check` -> tracked Rust golden corpus passed; an
+  unrelated untracked DSP without a golden was temporarily excluded and then
+  restored unchanged.
+- `cargo run -p xtask -- lockstep-simd-check` -> 14 lockstep-attributed
+  four-wide LLVM FP operations for each complex case; module totals 14/30/22.
+- `cargo build --release -p impulse-runner` -> release harness rebuilt.
+- `make -B -j8 interp-vec0 interp-vec1 -C tests/impulse-tests` -> 92 expected
   DSPs passed for each variant; documented `subcontainer1` exclusion only.
+- `cargo clippy --workspace --all-targets -- -D warnings` -> passed.
+- `cargo test --workspace --all-targets` -> codegen passes after the Wasm fix,
+  then stops at the unrelated `p3_shadow_mode` assertion described below.
 
 ## Open Issues / Blockers
 
 - The repository-wide test gate currently stops in the unrelated existing
-  `wasm_compute_lowers_control_flow_statements` assertion, which expects a
-  `Drop` operator. The isolated test reproduces the same failure; lockstep does
-  not touch Wasm lowering.
+  `recursive_apf_compute_body_reflects_all_four_cpp_schedules` assertion. It
+  observes three distinct scalar recursive APF C++ forms where the test expects
+  four; lockstep does not participate in scalar scheduling.
 - Wider recognition of recursive loops already owned by a fused-delay slice is
   a conservative future optimization, not a correctness gap.
 
 ## Next Steps
 
-1. Resolve the unrelated Wasm `Drop` assertion before claiming the complete
-   workspace test gate is green.
+1. Resolve or update the unrelated recursive APF scheduling-distinctness
+   assertion before claiming the complete workspace test gate is green.
 2. Consider composing fused-delay slices into lane-level lockstep units only
    with an extended certificate and equivalent mutation tests.
 
