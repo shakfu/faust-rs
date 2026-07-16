@@ -33,6 +33,11 @@ use super::vector_verify::{LoopEdge, VectorPlan, VectorPlanError, verify_vector_
 /// Suggested upper bound for focused production and differential checks.
 pub const DEFAULT_EVENT_LIMIT: usize = 4096;
 
+/// One sample checks the repeated body and the second checks every adjacent
+/// carried dependence. Compact evidence is enabled only for plans containing a
+/// verified lockstep bundle; other plans retain complete chunk expansion.
+const COMPACT_EVENT_SAMPLE_BASIS: usize = 2;
+
 /// Stable region containing a bounded dynamic event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EventRegion {
@@ -113,7 +118,13 @@ pub struct EventDependency {
 /// Canonical bounded witness containing `<scalar`, `<vec`, and `D`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventOrderCertificate {
+    /// Logical chunk length certified by this witness.
     sample_count: u64,
+    /// Number of concrete samples retained in the finite event table. This is
+    /// equal to `sample_count` for the expanded model and two for a repeated
+    /// induction basis that checks both one sample and the `n -> n + 1`
+    /// carried-state boundary.
+    checked_sample_count: u64,
     events: Vec<VectorEvent>,
     scalar_order: Vec<u64>,
     vector_order: Vec<u64>,
@@ -125,6 +136,18 @@ impl EventOrderCertificate {
     #[must_use]
     pub fn sample_count(&self) -> u64 {
         self.sample_count
+    }
+
+    /// Number of samples materialized in the finite event table.
+    #[must_use]
+    pub fn checked_sample_count(&self) -> u64 {
+        self.checked_sample_count
+    }
+
+    /// Whether the certificate uses the compact two-sample repetition basis.
+    #[must_use]
+    pub fn is_compact(&self) -> bool {
+        self.checked_sample_count < self.sample_count
     }
 
     /// Canonical event table.
@@ -191,6 +214,9 @@ pub enum VectorEventError {
     EventCountOverflow,
     /// The event table differs from independent reconstruction.
     EventTableMismatch,
+    /// A compact certificate does not use the canonical two-sample basis or
+    /// its per-sample templates are not translation invariant.
+    CompactRepetitionMismatch,
     /// The scalar order differs from independent reconstruction.
     ScalarOrderMismatch,
     /// The vector order differs from the accepted routed layout.
@@ -233,6 +259,9 @@ impl fmt::Display for VectorEventError {
             ),
             Self::EventCountOverflow => write!(f, "bounded event count overflowed"),
             Self::EventTableMismatch => write!(f, "event table does not match routed FIR"),
+            Self::CompactRepetitionMismatch => {
+                write!(f, "compact event repetition basis is not canonical")
+            }
             Self::ScalarOrderMismatch => write!(f, "scalar event order is not canonical"),
             Self::VectorOrderMismatch => write!(f, "vector event order does not match routing"),
             Self::DependencyMismatch => write!(f, "event dependence relation is incomplete"),
@@ -336,14 +365,27 @@ pub fn precheck_state_event_bound(
         .checked_mul(sample_count)
         .and_then(|count| count.checked_add(fixed))
         .ok_or(VectorEventError::EventCountOverflow)?;
-    if minimum > event_limit {
-        Err(VectorEventError::EventLowerBoundExceeded {
+    if minimum <= event_limit {
+        return Ok(());
+    }
+    if plan.lockstep_bundles.is_empty() {
+        return Err(VectorEventError::EventLowerBoundExceeded {
             minimum,
             limit: event_limit,
-        })
-    } else {
-        Ok(())
+        });
     }
+    let checked_samples = sample_count.min(COMPACT_EVENT_SAMPLE_BASIS);
+    let compact_minimum = per_sample
+        .checked_mul(checked_samples)
+        .and_then(|count| count.checked_add(fixed))
+        .ok_or(VectorEventError::EventCountOverflow)?;
+    if compact_minimum > event_limit {
+        return Err(VectorEventError::EventLowerBoundExceeded {
+            minimum: compact_minimum,
+            limit: event_limit,
+        });
+    }
+    Ok(())
 }
 
 /// Produces and independently checks the complete bounded P5.3 certificate.
@@ -417,14 +459,30 @@ fn verify_event_order_certificate_impl(
     if certificate.sample_count != plan.vec_size {
         return Err(VectorEventError::EventTableMismatch);
     }
-    verify_event_table_independently(plan, routed, state, &certificate.events, event_limit)?;
+    let expected_checked = independent_checked_sample_count(plan, routed, state, event_limit)?;
+    if certificate.checked_sample_count != expected_checked {
+        return Err(VectorEventError::CompactRepetitionMismatch);
+    }
+    let mut checked_plan = plan.clone();
+    checked_plan.vec_size = expected_checked;
+    verify_event_table_independently(
+        &checked_plan,
+        routed,
+        state,
+        &certificate.events,
+        event_limit,
+    )?;
+    if expected_checked < plan.vec_size {
+        verify_compact_repetition_basis(&checked_plan, &certificate.events)?;
+    }
     validate_order("scalar", &certificate.events, &certificate.scalar_order)?;
     validate_order("vector", &certificate.events, &certificate.vector_order)?;
-    let scalar_order = independently_order_events(plan, routed, &certificate.events, true);
+    let scalar_order = independently_order_events(&checked_plan, routed, &certificate.events, true);
     if certificate.scalar_order != scalar_order {
         return Err(VectorEventError::ScalarOrderMismatch);
     }
-    let vector_order = independently_order_events(plan, routed, &certificate.events, false);
+    let vector_order =
+        independently_order_events(&checked_plan, routed, &certificate.events, false);
     if certificate.vector_order != vector_order {
         return Err(VectorEventError::VectorOrderMismatch);
     }
@@ -471,7 +529,7 @@ fn verify_event_order_certificate_impl(
                     by_id[&dependency.after],
                     scalar_positions[&dependency.after],
                     vector_positions[&dependency.after],
-                    plan.fused_serial_groups
+                    checked_plan.fused_serial_groups
                 );
             }
             return Err(VectorEventError::FissionSafeViolation {
@@ -481,7 +539,7 @@ fn verify_event_order_certificate_impl(
         }
     }
     verify_required_dependencies(
-        plan,
+        &checked_plan,
         state,
         &certificate.events,
         &certificate.dependencies,
@@ -490,9 +548,88 @@ fn verify_event_order_certificate_impl(
     Ok(())
 }
 
+fn independent_checked_sample_count(
+    plan: &VectorPlan,
+    routed: &VerifiedRoutedFir,
+    state: Option<&VerifiedVectorStatePlan>,
+    event_limit: usize,
+) -> Result<u64, VectorEventError> {
+    let mut one_sample_plan = plan.clone();
+    one_sample_plan.vec_size = 1;
+    let keys = independently_expected_event_keys(&one_sample_plan, routed, state)?;
+    let fixed = keys
+        .iter()
+        .filter(|(_, sample, _)| sample.is_none())
+        .count();
+    let per_sample = keys
+        .iter()
+        .filter(|(_, sample, _)| sample.is_some())
+        .count();
+    let logical_samples =
+        usize::try_from(plan.vec_size).map_err(|_| VectorEventError::EventCountOverflow)?;
+    let complete = per_sample
+        .checked_mul(logical_samples)
+        .and_then(|count| count.checked_add(fixed))
+        .ok_or(VectorEventError::EventCountOverflow)?;
+    if complete <= event_limit {
+        return Ok(plan.vec_size);
+    }
+    if plan.lockstep_bundles.is_empty() {
+        return Err(VectorEventError::EventBoundExceeded {
+            needed: complete,
+            limit: event_limit,
+        });
+    }
+    let basis = logical_samples.min(COMPACT_EVENT_SAMPLE_BASIS);
+    let compact = per_sample
+        .checked_mul(basis)
+        .and_then(|count| count.checked_add(fixed))
+        .ok_or(VectorEventError::EventCountOverflow)?;
+    if compact > event_limit {
+        return Err(VectorEventError::EventBoundExceeded {
+            needed: compact,
+            limit: event_limit,
+        });
+    }
+    u64::try_from(basis).map_err(|_| VectorEventError::EventCountOverflow)
+}
+
+fn verify_compact_repetition_basis(
+    checked_plan: &VectorPlan,
+    events: &[VectorEvent],
+) -> Result<(), VectorEventError> {
+    if checked_plan.vec_size != COMPACT_EVENT_SAMPLE_BASIS as u64 {
+        return Err(VectorEventError::CompactRepetitionMismatch);
+    }
+    for record in &checked_plan.loops {
+        let sample_zero = events
+            .iter()
+            .filter(|event| {
+                event.region == EventRegion::Loop(record.loop_id) && event.sample == Some(0)
+            })
+            .map(|event| &event.kind)
+            .collect::<Vec<_>>();
+        let sample_one = events
+            .iter()
+            .filter(|event| {
+                event.region == EventRegion::Loop(record.loop_id) && event.sample == Some(1)
+            })
+            .map(|event| &event.kind)
+            .collect::<Vec<_>>();
+        if sample_zero != sample_one {
+            return Err(VectorEventError::CompactRepetitionMismatch);
+        }
+    }
+    Ok(())
+}
+
 type EventKey = (EventRegion, Option<u64>, VectorEventKind);
 
-fn append_state_event_keys(keys: &mut Vec<EventKey>, state: &VerifiedVectorStatePlan) {
+fn append_state_event_keys(
+    keys: &mut Vec<EventKey>,
+    state: &VerifiedVectorStatePlan,
+    sample_count: u64,
+) {
     for phases in &state.plan().loops {
         for action in &phases.pre {
             keys.push((
@@ -503,7 +640,7 @@ fn append_state_event_keys(keys: &mut Vec<EventKey>, state: &VerifiedVectorState
                 },
             ));
         }
-        for sample in 0..state.plan().vec_size {
+        for sample in 0..sample_count {
             for action in &phases.exec {
                 keys.push((
                     EventRegion::Loop(phases.loop_id),
@@ -681,7 +818,7 @@ fn independently_expected_event_keys(
         }
     }
     if let Some(state) = state {
-        append_state_event_keys(&mut keys, state);
+        append_state_event_keys(&mut keys, state, plan.vec_size);
     }
     keys.sort();
     Ok(keys)
@@ -993,29 +1130,56 @@ fn derive_certificate(
         return Err(VectorEventError::StatePlanMismatch);
     }
     let templates = event_templates(plan, routed, state)?;
-    let needed = expanded_event_count(plan, &templates, state)?;
-    if needed > event_limit {
-        return Err(VectorEventError::EventBoundExceeded {
-            needed,
-            limit: event_limit,
-        });
-    }
-    let events = expand_events(plan, templates, state)?;
+    let checked_sample_count = producer_checked_sample_count(plan, &templates, state, event_limit)?;
+    let mut checked_plan = plan.clone();
+    checked_plan.vec_size = checked_sample_count;
+    let needed = expanded_event_count(&checked_plan, &templates, state)?;
+    let events = expand_events(&checked_plan, templates, state)?;
     debug_assert_eq!(events.len(), needed);
     let contexts = context_events(&events);
-    let scalar_loops = canonical_scalar_loops(plan);
-    let vector_loops = routed_layout_loops(plan, routed);
-    let scalar_order = build_order(plan, &contexts, &scalar_loops, true);
-    let vector_order = build_order(plan, &contexts, &vector_loops, false);
-    let dependencies = build_dependencies(plan, state, &events, &contexts, &scalar_order);
+    let scalar_loops = canonical_scalar_loops(&checked_plan);
+    let vector_loops = routed_layout_loops(&checked_plan, routed);
+    let scalar_order = build_order(&checked_plan, &contexts, &scalar_loops, true);
+    let vector_order = build_order(&checked_plan, &contexts, &vector_loops, false);
+    let dependencies = build_dependencies(&checked_plan, state, &events, &contexts, &scalar_order);
 
     Ok(EventOrderCertificate {
         sample_count: plan.vec_size,
+        checked_sample_count,
         events,
         scalar_order,
         vector_order,
         dependencies,
     })
+}
+
+fn producer_checked_sample_count(
+    plan: &VectorPlan,
+    templates: &BTreeMap<EventRegion, Vec<VectorEventKind>>,
+    state: Option<&VerifiedVectorStatePlan>,
+    event_limit: usize,
+) -> Result<u64, VectorEventError> {
+    let needed = expanded_event_count(plan, templates, state)?;
+    if needed <= event_limit {
+        return Ok(plan.vec_size);
+    }
+    if plan.lockstep_bundles.is_empty() {
+        return Err(VectorEventError::EventBoundExceeded {
+            needed,
+            limit: event_limit,
+        });
+    }
+    let basis = plan.vec_size.min(COMPACT_EVENT_SAMPLE_BASIS as u64);
+    let mut compact_plan = plan.clone();
+    compact_plan.vec_size = basis;
+    let compact_needed = expanded_event_count(&compact_plan, templates, state)?;
+    if compact_needed > event_limit {
+        return Err(VectorEventError::EventBoundExceeded {
+            needed: compact_needed,
+            limit: event_limit,
+        });
+    }
+    Ok(basis)
 }
 
 fn validate_layout(plan: &VectorPlan, routed: &VerifiedRoutedFir) -> Result<(), VectorEventError> {
@@ -1271,7 +1435,7 @@ fn expand_events(
         }
     }
     if let Some(state) = state {
-        append_state_event_keys(&mut keys, state);
+        append_state_event_keys(&mut keys, state, plan.vec_size);
     }
     keys.sort();
     keys.into_iter()
@@ -1899,8 +2063,9 @@ mod tests {
         verified_vector_state_plan_for_test,
     };
     use crate::signal_fir::vector_verify::{
-        EpochRecord, LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord,
-        ValueType, VecSafeWitness, Vectorability, WitnessKind,
+        EpochRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord, LockstepLaneRecord,
+        LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord, ValueType,
+        VecSafeWitness, Vectorability, WitnessKind,
     };
 
     const ALL_STRATEGIES: [SchedulingStrategy; 4] = [
@@ -1967,6 +2132,60 @@ mod tests {
                 },
             ],
             fused_serial_groups: vec![],
+        })
+    }
+
+    fn compact_lockstep_plan() -> VerifiedVectorPlan {
+        verified_vector_plan_for_test(VectorPlan {
+            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            vec_size: 32,
+            signals: (0..2)
+                .map(|lane| signal(10 + lane, Placement::Owned(lane), vec![]))
+                .collect(),
+            loops: (0..2)
+                .map(|lane| LoopRecord {
+                    loop_id: lane,
+                    stable_name: format!("lockstep_lane_{lane}"),
+                    kind: LoopKind::Lockstep { width: 2 },
+                    roots: vec![10 + lane],
+                    epoch_id: 0,
+                })
+                .collect(),
+            epochs: vec![EpochRecord {
+                epoch_id: 0,
+                rank: 0,
+                loops: vec![0, 1],
+            }],
+            transports: vec![],
+            data_edges: vec![],
+            effect_edges: vec![],
+            vec_safe_witnesses: (0..2)
+                .map(|loop_id| VecSafeWitness {
+                    loop_id,
+                    witness_kind: WitnessKind::SerialStateInternal,
+                })
+                .collect(),
+            fused_serial_groups: vec![],
+            lockstep_bundles: vec![LockstepBundleRecord {
+                bundle_id: 0,
+                representative_loop_id: 0,
+                member_loop_ids: vec![0, 1],
+                lanes: (0..2)
+                    .map(|lane| LockstepLaneRecord {
+                        loop_id: lane,
+                        recursion_group: 20 + lane,
+                        roots: vec![IsoRootWitness {
+                            representative_root: 10,
+                            lane_root: 10 + lane,
+                            shape_hash: 0x55,
+                            leaf_mapping: vec![IsoLeafMapping {
+                                representative_signal_id: 10,
+                                lane_signal_id: 10 + lane,
+                            }],
+                        }],
+                    })
+                    .collect(),
+            }],
         })
     }
 
@@ -2152,6 +2371,40 @@ mod tests {
                 loops: vec![],
                 delays: vec![],
                 recursions: vec![],
+                prefixes: vec![],
+                waveforms: vec![],
+                no_op_resources: vec![],
+            },
+            plan,
+        )
+    }
+
+    fn compact_lockstep_state_plan(plan: &VerifiedVectorPlan) -> VerifiedVectorStatePlan {
+        verified_vector_state_plan_for_test(
+            VectorStatePlan {
+                schema_version: VECTOR_STATE_PLAN_VERSION,
+                vec_size: plan.plan().vec_size,
+                max_copy_delay: 16,
+                loops: (0..2)
+                    .map(|lane| LoopStatePhases {
+                        loop_id: lane,
+                        pre: vec![],
+                        exec: vec![VectorStateAction::RecursionStep { group: 20 + lane }],
+                        post: vec![],
+                    })
+                    .collect(),
+                delays: vec![],
+                recursions: (0..2)
+                    .map(|lane| RecursionTransition {
+                        group: 20 + lane,
+                        loop_id: lane,
+                        projections: vec![RecursionProjectionTransition {
+                            index: 0,
+                            signal_ids: vec![10 + lane],
+                            value_signal_id: 10 + lane,
+                        }],
+                    })
+                    .collect(),
                 prefixes: vec![],
                 waveforms: vec![],
                 no_op_resources: vec![],
@@ -2384,6 +2637,68 @@ mod tests {
                 needed: 17,
                 limit: 16,
             })
+        );
+    }
+
+    #[test]
+    fn lockstep_uses_two_sample_compact_basis_when_full_chunk_exceeds_bound() {
+        let plan = compact_lockstep_plan();
+        let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
+        let verified = build_event_order_certificate(&plan, &routed, 10)
+            .expect("compact lockstep certificate");
+        let certificate = verified.certificate();
+        assert_eq!(certificate.sample_count(), 32);
+        assert_eq!(certificate.checked_sample_count(), 2);
+        assert!(certificate.is_compact());
+        assert_eq!(certificate.events().len(), 6);
+    }
+
+    #[test]
+    fn compact_checker_rejects_sample_basis_and_template_mutations() {
+        let plan = compact_lockstep_plan();
+        let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
+        let verified = build_event_order_certificate(&plan, &routed, 10)
+            .expect("compact lockstep certificate");
+
+        let mut basis_mutation = verified.certificate().clone();
+        basis_mutation.checked_sample_count = 1;
+        assert_eq!(
+            verify_event_order_certificate(plan.plan(), &routed, &basis_mutation, 10),
+            Err(VectorEventError::CompactRepetitionMismatch)
+        );
+
+        let mut template_mutation = verified.into_certificate();
+        let sample_one = template_mutation
+            .events
+            .iter_mut()
+            .find(|event| event.sample == Some(1))
+            .expect("sample-one template");
+        sample_one.kind = VectorEventKind::Definition { signal_id: 999 };
+        assert_eq!(
+            verify_event_order_certificate(plan.plan(), &routed, &template_mutation, 10),
+            Err(VectorEventError::EventTableMismatch)
+        );
+    }
+
+    #[test]
+    fn compact_checker_rejects_a_missing_carried_recursion_edge() {
+        let plan = compact_lockstep_plan();
+        let state = compact_lockstep_state_plan(&plan);
+        let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
+        let verified = build_state_event_order_certificate(&plan, &routed, &state, 12)
+            .expect("compact state certificate");
+        assert!(verified.certificate().is_compact());
+
+        let mut mutation = verified.into_certificate();
+        let recursion_steps = recursion_step_events(&mutation.events);
+        let before = recursion_steps[&(0, 0, 20)];
+        let after = recursion_steps[&(0, 1, 20)];
+        mutation
+            .dependencies
+            .retain(|edge| *edge != EventDependency { before, after });
+        assert_eq!(
+            verify_state_event_order_certificate(plan.plan(), &routed, &state, &mutation, 12),
+            Err(VectorEventError::DependencyMismatch)
         );
     }
 

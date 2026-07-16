@@ -445,6 +445,17 @@ fn complex_and_partial_lockstep_corpus_is_bit_exact() {
 }
 
 #[test]
+fn complex_and_partial_lockstep_corpus_is_certified_at_default_vec_size() {
+    for (name, source) in [
+        ("lockstep_simd_quad", LOCKSTEP_SIMD_QUAD_SOURCE),
+        ("lockstep_mixed_reduce", LOCKSTEP_MIXED_REDUCE_SOURCE),
+        ("lockstep_mixed_branch", LOCKSTEP_MIXED_BRANCH_SOURCE),
+    ] {
+        assert_vector_pipeline_certified(name, source, ComputeMode::DEFAULT_VEC_SIZE);
+    }
+}
+
+#[test]
 fn lockstep_corpus_cpp_has_expected_physical_sample_loops() {
     for (name, source, expected_loops) in [
         ("pair", LOCKSTEP_PAIR_SOURCE, 1),

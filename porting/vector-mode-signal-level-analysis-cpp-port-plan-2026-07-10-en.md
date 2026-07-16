@@ -2522,6 +2522,11 @@ The remediation plan linked above requires compact event evidence,
 register-carried delay-one state, and a gate that fails unless
 `VectorPipelineStatus::Certified` is established before C++ generation.
 
+**Remediation progress.** The gate now enforces effective checked-vector mode,
+and the compact two-sample event basis retains the three complex cases at
+default `-vs 32`. The certified C++ still produces zero four-wide LLVM
+operations; register-carried lockstep state remains the active SIMD blocker.
+
 The full workspace Clippy gate passes with warnings denied. The workspace test
 gate currently stops at the unrelated existing Wasm control-flow assertion
 `wasm_compute_lowers_control_flow_statements` (missing expected `Drop`); the

@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: implementation in progress; Step 0 completed, Steps 1-4 pending
+Status: implementation in progress; Steps 0-1 completed, Steps 2-4 pending
 
 Scope: checked signal-level vector mode, lockstep event certification, FIR state lowering, and C++ SIMD evidence
 
@@ -253,6 +253,18 @@ diagnostic, establishing the intended red baseline for Step 1.
 
 Pass condition: all three complex cases retain checked vector FIR at default
 `-vs 32` under the complete strategy/loop-variant matrix.
+
+Implementation status (2026-07-16): complete. `EventOrderCertificate` now
+binds the logical chunk length separately from its concretely checked sample
+count. Plans with a verified lockstep bundle retain complete expansion while it
+fits; otherwise they use the canonical two-sample basis. The first sample
+checks every static event template and the second checks adjacent carried
+state. The independent checker reconstructs the basis size from routed FIR,
+checks translation-identical per-loop templates, and rejects basis, template,
+and recursion-edge mutations. All three complex cases are certified at default
+`-vs 32` across both loop variants and all scheduling strategies. The corrected
+SIMD gate now reaches native code and reports zero vector operations, which is
+the intended red baseline for Step 2.
 
 ### Step 2 — register-carry delay-one state
 
