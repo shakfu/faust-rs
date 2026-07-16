@@ -21,6 +21,12 @@
 //! iteration of every lane in canonical order. This preserves each lane's IEEE
 //! operation and contraction policy while exposing cross-instance SLP to FIR
 //! backends without changing the planar `compute` ABI.
+//!
+//! General fused serial groups use the same physical sample envelope. A
+//! top-rate group owns one `i0` body; a nonzero-clock group owns one contiguous
+//! sequence inside exactly one guarded clock island. The independent assembly
+//! checker requires delayed reads, state writes, and scalarized internal
+//! transports to remain inside that envelope.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -35,7 +41,7 @@ use super::vector_state::{
     DelayTransition, PrefixTransition, RecursionTransition, VectorDelayStorage, VectorStateAction,
     VectorStateInitialValue, VerifiedVectorStatePlan, WaveformTransition,
 };
-use super::vector_verify::{ValueType, VectorPlan};
+use super::vector_verify::{Placement, ValueType, VectorPlan};
 
 /// Current canonical P6.3b/P6.5 assembly schema.
 pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 3;
@@ -368,12 +374,24 @@ pub fn assemble_vector_fir(
             .iter()
             .map(|signal| (signal.signal_id, signal.value_type.clone()))
             .collect::<BTreeMap<_, _>>();
+        let fused_members_by_loop = routed
+            .plan()
+            .fused_serial_groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .member_loop_ids
+                    .iter()
+                    .map(move |&loop_id| (loop_id, group.member_loop_ids.as_slice()))
+            })
+            .collect::<BTreeMap<_, _>>();
         let materialization = StateMaterializationContext {
             delays: &delays,
             recursions: &recursions,
             prefixes: &prefixes,
             waveforms: &waveforms,
             definitions: &definitions,
+            fused_members_by_loop: &fused_members_by_loop,
             signal_types: &signal_types,
             real_type: real_type.clone(),
         };
@@ -937,8 +955,34 @@ struct StateMaterializationContext<'a> {
     prefixes: &'a BTreeMap<u64, &'a PrefixTransition>,
     waveforms: &'a BTreeMap<u64, &'a WaveformTransition>,
     definitions: &'a BTreeMap<(VectorRegion, u64), FirId>,
+    fused_members_by_loop: &'a BTreeMap<u64, &'a [u64]>,
     signal_types: &'a BTreeMap<u64, ValueType>,
     real_type: FirType,
+}
+
+fn fused_member_definition(
+    loop_id: u64,
+    signal_id: u64,
+    context: &StateMaterializationContext<'_>,
+) -> Option<FirId> {
+    if let Some(value) = context
+        .definitions
+        .get(&(VectorRegion::Loop(loop_id), signal_id))
+        .copied()
+    {
+        return Some(value);
+    }
+    let members = context.fused_members_by_loop.get(&loop_id)?;
+    let mut values = context
+        .definitions
+        .iter()
+        .filter_map(|((region, id), &value)| {
+            (*id == signal_id
+            && matches!(region, VectorRegion::Loop(owner) if members.binary_search(owner).is_ok()))
+        .then_some(value)
+        });
+    let value = values.next()?;
+    values.all(|candidate| candidate == value).then_some(value)
 }
 
 fn materialize_loop(
@@ -1088,20 +1132,14 @@ fn materialize_action(
                 let value = projection
                     .signal_ids
                     .iter()
-                    .find_map(|signal_id| {
-                        definitions
-                            .get(&(VectorRegion::Loop(loop_id), *signal_id))
-                            .copied()
-                    })
+                    .find_map(|signal_id| fused_member_definition(loop_id, *signal_id, context))
                     .or_else(|| {
-                        definitions
-                            .get(&(VectorRegion::Loop(loop_id), projection.value_signal_id))
-                            .copied()
-                    })
-                    .ok_or(VectorFirAssemblyError::MissingRecursionProjection {
-                        group: *group,
-                        index: projection.index,
-                    })?;
+                        fused_member_definition(loop_id, projection.value_signal_id, context)
+                    });
+                let value = value.ok_or(VectorFirAssemblyError::MissingRecursionProjection {
+                    group: *group,
+                    index: projection.index,
+                })?;
                 let signal_id = projection
                     .signal_ids
                     .first()
@@ -1647,6 +1685,13 @@ fn materialize_top_level(
     Ok(builder.block(&body))
 }
 
+/// Independently proves the physical FIR envelope of each checked fused group.
+///
+/// Top-rate members must be the exact body of one physical sample loop, with
+/// state setup/commit outside it. Nonzero-clock members must be consecutive in
+/// one exact island and have no escaped pre/post action. In both forms, every
+/// recorded delayed read, state write, and fused scalar transport must occur
+/// inside the selected body.
 fn verify_assembled_fused_serial_groups(
     routed: &VerifiedRoutedFir,
     state_plan: Option<&VerifiedVectorStatePlan>,
@@ -1664,11 +1709,12 @@ fn verify_assembled_fused_serial_groups(
         .iter()
         .map(|loop_| (loop_.loop_id, loop_))
         .collect::<BTreeMap<_, _>>();
-    let island_loops = assembly
-        .islands
+    let signal_by_id = routed
+        .plan()
+        .signals
         .iter()
-        .flat_map(|island| island.nested_loop_ids.iter().copied())
-        .collect::<BTreeSet<_>>();
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
 
     for group in &routed.plan().fused_serial_groups {
         let reject = || VectorFirAssemblyError::FusedGroupShape {
@@ -1678,7 +1724,7 @@ fn verify_assembled_fused_serial_groups(
             || group
                 .member_loop_ids
                 .iter()
-                .any(|loop_id| island_loops.contains(loop_id) || !loop_by_id.contains_key(loop_id))
+                .any(|loop_id| !loop_by_id.contains_key(loop_id))
         {
             return Err(reject());
         }
@@ -1701,40 +1747,82 @@ fn verify_assembled_fused_serial_groups(
             .iter()
             .map(|loop_id| loop_by_id[loop_id].iteration_statement)
             .collect::<Vec<_>>();
-        let physical_loops = top_level
+        let group_clock = group
+            .state_carrier_signal_ids
+            .first()
+            .and_then(|signal_id| signal_by_id.get(signal_id))
+            .map(|signal| signal.clock_id)
+            .ok_or_else(reject)?;
+        let owning_islands = assembly
+            .islands
             .iter()
-            .enumerate()
-            .filter_map(|(position, &statement)| match match_fir(store, statement) {
-                FirMatch::ForLoop {
-                    var,
-                    body,
-                    is_reverse: false,
-                    ..
-                } if var == "i0"
-                    && matches!(match_fir(store, body), FirMatch::Block(words) if words == expected_iterations) =>
-                {
-                    Some((position, body))
-                }
-                _ => None,
+            .filter(|island| {
+                group
+                    .member_loop_ids
+                    .iter()
+                    .any(|loop_id| island.nested_loop_ids.contains(loop_id))
             })
             .collect::<Vec<_>>();
-        let [(physical_position, physical_body)] = physical_loops.as_slice() else {
-            return Err(reject());
+        let physical_body = if group_clock == 0 {
+            if !owning_islands.is_empty() {
+                return Err(reject());
+            }
+            let physical_loops = top_level
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &statement)| match match_fir(store, statement) {
+                    FirMatch::ForLoop {
+                        var,
+                        body,
+                        is_reverse: false,
+                        ..
+                    } if var == "i0"
+                        && matches!(match_fir(store, body), FirMatch::Block(words) if words == expected_iterations) =>
+                    {
+                        Some((position, body))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [(physical_position, physical_body)] = physical_loops.as_slice() else {
+                return Err(reject());
+            };
+            for &loop_id in &members {
+                let assembled = loop_by_id[&loop_id];
+                for action in &assembled.pre {
+                    if !top_level[..*physical_position].contains(&action.statement) {
+                        return Err(reject());
+                    }
+                }
+                for action in &assembled.post {
+                    if !top_level[*physical_position + 1..].contains(&action.statement) {
+                        return Err(reject());
+                    }
+                }
+            }
+            *physical_body
+        } else {
+            let [island] = owning_islands.as_slice() else {
+                return Err(reject());
+            };
+            let positions = members
+                .iter()
+                .map(|loop_id| island.nested_loop_ids.iter().position(|id| id == loop_id))
+                .collect::<Option<Vec<_>>>();
+            let Some(positions) = positions else {
+                return Err(reject());
+            };
+            if island.domain_id + 1 != group_clock
+                || positions.windows(2).any(|pair| pair[1] != pair[0] + 1)
+                || members.iter().any(|loop_id| {
+                    let assembled = loop_by_id[loop_id];
+                    !assembled.pre.is_empty() || !assembled.post.is_empty()
+                })
+            {
+                return Err(reject());
+            }
+            island.statement
         };
-
-        for &loop_id in &members {
-            let assembled = loop_by_id[&loop_id];
-            for action in &assembled.pre {
-                if !top_level[..*physical_position].contains(&action.statement) {
-                    return Err(reject());
-                }
-            }
-            for action in &assembled.post {
-                if !top_level[*physical_position + 1..].contains(&action.statement) {
-                    return Err(reject());
-                }
-            }
-        }
 
         for &signal_id in &group.delayed_read_signal_ids {
             let definitions = routed
@@ -1746,8 +1834,7 @@ fn verify_assembled_fused_serial_groups(
                         && matches!(definition.region, VectorRegion::Loop(loop_id) if group.member_loop_ids.contains(&loop_id))
                 })
                 .collect::<Vec<_>>();
-            if definitions.len() != 1 || !fir_contains(store, *physical_body, definitions[0].value)
-            {
+            if definitions.len() != 1 || !fir_contains(store, physical_body, definitions[0].value) {
                 return Err(reject());
             }
         }
@@ -1756,19 +1843,15 @@ fn verify_assembled_fused_serial_groups(
             return Err(reject());
         };
         for &signal_id in &group.state_write_signal_ids {
-            let owners = state_plan
+            let Some(signal) = routed
                 .plan()
-                .recursions
+                .signals
                 .iter()
-                .filter(|recursion| {
-                    recursion
-                        .projections
-                        .iter()
-                        .any(|projection| projection.signal_ids.binary_search(&signal_id).is_ok())
-                })
-                .map(|recursion| recursion.loop_id)
-                .collect::<Vec<_>>();
-            let [owner_loop_id] = owners.as_slice() else {
+                .find(|signal| signal.signal_id == signal_id)
+            else {
+                return Err(reject());
+            };
+            let Placement::Owned(owner_loop_id) = signal.placement else {
                 return Err(reject());
             };
             let definitions = routed
@@ -1777,12 +1860,12 @@ fn verify_assembled_fused_serial_groups(
                 .iter()
                 .filter(|definition| {
                     definition.signal_id == signal_id
-                        && definition.region == VectorRegion::Loop(*owner_loop_id)
+                        && definition.region == VectorRegion::Loop(owner_loop_id)
                 })
                 .collect::<Vec<_>>();
             if definitions.len() != 1
-                || !fir_contains(store, *physical_body, definitions[0].value)
-                || group.member_loop_ids.binary_search(owner_loop_id).is_err()
+                || !fir_contains(store, physical_body, definitions[0].value)
+                || group.member_loop_ids.binary_search(&owner_loop_id).is_err()
             {
                 return Err(reject());
             }
@@ -1808,7 +1891,7 @@ fn verify_assembled_fused_serial_groups(
                 .flat_map(|loop_id| loop_by_id[loop_id].exec_actions.iter())
                 .filter(|action| action.action == (VectorStateAction::DelayWrite { signal_id }))
                 .collect::<Vec<_>>();
-            if writes.len() != 1 || !fir_contains(store, *physical_body, writes[0].statement) {
+            if writes.len() != 1 || !fir_contains(store, physical_body, writes[0].statement) {
                 return Err(reject());
             }
         }
@@ -1828,10 +1911,10 @@ fn verify_assembled_fused_serial_groups(
                 })
                 || transport
                     .store
-                    .is_none_or(|statement| !fir_contains(store, *physical_body, statement))
+                    .is_none_or(|statement| !fir_contains(store, physical_body, statement))
                 || transport
                     .load
-                    .is_none_or(|value| !fir_contains(store, *physical_body, value))
+                    .is_none_or(|value| !fir_contains(store, physical_body, value))
             {
                 return Err(reject());
             }
@@ -2639,9 +2722,9 @@ mod tests {
         VECTOR_STATE_PLAN_VERSION, VectorStatePlan, verified_vector_state_plan_for_test,
     };
     use crate::signal_fir::vector_verify::{
-        EpochRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord, LockstepLaneRecord,
-        LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord,
-        VecSafeWitness, VectorPlan, Vectorability, WitnessKind,
+        EpochRecord, FusedSerialGroupRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord,
+        LockstepLaneRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
+        TransportRecord, VecSafeWitness, VectorPlan, Vectorability, WitnessKind,
     };
 
     fn lockstep_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
@@ -3015,7 +3098,7 @@ mod tests {
                     structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Scal,
-                    clock_id: 7,
+                    clock_id: 8,
                     effects: vec![],
                     placement: Placement::Owned(0),
                     duplicable: true,
@@ -3037,7 +3120,7 @@ mod tests {
                     structural: false,
                     rate: Rate::Samp,
                     vectorability: Vectorability::Scal,
-                    clock_id: 7,
+                    clock_id: 8,
                     effects: vec![],
                     placement: Placement::Owned(2),
                     duplicable: true,
@@ -3108,7 +3191,16 @@ mod tests {
                 loop_id: 1,
                 witness_kind: WitnessKind::Pointwise,
             }],
-            fused_serial_groups: vec![],
+            fused_serial_groups: vec![FusedSerialGroupRecord {
+                group_id: 0,
+                owner_loop_id: 2,
+                member_loop_ids: vec![0, 2],
+                state_carrier_signal_ids: vec![12],
+                delayed_read_signal_ids: vec![10],
+                state_write_signal_ids: vec![12],
+                internal_transport_ids: vec![0],
+                output_or_transport_roots: vec![10, 12],
+            }],
         })
     }
 
@@ -3134,7 +3226,7 @@ mod tests {
                 transports: vec![
                     super::super::vector_clock_ad::ClockTransportPolicy {
                         transport_id: 0,
-                        mode: ClockTransportMode::IslandScalar { domain_id: 7 },
+                        mode: ClockTransportMode::FusedScalar { group_id: 0 },
                     },
                     super::super::vector_clock_ad::ClockTransportPolicy {
                         transport_id: 1,
@@ -3249,8 +3341,8 @@ mod tests {
         let assembly = verified.assembly();
         assert_eq!(assembly.islands.len(), 1);
         assert!(assembly.islands[0].state_cursor_advance.is_some());
-        assert_eq!(assembly.islands[0].local_declarations.len(), 1);
-        assert!(assembly.local_declarations.is_empty());
+        assert!(assembly.islands[0].local_declarations.is_empty());
+        assert_eq!(assembly.local_declarations.len(), 1);
         assert!(matches!(
             match_fir(&store, assembly.islands[0].statement),
             FirMatch::SimpleForLoop { .. }
@@ -3271,6 +3363,15 @@ mod tests {
         assert!(matches!(
             verify_vector_fir_assembly(&routed, Some(&state), Some(&clock), &forged, &store),
             Err(VectorFirAssemblyError::IslandShape { domain_id: 7 })
+        ));
+
+        let mut forged = assembly.clone();
+        let mut second_island = forged.islands[0].clone();
+        second_island.nested_loop_ids = vec![2];
+        forged.islands.push(second_island);
+        assert!(matches!(
+            verify_assembled_fused_serial_groups(&routed, Some(&state), &forged, &store),
+            Err(VectorFirAssemblyError::FusedGroupShape { group_id: 0 })
         ));
 
         let mut forged = assembly.clone();

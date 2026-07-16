@@ -2076,6 +2076,7 @@ pub fn verify_pure_vector_bodies(
         }
         if !body_contains(store, &consumer.statements, load_id)
             && !body_contains_equivalent_table_load(store, &consumer.statements, load_id)
+            && !body_contains_equivalent_scalar_load(store, &consumer.statements, load_id)
             && !state_consumed_uses.contains(&(transport.consumer_loop, transport.signal_id))
         {
             if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
@@ -2157,6 +2158,7 @@ pub fn verify_pure_vector_bodies(
             if !body_contains(store, &consumer.statements, routed_use.value)
                 && transport_load.is_none_or(|load| {
                     !body_contains_equivalent_table_load(store, &consumer.statements, load)
+                        && !body_contains_equivalent_scalar_load(store, &consumer.statements, load)
                 })
                 && !state_consumed_uses.contains(&(routed_use.consumer_loop, routed_use.signal_id))
             {
@@ -2217,6 +2219,37 @@ fn body_contains_equivalent_table_load(store: &FirStore, roots: &[FirId], expect
         if matches!(
             match_fir(store, value),
             FirMatch::LoadTable { name, access, typ, .. }
+                if name == expected_name && access == expected_access && typ == expected_type
+        ) {
+            return true;
+        }
+        stack.extend(fir_children(store, value));
+    }
+    false
+}
+
+fn body_contains_equivalent_scalar_load(
+    store: &FirStore,
+    roots: &[FirId],
+    expected: FirId,
+) -> bool {
+    let FirMatch::LoadVar {
+        name: expected_name,
+        access: expected_access,
+        typ: expected_type,
+    } = match_fir(store, expected)
+    else {
+        return false;
+    };
+    let mut stack = roots.to_vec();
+    let mut seen = BTreeSet::new();
+    while let Some(value) = stack.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        if matches!(
+            match_fir(store, value),
+            FirMatch::LoadVar { name, access, typ }
                 if name == expected_name && access == expected_access && typ == expected_type
         ) {
             return true;
@@ -2536,6 +2569,39 @@ mod tests {
             builder.drop_(load)
         };
         assert!(!body_contains_equivalent_table_load(
+            &store,
+            &[wrong],
+            expected
+        ));
+    }
+
+    #[test]
+    fn fused_scalar_transport_load_evidence_survives_cse_rebuilding() {
+        let mut store = FirStore::new();
+        let expected = FirBuilder::new(&mut store).load_var(
+            "transport_s1_l0_l1",
+            AccessType::Stack,
+            FirType::Float32,
+        );
+        let actual_load = FirBuilder::new(&mut store).load_var(
+            "transport_s1_l0_l1",
+            AccessType::Stack,
+            FirType::Float32,
+        );
+        let actual = FirBuilder::new(&mut store).drop_(actual_load);
+        assert!(body_contains_equivalent_scalar_load(
+            &store,
+            &[actual],
+            expected
+        ));
+
+        let wrong_load = FirBuilder::new(&mut store).load_var(
+            "transport_s2_l0_l1",
+            AccessType::Stack,
+            FirType::Float32,
+        );
+        let wrong = FirBuilder::new(&mut store).drop_(wrong_load);
+        assert!(!body_contains_equivalent_scalar_load(
             &store,
             &[wrong],
             expected

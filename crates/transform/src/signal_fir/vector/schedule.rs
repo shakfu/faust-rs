@@ -13,6 +13,12 @@
 //! the C++ dependency convention `consumer -> dependency`; cross-epoch edges
 //! are barriers validated by [`verify_vector_plan`] and are intentionally
 //! absent from each local DAG.
+//!
+//! A checked fused serial group is contracted to one external scheduling unit
+//! so dependencies that become internal cannot create an artificial cycle.
+//! Its induced member DAG is still scheduled independently with the requested
+//! strategy and checked before expansion, preserving both the group envelope
+//! and the original loop identities.
 
 use std::fmt;
 
@@ -137,7 +143,12 @@ fn schedule_after_plan_verification(
     let scheduled_epochs = epochs
         .into_iter()
         .map(|epoch| {
-            let dag = EpochDag::new(&epoch.loops, plan);
+            let dag = EpochDag::new(&epoch.loops, plan, strategy).map_err(|source| {
+                VectorScheduleError::EpochScheduling {
+                    epoch_id: epoch.epoch_id,
+                    source,
+                }
+            })?;
             let units = schedule(strategy, &dag).map_err(|source| {
                 VectorScheduleError::EpochScheduling {
                     epoch_id: epoch.epoch_id,
@@ -163,20 +174,28 @@ fn schedule_after_plan_verification(
     })
 }
 
-/// `ScheduleDag` view of one epoch. Filtering both endpoints is what keeps
-/// cross-epoch barriers out of local scheduling while preserving all
-/// same-epoch data and effect constraints.
+/// `ScheduleDag` view of one epoch.
+///
+/// Filtering both endpoints keeps cross-epoch barriers out of local
+/// scheduling while preserving all same-epoch data/effect constraints.
+/// Lockstep bundles and fused serial groups are represented as contracted
+/// units; fused members retain a separately checked internal schedule.
 struct EpochDag<'a> {
     nodes: Vec<u64>,
     dependencies: std::collections::BTreeMap<u64, Vec<u64>>,
-    lockstep_members: std::collections::BTreeMap<u64, &'a [u64]>,
+    unit_members: std::collections::BTreeMap<u64, Vec<u64>>,
+    marker: std::marker::PhantomData<&'a VectorPlan>,
 }
 
 impl<'a> EpochDag<'a> {
-    fn new(nodes: &'a [u64], plan: &'a VectorPlan) -> Self {
+    fn new(
+        nodes: &'a [u64],
+        plan: &'a VectorPlan,
+        strategy: SchedulingStrategy,
+    ) -> Result<Self, ScheduleError<u64>> {
         use std::collections::{BTreeMap, BTreeSet};
 
-        let lockstep_representative = plan
+        let mut representative = plan
             .lockstep_bundles
             .iter()
             .flat_map(|bundle| {
@@ -186,45 +205,58 @@ impl<'a> EpochDag<'a> {
                     .map(move |&loop_id| (loop_id, bundle.representative_loop_id))
             })
             .collect::<BTreeMap<_, _>>();
-        let lockstep_members = plan
+        let mut unit_members = plan
             .lockstep_bundles
             .iter()
             .map(|bundle| {
                 (
                     bundle.representative_loop_id,
-                    bundle.member_loop_ids.as_slice(),
+                    bundle.member_loop_ids.clone(),
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let unit_of = |loop_id: u64| {
-            lockstep_representative
-                .get(&loop_id)
-                .copied()
-                .unwrap_or(loop_id)
-        };
+        for group in &plan.fused_serial_groups {
+            let group_representative = group.member_loop_ids[0];
+            for &loop_id in &group.member_loop_ids {
+                representative.insert(loop_id, group_representative);
+            }
+            let group_dag = InducedDag::new(&group.member_loop_ids, plan);
+            let members = schedule(strategy, &group_dag).map_err(|error| {
+                if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                    eprintln!(
+                        "[vector-fused-internal-schedule] group={} error={} dependencies={:?}",
+                        group.group_id, error, group_dag.dependencies
+                    );
+                }
+                error
+            })?;
+            verify_schedule(&group_dag, &members).map_err(|error| {
+                let remaining = match error {
+                    VerifyError::DuplicateGraphNode { node }
+                    | VerifyError::Duplicate { node }
+                    | VerifyError::Missing { node }
+                    | VerifyError::Extra { node } => vec![node],
+                    VerifyError::OutOfOrder {
+                        consumer,
+                        dependency,
+                    } => vec![consumer, dependency],
+                };
+                ScheduleError::Cycle { remaining }
+            })?;
+            unit_members.insert(group_representative, members);
+        }
+        let unit_of = |loop_id: u64| representative.get(&loop_id).copied().unwrap_or(loop_id);
         let unit_nodes = nodes
             .iter()
             .copied()
             .filter(|loop_id| unit_of(*loop_id) == *loop_id)
             .collect::<Vec<_>>();
         let node_set = nodes.iter().copied().collect::<BTreeSet<_>>();
-        let group_by_member = plan
-            .fused_serial_groups
-            .iter()
-            .enumerate()
-            .flat_map(|(group_index, group)| {
-                group
-                    .member_loop_ids
-                    .iter()
-                    .map(move |&loop_id| (loop_id, group_index))
-            })
-            .collect::<BTreeMap<_, _>>();
         let mut direct = unit_nodes
             .iter()
             .copied()
             .map(|node| (node, BTreeSet::new()))
             .collect::<BTreeMap<_, _>>();
-        let mut group_external = BTreeMap::<usize, BTreeSet<u64>>::new();
 
         for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
             if !node_set.contains(&edge.consumer) || !node_set.contains(&edge.dependency) {
@@ -239,77 +271,91 @@ impl<'a> EpochDag<'a> {
                 .get_mut(&consumer)
                 .expect("epoch nodes initialize direct dependencies")
                 .insert(dependency);
-            if let Some(&group_index) = group_by_member.get(&consumer) {
-                let group = &plan.fused_serial_groups[group_index];
-                if group.member_loop_ids.binary_search(&dependency).is_err() {
-                    group_external
-                        .entry(group_index)
-                        .or_default()
-                        .insert(dependency);
-                }
-            }
         }
 
         let dependencies = unit_nodes
             .iter()
             .copied()
             .map(|node| {
-                let own_group_index = group_by_member.get(&node).copied();
-                let direct_dependencies = &direct[&node];
-                let mut inherited = direct_dependencies.clone();
-                if let Some(group_index) = own_group_index {
-                    inherited.extend(
-                        group_external
-                            .get(&group_index)
-                            .into_iter()
-                            .flatten()
-                            .copied(),
-                    );
-                }
-
-                let mut expanded = BTreeSet::new();
-                for dependency in inherited {
-                    if let Some(&dependency_group_index) = group_by_member.get(&dependency) {
-                        expanded.extend(
-                            plan.fused_serial_groups[dependency_group_index]
-                                .member_loop_ids
-                                .iter()
-                                .copied(),
-                        );
-                    } else {
-                        expanded.insert(dependency);
-                    }
-                }
-                if let Some(group_index) = own_group_index {
-                    let own_group = &plan.fused_serial_groups[group_index];
-                    expanded.retain(|dependency| {
-                        own_group.member_loop_ids.binary_search(dependency).is_err()
-                            || direct_dependencies.contains(dependency)
-                    });
-                }
-                (node, expanded.into_iter().collect())
+                (
+                    node,
+                    direct
+                        .remove(&node)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                )
             })
             .collect();
 
-        Self {
+        Ok(Self {
             nodes: unit_nodes,
             dependencies,
-            lockstep_members,
-        }
+            unit_members,
+            marker: std::marker::PhantomData,
+        })
     }
 
     fn expand_lockstep_units(&self, units: &[u64]) -> Vec<u64> {
         units
             .iter()
             .flat_map(|unit| {
-                self.lockstep_members
+                self.unit_members
                     .get(unit)
-                    .copied()
+                    .map(Vec::as_slice)
                     .unwrap_or(std::slice::from_ref(unit))
                     .iter()
                     .copied()
             })
             .collect()
+    }
+}
+
+struct InducedDag {
+    nodes: Vec<u64>,
+    dependencies: std::collections::BTreeMap<u64, Vec<u64>>,
+}
+
+impl InducedDag {
+    fn new(nodes: &[u64], plan: &VectorPlan) -> Self {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let node_set = nodes.iter().copied().collect::<BTreeSet<_>>();
+        let mut dependencies = nodes
+            .iter()
+            .copied()
+            .map(|node| (node, BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
+            if edge.consumer != edge.dependency
+                && node_set.contains(&edge.consumer)
+                && node_set.contains(&edge.dependency)
+            {
+                dependencies
+                    .get_mut(&edge.consumer)
+                    .expect("induced nodes initialize dependencies")
+                    .insert(edge.dependency);
+            }
+        }
+        Self {
+            nodes: nodes.to_vec(),
+            dependencies: dependencies
+                .into_iter()
+                .map(|(node, dependencies)| (node, dependencies.into_iter().collect()))
+                .collect(),
+        }
+    }
+}
+
+impl ScheduleDag for InducedDag {
+    type Node = u64;
+
+    fn nodes(&self) -> Vec<Self::Node> {
+        self.nodes.clone()
+    }
+
+    fn dependencies(&self, node: Self::Node) -> Vec<Self::Node> {
+        self.dependencies.get(&node).cloned().unwrap_or_default()
     }
 }
 
@@ -467,7 +513,8 @@ mod tests {
     #[test]
     fn lockstep_bundle_is_one_scheduler_node_and_expands_canonically() {
         let plan = lockstep_plan();
-        let dag = EpochDag::new(&plan.epochs[0].loops, &plan);
+        let dag =
+            EpochDag::new(&plan.epochs[0].loops, &plan, SchedulingStrategy::DepthFirst).unwrap();
         assert_eq!(dag.nodes(), vec![0]);
         let schedule = schedule_vector_plan(&plan, SchedulingStrategy::DepthFirst).unwrap();
         assert_eq!(schedule.epochs[0].loops, vec![0, 1]);
@@ -479,7 +526,7 @@ mod tests {
         for strategy in ALL_STRATEGIES {
             let schedule = schedule_vector_plan(&plan, strategy).expect("valid plan schedules");
             let epoch = &schedule.epochs[0];
-            let dag = EpochDag::new(&plan.epochs[0].loops, &plan);
+            let dag = EpochDag::new(&plan.epochs[0].loops, &plan, strategy).unwrap();
             verify_schedule(&dag, &epoch.loops).expect("order is complete and valid");
         }
     }
@@ -553,7 +600,7 @@ mod tests {
             group_id: 0,
             owner_loop_id: 3,
             member_loop_ids: vec![1, 3],
-            recursive_carrier_signal_id: 3,
+            state_carrier_signal_ids: vec![3],
             delayed_read_signal_ids: vec![1],
             state_write_signal_ids: vec![3],
             internal_transport_ids: vec![],
@@ -574,6 +621,7 @@ mod tests {
             assert!(position(0) < position(3));
             assert!(position(1) < position(3));
             assert!(position(3) < position(4));
+            assert_eq!(position(3), position(1) + 1);
         }
     }
 
@@ -607,7 +655,12 @@ mod tests {
             .expect("monotone barrier plan schedules");
         let first = &schedule.epochs[0];
         let second = &schedule.epochs[1];
-        let second_dag = EpochDag::new(&plan.epochs[1].loops, &plan);
+        let second_dag = EpochDag::new(
+            &plan.epochs[1].loops,
+            &plan,
+            SchedulingStrategy::BreadthFirst,
+        )
+        .unwrap();
         assert!(second_dag.dependencies(2).is_empty());
         verify_schedule(&second_dag, &second.loops)
             .expect("cross-epoch dependency is not a local DAG edge");

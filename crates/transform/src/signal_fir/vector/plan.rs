@@ -16,6 +16,15 @@
 //! line loop preceding its readers within a vector chunk. P5 still owns
 //! region-aware FIR routing; P6 owns complete clock-domain epochs and
 //! delay/recursion storage geometry.
+//!
+//! Fused serial groups are an adapted representation of the C++ mutable
+//! `CodeLoop` nesting used for state-mediated sample dependencies. Production
+//! construction closes sample-required occurrence/data ancestors, every
+//! dangerous delayed-read/carrier relation, its same-sample path, and all
+//! conflicting effect users. Symbolic recursion carriers and table containers
+//! remain structural: their executable children, rather than the containers,
+//! enter the sample closure. The independent checker reconstructs these sets
+//! before routing can consume the certificate.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -118,7 +127,7 @@ impl From<VectorPlanError> for VectorPlanBuildError {
 struct PlacementState<'a> {
     records: BTreeMap<u32, &'a DecorationRecord>,
     children: BTreeMap<u32, Vec<u32>>,
-    delayed_values: BTreeSet<u32>,
+    sample_required: BTreeSet<u32>,
     delayed_pairs: BTreeSet<(u32, u32)>,
     structural_carriers: BTreeSet<u32>,
     placement: BTreeMap<u32, Placement>,
@@ -138,11 +147,7 @@ impl<'a> PlacementState<'a> {
             self.placement.insert(signal_id, Placement::Inline);
             return Ok(());
         }
-        if !requires_sample_execution(
-            record,
-            self.delayed_values.contains(&signal_id),
-            self.structural_carriers.contains(&signal_id),
-        ) {
+        if !self.sample_required.contains(&signal_id) {
             self.placement.insert(signal_id, Placement::Control);
             return Ok(());
         }
@@ -237,6 +242,45 @@ pub fn build_vector_plan(
         .filter(|record| record.is_symbolic_recursion_carrier)
         .map(|record| record.signal_id)
         .collect::<BTreeSet<_>>();
+    let mut sample_required = certificate
+        .records
+        .iter()
+        .filter(|record| {
+            requires_sample_execution(
+                record,
+                delayed_values.contains(&record.signal_id),
+                structural_carriers.contains(&record.signal_id),
+            )
+        })
+        .map(|record| record.signal_id)
+        .collect::<BTreeSet<_>>();
+    loop {
+        let previous = sample_required.len();
+        let additions = certificate
+            .occurrence_dependencies
+            .iter()
+            .filter_map(|dependency| {
+                sample_required
+                    .contains(&dependency.to)
+                    .then_some(dependency.from)
+            })
+            .chain(certificate.dependencies.iter().filter_map(|dependency| {
+                sample_required
+                    .contains(&dependency.to)
+                    .then_some(dependency.from)
+            }))
+            .filter(|signal_id| {
+                !structural_carriers.contains(signal_id)
+                    && records.get(signal_id).is_some_and(|record| {
+                        !matches!(record.sig_type, CanonicalSigType::Table { .. })
+                    })
+            })
+            .collect::<Vec<_>>();
+        sample_required.extend(additions);
+        if sample_required.len() == previous {
+            break;
+        }
+    }
     let separations = certificate
         .records
         .iter()
@@ -255,12 +299,8 @@ pub fn build_vector_plan(
     trace_stage("records-and-separations");
 
     let inline_sample_root = certificate.roots.iter().any(|root| {
-        records.get(root).is_some_and(|record| {
-            requires_sample_execution(
-                record,
-                delayed_values.contains(root),
-                structural_carriers.contains(root),
-            ) && separations[root] == LoopSeparation::Inline
+        records.get(root).is_some_and(|_record| {
+            sample_required.contains(root) && separations[root] == LoopSeparation::Inline
         })
     });
     let mut next_loop = 0_u64;
@@ -278,11 +318,8 @@ pub fn build_vector_plan(
 
     let mut owner = BTreeMap::<u32, u64>::new();
     for record in &certificate.records {
-        if requires_sample_execution(
-            record,
-            delayed_values.contains(&record.signal_id),
-            structural_carriers.contains(&record.signal_id),
-        ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+        if sample_required.contains(&record.signal_id)
+            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && separations[&record.signal_id] == LoopSeparation::SeparateSerial
         {
             let group = record
@@ -293,11 +330,8 @@ pub fn build_vector_plan(
         }
     }
     for record in &certificate.records {
-        if requires_sample_execution(
-            record,
-            delayed_values.contains(&record.signal_id),
-            structural_carriers.contains(&record.signal_id),
-        ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+        if sample_required.contains(&record.signal_id)
+            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && separations[&record.signal_id] == LoopSeparation::SeparateVectorizable
         {
             owner.insert(record.signal_id, next_loop);
@@ -329,7 +363,7 @@ pub fn build_vector_plan(
     let mut state = PlacementState {
         records,
         children,
-        delayed_values: delayed_values.clone(),
+        sample_required: sample_required.clone(),
         delayed_pairs,
         structural_carriers: structural_carriers.clone(),
         placement: BTreeMap::new(),
@@ -340,11 +374,7 @@ pub fn build_vector_plan(
     for record in &certificate.records {
         if structural_carriers.contains(&record.signal_id) {
             state.placement.insert(record.signal_id, Placement::Inline);
-        } else if !requires_sample_execution(
-            record,
-            delayed_values.contains(&record.signal_id),
-            structural_carriers.contains(&record.signal_id),
-        ) {
+        } else if !sample_required.contains(&record.signal_id) {
             state.placement.insert(record.signal_id, Placement::Control);
         }
     }
@@ -360,16 +390,12 @@ pub fn build_vector_plan(
             .insert(u64::from(signal));
     }
     for &root in &certificate.roots {
-        let record = state
+        let _record = state
             .records
             .get(&root)
             .copied()
             .ok_or(VectorPlanBuildError::MissingRecord { signal_id: root })?;
-        if !requires_sample_execution(
-            record,
-            delayed_values.contains(&root),
-            structural_carriers.contains(&root),
-        ) {
+        if !sample_required.contains(&root) {
             continue;
         }
         let loop_id = match state.placement.get(&root).copied() {
@@ -406,11 +432,8 @@ pub fn build_vector_plan(
             .records
             .iter()
             .filter(|record| {
-                requires_sample_execution(
-                    record,
-                    delayed_values.contains(&record.signal_id),
-                    structural_carriers.contains(&record.signal_id),
-                ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+                sample_required.contains(&record.signal_id)
+                    && !certificate.lifecycle_boundaries.contains(&record.signal_id)
                     && !state.placement.contains_key(&record.signal_id)
             })
             .map(|record| record.signal_id)
@@ -456,11 +479,8 @@ pub fn build_vector_plan(
     }
     trace_stage("placement");
     for record in &certificate.records {
-        if requires_sample_execution(
-            record,
-            delayed_values.contains(&record.signal_id),
-            structural_carriers.contains(&record.signal_id),
-        ) && !certificate.lifecycle_boundaries.contains(&record.signal_id)
+        if sample_required.contains(&record.signal_id)
+            && !certificate.lifecycle_boundaries.contains(&record.signal_id)
             && !state.placement.contains_key(&record.signal_id)
         {
             if timing_enabled {
@@ -515,6 +535,20 @@ pub fn build_vector_plan(
             &mut immediate_delay_edges,
             &mut effect_edges,
         )?;
+    }
+    for occurrence in certificate
+        .occurrence_dependencies
+        .iter()
+        .filter(|occurrence| occurrence.delay == 0)
+    {
+        let Some(Placement::Owned(producer)) = state.placement.get(&occurrence.to).copied() else {
+            continue;
+        };
+        for &consumer in state.contexts.get(&occurrence.from).into_iter().flatten() {
+            if consumer != producer {
+                cross_uses.insert((occurrence.to, producer, consumer));
+            }
+        }
     }
     trace_stage("dependency-edges");
     let mut data_edges = cross_uses
@@ -626,8 +660,14 @@ pub fn build_vector_plan(
     }
     trace_stage("transports");
 
-    let fused_serial_groups =
-        build_fused_serial_groups(certificate, &state, &loop_ids, &data_edges, &transports);
+    let fused_serial_groups = build_fused_serial_groups(
+        certificate,
+        &state,
+        &loop_ids,
+        &data_edges,
+        &effect_edges,
+        &transports,
+    );
     for edge in &immediate_delay_edges {
         if !fused_serial_groups.iter().any(|group| {
             group
@@ -636,6 +676,44 @@ pub fn build_vector_plan(
                 .is_ok()
                 && group.member_loop_ids.binary_search(&edge.consumer).is_ok()
         }) {
+            if timing_enabled {
+                eprintln!(
+                    "[vector-fused-uncovered-edge] producer={} consumer={} groups={:?}",
+                    edge.dependency, edge.consumer, fused_serial_groups
+                );
+                for dependency in certificate.dependencies.iter().filter(|dependency| {
+                    matches!(dependency.kind, DepKind::Immediate)
+                        && state.records[&dependency.from].is_delay_read
+                        && state
+                            .delayed_pairs
+                            .contains(&(dependency.from, dependency.to))
+                        && state.placement.get(&dependency.to)
+                            == Some(&Placement::Owned(edge.dependency))
+                        && state
+                            .contexts
+                            .get(&dependency.from)
+                            .is_some_and(|contexts| contexts.contains(&edge.consumer))
+                }) {
+                    let read = state.records[&dependency.from];
+                    let carrier = state.records[&dependency.to];
+                    eprintln!(
+                        "[vector-fused-uncovered-fact] read={} carrier={} read_place={:?} carrier_place={:?} read_clock={:?} carrier_clock={:?} carrier_rec={:?} carrier_delay={} read_dependencies={:?}",
+                        dependency.from,
+                        dependency.to,
+                        state.placement.get(&dependency.from),
+                        state.placement.get(&dependency.to),
+                        read.clock_domain,
+                        carrier.clock_domain,
+                        carrier.recursive_projection,
+                        carrier.max_delay,
+                        certificate
+                            .dependencies
+                            .iter()
+                            .filter(|candidate| candidate.from == dependency.from)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
             return Err(VectorPlanBuildError::UnfusedImmediateDelayCrossing {
                 producer: edge.dependency,
                 consumer: edge.consumer,
@@ -689,46 +767,51 @@ pub fn build_vector_plan_with_lockstep(
     Ok(VerifiedVectorPlan { plan })
 }
 
-/// Derives a fail-closed fused-serial slice directly from certified decoration
-/// facts. Every delayed read and pure transport chain belonging to one
-/// top-rate recursion group is kept in a single per-sample execution unit.
+/// Derives fail-closed fused-serial groups directly from certified decoration
+/// facts.
+///
+/// Every immediate delayed-state crossing and delayed-recursion chain is
+/// closed into one canonical per-sample execution component. Components also
+/// absorb overlapping carriers, internal transports, and conflicting effect
+/// users. A component is emitted only when every member and grouped signal has
+/// one exact clock id; the independent verifier rebuilds all of these facts.
 fn build_fused_serial_groups(
     certificate: &super::decoration_verify::DecorationCertificate,
     state: &PlacementState<'_>,
     loop_ids: &[u64],
     data_edges: &BTreeSet<LoopEdge>,
+    effect_edges: &BTreeSet<LoopEdge>,
     transports: &[TransportRecord],
 ) -> Vec<FusedSerialGroupRecord> {
     #[derive(Default)]
     struct Candidate {
-        carrier: Option<u64>,
-        recursion_group: Option<u32>,
+        carriers: BTreeSet<u64>,
         members: BTreeSet<u64>,
         delayed_reads: BTreeSet<u64>,
-        ambiguous: bool,
+        state_effects: BTreeSet<EffectAtom>,
+        close_effect_users: bool,
     }
 
-    let reachability = PlanReachability::new(loop_ids, data_edges);
-    let mut candidates = BTreeMap::<u64, Candidate>::new();
+    let mut ordering_edges = data_edges.clone();
+    ordering_edges.extend(effect_edges.iter().copied());
+    let reachability = PlanReachability::new(loop_ids, &ordering_edges);
+    let mut seeds = Vec::<Candidate>::new();
+
+    // Delayed recursion dependencies run from the delayed read towards the
+    // recursive writer. Close every loop on that same-sample path.
     for dependency in certificate
         .dependencies
         .iter()
         .filter(|dependency| matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0))
     {
         let read_id = dependency.from;
-        let Some(read_record) = state.records.get(&read_id).copied() else {
+        if !state.records.contains_key(&read_id) {
             continue;
-        };
+        }
         let Some(carrier_record) = state.records.get(&dependency.to).copied() else {
             continue;
         };
-        let Some(projection) = carrier_record.recursive_projection else {
-            continue;
-        };
-        if carrier_record.max_delay == 0
-            || read_record.clock_domain.is_some()
-            || carrier_record.clock_domain.is_some()
-        {
+        if carrier_record.max_delay == 0 {
             continue;
         }
         let Some(Placement::Owned(read_loop_id)) = state.placement.get(&read_id).copied() else {
@@ -741,21 +824,8 @@ fn build_fused_serial_groups(
         if read_loop_id == owner_loop_id || !reachability.reaches(read_loop_id, owner_loop_id) {
             continue;
         }
-        let candidate = candidates.entry(owner_loop_id).or_default();
-        let carrier = u64::from(dependency.to);
-        if candidate
-            .recursion_group
-            .is_some_and(|existing| existing != projection.group)
-        {
-            candidate.ambiguous = true;
-            continue;
-        }
-        candidate.carrier = Some(
-            candidate
-                .carrier
-                .map_or(carrier, |current| current.min(carrier)),
-        );
-        candidate.recursion_group = Some(projection.group);
+        let mut candidate = Candidate::default();
+        candidate.carriers.insert(u64::from(dependency.to));
         // Include every loop on a same-sample data path from the delayed read
         // to its recursive writer. The fused body then preserves read(n),
         // write(n), read(n+1) even when no transport directly carries the
@@ -767,7 +837,69 @@ fn build_fused_serial_groups(
                     && (loop_id == owner_loop_id || reachability.reaches(loop_id, owner_loop_id))
             }));
         candidate.delayed_reads.insert(u64::from(read_id));
+        seeds.push(candidate);
     }
+
+    // Immediate state-mediated delay crossings are represented by an
+    // immediate scheduling dependency plus a nonzero occurrence delay for the
+    // same signal pair. Unlike the original slice, the carrier need not be a
+    // recursive projection: ordinary bounded delay lines have the same
+    // per-sample write/read obligation.
+    for dependency in certificate.dependencies.iter().filter(|dependency| {
+        matches!(dependency.kind, DepKind::Immediate)
+            && state.records[&dependency.from].is_delay_read
+            && state
+                .delayed_pairs
+                .contains(&(dependency.from, dependency.to))
+    }) {
+        let carrier_record = state.records[&dependency.to];
+        if carrier_record.max_delay == 0 {
+            continue;
+        }
+        let Some(Placement::Owned(writer_loop_id)) = state.placement.get(&dependency.to).copied()
+        else {
+            continue;
+        };
+        let mut candidate = Candidate::default();
+        candidate.close_effect_users = true;
+        candidate.carriers.insert(u64::from(dependency.to));
+        candidate.delayed_reads.insert(u64::from(dependency.from));
+        candidate.members.insert(writer_loop_id);
+        candidate.state_effects.extend(
+            carrier_record
+                .effects
+                .iter()
+                .filter(|carrier_effect| {
+                    state.records[&dependency.from]
+                        .effects
+                        .iter()
+                        .any(|read_effect| {
+                            super::super::vector_analysis::effects_conflict(
+                                carrier_effect,
+                                read_effect,
+                            )
+                        })
+                })
+                .cloned(),
+        );
+        if let Some(Placement::Owned(read_owner)) = state.placement.get(&dependency.from).copied() {
+            candidate.members.insert(read_owner);
+        }
+        for &read_loop_id in state.contexts.get(&dependency.from).into_iter().flatten() {
+            candidate.members.insert(read_loop_id);
+            if reachability.reaches(writer_loop_id, read_loop_id) {
+                candidate
+                    .members
+                    .extend(loop_ids.iter().copied().filter(|&loop_id| {
+                        (loop_id == writer_loop_id || reachability.reaches(writer_loop_id, loop_id))
+                            && (loop_id == read_loop_id
+                                || reachability.reaches(loop_id, read_loop_id))
+                    }));
+            }
+        }
+        seeds.push(candidate);
+    }
+
     // Preserve the direct transported-read slice as a second, independent
     // discovery route. A delayed read may already share its recursive owner
     // loop while a consumer transport still has to remain in that same
@@ -775,9 +907,9 @@ fn build_fused_serial_groups(
     // skips that local-read case.
     for transport in transports {
         let read_id = u32::try_from(transport.signal_id).expect("signal id fits u32");
-        let Some(read_record) = state.records.get(&read_id).copied() else {
+        if !state.records.contains_key(&read_id) {
             continue;
-        };
+        }
         for dependency in certificate.dependencies.iter().filter(|dependency| {
             dependency.from == read_id
                 && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
@@ -785,13 +917,7 @@ fn build_fused_serial_groups(
             let Some(carrier_record) = state.records.get(&dependency.to).copied() else {
                 continue;
             };
-            let Some(projection) = carrier_record.recursive_projection else {
-                continue;
-            };
-            if carrier_record.max_delay == 0
-                || read_record.clock_domain.is_some()
-                || carrier_record.clock_domain.is_some()
-            {
+            if carrier_record.max_delay == 0 {
                 continue;
             }
             let Some(Placement::Owned(owner_loop_id)) =
@@ -799,76 +925,288 @@ fn build_fused_serial_groups(
             else {
                 continue;
             };
-            let candidate = candidates.entry(owner_loop_id).or_default();
-            let carrier = u64::from(dependency.to);
-            if candidate
-                .recursion_group
-                .is_some_and(|existing| existing != projection.group)
-            {
-                candidate.ambiguous = true;
-                continue;
-            }
-            candidate.carrier = Some(
-                candidate
-                    .carrier
-                    .map_or(carrier, |current| current.min(carrier)),
-            );
-            candidate.recursion_group = Some(projection.group);
+            let mut candidate = Candidate::default();
+            candidate.carriers.insert(u64::from(dependency.to));
             candidate.members.insert(transport.producer_loop);
             candidate.members.insert(transport.consumer_loop);
             candidate.members.insert(owner_loop_id);
             candidate.delayed_reads.insert(transport.signal_id);
+            seeds.push(candidate);
         }
     }
 
-    let mut components = Vec::<Vec<(u64, Candidate)>>::new();
-    for candidate in candidates.into_iter().filter(|(_, candidate)| {
-        !candidate.ambiguous && candidate.carrier.is_some() && candidate.recursion_group.is_some()
-    }) {
-        let mut component = vec![candidate];
-        let mut members = component[0].1.members.clone();
-        while let Some(position) = components.iter().position(|existing| {
-            existing
-                .iter()
-                .any(|(_, candidate)| !candidate.members.is_disjoint(&members))
-        }) {
-            let existing = components.remove(position);
-            for (_, candidate) in &existing {
-                members.extend(candidate.members.iter().copied());
+    let mut components = Vec::<Candidate>::new();
+    for mut candidate in seeds
+        .into_iter()
+        .filter(|candidate| !candidate.carriers.is_empty() && candidate.members.len() >= 2)
+    {
+        let mut position = 0;
+        while position < components.len() {
+            if !components[position].members.is_disjoint(&candidate.members)
+                || !components[position]
+                    .carriers
+                    .is_disjoint(&candidate.carriers)
+                || components[position].state_effects.iter().any(|left| {
+                    candidate
+                        .state_effects
+                        .iter()
+                        .any(|right| super::super::vector_analysis::effects_conflict(left, right))
+                })
+            {
+                let existing = components.remove(position);
+                candidate.carriers.extend(existing.carriers);
+                candidate.members.extend(existing.members);
+                candidate.delayed_reads.extend(existing.delayed_reads);
+                candidate.state_effects.extend(existing.state_effects);
+                candidate.close_effect_users |= existing.close_effect_users;
+                position = 0;
+            } else {
+                position += 1;
             }
-            component.extend(existing);
         }
-        component.sort_by_key(|(owner_loop_id, _)| *owner_loop_id);
-        components.push(component);
+        components.push(candidate);
     }
-    components.sort_by_key(|component| component[0].0);
+    loop {
+        let mut changed = false;
+        for component in &mut components {
+            let previous = (
+                component.carriers.len(),
+                component.members.len(),
+                component.delayed_reads.len(),
+                component.state_effects.len(),
+            );
+            component.carriers.extend(
+                certificate
+                    .records
+                    .iter()
+                    .filter(|record| {
+                        record.max_delay > 0
+                            && state.placement.get(&record.signal_id).is_some_and(
+                                |placement| {
+                                    matches!(placement, Placement::Owned(loop_id) if component.members.contains(loop_id))
+                                },
+                            )
+                            && certificate.dependencies.iter().any(|dependency| {
+                                dependency.to == record.signal_id
+                                    && state
+                                        .placement
+                                        .get(&dependency.from)
+                                        .is_some_and(|placement| {
+                                            matches!(placement, Placement::Owned(_))
+                                        })
+                                    && (matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
+                                        || (matches!(dependency.kind, DepKind::Immediate)
+                                            && state.delayed_pairs.contains(&(
+                                                dependency.from,
+                                                dependency.to,
+                                            ))))
+                            })
+                    })
+                    .map(|record| u64::from(record.signal_id)),
+            );
+            for dependency in &certificate.dependencies {
+                let carrier_id = u64::from(dependency.to);
+                if !component.carriers.contains(&carrier_id) {
+                    continue;
+                }
+                let immediate = matches!(dependency.kind, DepKind::Immediate)
+                    && state
+                        .delayed_pairs
+                        .contains(&(dependency.from, dependency.to));
+                let delayed = matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0);
+                if !immediate && !delayed {
+                    continue;
+                }
+                let Some(Placement::Owned(read_owner)) =
+                    state.placement.get(&dependency.from).copied()
+                else {
+                    continue;
+                };
+                component.delayed_reads.insert(u64::from(dependency.from));
+                component.members.insert(read_owner);
+                if immediate {
+                    component.close_effect_users = true;
+                    component.state_effects.extend(
+                        state.records[&dependency.to]
+                            .effects
+                            .iter()
+                            .filter(|carrier_effect| {
+                                state.records[&dependency.from]
+                                    .effects
+                                    .iter()
+                                    .any(|read_effect| {
+                                        super::super::vector_analysis::effects_conflict(
+                                            carrier_effect,
+                                            read_effect,
+                                        )
+                                    })
+                            })
+                            .cloned(),
+                    );
+                }
+            }
+            component.state_effects.extend(
+                component
+                    .members
+                    .iter()
+                    .flat_map(|loop_id| loop_effects(*loop_id, state)),
+            );
+            component.close_effect_users |= !component.state_effects.is_empty();
+            if component.close_effect_users {
+                let carrier_owners = component
+                    .carriers
+                    .iter()
+                    .filter_map(|signal_id| u32::try_from(*signal_id).ok())
+                    .filter_map(|signal_id| match state.placement.get(&signal_id) {
+                        Some(Placement::Owned(loop_id)) => Some(*loop_id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let effect_users = loop_ids
+                    .iter()
+                    .copied()
+                    .filter(|loop_id| {
+                        loop_effects(*loop_id, state).iter().any(|effect| {
+                            component.state_effects.iter().any(|carrier| {
+                                super::super::vector_analysis::effects_conflict(carrier, effect)
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for effect_loop in effect_users {
+                    component.members.insert(effect_loop);
+                    for &owner_loop in &carrier_owners {
+                        let (start, end) = if reachability.reaches(owner_loop, effect_loop) {
+                            (owner_loop, effect_loop)
+                        } else if reachability.reaches(effect_loop, owner_loop) {
+                            (effect_loop, owner_loop)
+                        } else {
+                            continue;
+                        };
+                        component
+                            .members
+                            .extend(loop_ids.iter().copied().filter(|&loop_id| {
+                                (loop_id == start || reachability.reaches(start, loop_id))
+                                    && (loop_id == end || reachability.reaches(loop_id, end))
+                            }));
+                    }
+                }
+            }
+            changed |= previous
+                != (
+                    component.carriers.len(),
+                    component.members.len(),
+                    component.delayed_reads.len(),
+                    component.state_effects.len(),
+                );
+            let additions = loop_ids
+                .iter()
+                .copied()
+                .filter(|loop_id| !component.members.contains(loop_id))
+                .filter(|loop_id| {
+                    component.members.iter().any(|member| {
+                        *member == *loop_id || reachability.reaches(*member, *loop_id)
+                    }) && component.members.iter().any(|member| {
+                        *member == *loop_id || reachability.reaches(*loop_id, *member)
+                    })
+                })
+                .collect::<Vec<_>>();
+            changed |= !additions.is_empty();
+            component.members.extend(additions);
+        }
+        let mut left = 0;
+        while left < components.len() {
+            let mut right = left + 1;
+            while right < components.len() {
+                if components[left]
+                    .members
+                    .is_disjoint(&components[right].members)
+                    && components[left]
+                        .carriers
+                        .is_disjoint(&components[right].carriers)
+                    && !components[left].state_effects.iter().any(|left_effect| {
+                        components[right].state_effects.iter().any(|right_effect| {
+                            super::super::vector_analysis::effects_conflict(
+                                left_effect,
+                                right_effect,
+                            )
+                        })
+                    })
+                {
+                    right += 1;
+                    continue;
+                }
+                let other = components.remove(right);
+                components[left].carriers.extend(other.carriers);
+                components[left].members.extend(other.members);
+                components[left].delayed_reads.extend(other.delayed_reads);
+                components[left].state_effects.extend(other.state_effects);
+                components[left].close_effect_users |= other.close_effect_users;
+                changed = true;
+            }
+            left += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+    components.sort_by_key(|component| component.members.iter().next().copied());
 
     let mut groups = Vec::new();
     for component in components {
-        let owner_loop_id = component[0].0;
-        let carrier = component[0].1.carrier.expect("component carrier checked");
-        let members = component
+        let members = component.members;
+        let carriers = component.carriers;
+        let delayed_reads = component.delayed_reads;
+        let expected_clock = carriers
             .iter()
-            .flat_map(|(_, candidate)| candidate.members.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let delayed_reads = component
+            .next()
+            .and_then(|carrier| u32::try_from(*carrier).ok())
+            .and_then(|carrier| state.records.get(&carrier))
+            .map(|record| record.clock_domain);
+        let clocks_match = expected_clock.is_some()
+            && carriers
+                .iter()
+                .chain(&delayed_reads)
+                .filter_map(|signal_id| u32::try_from(*signal_id).ok())
+                .all(|signal_id| {
+                    state.records[&signal_id].clock_domain == expected_clock.flatten()
+                })
+            && state.placement.iter().all(|(signal_id, placement)| {
+                !matches!(placement, Placement::Owned(loop_id) if members.contains(loop_id))
+                    || state.records[signal_id].clock_domain == expected_clock.flatten()
+            });
+        if !clocks_match {
+            continue;
+        }
+        let Some(owner_loop_id) = carriers
             .iter()
-            .flat_map(|(_, candidate)| candidate.delayed_reads.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let state_write_signal_ids = certificate
-            .records
-            .iter()
-            .filter(|record| {
-                record.recursive_projection.is_some()
+            .filter_map(|signal_id| {
+                let signal_id = u32::try_from(*signal_id).ok()?;
+                match state.placement.get(&signal_id) {
+                    Some(Placement::Owned(loop_id)) => Some(*loop_id),
+                    _ => None,
+                }
+            })
+            .min()
+        else {
+            continue;
+        };
+        let mut state_write_signal_ids = carriers.clone();
+        state_write_signal_ids.extend(
+            certificate
+                .records
+                .iter()
+                .filter(|record| {
+                    record.recursive_projection.is_some()
                     && state
                         .placement
                         .get(&record.signal_id)
                         .is_some_and(|placement| {
                             matches!(placement, Placement::Owned(owner) if members.contains(owner))
                         })
-            })
-            .map(|record| u64::from(record.signal_id))
-            .collect::<Vec<_>>();
+                })
+                .map(|record| u64::from(record.signal_id)),
+        );
         let output_or_transport_roots = members
             .iter()
             .flat_map(|loop_id| state.roots_by_loop.get(loop_id).into_iter().flatten())
@@ -884,16 +1222,16 @@ fn build_fused_serial_groups(
             })
             .map(|transport| transport.transport_id)
             .collect::<Vec<_>>();
-        if state_write_signal_ids.is_empty() || output_or_transport_roots.is_empty() {
+        if output_or_transport_roots.is_empty() {
             continue;
         }
         groups.push(FusedSerialGroupRecord {
             group_id: u64::try_from(groups.len()).expect("fused group count fits u64"),
             owner_loop_id,
             member_loop_ids: members.into_iter().collect(),
-            recursive_carrier_signal_id: carrier,
+            state_carrier_signal_ids: carriers.into_iter().collect(),
             delayed_read_signal_ids: delayed_reads.into_iter().collect(),
-            state_write_signal_ids,
+            state_write_signal_ids: state_write_signal_ids.into_iter().collect(),
             internal_transport_ids,
             output_or_transport_roots,
         });
@@ -1624,6 +1962,27 @@ mod tests {
                 && transport.element_type == ValueType::Real
                 && transport.length == 8
         }));
+    }
+
+    #[test]
+    fn delayed_constant_sample_requirement_propagates_to_its_parent() {
+        let mut arena = TreeArena::new();
+        let parent = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let one = builder.real(1.0);
+            let delayed = builder.delay1(one);
+            let two = builder.real(2.0);
+            builder.binop(signals::BinOp::Add, delayed, two)
+        };
+        let decorations = certify(&arena, &[parent]);
+        let plan = build_vector_plan(&decorations, 8).unwrap();
+        let parent = plan
+            .plan()
+            .signals
+            .iter()
+            .find(|signal| signal.signal_id == u64::from(parent.as_u32()))
+            .expect("prepared parent keeps its stable signal id");
+        assert!(matches!(parent.placement, Placement::Owned(_)));
     }
 
     #[test]

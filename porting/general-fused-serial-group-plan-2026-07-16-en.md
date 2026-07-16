@@ -1,7 +1,7 @@
 # General Fused Serial Group Certificate Plan
 
 Date: 2026-07-16
-Status: planned (Phase D)
+Status: D0-D2 implemented; D3 corpus qualification pending
 Scope: checked serial fusion for every immediate state-mediated delay crossing
 
 ## 1. Objective and baseline
@@ -18,9 +18,12 @@ The direct top-rate slice described by
 already preserves one delayed recursive carrier and every same-sample path loop
 inside one physical sample iteration. Its producer is seeded primarily from
 `DepKind::Delayed` facts, records only one canonical carrier, and excludes all
-clocked signals. The remaining corpus needs complete coverage of certified
-immediate state-mediated crossings, multiple coupled carriers, longer path
-closures, and groups wholly contained in one clock island.
+clocked signals. Live D0 characterization found that 12 first uncovered edges
+use ordinary bounded-delay state (`max_delay > 0`) rather than a recursive
+projection; `echo_bug` exposes two immediate delayed reads of one recursive
+carrier. The remaining corpus therefore needs complete coverage of all checked
+state carriers, multiple coupled carriers, longer path closures, and groups
+wholly contained in one clock island.
 
 This phase does not weaken `UnfusedImmediateDelayCrossing`. Every dangerous
 edge must be covered by a checked group before vector routing starts; otherwise
@@ -28,21 +31,22 @@ the compiler retains the same fail-closed scalar fallback.
 
 ## 2. Versioned data model
 
-Vector-plan schema v3 replaces the singular canonical carrier field with:
+Vector-plan schema v3 replaces the singular recursive-only carrier field with:
 
 ```rust
-recursive_carrier_signal_ids: Vec<u64>
+state_carrier_signal_ids: Vec<u64>
 ```
 
-The array is non-empty, strictly ascending, and contains every recursive
-carrier reached by a delayed read in the group. `owner_loop_id` remains the
-canonical minimum recursive owner used for stable group identity. Existing
+The array is non-empty, strictly ascending, and contains every `max_delay > 0`
+state carrier reached by a delayed read in the group. Recursive projections
+are one supported carrier class, not a prerequisite. `owner_loop_id` remains
+the canonical minimum carrier owner used for stable group identity. Existing
 fields retain their meanings:
 
 - `member_loop_ids`: exact loop closure emitted in one sample-time unit;
 - `delayed_read_signal_ids`: all delayed reads that seed the closure;
-- `state_write_signal_ids`: every recursive projection written by a recursive
-  member loop;
+- `state_write_signal_ids`: every listed carrier plus every recursive
+  projection written by a recursive member loop;
 - `internal_transport_ids`: every planned transport whose producer and
   consumer are both group members, rematerialized as a scalar value;
 - `output_or_transport_roots`: the complete owned-root envelope.
@@ -59,10 +63,11 @@ the strategy-independent plan graph.
 1. Reconstruct every dangerous immediate delay edge using the same certified
    occurrence-delay relation that feeds `immediate_delay_edges`.
 2. For each edge, identify every delayed-read/carrier pair, its read loop, its
-   recursive writer loop, and its exact nonzero clock id (zero means top rate).
-3. Compute the complete same-sample path closure from the read loop to the
-   writer loop over data edges. Paths may contain any finite number of pure or
-   serial loops.
+   state-writer loop, and its exact nonzero clock id (zero means top rate).
+3. Compute the complete same-sample path closure between the carrier writer and
+   delayed-read consumer for immediate state crossings, and from read to writer
+   for delayed recursive dependencies. Paths may contain any finite number of
+   pure or serial loops.
 4. Merge closures that overlap, share a carrier, or are connected by another
    dangerous crossing. Union every carrier, read, recursive writer, root, and
    internal transport.
@@ -80,18 +85,20 @@ The checker must not call the producer or consume producer discovery state. It
 reconstructs from decorations plus the accepted raw plan:
 
 1. the full dangerous immediate-delay edge set;
-2. every delayed-read/carrier relation and recursive projection group;
+2. every delayed-read/state-carrier relation and any recursive projection
+   group;
 3. the complete read-to-writer path closure, including arbitrary chain length;
 4. connected components formed by overlapping closures and carriers;
 5. the exact carrier, read, writer, member, root, and internal-transport sets;
 6. one common clock id for every member-owned signal and every grouped signal;
 7. coverage of every dangerous edge by exactly one canonical group.
 
-It rejects missing or extra carriers, truncated paths, omitted transports,
-overlapping groups, incompatible clocks, a recursive member without its writer,
-and any delayed read without a positive certified dependency to a listed
-carrier. The checker continues to run after the ordinary finite-shape plan
-verifier and before routing.
+It rejects missing or extra carriers, a carrier without `max_delay > 0`,
+truncated paths, omitted transports, overlapping groups, incompatible clocks,
+a recursive member without its writer, and any delayed read without a positive
+certified occurrence-delay or delayed dependency to a listed carrier. The
+checker continues to run after the ordinary finite-shape plan verifier and
+before routing.
 
 ## 5. Routing, state, and FIR assembly
 
@@ -141,20 +148,20 @@ variants and all four scheduling strategies.
 
 ### D0 — plan and characterization
 
-- Freeze this certificate and checker contract before implementation.
-- Record the exact 13-case baseline and each first uncovered edge.
+- [x] Freeze this certificate and checker contract before implementation.
+- [x] Record the exact 13-case baseline and each first uncovered edge.
 
 ### D1 — schema, producer, and independent checker
 
-- Introduce vector-plan schema v3 and complete carrier sets.
-- Rebuild components from all dangerous edges and arbitrary path closures.
-- Add the independent reconstruction and rejecting mutations.
+- [x] Introduce vector-plan schema v3 and complete state-carrier sets.
+- [x] Rebuild components from all dangerous edges and arbitrary path closures.
+- [x] Add the independent reconstruction and rejecting mutations.
 
 ### D2 — same-island routing and assembled FIR
 
-- Permit `FusedScalar` transports within one exact clock domain.
-- Assemble and independently verify top-rate and same-island fused bodies.
-- Add focused end-to-end bit-exact tests for multi-carrier, long-chain, and
+- [x] Permit `FusedScalar` transports within one exact clock domain.
+- [x] Assemble and independently verify top-rate and same-island fused bodies.
+- [x] Add focused structural and end-to-end tests for multi-carrier, long-chain, and
   clock-island shapes.
 
 ### D3 — corpus qualification
@@ -184,8 +191,8 @@ Phase D is complete only when:
 
 ## 9. Risks and mitigations
 
-- **Incomplete carrier closure:** make carrier sets explicit in schema v3 and
-  compare them with an independently reconstructed set.
+- **Incomplete carrier closure:** make generic state-carrier sets explicit in
+  schema v3 and compare them with an independently reconstructed set.
 - **Unsound long-chain fusion:** require exact graph reachability closure, not
   only direct transported reads.
 - **Clock-rate mismatch:** admit only one exact clock id and require one exact

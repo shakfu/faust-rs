@@ -57,7 +57,8 @@ pub enum ClockTransportMode {
     OuterChunk,
     /// Per-sample value crossing logical loops in one certified fused group.
     /// The route is a scalar stack temporary inside the group's sole sample
-    /// loop, never a chunk array filled by a preceding loop.
+    /// envelope, either a top-rate loop or one exact guarded clock island,
+    /// never a chunk array filled by a preceding loop.
     FusedScalar { group_id: u64 },
     /// Domain-rate value: route below the serial guard, one fire at a time.
     IslandScalar { domain_id: u64 },
@@ -720,9 +721,6 @@ fn derive_transport_policies(
                 },
             )?;
             let mode = if let Some(&group_id) = fused_transports.get(&transport.transport_id) {
-                if signal.clock_id != 0 {
-                    return Err(VectorClockAdError::TransportCoverageMismatch);
-                }
                 ClockTransportMode::FusedScalar { group_id }
             } else if signal.clock_id == 0 {
                 ClockTransportMode::OuterChunk
