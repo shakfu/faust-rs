@@ -1100,11 +1100,11 @@ mod tests {
         let mut out = String::new();
         let mut mode = EmitMode::Default;
         emit_stmt(&store, &mut out, &options, control, 1, &mut mode).expect("Control renders");
-        assert_eq!(out, "    if (1) {\n        (void)(2);\n    }\n");
+        assert_eq!(out, "    if (1) {\n    }\n");
 
         let mut out = String::new();
         emit_stmt(&store, &mut out, &options, while_loop, 1, &mut mode).expect("WhileLoop renders");
-        assert_eq!(out, "    while (1) {\n        (void)(2);\n    }\n");
+        assert_eq!(out, "    while (1) {\n    }\n");
     }
 
     #[test]

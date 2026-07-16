@@ -711,13 +711,26 @@ pub(crate) fn emit_stmt_common<E>(
             }
             (Err(err), _) | (_, Err(err)) => Err(err),
         },
-        FirMatch::Drop(value) => match (ctx.render_value)(value) {
-            Ok(value) => {
-                let _ = writeln!(out, "{tab}(void)({value});");
+        FirMatch::Drop(value) => {
+            // Vector FIR uses Drop roots to materialize and verify a shared
+            // expression DAG. Once the roots have become ordinary loads,
+            // constants, or pure arithmetic, emitting `(void)(...)` only
+            // bloats generated C/C++ and cannot affect execution. Keep every
+            // call or unrecognised node: FIR has no general purity annotation
+            // for foreign functions, so the conservative fallback preserves
+            // potential side effects.
+            if is_obviously_side_effect_free_value(store, value) {
                 Ok(())
+            } else {
+                match (ctx.render_value)(value) {
+                    Ok(value) => {
+                        let _ = writeln!(out, "{tab}(void)({value});");
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
+                }
             }
-            Err(err) => Err(err),
-        },
+        }
         FirMatch::NullStatement => {
             let _ = writeln!(out, "{tab};");
             Ok(())
@@ -984,13 +997,61 @@ pub(crate) fn emit_stmt_common<E>(
     Some(result)
 }
 
+/// Returns `true` only for FIR values whose evaluation cannot have an effect.
+///
+/// This is deliberately narrower than mathematical purity: [`FirMatch::FunCall`]
+/// is retained because a foreign function has no purity contract at this
+/// backend boundary. The predicate is used solely to omit redundant textual
+/// `Drop` statements after vector DAG materialization.
+fn is_obviously_side_effect_free_value(store: &FirStore, value: FirId) -> bool {
+    match match_fir(store, value) {
+        FirMatch::Int32 { .. }
+        | FirMatch::Int64 { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Quad { .. }
+        | FirMatch::FixedPoint { .. }
+        | FirMatch::Int32Array { .. }
+        | FirMatch::Float32Array { .. }
+        | FirMatch::Float64Array { .. }
+        | FirMatch::QuadArray { .. }
+        | FirMatch::FixedPointArray { .. }
+        | FirMatch::LoadVar { .. }
+        | FirMatch::LoadVarAddress { .. }
+        | FirMatch::NullValue { .. } => true,
+        FirMatch::LoadTable { index, .. } => is_obviously_side_effect_free_value(store, index),
+        FirMatch::ValueArray { values, .. } => values
+            .iter()
+            .all(|&item| is_obviously_side_effect_free_value(store, item)),
+        FirMatch::BinOp { lhs, rhs, .. } => {
+            is_obviously_side_effect_free_value(store, lhs)
+                && is_obviously_side_effect_free_value(store, rhs)
+        }
+        FirMatch::Neg { value, .. }
+        | FirMatch::Cast { value, .. }
+        | FirMatch::Bitcast { value, .. } => is_obviously_side_effect_free_value(store, value),
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
+            is_obviously_side_effect_free_value(store, cond)
+                && is_obviously_side_effect_free_value(store, then_value)
+                && is_obviously_side_effect_free_value(store, else_value)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CFamilySyntax, emit_binop, emit_binop_expr, emit_type, format_float32, string_literal,
-        trim_float,
+        CFamilySyntax, emit_binop, emit_binop_expr, emit_type, format_float32,
+        is_obviously_side_effect_free_value, string_literal, trim_float,
     };
-    use fir::{FirBinOp, FirType};
+    use fir::{AccessType, FirBinOp, FirBuilder, FirStore, FirType};
 
     const TEST_SYNTAX: CFamilySyntax = CFamilySyntax {
         bool_type: "bool",
@@ -1043,6 +1104,19 @@ mod tests {
             emit_binop_expr(FirBinOp::LRsh, "n", "3"),
             "((int32_t)(((uint32_t)(n)) >> (3)))"
         );
+    }
+
+    #[test]
+    fn redundant_drop_purity_is_conservative_about_calls() {
+        let mut store = FirStore::new();
+        let mut builder = FirBuilder::new(&mut store);
+        let one = builder.float32(1.0);
+        let local = builder.load_var("local", AccessType::Stack, FirType::Float32);
+        let sum = builder.binop(FirBinOp::Add, one, local, FirType::Float32);
+        let foreign = builder.fun_call("foreign_side_effect", &[], FirType::Float32);
+
+        assert!(is_obviously_side_effect_free_value(&store, sum));
+        assert!(!is_obviously_side_effect_free_value(&store, foreign));
     }
 
     #[test]
