@@ -21,9 +21,7 @@ use crate::schedule::{
 };
 
 use super::vector_plan::VerifiedVectorPlan;
-use super::vector_verify::{
-    EpochRecord, LoopEdge, VectorPlan, VectorPlanError, verify_vector_plan,
-};
+use super::vector_verify::{EpochRecord, VectorPlan, VectorPlanError, verify_vector_plan};
 
 /// The selected order for one verified vector-plan epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,11 +137,7 @@ fn schedule_after_plan_verification(
     let scheduled_epochs = epochs
         .into_iter()
         .map(|epoch| {
-            let dag = EpochDag {
-                nodes: &epoch.loops,
-                data_edges: &plan.data_edges,
-                effect_edges: &plan.effect_edges,
-            };
+            let dag = EpochDag::new(&epoch.loops, plan);
             let loops = schedule(strategy, &dag).map_err(|source| {
                 VectorScheduleError::EpochScheduling {
                     epoch_id: epoch.epoch_id,
@@ -173,8 +167,101 @@ fn schedule_after_plan_verification(
 /// same-epoch data and effect constraints.
 struct EpochDag<'a> {
     nodes: &'a [u64],
-    data_edges: &'a [LoopEdge],
-    effect_edges: &'a [LoopEdge],
+    dependencies: std::collections::BTreeMap<u64, Vec<u64>>,
+}
+
+impl<'a> EpochDag<'a> {
+    fn new(nodes: &'a [u64], plan: &VectorPlan) -> Self {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let node_set = nodes.iter().copied().collect::<BTreeSet<_>>();
+        let group_by_member = plan
+            .fused_serial_groups
+            .iter()
+            .enumerate()
+            .flat_map(|(group_index, group)| {
+                group
+                    .member_loop_ids
+                    .iter()
+                    .map(move |&loop_id| (loop_id, group_index))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut direct = nodes
+            .iter()
+            .copied()
+            .map(|node| (node, BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut group_external = BTreeMap::<usize, BTreeSet<u64>>::new();
+
+        for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
+            if !node_set.contains(&edge.consumer) || !node_set.contains(&edge.dependency) {
+                continue;
+            }
+            direct
+                .get_mut(&edge.consumer)
+                .expect("epoch nodes initialize direct dependencies")
+                .insert(edge.dependency);
+            if let Some(&group_index) = group_by_member.get(&edge.consumer) {
+                let group = &plan.fused_serial_groups[group_index];
+                if group
+                    .member_loop_ids
+                    .binary_search(&edge.dependency)
+                    .is_err()
+                {
+                    group_external
+                        .entry(group_index)
+                        .or_default()
+                        .insert(edge.dependency);
+                }
+            }
+        }
+
+        let dependencies = nodes
+            .iter()
+            .copied()
+            .map(|node| {
+                let own_group_index = group_by_member.get(&node).copied();
+                let direct_dependencies = &direct[&node];
+                let mut inherited = direct_dependencies.clone();
+                if let Some(group_index) = own_group_index {
+                    inherited.extend(
+                        group_external
+                            .get(&group_index)
+                            .into_iter()
+                            .flatten()
+                            .copied(),
+                    );
+                }
+
+                let mut expanded = BTreeSet::new();
+                for dependency in inherited {
+                    if let Some(&dependency_group_index) = group_by_member.get(&dependency) {
+                        expanded.extend(
+                            plan.fused_serial_groups[dependency_group_index]
+                                .member_loop_ids
+                                .iter()
+                                .copied(),
+                        );
+                    } else {
+                        expanded.insert(dependency);
+                    }
+                }
+                if let Some(group_index) = own_group_index {
+                    let own_group = &plan.fused_serial_groups[group_index];
+                    expanded.retain(|dependency| {
+                        own_group.member_loop_ids.binary_search(dependency).is_err()
+                            || direct_dependencies.contains(dependency)
+                    });
+                }
+                (node, expanded.into_iter().collect())
+            })
+            .collect();
+
+        Self {
+            nodes,
+            dependencies,
+        }
+    }
 }
 
 impl ScheduleDag for EpochDag<'_> {
@@ -185,19 +272,7 @@ impl ScheduleDag for EpochDag<'_> {
     }
 
     fn dependencies(&self, node: Self::Node) -> Vec<Self::Node> {
-        let is_member = |id| self.nodes.binary_search(&id).is_ok();
-        let mut dependencies: Vec<u64> = self
-            .data_edges
-            .iter()
-            .chain(self.effect_edges)
-            .filter(|edge| {
-                edge.consumer == node && is_member(edge.consumer) && is_member(edge.dependency)
-            })
-            .map(|edge| edge.dependency)
-            .collect();
-        dependencies.sort_unstable();
-        dependencies.dedup();
-        dependencies
+        self.dependencies.get(&node).cloned().unwrap_or_default()
     }
 }
 
@@ -209,8 +284,8 @@ mod tests {
     use crate::schedule::{SchedulingStrategy, verify_schedule};
     use crate::signal_fir::pv_slice::{build_pv_plan, build_pv_signals};
     use crate::signal_fir::vector_verify::{
-        LoopKind, LoopRecord, Placement, Rate, SignalRecord, ValueType, VecSafeWitness,
-        Vectorability, WitnessKind,
+        FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
+        ValueType, VecSafeWitness, Vectorability, WitnessKind,
     };
 
     const ALL_STRATEGIES: [SchedulingStrategy; 4] = [
@@ -313,11 +388,7 @@ mod tests {
         for strategy in ALL_STRATEGIES {
             let schedule = schedule_vector_plan(&plan, strategy).expect("valid plan schedules");
             let epoch = &schedule.epochs[0];
-            let dag = EpochDag {
-                nodes: &plan.epochs[0].loops,
-                data_edges: &plan.data_edges,
-                effect_edges: &plan.effect_edges,
-            };
+            let dag = EpochDag::new(&plan.epochs[0].loops, &plan);
             verify_schedule(&dag, &epoch.loops).expect("order is complete and valid");
         }
     }
@@ -365,6 +436,57 @@ mod tests {
     }
 
     #[test]
+    fn fused_group_schedule_envelopes_all_external_dependencies() {
+        let mut plan = plan_with_epochs(
+            5,
+            &[(0, 0, &[0, 1, 2, 3, 4])],
+            &[
+                LoopEdge {
+                    consumer: 3,
+                    dependency: 0,
+                },
+                LoopEdge {
+                    consumer: 3,
+                    dependency: 1,
+                },
+                LoopEdge {
+                    consumer: 4,
+                    dependency: 1,
+                },
+            ],
+            &[],
+        );
+        plan.loops[3].kind = LoopKind::Recursive(9);
+        plan.vec_safe_witnesses[3].witness_kind = WitnessKind::SerialStateInternal;
+        plan.fused_serial_groups = vec![FusedSerialGroupRecord {
+            group_id: 0,
+            owner_loop_id: 3,
+            member_loop_ids: vec![1, 3],
+            recursive_carrier_signal_id: 3,
+            delayed_read_signal_ids: vec![1],
+            state_write_signal_ids: vec![3],
+            internal_transport_ids: vec![],
+            output_or_transport_roots: vec![3],
+        }];
+        for strategy in ALL_STRATEGIES {
+            let order = &schedule_vector_plan(&plan, strategy)
+                .expect("fused envelope schedules")
+                .epochs[0]
+                .loops;
+            let position = |loop_id| {
+                order
+                    .iter()
+                    .position(|candidate| *candidate == loop_id)
+                    .expect("complete schedule")
+            };
+            assert!(position(0) < position(1));
+            assert!(position(0) < position(3));
+            assert!(position(1) < position(3));
+            assert!(position(3) < position(4));
+        }
+    }
+
+    #[test]
     fn epochs_are_emitted_in_rank_order() {
         let plan = plan_with_epochs(2, &[(42, 0, &[0]), (7, 1, &[1])], &[], &[]);
         let schedule = schedule_vector_plan(&plan, SchedulingStrategy::DepthFirst)
@@ -394,11 +516,7 @@ mod tests {
             .expect("monotone barrier plan schedules");
         let first = &schedule.epochs[0];
         let second = &schedule.epochs[1];
-        let second_dag = EpochDag {
-            nodes: &plan.epochs[1].loops,
-            data_edges: &plan.data_edges,
-            effect_edges: &plan.effect_edges,
-        };
+        let second_dag = EpochDag::new(&plan.epochs[1].loops, &plan);
         assert!(second_dag.dependencies(2).is_empty());
         verify_schedule(&second_dag, &second.loops)
             .expect("cross-epoch dependency is not a local DAG edge");

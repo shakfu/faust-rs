@@ -1455,7 +1455,7 @@ fn rate(variability: Variability) -> Rate {
 fn value_type(sig_type: &CanonicalSigType) -> ValueType {
     match sig_type {
         CanonicalSigType::Simple { nature, .. } => scalar_value_type(*nature),
-        CanonicalSigType::Table { content, .. } => value_type(content),
+        CanonicalSigType::Table { nature, .. } => scalar_value_type(*nature),
         CanonicalSigType::Tuplet { components, .. } => {
             ValueType::Tuple(components.iter().map(value_type).collect())
         }

@@ -23,6 +23,7 @@ use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
 use super::cse::materialize_shared_values;
 use super::module::map_binop;
 use super::recursion::{decode_group_projection, decode_symbolic_group_bodies};
+use super::siggen::interpret_generator;
 use super::vector_analysis::EffectAtom;
 use super::vector_clock_ad::VerifiedVectorClockAdPlan;
 use super::vector_plan::VerifiedVectorPlan;
@@ -147,7 +148,11 @@ pub enum PureVectorLowerError {
         prepared: Option<SimpleSigType>,
     },
     /// The pure P5.2 slice cannot execute an effect-bearing signal.
-    EffectfulSignal { signal_id: u64 },
+    EffectfulSignal {
+        signal_id: u64,
+        expression: String,
+        effects: Vec<EffectAtom>,
+    },
     /// The pure P5.2 slice has no state/effect semantics for this node.
     UnsupportedSignal { signal_id: u64, expression: String },
     /// A control expression depended on a sample-region value.
@@ -190,10 +195,14 @@ impl fmt::Display for PureVectorLowerError {
                 f,
                 "signal {signal_id} planned type {planned:?} disagrees with prepared type {prepared:?}"
             ),
-            Self::EffectfulSignal { signal_id } => {
+            Self::EffectfulSignal {
+                signal_id,
+                expression,
+                effects,
+            } => {
                 write!(
                     f,
-                    "signal {signal_id} is effectful and cannot enter pure P5.2 lowering"
+                    "signal {signal_id} is effectful and cannot enter pure P5.2 lowering: {expression}; effects={effects:?}"
                 )
             }
             Self::UnsupportedSignal {
@@ -272,6 +281,7 @@ struct PureVectorLowerer<'a> {
     input_aliases: BTreeSet<usize>,
     static_declarations: Vec<FirId>,
     waveform_tables: BTreeMap<u64, String>,
+    readonly_tables: BTreeMap<u64, (String, usize, FirType)>,
     math_ops: HashSet<FirMathOp>,
     int_helpers: BTreeSet<&'static str>,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
@@ -396,6 +406,7 @@ fn lower_vector_program_impl<'a>(
         input_aliases: BTreeSet::new(),
         static_declarations: Vec::new(),
         waveform_tables: BTreeMap::new(),
+        readonly_tables: BTreeMap::new(),
         math_ops: HashSet::new(),
         int_helpers: BTreeSet::new(),
         state_plan,
@@ -516,6 +527,20 @@ fn lower_vector_program_impl<'a>(
 
     control_statements.splice(0..0, lowerer.input_declarations.iter().copied());
     let routed = lowerer.session.finish(&lowerer.store)?;
+    if timing_enabled {
+        for transport in &verified_plan.plan().transports {
+            if let Some(&sig) = lowerer.signal_ids.get(&transport.signal_id) {
+                eprintln!(
+                    "[vector-lower-transport] id={} signal={} producer={} consumer={} expr={}",
+                    transport.transport_id,
+                    transport.signal_id,
+                    transport.producer_loop,
+                    transport.consumer_loop,
+                    dump_sig_readable(lowerer.prepared.arena(), sig)
+                );
+            }
+        }
+    }
     verify_pure_vector_bodies(
         verified_plan.plan(),
         &routed,
@@ -747,6 +772,18 @@ impl PureVectorLowerer<'_> {
                 self.lower_prefix(scope, signal_id, value, cache, active)?
             }
             SigMatch::Waveform(values) => self.lower_waveform(scope, signal_id, values)?,
+            SigMatch::Gen(_) => self.lower_readonly_generator(signal_id)?,
+            SigMatch::RdTbl(table, index) => {
+                self.lower_readonly_table(scope, signal_id, table, index, cache, active)?
+            }
+            SigMatch::WrTbl(size, generator, write_index, write_value) => self
+                .lower_readonly_table_definition(
+                    signal_id,
+                    size,
+                    generator,
+                    write_index,
+                    write_value,
+                )?,
             SigMatch::Proj(index, group) => {
                 if let Some(var) = match_sym_ref(self.prepared.arena(), group) {
                     let _ = self.lower_dep(scope, group, cache, active)?;
@@ -1229,6 +1266,244 @@ impl PureVectorLowerer<'_> {
         ))
     }
 
+    fn lower_readonly_table_definition(
+        &mut self,
+        signal_id: u64,
+        size: SigId,
+        generator: SigId,
+        write_index: SigId,
+        write_value: SigId,
+    ) -> Result<FirId, PureVectorLowerError> {
+        if !self.prepared.arena().is_nil(write_index) || !self.prepared.arena().is_nil(write_value)
+        {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "mutable write-table state is not certified in checked vector lowering"
+                    .to_owned(),
+            });
+        }
+        let _ = self.ensure_readonly_table(signal_id, size, generator)?;
+        let typ = self.fir_type(signal_id)?;
+        self.zero_value(&typ)
+    }
+
+    fn lower_readonly_generator(&mut self, signal_id: u64) -> Result<FirId, PureVectorLowerError> {
+        let is_readonly_generator = self.signal_ids.values().any(|&candidate| {
+            matches!(
+                match_sig(self.prepared.arena(), candidate),
+                SigMatch::WrTbl(_, generator, write_index, write_value)
+                    if u64::from(generator.as_u32()) == signal_id
+                        && self.prepared.arena().is_nil(write_index)
+                        && self.prepared.arena().is_nil(write_value)
+            )
+        });
+        if !is_readonly_generator {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "generator is not owned by an accepted immutable table".to_owned(),
+            });
+        }
+        let typ = self.fir_type(signal_id)?;
+        self.zero_value(&typ)
+    }
+
+    fn lower_readonly_table(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        table: SigId,
+        index: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let table_id = u64::from(table.as_u32());
+        let _ = self.lower_dep(scope, table, cache, active)?;
+        let (name, length, elem_type) =
+            self.readonly_tables
+                .get(&table_id)
+                .cloned()
+                .ok_or_else(|| PureVectorLowerError::UnsupportedSignal {
+                    signal_id,
+                    expression: "table read source is not an accepted immutable table".to_owned(),
+                })?;
+        let raw_index = self.lower_dep(scope, index, cache, active)?;
+        if self.store.value_type(raw_index) != Some(FirType::Int32) {
+            return Err(PureVectorLowerError::FirTypeMismatch {
+                signal_id: u64::from(index.as_u32()),
+                expected: FirType::Int32,
+                actual: self.store.value_type(raw_index),
+            });
+        }
+        let checked_index = self.table_index_with_bounds(index, raw_index, length)?;
+        let expected = self.fir_type(signal_id)?;
+        if expected != elem_type {
+            return Err(PureVectorLowerError::FirTypeMismatch {
+                signal_id,
+                expected,
+                actual: Some(elem_type),
+            });
+        }
+        Ok(FirBuilder::new(&mut self.store).load_table(
+            name,
+            AccessType::Static,
+            checked_index,
+            expected,
+        ))
+    }
+
+    fn ensure_readonly_table(
+        &mut self,
+        signal_id: u64,
+        size: SigId,
+        generator: SigId,
+    ) -> Result<(String, usize, FirType), PureVectorLowerError> {
+        if let Some(table) = self.readonly_tables.get(&signal_id) {
+            return Ok(table.clone());
+        }
+        let length = match match_sig(self.prepared.arena(), size) {
+            SigMatch::Int(value) if value > 0 => {
+                usize::try_from(value).map_err(|_| PureVectorLowerError::UnsupportedSignal {
+                    signal_id,
+                    expression: format!("read-only table size {value} exceeds usize"),
+                })?
+            }
+            _ => {
+                return Err(PureVectorLowerError::UnsupportedSignal {
+                    signal_id,
+                    expression: "read-only table requires a positive literal size".to_owned(),
+                });
+            }
+        };
+        let elem_type = self.fir_type(signal_id)?;
+        if !matches!(
+            elem_type,
+            FirType::Int32 | FirType::Float32 | FirType::Float64
+        ) {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: format!("unsupported read-only table element type {elem_type:?}"),
+            });
+        }
+        let inner = match match_sig(self.prepared.arena(), generator) {
+            SigMatch::Gen(inner) => inner,
+            _ => generator,
+        };
+        let mut initializers = Vec::with_capacity(length);
+        match match_sig(self.prepared.arena(), inner) {
+            SigMatch::Waveform(values) if !values.is_empty() => {
+                for index in 0..length {
+                    initializers
+                        .push(self.table_literal(values[index % values.len()], &elem_type)?);
+                }
+            }
+            SigMatch::Int(_) | SigMatch::Real(_) => {
+                let value = self.table_literal(inner, &elem_type)?;
+                initializers.resize(length, value);
+            }
+            _ => {
+                let values =
+                    interpret_generator(self.prepared.arena(), inner, length).map_err(|error| {
+                        PureVectorLowerError::UnsupportedSignal {
+                            signal_id,
+                            expression: format!("read-only table generator failed: {error}"),
+                        }
+                    })?;
+                for value in values {
+                    initializers.push(self.table_value(value, &elem_type)?);
+                }
+            }
+        }
+        let prefix = if elem_type == FirType::Int32 {
+            "iVecTbl"
+        } else {
+            "fVecTbl"
+        };
+        let name = format!("{prefix}{signal_id}");
+        let declaration = FirBuilder::new(&mut self.store).declare_table(
+            name.clone(),
+            AccessType::Static,
+            elem_type.clone(),
+            &initializers,
+        );
+        self.static_declarations.push(declaration);
+        let table = (name, length, elem_type);
+        self.readonly_tables.insert(signal_id, table.clone());
+        Ok(table)
+    }
+
+    fn table_literal(
+        &mut self,
+        signal: SigId,
+        elem_type: &FirType,
+    ) -> Result<FirId, PureVectorLowerError> {
+        match match_sig(self.prepared.arena(), signal) {
+            SigMatch::Int(value) => self.table_value(f64::from(value), elem_type),
+            SigMatch::Real(value) => self.table_value(value, elem_type),
+            _ => Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(signal.as_u32()),
+                expression: "read-only table literal is not numeric".to_owned(),
+            }),
+        }
+    }
+
+    fn table_value(
+        &mut self,
+        value: f64,
+        elem_type: &FirType,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let mut builder = FirBuilder::new(&mut self.store);
+        match elem_type {
+            FirType::Int32 => Ok(builder.int32(value as i32)),
+            FirType::Float32 => Ok(builder.float32(value as f32)),
+            FirType::Float64 => Ok(builder.float64(value)),
+            _ => Err(PureVectorLowerError::InvalidRealType(elem_type.clone())),
+        }
+    }
+
+    fn table_index_with_bounds(
+        &mut self,
+        index_signal: SigId,
+        index: FirId,
+        length: usize,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let length_i32 =
+            i32::try_from(length).map_err(|_| PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(index_signal.as_u32()),
+                expression: "read-only table length exceeds FIR i32".to_owned(),
+            })?;
+        if let Some(interval) = self
+            .prepared
+            .sig_ty(index_signal)
+            .map(sigtype::SigType::interval)
+        {
+            let lo = interval.lo();
+            let hi = interval.hi();
+            if lo.is_finite() && hi.is_finite() {
+                let lo = lo as i64;
+                let hi = hi as i64;
+                let length = i64::from(length_i32);
+                if lo >= 0 && hi >= 0 && hi < length {
+                    return Ok(index);
+                }
+                let mut builder = FirBuilder::new(&mut self.store);
+                let upper = builder.int32(length_i32 - 1);
+                self.int_helpers.insert("min_i");
+                let upper_clamped = builder.fun_call("min_i", &[upper, index], FirType::Int32);
+                if lo >= 0 {
+                    return Ok(upper_clamped);
+                }
+                let zero = builder.int32(0);
+                self.int_helpers.insert("max_i");
+                return Ok(builder.fun_call("max_i", &[upper_clamped, zero], FirType::Int32));
+            }
+        }
+        let mut builder = FirBuilder::new(&mut self.store);
+        let length = builder.int32(length_i32);
+        let rem = builder.binop(fir::FirBinOp::Rem, index, length, FirType::Int32);
+        let shifted = builder.binop(fir::FirBinOp::Add, rem, length, FirType::Int32);
+        Ok(builder.binop(fir::FirBinOp::Rem, shifted, length, FirType::Int32))
+    }
+
     fn lower_symbolic_ref(
         &mut self,
         scope: LowerScope,
@@ -1567,6 +1842,15 @@ fn verify_plan_prepared_boundary(
     if let Some(clock_plan) = clock_plan {
         managed_resources.extend(clock_plan.managed_state_resources());
     }
+    let output_channels = ids
+        .values()
+        .filter_map(|&sig| match match_sig(prepared.arena(), sig) {
+            SigMatch::Output(channel, _) if channel >= 0 => {
+                Some(u32::try_from(channel).expect("nonnegative output channel fits u32"))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     for record in &plan.signals {
         let sig = ids.get(&record.signal_id).copied().ok_or(
             PureVectorLowerError::MissingPreparedSignal {
@@ -1584,47 +1868,60 @@ fn verify_plan_prepared_boundary(
             _ => false,
         };
         if !matches {
+            if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                eprintln!(
+                    "[vector-lower-type-mismatch] signal={} planned={:?} prepared={prepared_type:?} expr={}",
+                    record.signal_id,
+                    record.value_type,
+                    dump_sig_readable(prepared.arena(), sig)
+                );
+            }
             return Err(PureVectorLowerError::PlannedTypeMismatch {
                 signal_id: record.signal_id,
                 planned: record.value_type.clone(),
                 prepared: prepared_type,
             });
         }
-        let output_channel = match match_sig(prepared.arena(), sig) {
-            SigMatch::Output(channel, _) if channel >= 0 => {
-                Some(u32::try_from(channel).expect("nonnegative output channel fits u32"))
-            }
-            _ => None,
-        };
         let effects_supported = record.effects.iter().all(|effect| match effect {
             EffectAtom::ReadState(resource) | EffectAtom::WriteState(resource) => {
                 managed_resources.contains(resource)
             }
-            EffectAtom::WriteOutput(channel) => output_channel == Some(*channel),
-            EffectAtom::WriteUi(control) => {
-                let expected = match match_sig(prepared.arena(), sig) {
-                    SigMatch::VBargraph(actual, _) if actual == *control => {
-                        Some(ui::ControlKind::VBargraph)
-                    }
-                    SigMatch::HBargraph(actual, _) if actual == *control => {
-                        Some(ui::ControlKind::HBargraph)
-                    }
-                    _ => None,
-                };
-                expected.is_some_and(|kind| {
-                    ui.control(*control)
-                        .is_some_and(|spec| spec.kind == kind && spec.id == *control)
-                })
+            EffectAtom::ReadTable(table) | EffectAtom::WriteTable(table) => {
+                readonly_table_signal(prepared, ids, u64::from(*table))
             }
+            EffectAtom::WriteOutput(channel) => output_channels.contains(channel),
+            EffectAtom::WriteUi(control) => ui.control(*control).is_some_and(|spec| {
+                matches!(
+                    spec.kind,
+                    ui::ControlKind::VBargraph | ui::ControlKind::HBargraph
+                ) && spec.id == *control
+            }),
             _ => false,
         });
         if !record.effects.is_empty() && !effects_supported {
             return Err(PureVectorLowerError::EffectfulSignal {
                 signal_id: record.signal_id,
+                expression: dump_sig_readable(prepared.arena(), sig),
+                effects: record.effects.to_vec(),
             });
         }
     }
     Ok(())
+}
+
+fn readonly_table_signal(
+    prepared: &VerifiedPreparedSignals,
+    ids: &BTreeMap<u64, SigId>,
+    signal_id: u64,
+) -> bool {
+    ids.get(&signal_id).is_some_and(|&sig| {
+        matches!(
+            match_sig(prepared.arena(), sig),
+            SigMatch::WrTbl(_, _, write_index, write_value)
+                if prepared.arena().is_nil(write_index)
+                    && prepared.arena().is_nil(write_value)
+        )
+    })
 }
 
 fn value_type_to_fir(value_type: &ValueType, real_type: &FirType) -> Option<FirType> {
@@ -1754,12 +2051,22 @@ pub fn verify_pure_vector_bodies(
             });
         }
         if !body_contains(store, &consumer.statements, load_id)
+            && !body_contains_equivalent_table_load(store, &consumer.statements, load_id)
             && !state_consumed_uses.contains(&(transport.consumer_loop, transport.signal_id))
         {
+            if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                for statement in &consumer.statements {
+                    eprintln!(
+                        "[vector-lower-consumer-body] loop={} {}",
+                        transport.consumer_loop,
+                        fir::dump_fir(store, *statement)
+                    );
+                }
+            }
             return Err(PureVectorLowerError::BodyEvidence {
                 detail: format!(
-                    "transport {} load is absent from its consumer body",
-                    transport.transport_id
+                    "transport {} for signal {} load is absent from its consumer body",
+                    transport.transport_id, transport.signal_id
                 ),
             });
         }
@@ -1784,7 +2091,28 @@ pub fn verify_pure_vector_bodies(
                         .iter()
                         .any(|transport| transport.signal_id == definition.signal_id)
             });
-        if !visible && !structural_tuple {
+        // Region-local CSE may rebuild an inline expression around temporary
+        // loads, so its pre-CSE FIR id need not remain reachable. It is safe to
+        // accept only non-transported `Inline` values here: owned and routed
+        // definitions retain exact independent visibility requirements.
+        let cse_local_inline = plan
+            .signals
+            .iter()
+            .find(|signal| signal.signal_id == definition.signal_id)
+            .is_some_and(|signal| signal.placement == Placement::Inline)
+            && !plan
+                .transports
+                .iter()
+                .any(|transport| transport.signal_id == definition.signal_id);
+        if !visible && !structural_tuple && !cse_local_inline {
+            if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                eprintln!(
+                    "[vector-lower-missing-definition] signal={} region={:?} fir={}",
+                    definition.signal_id,
+                    definition.region,
+                    fir::dump_fir(store, definition.value)
+                );
+            }
             return Err(PureVectorLowerError::BodyEvidence {
                 detail: format!(
                     "signal {} definition is absent from {:?}",
@@ -1794,9 +2122,18 @@ pub fn verify_pure_vector_bodies(
         }
     }
     for routed_use in routed.trace().uses() {
-        if let RoutedUseSource::Transport(_) = routed_use.source {
+        if let RoutedUseSource::Transport(transport_id) = routed_use.source {
             let consumer = region_by_id(regions, routed_use.consumer_loop)?;
+            let transport_load = routed
+                .trace()
+                .transports()
+                .iter()
+                .find(|transport| transport.transport_id == transport_id)
+                .and_then(|transport| transport.load);
             if !body_contains(store, &consumer.statements, routed_use.value)
+                && transport_load.is_none_or(|load| {
+                    !body_contains_equivalent_table_load(store, &consumer.statements, load)
+                })
                 && !state_consumed_uses.contains(&(routed_use.consumer_loop, routed_use.signal_id))
             {
                 return Err(PureVectorLowerError::BodyEvidence {
@@ -1833,6 +2170,34 @@ fn body_contains(store: &FirStore, roots: &[FirId], needle: FirId) -> bool {
         if seen.insert(value) {
             stack.extend(fir_children(store, value));
         }
+    }
+    false
+}
+
+fn body_contains_equivalent_table_load(store: &FirStore, roots: &[FirId], expected: FirId) -> bool {
+    let FirMatch::LoadTable {
+        name: expected_name,
+        access: expected_access,
+        typ: expected_type,
+        ..
+    } = match_fir(store, expected)
+    else {
+        return false;
+    };
+    let mut stack = roots.to_vec();
+    let mut seen = BTreeSet::new();
+    while let Some(value) = stack.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        if matches!(
+            match_fir(store, value),
+            FirMatch::LoadTable { name, access, typ, .. }
+                if name == expected_name && access == expected_access && typ == expected_type
+        ) {
+            return true;
+        }
+        stack.extend(fir_children(store, value));
     }
     false
 }
@@ -2098,6 +2463,54 @@ mod tests {
                 program.store()
             ),
             Err(PureVectorLowerError::BodyEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn body_transport_load_evidence_survives_cse_index_rewriting() {
+        let mut store = FirStore::new();
+        let expected = {
+            let mut builder = FirBuilder::new(&mut store);
+            let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
+            builder.load_table(
+                "transport_s1_l0_l1",
+                AccessType::Stack,
+                i0,
+                FirType::Float32,
+            )
+        };
+        let actual = {
+            let mut builder = FirBuilder::new(&mut store);
+            let index = builder.load_var("iTemp0", AccessType::Stack, FirType::Int32);
+            let load = builder.load_table(
+                "transport_s1_l0_l1",
+                AccessType::Stack,
+                index,
+                FirType::Float32,
+            );
+            builder.drop_(load)
+        };
+        assert!(body_contains_equivalent_table_load(
+            &store,
+            &[actual],
+            expected
+        ));
+
+        let wrong = {
+            let mut builder = FirBuilder::new(&mut store);
+            let index = builder.load_var("iTemp0", AccessType::Stack, FirType::Int32);
+            let load = builder.load_table(
+                "transport_s2_l0_l1",
+                AccessType::Stack,
+                index,
+                FirType::Float32,
+            );
+            builder.drop_(load)
+        };
+        assert!(!body_contains_equivalent_table_load(
+            &store,
+            &[wrong],
+            expected
         ));
     }
 

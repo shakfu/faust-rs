@@ -18,6 +18,20 @@ const PULSE_COUNTUP_LOOP_SOURCE: &str =
     "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;";
 const PULSE_COUNTDOWN_LOOP_SOURCE: &str =
     "ba = library(\"basics.lib\"); process = ba.pulse_countdown_loop(4, 1) + 0.001;";
+const INDIRECT_RECURSIVE_DELAY_SOURCE: &str = r#"
+    import("music.lib");
+    indirect(freq, reset, replacement) =
+        (select2(prefix(1, clock), +(increment), replacement) : decimal) ~ _
+    with {
+        clock = reset > 0;
+        increment = freq / SR;
+    };
+    process = indirect(750, reset, replacement), reset, replacement
+    with {
+        reset = waveform {0, 0, 1, 0, 0} : !, _;
+        replacement = waveform {0.125, 0.75, 0.5} : !, _;
+    };
+"#;
 
 /// Compiles `source` to interpreter bytecode with the given compute and
 /// scheduling modes, then runs one block with the provided input channels.
@@ -229,6 +243,16 @@ fn direct_waveform_is_certified_and_bit_exact() {
 }
 
 #[test]
+fn readonly_generated_table_is_certified_and_bit_exact() {
+    let source = r#"
+        process = waveform {10, 20, 30, 40, 50, 60, 70},
+            ((%(7) ~ +(3)) : max(0) : min(6)) : rdtable;
+    "#;
+    assert_vector_pipeline_certified("readonly_generated_table", source, 24);
+    assert_scalar_vector_bit_exact("readonly_generated_table", source, 24);
+}
+
+#[test]
 fn recursion_and_delay_cross_chunk_boundary_bit_exact() {
     // Integrator (loop-carried state) plus a 5-sample delay: both the recursive
     // carrier and the delay line must survive the chunk boundary unchanged.
@@ -252,6 +276,20 @@ fn recursive_short_delay_transport_reads_after_copy_in() {
 #[test]
 fn recursive_short_delay_transport_uses_certified_vector_pipeline() {
     assert_vector_pipeline_certified("pulse_countup_loop", PULSE_COUNTUP_LOOP_SOURCE, 32);
+}
+
+#[test]
+fn indirect_cross_loop_delayed_read_is_fused_and_bit_exact() {
+    assert_vector_pipeline_certified(
+        "indirect_cross_loop_delayed_read",
+        INDIRECT_RECURSIVE_DELAY_SOURCE,
+        24,
+    );
+    assert_scalar_vector_bit_exact(
+        "indirect_cross_loop_delayed_read",
+        INDIRECT_RECURSIVE_DELAY_SOURCE,
+        24,
+    );
 }
 
 #[test]

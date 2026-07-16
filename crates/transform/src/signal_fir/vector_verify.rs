@@ -266,6 +266,9 @@ pub enum VectorPlanError {
     FusedGroupCarrierNotRecursiveDelayed { group_id: u64, signal_id: u64 },
     /// A delayed read lacks the declared `DepKind::Delayed` carrier edge.
     FusedGroupDelayedDependencyMissing { group_id: u64, signal_id: u64 },
+    /// A same-sample path from a delayed read to its recursive writer leaves
+    /// the fused serial group.
+    FusedGroupPathIncomplete { group_id: u64, loop_id: u64 },
     /// A declared state writer does not match its recursive member loop.
     FusedGroupStateWriterMismatch { group_id: u64, signal_id: u64 },
     /// A recursive member loop has no matching projection writer in the group.
@@ -440,6 +443,9 @@ impl fmt::Display for VectorPlanError {
                 f,
                 "fused group {group_id} read {signal_id} lacks its delayed carrier dependency"
             ),
+            Self::FusedGroupPathIncomplete { group_id, loop_id } => {
+                write!(f, "fused group {group_id} omits data-path loop {loop_id}")
+            }
             Self::FusedGroupStateWriterMismatch {
                 group_id,
                 signal_id,
@@ -961,6 +967,7 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
         .iter()
         .map(|loop_| (loop_.loop_id, loop_))
         .collect::<AHashMap<_, _>>();
+    let reachability = CheckedReachability::data(plan);
     for group in &plan.fused_serial_groups {
         let carrier_id = group.recursive_carrier_signal_id;
         let Some(carrier) = records.get(&carrier_id).copied() else {
@@ -1017,7 +1024,7 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
         }
 
         for &read_signal_id in &group.delayed_read_signal_ids {
-            let has_delayed_carrier_edge = certificate.dependencies.iter().any(|dependency| {
+            let delayed_carrier_edge = certificate.dependencies.iter().find(|dependency| {
                 u64::from(dependency.from) == read_signal_id
                     && group
                         .state_write_signal_ids
@@ -1025,11 +1032,39 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
                         .is_ok()
                     && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
             });
-            if !has_delayed_carrier_edge {
+            let Some(delayed_carrier_edge) = delayed_carrier_edge else {
                 return Err(VectorPlanError::FusedGroupDelayedDependencyMissing {
                     group_id: group.group_id,
                     signal_id: read_signal_id,
                 });
+            };
+            let Placement::Owned(read_loop_id) = signals[&read_signal_id].placement else {
+                return Err(VectorPlanError::FusedGroupSignalOutside {
+                    group_id: group.group_id,
+                    signal_id: read_signal_id,
+                });
+            };
+            let carrier_signal_id = u64::from(delayed_carrier_edge.to);
+            let Placement::Owned(writer_loop_id) = signals[&carrier_signal_id].placement else {
+                return Err(VectorPlanError::FusedGroupSignalOutside {
+                    group_id: group.group_id,
+                    signal_id: carrier_signal_id,
+                });
+            };
+            for &loop_id in loops.keys() {
+                let follows_read =
+                    loop_id == read_loop_id || reachability.reaches(read_loop_id, loop_id);
+                let precedes_writer =
+                    loop_id == writer_loop_id || reachability.reaches(loop_id, writer_loop_id);
+                if follows_read
+                    && precedes_writer
+                    && group.member_loop_ids.binary_search(&loop_id).is_err()
+                {
+                    return Err(VectorPlanError::FusedGroupPathIncomplete {
+                        group_id: group.group_id,
+                        loop_id,
+                    });
+                }
             }
         }
 
@@ -1085,17 +1120,13 @@ pub(crate) fn verify_fused_serial_groups_after_plan(
         // Internal transports may form an arbitrary pure chain between a
         // delayed read and its recursive writer. Finite-shape verification
         // above proves that every listed transport stays within the fused
-        // member set; the check below requires every dangerous delayed-read
-        // transport in that set to be listed.
+        // member set; require every internal transport so none can remain a
+        // whole-chunk array inside the serial slice.
         for transport in &plan.transports {
             if group
-                .delayed_read_signal_ids
-                .binary_search(&transport.signal_id)
+                .member_loop_ids
+                .binary_search(&transport.producer_loop)
                 .is_ok()
-                && group
-                    .member_loop_ids
-                    .binary_search(&transport.producer_loop)
-                    .is_ok()
                 && group
                     .member_loop_ids
                     .binary_search(&transport.consumer_loop)
@@ -1218,6 +1249,14 @@ struct CheckedReachability {
 
 impl CheckedReachability {
     fn new(plan: &VectorPlan) -> Self {
+        Self::from_edges(plan, plan.data_edges.iter().chain(&plan.effect_edges))
+    }
+
+    fn data(plan: &VectorPlan) -> Self {
+        Self::from_edges(plan, plan.data_edges.iter())
+    }
+
+    fn from_edges<'a>(plan: &VectorPlan, edges: impl Iterator<Item = &'a LoopEdge>) -> Self {
         let index = plan
             .loops
             .iter()
@@ -1226,7 +1265,7 @@ impl CheckedReachability {
             .collect::<AHashMap<_, _>>();
         let words = plan.loops.len().div_ceil(u64::BITS as usize);
         let mut rows = vec![vec![0_u64; words]; plan.loops.len()];
-        for edge in plan.data_edges.iter().chain(&plan.effect_edges) {
+        for edge in edges {
             let from = index[&edge.dependency];
             let to = index[&edge.consumer];
             rows[from][to / u64::BITS as usize] |= 1_u64 << (to % u64::BITS as usize);
@@ -1537,6 +1576,12 @@ mod tests {
         };
         let carrier = record(carrier_id);
         let read = record(read_id);
+        let middle_id = certificate
+            .records
+            .iter()
+            .map(|record| u64::from(record.signal_id))
+            .find(|signal_id| *signal_id != carrier_id && *signal_id != read_id)
+            .expect("recursive fixture has an intermediate signal");
         let recursion_group = u64::from(carrier.recursive_projection.unwrap().group);
         let signal = |signal_id: u64, owner: u64| {
             let decoration = record(signal_id);
@@ -1553,7 +1598,11 @@ mod tests {
                 duplicable: effects_duplicable(&decoration.effects),
             }
         };
-        let mut signals = vec![signal(carrier_id, 0), signal(read_id, 1)];
+        let mut signals = vec![
+            signal(carrier_id, 0),
+            signal(read_id, 1),
+            signal(middle_id, 2),
+        ];
         signals.sort_by_key(|signal| signal.signal_id);
         let plan = VectorPlan {
             vec_size: 16,
@@ -1573,25 +1622,49 @@ mod tests {
                     roots: vec![read_id],
                     epoch_id: 0,
                 },
+                LoopRecord {
+                    loop_id: 2,
+                    stable_name: "fused_middle".to_owned(),
+                    kind: LoopKind::Island(1),
+                    roots: vec![middle_id],
+                    epoch_id: 0,
+                },
             ],
             epochs: vec![EpochRecord {
                 epoch_id: 0,
                 rank: 0,
-                loops: vec![0, 1],
+                loops: vec![0, 1, 2],
             }],
-            transports: vec![TransportRecord {
-                transport_id: 0,
-                stable_name: "fused_delayed_read".to_owned(),
-                signal_id: read_id,
-                producer_loop: 1,
-                consumer_loop: 0,
-                element_type: ValueType::Real,
-                length: 16,
-            }],
-            data_edges: vec![LoopEdge {
-                consumer: 0,
-                dependency: 1,
-            }],
+            transports: vec![
+                TransportRecord {
+                    transport_id: 0,
+                    stable_name: "fused_delayed_read".to_owned(),
+                    signal_id: read_id,
+                    producer_loop: 1,
+                    consumer_loop: 2,
+                    element_type: ValueType::Real,
+                    length: 16,
+                },
+                TransportRecord {
+                    transport_id: 1,
+                    stable_name: "fused_middle_value".to_owned(),
+                    signal_id: middle_id,
+                    producer_loop: 2,
+                    consumer_loop: 0,
+                    element_type: ValueType::Real,
+                    length: 16,
+                },
+            ],
+            data_edges: vec![
+                LoopEdge {
+                    consumer: 0,
+                    dependency: 2,
+                },
+                LoopEdge {
+                    consumer: 2,
+                    dependency: 1,
+                },
+            ],
             effect_edges: vec![],
             vec_safe_witnesses: vec![
                 VecSafeWitness {
@@ -1602,16 +1675,24 @@ mod tests {
                     loop_id: 1,
                     witness_kind: WitnessKind::SerialStateInternal,
                 },
+                VecSafeWitness {
+                    loop_id: 2,
+                    witness_kind: WitnessKind::SerialStateInternal,
+                },
             ],
             fused_serial_groups: vec![FusedSerialGroupRecord {
                 group_id: 0,
                 owner_loop_id: 0,
-                member_loop_ids: vec![0, 1],
+                member_loop_ids: vec![0, 1, 2],
                 recursive_carrier_signal_id: carrier_id,
                 delayed_read_signal_ids: vec![read_id],
                 state_write_signal_ids: vec![carrier_id],
-                internal_transport_ids: vec![0],
-                output_or_transport_roots: vec![carrier_id],
+                internal_transport_ids: vec![0, 1],
+                output_or_transport_roots: {
+                    let mut roots = vec![carrier_id, middle_id];
+                    roots.sort_unstable();
+                    roots
+                },
             }],
         };
         assert_eq!(carrier.clock_domain, read.clock_domain);
@@ -1700,6 +1781,19 @@ mod tests {
                 transport_id: 0,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn fused_checker_rejects_a_missing_intermediate_path_loop() {
+        let (mut plan, decorations) = fused_decoration_fixture();
+        let group = &mut plan.fused_serial_groups[0];
+        group.member_loop_ids = vec![0, 1];
+        group.internal_transport_ids.clear();
+        group.output_or_transport_roots = vec![group.recursive_carrier_signal_id];
+        assert!(matches!(
+            verify_fused_serial_groups(&plan, &decorations),
+            Err(VectorPlanError::FusedGroupPathIncomplete { loop_id: 2, .. })
         ));
     }
 

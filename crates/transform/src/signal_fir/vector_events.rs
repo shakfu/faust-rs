@@ -185,6 +185,8 @@ pub enum VectorEventError {
     InvalidLayout { detail: &'static str, loop_id: u64 },
     /// The complete dynamic expansion is larger than the caller's bound.
     EventBoundExceeded { needed: usize, limit: usize },
+    /// A route-independent lower bound already exceeds the caller's bound.
+    EventLowerBoundExceeded { minimum: usize, limit: usize },
     /// Event-count arithmetic exceeded the host representation.
     EventCountOverflow,
     /// The event table differs from independent reconstruction.
@@ -225,6 +227,10 @@ impl fmt::Display for VectorEventError {
                     "bounded event model needs {needed} events, limit is {limit}"
                 )
             }
+            Self::EventLowerBoundExceeded { minimum, limit } => write!(
+                f,
+                "bounded event model requires at least {minimum} events, limit is {limit}"
+            ),
             Self::EventCountOverflow => write!(f, "bounded event count overflowed"),
             Self::EventTableMismatch => write!(f, "event table does not match routed FIR"),
             Self::ScalarOrderMismatch => write!(f, "scalar event order is not canonical"),
@@ -257,6 +263,86 @@ impl std::error::Error for VectorEventError {
 impl From<VectorPlanError> for VectorEventError {
     fn from(value: VectorPlanError) -> Self {
         Self::Plan(value)
+    }
+}
+
+/// Rejects plans whose route-independent event lower bound already exceeds
+/// `event_limit`.
+///
+/// This is intentionally one-sided: it counts only non-tuple loop roots,
+/// their unmanaged effects, planned transport store/load pairs, epoch
+/// barriers, and exact state actions. Routed inline definitions and uses are
+/// omitted, so passing this precheck is not certification. Rejection is safe
+/// because the complete event table must contain every counted event.
+pub fn precheck_state_event_bound(
+    verified_plan: &VerifiedVectorPlan,
+    state: &VerifiedVectorStatePlan,
+    event_limit: usize,
+) -> Result<(), VectorEventError> {
+    let plan = verified_plan.plan();
+    if state.vector_plan() != plan {
+        return Err(VectorEventError::StatePlanMismatch);
+    }
+    let managed = state.managed_resources();
+    let signals = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
+    let mut per_sample = plan
+        .transports
+        .len()
+        .checked_mul(2)
+        .ok_or(VectorEventError::EventCountOverflow)?;
+    for record in &plan.loops {
+        for root in &record.roots {
+            let signal = signals
+                .get(root)
+                .ok_or(VectorEventError::EventCountOverflow)?;
+            if matches!(signal.value_type, super::vector_verify::ValueType::Tuple(_)) {
+                continue;
+            }
+            per_sample = per_sample
+                .checked_add(1)
+                .and_then(|count| {
+                    count.checked_add(
+                        signal
+                            .effects
+                            .iter()
+                            .filter(|effect| !effect_is_managed(effect, &managed))
+                            .count(),
+                    )
+                })
+                .ok_or(VectorEventError::EventCountOverflow)?;
+        }
+    }
+    let mut fixed = plan
+        .epochs
+        .len()
+        .checked_mul(2)
+        .ok_or(VectorEventError::EventCountOverflow)?;
+    for phases in &state.plan().loops {
+        per_sample = per_sample
+            .checked_add(phases.exec.len())
+            .ok_or(VectorEventError::EventCountOverflow)?;
+        fixed = fixed
+            .checked_add(phases.pre.len())
+            .and_then(|count| count.checked_add(phases.post.len()))
+            .ok_or(VectorEventError::EventCountOverflow)?;
+    }
+    let sample_count =
+        usize::try_from(plan.vec_size).map_err(|_| VectorEventError::EventCountOverflow)?;
+    let minimum = per_sample
+        .checked_mul(sample_count)
+        .and_then(|count| count.checked_add(fixed))
+        .ok_or(VectorEventError::EventCountOverflow)?;
+    if minimum > event_limit {
+        Err(VectorEventError::EventLowerBoundExceeded {
+            minimum,
+            limit: event_limit,
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -371,6 +457,23 @@ fn verify_event_order_certificate_impl(
             });
         }
         if vector_positions[&dependency.before] >= vector_positions[&dependency.after] {
+            if std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some() {
+                let by_id = certificate
+                    .events
+                    .iter()
+                    .map(|event| (event.event_id, event))
+                    .collect::<BTreeMap<_, _>>();
+                eprintln!(
+                    "[vector-event-reversal] before={:?} scalar={} vector={} after={:?} scalar={} vector={} fused={:?}",
+                    by_id[&dependency.before],
+                    scalar_positions[&dependency.before],
+                    vector_positions[&dependency.before],
+                    by_id[&dependency.after],
+                    scalar_positions[&dependency.after],
+                    vector_positions[&dependency.after],
+                    plan.fused_serial_groups
+                );
+            }
             return Err(VectorEventError::FissionSafeViolation {
                 before: dependency.before,
                 after: dependency.after,
@@ -379,6 +482,7 @@ fn verify_event_order_certificate_impl(
     }
     verify_required_dependencies(
         plan,
+        state,
         &certificate.events,
         &certificate.dependencies,
         &scalar_positions,
@@ -613,46 +717,81 @@ fn independently_order_events(
         .enumerate()
         .map(|(position, region)| (region.loop_id, position))
         .collect::<BTreeMap<_, _>>();
+    let mut fused_vector_position = BTreeMap::new();
+    for group in &plan.fused_serial_groups {
+        let members = routed
+            .layout()
+            .loops()
+            .iter()
+            .filter(|region| group.member_loop_ids.binary_search(&region.loop_id).is_ok())
+            .map(|region| region.loop_id)
+            .collect::<Vec<_>>();
+        let unit_position = members
+            .iter()
+            .map(|loop_id| vector_loop_position[loop_id])
+            .min()
+            .expect("verified fused groups are non-empty");
+        for (member_position, loop_id) in members.into_iter().enumerate() {
+            fused_vector_position.insert(loop_id, (unit_position, member_position));
+        }
+    }
 
     let mut order = events.iter().collect::<Vec<_>>();
     order.sort_unstable_by_key(|event| match event.region {
-        EventRegion::Control => (0, 0, 0, 0, 0, event.event_id),
+        EventRegion::Control => (0, 0, 0, 0, 0, 0, event.event_id),
         EventRegion::Epoch(epoch_id) => {
             let phase = match event.kind {
                 VectorEventKind::EpochEnter { .. } => 0,
-                VectorEventKind::EpochExit { .. } => 2,
+                VectorEventKind::EpochExit { .. } => 4,
                 _ => unreachable!("event-table checker restricts epoch events"),
             };
-            (epoch_position[&epoch_id], phase, 0, 0, 0, event.event_id)
+            (epoch_position[&epoch_id], phase, 0, 0, 0, 0, event.event_id)
         }
         EventRegion::LoopPre(loop_id)
         | EventRegion::Loop(loop_id)
         | EventRegion::LoopPost(loop_id) => {
             let epoch = epoch_position[&loop_epoch[&loop_id]];
             let (phase, sample) = match event.region {
-                EventRegion::LoopPre(_) => (0, 0),
+                EventRegion::LoopPre(_) => (1, 0),
                 EventRegion::Loop(_) => (
-                    1,
+                    2,
                     usize::try_from(event.sample.expect("exec event has a sample"))
                         .expect("event table is bounded by usize"),
                 ),
-                EventRegion::LoopPost(_) => (2, 0),
+                EventRegion::LoopPost(_) => (3, 0),
                 EventRegion::Control | EventRegion::Epoch(_) => unreachable!(),
             };
-            let loop_position = if sample_major {
-                scalar_loop_position[&loop_id]
-            } else {
-                vector_loop_position[&loop_id]
-            };
-            if sample_major {
-                let (outer, inner) = if phase == 1 {
-                    (sample, loop_position)
+            if phase != 2 {
+                let loop_position = if sample_major {
+                    scalar_loop_position[&loop_id]
                 } else {
-                    (loop_position, 0)
+                    vector_loop_position[&loop_id]
                 };
-                (epoch, 1, phase, outer, inner, event.event_id)
+                (epoch, phase, loop_position, 0, 0, 0, event.event_id)
+            } else if sample_major {
+                (
+                    epoch,
+                    phase,
+                    sample,
+                    scalar_loop_position[&loop_id],
+                    0,
+                    0,
+                    event.event_id,
+                )
             } else {
-                (epoch, 1, loop_position, phase, sample, event.event_id)
+                let (unit_position, member_position) = fused_vector_position
+                    .get(&loop_id)
+                    .copied()
+                    .unwrap_or((vector_loop_position[&loop_id], 0));
+                (
+                    epoch,
+                    phase,
+                    unit_position,
+                    sample,
+                    member_position,
+                    0,
+                    event.event_id,
+                )
             }
         }
     });
@@ -661,6 +800,7 @@ fn independently_order_events(
 
 fn verify_required_dependencies(
     plan: &VectorPlan,
+    state: Option<&VerifiedVectorStatePlan>,
     events: &[VectorEvent],
     dependencies: &[EventDependency],
     scalar_positions: &BTreeMap<u64, usize>,
@@ -820,6 +960,9 @@ fn verify_required_dependencies(
             require(*event_id, *next)?;
         }
     }
+    for dependency in managed_state_dependencies(plan, state, events, scalar_positions) {
+        require(dependency.before, dependency.after)?;
+    }
     Ok(())
 }
 
@@ -853,7 +996,7 @@ fn derive_certificate(
     let vector_loops = routed_layout_loops(plan, routed);
     let scalar_order = build_order(plan, &contexts, &scalar_loops, true);
     let vector_order = build_order(plan, &contexts, &vector_loops, false);
-    let dependencies = build_dependencies(plan, &events, &contexts, &scalar_order);
+    let dependencies = build_dependencies(plan, state, &events, &contexts, &scalar_order);
 
     Ok(EventOrderCertificate {
         sample_count: plan.vec_size,
@@ -1224,26 +1367,59 @@ fn append_epoch_events(
     order: &mut Vec<u64>,
     sample_major: bool,
 ) {
+    for &loop_id in loops {
+        append_context(contexts, EventRegion::LoopPre(loop_id), None, order);
+    }
     if sample_major {
-        for &loop_id in loops {
-            append_context(contexts, EventRegion::LoopPre(loop_id), None, order);
-        }
         for sample in 0..plan.vec_size {
             for &loop_id in loops {
                 append_context(contexts, EventRegion::Loop(loop_id), Some(sample), order);
             }
         }
-        for &loop_id in loops {
-            append_context(contexts, EventRegion::LoopPost(loop_id), None, order);
-        }
     } else {
+        let group_by_member = plan
+            .fused_serial_groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .member_loop_ids
+                    .iter()
+                    .map(move |&loop_id| (loop_id, group.group_id))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut emitted_groups = BTreeSet::new();
         for &loop_id in loops {
-            append_context(contexts, EventRegion::LoopPre(loop_id), None, order);
-            for sample in 0..plan.vec_size {
-                append_context(contexts, EventRegion::Loop(loop_id), Some(sample), order);
+            if let Some(&group_id) = group_by_member.get(&loop_id) {
+                if !emitted_groups.insert(group_id) {
+                    continue;
+                }
+                let members = &plan
+                    .fused_serial_groups
+                    .iter()
+                    .find(|group| group.group_id == group_id)
+                    .expect("member map came from a verified fused group")
+                    .member_loop_ids;
+                for sample in 0..plan.vec_size {
+                    for &member in loops {
+                        if members.binary_search(&member).is_ok() {
+                            append_context(
+                                contexts,
+                                EventRegion::Loop(member),
+                                Some(sample),
+                                order,
+                            );
+                        }
+                    }
+                }
+            } else {
+                for sample in 0..plan.vec_size {
+                    append_context(contexts, EventRegion::Loop(loop_id), Some(sample), order);
+                }
             }
-            append_context(contexts, EventRegion::LoopPost(loop_id), None, order);
         }
+    }
+    for &loop_id in loops {
+        append_context(contexts, EventRegion::LoopPost(loop_id), None, order);
     }
 }
 
@@ -1274,6 +1450,7 @@ fn is_epoch_enter(
 
 fn build_dependencies(
     plan: &VectorPlan,
+    state: Option<&VerifiedVectorStatePlan>,
     events: &[VectorEvent],
     contexts: &BTreeMap<(EventRegion, Option<u64>), Vec<u64>>,
     scalar_order: &[u64],
@@ -1424,6 +1601,12 @@ fn build_dependencies(
             add_dependency(&mut dependencies, *event_id, *next);
         }
     }
+    dependencies.extend(managed_state_dependencies(
+        plan,
+        state,
+        events,
+        &scalar_positions,
+    ));
     dependencies.into_iter().collect()
 }
 
@@ -1461,6 +1644,123 @@ fn event_ids_by_transport(
             Some(((transport_id, event.sample), event.event_id))
         })
         .collect()
+}
+
+fn managed_state_dependencies(
+    plan: &VectorPlan,
+    state: Option<&VerifiedVectorStatePlan>,
+    events: &[VectorEvent],
+    scalar_positions: &BTreeMap<u64, usize>,
+) -> BTreeSet<EventDependency> {
+    let Some(state) = state else {
+        return BTreeSet::new();
+    };
+    let signals = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
+    let mut reads = BTreeMap::<(StateResource, u64), Vec<u64>>::new();
+    let mut writes = BTreeMap::<(StateResource, u64), Vec<u64>>::new();
+    for event in events {
+        let Some(sample) = event.sample else {
+            continue;
+        };
+        match &event.kind {
+            VectorEventKind::Definition { signal_id } => {
+                for effect in &signals[signal_id].effects {
+                    if let EffectAtom::ReadState(resource) = effect {
+                        reads
+                            .entry((resource.clone(), sample))
+                            .or_default()
+                            .push(event.event_id);
+                    }
+                }
+            }
+            VectorEventKind::StateTransition { action } => {
+                for resource in state_action_resources(state, action) {
+                    writes
+                        .entry((resource, sample))
+                        .or_default()
+                        .push(event.event_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut dependencies = BTreeSet::new();
+    for ((resource, sample), writer_ids) in &writes {
+        for &writer_id in writer_ids {
+            if let Some(reader_ids) = reads.get(&(resource.clone(), *sample)) {
+                for &reader_id in reader_ids {
+                    if scalar_positions[&reader_id] < scalar_positions[&writer_id] {
+                        add_dependency(&mut dependencies, reader_id, writer_id);
+                    }
+                }
+            }
+            let Some(next_sample) = sample.checked_add(1).filter(|next| *next < plan.vec_size)
+            else {
+                continue;
+            };
+            if let Some(reader_ids) = reads.get(&(resource.clone(), next_sample)) {
+                for &reader_id in reader_ids {
+                    if scalar_positions[&writer_id] < scalar_positions[&reader_id] {
+                        add_dependency(&mut dependencies, writer_id, reader_id);
+                    }
+                }
+            }
+            if let Some(next_writer_ids) = writes.get(&(resource.clone(), next_sample)) {
+                for &next_writer_id in next_writer_ids {
+                    if scalar_positions[&writer_id] < scalar_positions[&next_writer_id] {
+                        add_dependency(&mut dependencies, writer_id, next_writer_id);
+                    }
+                }
+            }
+        }
+    }
+    dependencies
+}
+
+fn state_action_resources(
+    state: &VerifiedVectorStatePlan,
+    action: &VectorStateAction,
+) -> Vec<StateResource> {
+    match action {
+        VectorStateAction::DelayWrite { signal_id } => vec![StateResource::Signal {
+            owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
+            cell: super::vector_analysis::StateCell::Delay,
+        }],
+        VectorStateAction::RecursionStep { group } => state
+            .plan()
+            .recursions
+            .iter()
+            .find(|recursion| recursion.group == *group)
+            .into_iter()
+            .flat_map(|recursion| {
+                recursion
+                    .projections
+                    .iter()
+                    .map(move |projection| StateResource::Recursion {
+                        group: u32::try_from(*group).expect("verified recursion group fits u32"),
+                        projection: u32::try_from(projection.index)
+                            .expect("verified recursion projection fits u32"),
+                    })
+            })
+            .collect(),
+        VectorStateAction::PrefixWrite { signal_id } => vec![StateResource::Signal {
+            owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
+            cell: super::vector_analysis::StateCell::Prefix,
+        }],
+        VectorStateAction::WaveformAdvance { signal_id } => vec![StateResource::Signal {
+            owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
+            cell: super::vector_analysis::StateCell::WaveformIndex,
+        }],
+        VectorStateAction::DelayCopyIn { .. }
+        | VectorStateAction::DelayCopyOut { .. }
+        | VectorStateAction::DelayRingAdvance { .. }
+        | VectorStateAction::DelayRingSaveAdvance { .. } => Vec::new(),
+    }
 }
 
 fn recursion_step_events(events: &[VectorEvent]) -> BTreeMap<(u64, u64, u64), u64> {
@@ -1790,6 +2090,23 @@ mod tests {
         (plan, state)
     }
 
+    fn empty_state_plan(plan: &VerifiedVectorPlan) -> VerifiedVectorStatePlan {
+        verified_vector_state_plan_for_test(
+            VectorStatePlan {
+                schema_version: VECTOR_STATE_PLAN_VERSION,
+                vec_size: plan.plan().vec_size,
+                max_copy_delay: 16,
+                loops: vec![],
+                delays: vec![],
+                recursions: vec![],
+                prefixes: vec![],
+                waveforms: vec![],
+                no_op_resources: vec![],
+            },
+            plan,
+        )
+    }
+
     fn signal(signal_id: u64, placement: Placement, effects: Vec<EffectAtom>) -> SignalRecord {
         SignalRecord {
             signal_id,
@@ -1815,6 +2132,26 @@ mod tests {
             roots,
             epoch_id: 0,
         }
+    }
+
+    #[test]
+    fn event_bound_precheck_accepts_a_small_plan_without_certifying_it() {
+        let plan = pure_transport_plan();
+        let state = empty_state_plan(&plan);
+        assert_eq!(precheck_state_event_bound(&plan, &state, 14), Ok(()));
+    }
+
+    #[test]
+    fn event_bound_precheck_rejects_a_proven_lower_bound() {
+        let plan = pure_transport_plan();
+        let state = empty_state_plan(&plan);
+        assert_eq!(
+            precheck_state_event_bound(&plan, &state, 13),
+            Err(VectorEventError::EventLowerBoundExceeded {
+                minimum: 14,
+                limit: 13,
+            })
+        );
     }
 
     fn serial_loop(loop_id: u64, roots: Vec<u64>) -> LoopRecord {

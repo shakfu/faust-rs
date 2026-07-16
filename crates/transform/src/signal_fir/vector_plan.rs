@@ -561,7 +561,8 @@ pub fn build_vector_plan(
     }
     trace_stage("transports");
 
-    let fused_serial_groups = build_fused_serial_groups(certificate, &state, &transports);
+    let fused_serial_groups =
+        build_fused_serial_groups(certificate, &state, &loop_ids, &data_edges, &transports);
     trace_stage("fused-groups");
     let plan = VectorPlan {
         vec_size,
@@ -596,6 +597,8 @@ pub fn build_vector_plan(
 fn build_fused_serial_groups(
     certificate: &super::decoration_verify::DecorationCertificate,
     state: &PlacementState<'_>,
+    loop_ids: &[u64],
+    data_edges: &BTreeSet<LoopEdge>,
     transports: &[TransportRecord],
 ) -> Vec<FusedSerialGroupRecord> {
     #[derive(Default)]
@@ -607,14 +610,79 @@ fn build_fused_serial_groups(
         ambiguous: bool,
     }
 
+    let reachability = PlanReachability::new(loop_ids, data_edges);
     let mut candidates = BTreeMap::<u64, Candidate>::new();
+    for dependency in certificate
+        .dependencies
+        .iter()
+        .filter(|dependency| matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0))
+    {
+        let read_id = dependency.from;
+        let Some(read_record) = state.records.get(&read_id).copied() else {
+            continue;
+        };
+        let Some(carrier_record) = state.records.get(&dependency.to).copied() else {
+            continue;
+        };
+        let Some(projection) = carrier_record.recursive_projection else {
+            continue;
+        };
+        if carrier_record.max_delay == 0
+            || read_record.clock_domain.is_some()
+            || carrier_record.clock_domain.is_some()
+        {
+            continue;
+        }
+        let Some(Placement::Owned(read_loop_id)) = state.placement.get(&read_id).copied() else {
+            continue;
+        };
+        let Some(Placement::Owned(owner_loop_id)) = state.placement.get(&dependency.to).copied()
+        else {
+            continue;
+        };
+        if read_loop_id == owner_loop_id || !reachability.reaches(read_loop_id, owner_loop_id) {
+            continue;
+        }
+        let candidate = candidates.entry(owner_loop_id).or_default();
+        let carrier = u64::from(dependency.to);
+        if candidate
+            .recursion_group
+            .is_some_and(|existing| existing != projection.group)
+        {
+            candidate.ambiguous = true;
+            continue;
+        }
+        candidate.carrier = Some(
+            candidate
+                .carrier
+                .map_or(carrier, |current| current.min(carrier)),
+        );
+        candidate.recursion_group = Some(projection.group);
+        // Include every loop on a same-sample data path from the delayed read
+        // to its recursive writer. The fused body then preserves read(n),
+        // write(n), read(n+1) even when no transport directly carries the
+        // delayed-read node itself.
+        candidate
+            .members
+            .extend(loop_ids.iter().copied().filter(|&loop_id| {
+                (loop_id == read_loop_id || reachability.reaches(read_loop_id, loop_id))
+                    && (loop_id == owner_loop_id || reachability.reaches(loop_id, owner_loop_id))
+            }));
+        candidate.delayed_reads.insert(u64::from(read_id));
+    }
+    // Preserve the direct transported-read slice as a second, independent
+    // discovery route. A delayed read may already share its recursive owner
+    // loop while a consumer transport still has to remain in that same
+    // physical sample loop. Direct dependency discovery above intentionally
+    // skips that local-read case.
     for transport in transports {
         let read_id = u32::try_from(transport.signal_id).expect("signal id fits u32");
         let Some(read_record) = state.records.get(&read_id).copied() else {
             continue;
         };
         for dependency in certificate.dependencies.iter().filter(|dependency| {
-            dependency.from == read_id && matches!(dependency.kind, DepKind::Delayed { .. })
+            dependency.from == read_id
+                && matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
         }) {
             let Some(carrier_record) = state.records.get(&dependency.to).copied() else {
                 continue;
@@ -648,9 +716,6 @@ fn build_fused_serial_groups(
                     .map_or(carrier, |current| current.min(carrier)),
             );
             candidate.recursion_group = Some(projection.group);
-            // Fuse the delayed-read producer, its immediate consumer, and the
-            // recursion owner. Overlapping slices are merged transitively
-            // below so coupled recursive groups remain sample-synchronous.
             candidate.members.insert(transport.producer_loop);
             candidate.members.insert(transport.consumer_loop);
             candidate.members.insert(owner_loop_id);
@@ -1090,7 +1155,10 @@ fn vectorability(vectorability: SigVectorability) -> Vectorability {
 fn value_type(sig_type: &CanonicalSigType) -> ValueType {
     match sig_type {
         CanonicalSigType::Simple { nature, .. } => scalar_value_type(*nature),
-        CanonicalSigType::Table { content, .. } => value_type(content),
+        // Table wrappers carry the effective nature of the current signal.
+        // This matters for casts around nested read-table types: recursively
+        // unwrapping content would lose the outer real cast.
+        CanonicalSigType::Table { nature, .. } => scalar_value_type(*nature),
         CanonicalSigType::Tuplet { components, .. } => {
             ValueType::Tuple(components.iter().map(value_type).collect())
         }

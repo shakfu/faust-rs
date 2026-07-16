@@ -2,7 +2,7 @@
 
 Date: 2026-07-15
 
-Status: in progress — Phases 0, 1, 2, and 3 complete
+Status: in progress — Phases 0, 1, 2, and 3 complete; Phase 4 active
 
 Working branch: `ondemand-vec-fad-synthesis`
 
@@ -197,6 +197,49 @@ compile-time regression: each new path completed in at most 0.06 seconds and
 `reverb_designer` remained about 66.8 seconds, versus 67.8 seconds in the
 preceding slice. Remaining table cases are effectful `rdtable`/`wrtable`
 programs and stay closed until their ordered state semantics are certified.
+
+The next Phase 4 slice adds checked read-only generated tables. The lowerer
+interprets finite waveform, literal, and pure computed generators at compile
+time, emits an immutable typed table, and accepts `rdtable` only when the table
+is owned by that immutable declaration. Exact scalar table bounds are
+preserved. Mutable `wrtable` and unknown foreign-function effects remain
+explicit fail-closed boundaries rather than being admitted to a pure region.
+The same slice fixes generic routed-definition and CSE identity handling; no
+DSP name or corpus path participates in lowering decisions.
+
+The complete corpus now has 44 certified DSPs, 48 fallbacks, and the existing
+independent SIGGEN error. The 17 newly certified files are `BPF`, `math_simp`,
+`midi_tester`, `osc`, `phasor`, `pow`, `priority`, `reverb_tester`, `select2`,
+`spat`, `switcher`, `table`, `vumeter`, `waveform2`, `waveform3`, `waveform4`,
+and `waveform6`. The remaining lowering boundary is specific: 13 files expose
+missing routed consumer definitions, two require ordered mutable tables, and
+one uses an unknown-purity foreign function. Event certification rejects 31
+larger temporal programs, including 27 through a safe pre-lowering event-count
+bound; the soundfile UI policy remains unchanged.
+
+Native differential testing exposed a generic indirect recursive dependency
+that the earlier fused-group producer did not close: a delayed read could pass
+through an intermediate loop before reaching its recursive writer. Fused
+groups now include every loop on every same-sample data path from a delayed
+read to its writer, list every internal transport, and execute as one scheduling
+envelope with all external incoming and outgoing dependencies. The independent
+checker reconstructs data-only path closure and rejects an omitted member.
+The event certificate separately models sample-major fused execution and
+managed delay, recursion, prefix, and waveform transitions. Synthetic
+three-loop fixtures, mutation tests, and a corpus-independent compiler fixture
+cover this rule across both loop variants and all four scheduling strategies.
+
+Compile-cost checks prevented the enlarged temporal paths from constructing an
+unbounded event graph merely to reject it. A conservative lower bound computed
+from roots, effects, transports, state actions, and barriers now rejects before
+event materialization; `spectral_level` fell from about 29.0 to 20.7 seconds.
+On `reverb_designer`, the scalar pipeline remains the dominant cost at about
+61.8 seconds. A vector request takes about 68.3 seconds: the new fused-group
+production and checking account for about 0.3 seconds, while approximately
+5.8 seconds belongs to the pre-existing complete vector plan. Fused scheduling
+dependencies are now precomputed once per epoch instead of being reconstructed
+for every node. The historical source of the scalar cost remains assigned to
+Phase 6.
 
 ## 2. Measured Baseline
 
