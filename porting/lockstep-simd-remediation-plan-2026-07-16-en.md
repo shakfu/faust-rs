@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: implementation in progress; Steps 0-1 completed, Steps 2-4 pending
+Status: implementation in progress; Steps 0-2 completed, Steps 3-4 pending
 
 Scope: checked signal-level vector mode, lockstep event certification, FIR state lowering, and C++ SIMD evidence
 
@@ -273,6 +273,22 @@ the intended red baseline for Step 2.
 
 Pass condition: bit-exact tests pass and the corrected native-SIMD gate observes
 profitable four-wide arithmetic in the certified region.
+
+Implementation status (2026-07-16): complete. State-plan schema v4 introduces
+an explicit `LockstepRegisterBundle` whose ordered lane records bind bundle,
+loop, recursion group, delayed carrier, local scalar, and persistent scalar
+identities. The producer promotes only complete top-rate bundles with one
+recursion projection and one fixed delay-one carrier per lane; the independent
+checker reconstructs that mapping, and unsupported or partial shapes retain
+the existing copy/ring storage. FIR loads each persistent value once per chunk,
+carries it in a scalar local, and stores it once after the physical loop.
+Lockstep assembly transposes isomorphic statement rows across lanes, exposing
+homologous operations to SLP without changing any lane's expression order.
+Mutation tests reject crossed lanes and a missing final store. The three
+certified default-size corpus cases produce respectively 14, 30, and 22
+four-wide LLVM floating-point operations with Clang 14 at
+`-O3 -ffp-contract=off`; scalar/vector interpreter results remain bit-exact
+across both loop variants, all four schedulers, and tail chunks.
 
 ### Step 3 — mixed-subgraph validation
 

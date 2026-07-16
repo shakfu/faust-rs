@@ -1964,7 +1964,9 @@ fn state_action_resources(
             owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
             cell: super::vector_analysis::StateCell::WaveformIndex,
         }],
-        VectorStateAction::DelayCopyIn { .. }
+        VectorStateAction::DelayRegisterLoad { .. }
+        | VectorStateAction::DelayRegisterStore { .. }
+        | VectorStateAction::DelayCopyIn { .. }
         | VectorStateAction::DelayCopyOut { .. }
         | VectorStateAction::DelayRingAdvance { .. }
         | VectorStateAction::DelayRingSaveAdvance { .. } => Vec::new(),
@@ -2353,6 +2355,7 @@ mod tests {
                         },
                     ],
                 }],
+                lockstep_register_bundles: vec![],
                 prefixes: vec![],
                 waveforms: vec![],
                 no_op_resources: vec![],
@@ -2371,6 +2374,7 @@ mod tests {
                 loops: vec![],
                 delays: vec![],
                 recursions: vec![],
+                lockstep_register_bundles: vec![],
                 prefixes: vec![],
                 waveforms: vec![],
                 no_op_resources: vec![],
@@ -2405,6 +2409,7 @@ mod tests {
                         }],
                     })
                     .collect(),
+                lockstep_register_bundles: vec![],
                 prefixes: vec![],
                 waveforms: vec![],
                 no_op_resources: vec![],

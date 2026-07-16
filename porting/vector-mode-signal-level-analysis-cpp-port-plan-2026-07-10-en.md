@@ -2452,8 +2452,9 @@ levelization compatibility setting, with deterministic Rust tie ordering.
 
 ## 8. Lockstep instance vectorization extension
 
-**Status:** structural lockstep implemented and parity-validated on 2026-07-16;
-native-SIMD acceptance reopened after a scalar-fallback false positive. See the
+**Status:** lockstep lowering and native SIMD implemented and parity-validated
+on 2026-07-16; mixed-subgraph attribution and final repository gates remain.
+See the
 [lockstep SIMD remediation plan](lockstep-simd-remediation-plan-2026-07-16-en.md).
 
 ### 8.0 Implementation decision and acceptance gate
@@ -2524,8 +2525,14 @@ register-carried delay-one state, and a gate that fails unless
 
 **Remediation progress.** The gate now enforces effective checked-vector mode,
 and the compact two-sample event basis retains the three complex cases at
-default `-vs 32`. The certified C++ still produces zero four-wide LLVM
-operations; register-carried lockstep state remains the active SIMD blocker.
+default `-vs 32`. State-plan schema v4 explicitly certifies complete
+register-carried delay-one bundles; unsupported state shapes retain the prior
+array-backed path. FIR loads and stores each lane state once per chunk and
+transposes homologous statement rows across the already-certified independent
+lanes. With Clang 14, `-O3 -ffp-contract=off`, the corrected gate observes
+14, 30, and 22 four-wide LLVM floating-point operations for the recursive bank,
+mixed reduction, and mixed side-branch cases respectively. Crossed lane-state
+identity and missing final-store mutations are rejected independently.
 
 The full workspace Clippy gate passes with warnings denied. The workspace test
 gate currently stops at the unrelated existing Wasm control-flow assertion

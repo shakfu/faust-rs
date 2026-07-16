@@ -457,13 +457,13 @@ fn complex_and_partial_lockstep_corpus_is_certified_at_default_vec_size() {
 
 #[test]
 fn lockstep_corpus_cpp_has_expected_physical_sample_loops() {
-    for (name, source, expected_loops) in [
-        ("pair", LOCKSTEP_PAIR_SOURCE, 1),
-        ("quad", LOCKSTEP_QUAD_SOURCE, 1),
-        ("simd_quad", LOCKSTEP_SIMD_QUAD_SOURCE, 1),
-        ("mixed_reduce", LOCKSTEP_MIXED_REDUCE_SOURCE, 2),
-        ("mixed_branch", LOCKSTEP_MIXED_BRANCH_SOURCE, 2),
-        ("near_isomorphic", LOCKSTEP_NEAR_ISOMORPHIC_SOURCE, 2),
+    for (name, source, expected_loops, register_carried) in [
+        ("pair", LOCKSTEP_PAIR_SOURCE, 1, true),
+        ("quad", LOCKSTEP_QUAD_SOURCE, 1, true),
+        ("simd_quad", LOCKSTEP_SIMD_QUAD_SOURCE, 1, true),
+        ("mixed_reduce", LOCKSTEP_MIXED_REDUCE_SOURCE, 2, true),
+        ("mixed_branch", LOCKSTEP_MIXED_BRANCH_SOURCE, 2, true),
+        ("near_isomorphic", LOCKSTEP_NEAR_ISOMORPHIC_SOURCE, 2, false),
     ] {
         let path = std::env::temp_dir().join(format!(
             "faust-rs-lockstep-{name}-{}-{:?}.dsp",
@@ -489,6 +489,16 @@ fn lockstep_corpus_cpp_has_expected_physical_sample_loops() {
             expected_loops,
             "{name}: unexpected physical sample-loop count"
         );
+        if register_carried {
+            assert!(
+                cpp.contains("vlock_b0_l0_") && cpp.contains("_state"),
+                "{name}: missing register-carried lockstep state"
+            );
+            assert!(
+                !cpp.contains("vstate_s") || !cpp.contains("_tmp["),
+                "{name}: lockstep delay-one state remained chunk-array-backed"
+            );
+        }
     }
 }
 

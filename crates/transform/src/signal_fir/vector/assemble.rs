@@ -403,8 +403,14 @@ pub fn assemble_vector_fir(
             &mut state_declarations,
             &mut clear_statements,
         )?;
-        let top_level_statement =
-            materialize_top_level(routed, &loops, &islands, clock_output_stores, &mut builder)?;
+        let top_level_statement = materialize_top_level(
+            routed,
+            state_plan,
+            &loops,
+            &islands,
+            clock_output_stores,
+            &mut builder,
+        )?;
         VectorFirAssembly {
             schema_version: VECTOR_FIR_ASSEMBLY_VERSION,
             local_declarations,
@@ -567,7 +573,7 @@ pub fn verify_vector_fir_assembly(
     }
     verify_clock_output_stores(assembly, expected_islands, store)?;
     verify_assembled_fused_serial_groups(routed, state_plan, assembly, store)?;
-    verify_assembled_lockstep_bundles(routed, assembly, store)?;
+    verify_assembled_lockstep_bundles(routed, state_plan, assembly, store)?;
     Ok(())
 }
 
@@ -776,6 +782,21 @@ fn materialize_state_storage(
     for delay in &state_plan.plan().delays {
         let typ = state_fir_type(delay, real_type.clone())?;
         match &delay.storage {
+            VectorDelayStorage::Register {
+                local_name,
+                persistent_name,
+                ..
+            } => {
+                local.push(builder.declare_var(local_name, typ.clone(), AccessType::Stack, None));
+                state.push(builder.declare_var(
+                    persistent_name,
+                    typ.clone(),
+                    AccessType::Struct,
+                    None,
+                ));
+                let zero = zero_value(builder, &typ);
+                clear.push(builder.store_var(persistent_name, AccessType::Struct, zero));
+            }
             VectorDelayStorage::Copy {
                 temporary_name,
                 permanent_name,
@@ -1009,6 +1030,23 @@ fn materialize_action(
 ) -> Result<VectorStateFirAction, VectorFirAssemblyError> {
     let mut execution_statements = None;
     let statement = match action {
+        VectorStateAction::DelayRegisterLoad { signal_id } => {
+            let delay = delays[signal_id];
+            let VectorDelayStorage::Register {
+                local_name,
+                persistent_name,
+                ..
+            } = &delay.storage
+            else {
+                return Err(VectorFirAssemblyError::ActionShape {
+                    loop_id,
+                    action: action.clone(),
+                });
+            };
+            let typ = state_fir_type(delay, real_type)?;
+            let value = builder.load_var(persistent_name, AccessType::Struct, typ);
+            builder.store_var(local_name, AccessType::Stack, value)
+        }
         VectorStateAction::DelayCopyIn { signal_id } => {
             let delay = delays[signal_id];
             let VectorDelayStorage::Copy {
@@ -1122,6 +1160,9 @@ fn materialize_action(
             })?;
             let local = local_index(builder);
             match &delay.storage {
+                VectorDelayStorage::Register { local_name, .. } => {
+                    builder.store_var(local_name, AccessType::Stack, value)
+                }
                 VectorDelayStorage::Copy {
                     temporary_name,
                     history_length,
@@ -1176,6 +1217,23 @@ fn materialize_action(
             let length = fir_i32(builder, "waveform length", transition.length)?;
             let wrapped = builder.binop(FirBinOp::Rem, next, length, FirType::Int32);
             builder.store_var(&transition.index_name, AccessType::Struct, wrapped)
+        }
+        VectorStateAction::DelayRegisterStore { signal_id } => {
+            let delay = delays[signal_id];
+            let VectorDelayStorage::Register {
+                local_name,
+                persistent_name,
+                ..
+            } = &delay.storage
+            else {
+                return Err(VectorFirAssemblyError::ActionShape {
+                    loop_id,
+                    action: action.clone(),
+                });
+            };
+            let typ = state_fir_type(delay, real_type)?;
+            let value = builder.load_var(local_name, AccessType::Stack, typ);
+            builder.store_var(persistent_name, AccessType::Struct, value)
         }
         VectorStateAction::DelayCopyOut { signal_id } => {
             let delay = delays[signal_id];
@@ -1394,6 +1452,7 @@ fn clock_cursor_for_domain(
 
 fn materialize_top_level(
     routed: &VerifiedRoutedFir,
+    state_plan: Option<&VerifiedVectorStatePlan>,
     loops: &[AssembledVectorLoop],
     islands: &[AssembledClockIsland],
     clock_output_stores: &[VectorClockOutputStore],
@@ -1493,6 +1552,11 @@ fn materialize_top_level(
         .iter()
         .map(|bundle| (bundle.bundle_id, bundle.member_loop_ids.as_slice()))
         .collect::<BTreeMap<_, _>>();
+    let register_bundles = state_plan
+        .into_iter()
+        .flat_map(|state| &state.plan().lockstep_register_bundles)
+        .map(|bundle| bundle.bundle_id)
+        .collect::<BTreeSet<_>>();
     let mut body = Vec::new();
     for region in routed.layout().loops() {
         if !owned.contains(&region.loop_id) {
@@ -1519,11 +1583,35 @@ fn materialize_top_level(
             } else if let Some(bundle_id) = lockstep_bundle_by_member.get(&region.loop_id) {
                 let members = lockstep_members_by_bundle[bundle_id];
                 if members.first() == Some(&region.loop_id) {
-                    let iterations = members
-                        .iter()
-                        .map(|loop_id| loop_by_id[loop_id].iteration_statement)
-                        .collect::<Vec<_>>();
-                    let lockstep_body = builder.block(&iterations);
+                    let statements = if !register_bundles.contains(bundle_id) {
+                        members
+                            .iter()
+                            .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+                            .collect::<Vec<_>>()
+                    } else {
+                        let width = members
+                            .first()
+                            .map(|loop_id| loop_by_id[loop_id].exec.len())
+                            .unwrap_or(0);
+                        if members
+                            .iter()
+                            .all(|loop_id| loop_by_id[loop_id].exec.len() == width)
+                        {
+                            let mut transposed = Vec::with_capacity(width * members.len());
+                            for index in 0..width {
+                                for loop_id in members {
+                                    transposed.push(loop_by_id[loop_id].exec[index]);
+                                }
+                            }
+                            transposed
+                        } else {
+                            members
+                                .iter()
+                                .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+                                .collect()
+                        }
+                    };
+                    let lockstep_body = builder.block(&statements);
                     body.push(sample_loop(builder, lockstep_body));
                 }
             } else {
@@ -1760,6 +1848,7 @@ fn verify_assembled_fused_serial_groups(
 /// lane sequence inside that island.
 fn verify_assembled_lockstep_bundles(
     routed: &VerifiedRoutedFir,
+    state_plan: Option<&VerifiedVectorStatePlan>,
     assembly: &VectorFirAssembly,
     store: &FirStore,
 ) -> Result<(), VectorFirAssemblyError> {
@@ -1774,6 +1863,11 @@ fn verify_assembled_lockstep_bundles(
         .iter()
         .map(|loop_| (loop_.loop_id, loop_))
         .collect::<BTreeMap<_, _>>();
+    let register_bundles = state_plan
+        .into_iter()
+        .flat_map(|state| &state.plan().lockstep_register_bundles)
+        .map(|bundle| bundle.bundle_id)
+        .collect::<BTreeSet<_>>();
 
     for bundle in &routed.plan().lockstep_bundles {
         let reject = || VectorFirAssemblyError::LockstepBundleShape {
@@ -1815,11 +1909,35 @@ fn verify_assembled_lockstep_bundles(
             continue;
         }
 
-        let expected_iterations = bundle
-            .member_loop_ids
-            .iter()
-            .map(|loop_id| loop_by_id[loop_id].iteration_statement)
-            .collect::<Vec<_>>();
+        let expected_iterations = if !register_bundles.contains(&bundle.bundle_id) {
+            bundle
+                .member_loop_ids
+                .iter()
+                .map(|loop_id| loop_by_id[loop_id].iteration_statement)
+                .collect::<Vec<_>>()
+        } else {
+            let Some(width) = bundle
+                .member_loop_ids
+                .first()
+                .map(|loop_id| loop_by_id[loop_id].exec.len())
+            else {
+                return Err(reject());
+            };
+            if bundle
+                .member_loop_ids
+                .iter()
+                .any(|loop_id| loop_by_id[loop_id].exec.len() != width)
+            {
+                return Err(reject());
+            }
+            let mut expected_iterations = Vec::with_capacity(width * bundle.member_loop_ids.len());
+            for index in 0..width {
+                for loop_id in &bundle.member_loop_ids {
+                    expected_iterations.push(loop_by_id[loop_id].exec[index]);
+                }
+            }
+            expected_iterations
+        };
         let physical_loops = top_level
             .iter()
             .enumerate()
@@ -2067,6 +2185,16 @@ fn verify_action_shape(
 ) -> Result<(), VectorFirAssemblyError> {
     let state = state_plan.expect("actions require a state plan");
     let valid = match &action.action {
+        VectorStateAction::DelayRegisterLoad { signal_id } => {
+            let delay = find_delay(state, *signal_id);
+            matches!(
+                (&delay.storage, match_fir(store, action.statement)),
+                (
+                    VectorDelayStorage::Register { local_name, .. },
+                    FirMatch::StoreVar { name, access: AccessType::Stack, .. }
+                ) if *local_name == name
+            )
+        }
         VectorStateAction::DelayCopyIn { signal_id } => {
             let delay = find_delay(state, *signal_id);
             match &delay.storage {
@@ -2084,7 +2212,9 @@ fn verify_action_shape(
                     *history_length,
                     store,
                 ),
-                VectorDelayStorage::Ring { .. } | VectorDelayStorage::ClockRing { .. } => false,
+                VectorDelayStorage::Register { .. }
+                | VectorDelayStorage::Ring { .. }
+                | VectorDelayStorage::ClockRing { .. } => false,
             }
         }
         VectorStateAction::DelayRingAdvance { signal_id } => {
@@ -2109,6 +2239,14 @@ fn verify_action_shape(
         VectorStateAction::DelayWrite { signal_id } => {
             let delay = find_delay(state, *signal_id);
             match (&delay.storage, match_fir(store, action.statement)) {
+                (
+                    VectorDelayStorage::Register { local_name, .. },
+                    FirMatch::StoreVar {
+                        name,
+                        access: AccessType::Stack,
+                        ..
+                    },
+                ) => *local_name == name,
                 (
                     VectorDelayStorage::Copy { temporary_name, .. },
                     FirMatch::StoreTable {
@@ -2161,6 +2299,16 @@ fn verify_action_shape(
                 .expect("verified waveform action has a transition");
             waveform_advance_matches(action.statement, transition, store)
         }
+        VectorStateAction::DelayRegisterStore { signal_id } => {
+            let delay = find_delay(state, *signal_id);
+            matches!(
+                (&delay.storage, match_fir(store, action.statement)),
+                (
+                    VectorDelayStorage::Register { persistent_name, .. },
+                    FirMatch::StoreVar { name, access: AccessType::Struct, .. }
+                ) if *persistent_name == name
+            )
+        }
         VectorStateAction::DelayCopyOut { signal_id } => {
             let delay = find_delay(state, *signal_id);
             match &delay.storage {
@@ -2178,7 +2326,9 @@ fn verify_action_shape(
                     *history_length,
                     store,
                 ),
-                VectorDelayStorage::Ring { .. } | VectorDelayStorage::ClockRing { .. } => false,
+                VectorDelayStorage::Register { .. }
+                | VectorDelayStorage::Ring { .. }
+                | VectorDelayStorage::ClockRing { .. } => false,
             }
         }
         VectorStateAction::DelayRingSaveAdvance { signal_id } => {
@@ -2742,6 +2892,7 @@ mod tests {
                         value_signal_id: 11,
                     }],
                 }],
+                lockstep_register_bundles: vec![],
                 prefixes: vec![],
                 waveforms: vec![],
                 no_op_resources: vec![],
@@ -3021,6 +3172,7 @@ mod tests {
                     },
                 }],
                 recursions: vec![],
+                lockstep_register_bundles: vec![],
                 prefixes: vec![],
                 waveforms: vec![],
                 no_op_resources: vec![],

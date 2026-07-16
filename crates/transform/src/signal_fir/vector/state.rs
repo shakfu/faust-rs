@@ -37,7 +37,7 @@ use super::vector_verify::{
 use crate::signal_prepare::VerifiedPreparedSignals;
 
 /// Current canonical P6.1 state-plan schema.
-pub const VECTOR_STATE_PLAN_VERSION: u32 = 3;
+pub const VECTOR_STATE_PLAN_VERSION: u32 = 4;
 
 /// One `CodeLoop` execution phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,6 +50,15 @@ pub enum VectorStatePhase {
 /// Exact vector-mode storage selected for one delayed carrier.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorDelayStorage {
+    /// Delay-one state carried in a scalar local for one certified lockstep
+    /// lane. Eligibility is bound by [`LockstepRegisterBundle`] rather than
+    /// inferred from these generated names.
+    Register {
+        local_name: String,
+        persistent_name: String,
+        bundle_id: u64,
+        lane: u64,
+    },
     /// C++ `_tmp`/`_perm` dual-buffer representation.
     Copy {
         temporary_name: String,
@@ -78,12 +87,14 @@ pub enum VectorDelayStorage {
 /// Canonical phase operation. Enum order is also canonical operation order.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorStateAction {
+    DelayRegisterLoad { signal_id: u64 },
     DelayCopyIn { signal_id: u64 },
     DelayRingAdvance { signal_id: u64 },
     RecursionStep { group: u64 },
     DelayWrite { signal_id: u64 },
     PrefixWrite { signal_id: u64 },
     WaveformAdvance { signal_id: u64 },
+    DelayRegisterStore { signal_id: u64 },
     DelayCopyOut { signal_id: u64 },
     DelayRingSaveAdvance { signal_id: u64 },
 }
@@ -93,12 +104,16 @@ impl VectorStateAction {
     #[must_use]
     pub fn phase(&self) -> VectorStatePhase {
         match self {
-            Self::DelayCopyIn { .. } | Self::DelayRingAdvance { .. } => VectorStatePhase::Pre,
+            Self::DelayRegisterLoad { .. }
+            | Self::DelayCopyIn { .. }
+            | Self::DelayRingAdvance { .. } => VectorStatePhase::Pre,
             Self::RecursionStep { .. }
             | Self::DelayWrite { .. }
             | Self::PrefixWrite { .. }
             | Self::WaveformAdvance { .. } => VectorStatePhase::Exec,
-            Self::DelayCopyOut { .. } | Self::DelayRingSaveAdvance { .. } => VectorStatePhase::Post,
+            Self::DelayRegisterStore { .. }
+            | Self::DelayCopyOut { .. }
+            | Self::DelayRingSaveAdvance { .. } => VectorStatePhase::Post,
         }
     }
 }
@@ -163,6 +178,29 @@ pub struct RecursionTransition {
     pub projections: Vec<RecursionProjectionTransition>,
 }
 
+/// One ordered register-carried lane in a certified lockstep bundle.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LockstepRegisterLane {
+    pub lane: u64,
+    pub loop_id: u64,
+    pub recursion_group: u64,
+    pub signal_id: u64,
+    pub local_name: String,
+    pub persistent_name: String,
+}
+
+/// Checked bundle-level identity for register-carried delay-one state.
+///
+/// This record is an adapted Rust representation of the scalar state carried
+/// by Faust C++ `CodeLoop` execution. It prevents assembly from deciding
+/// eligibility from variable names and keeps lane order, state identity, and
+/// persistent boundaries co-located.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LockstepRegisterBundle {
+    pub bundle_id: u64,
+    pub lanes: Vec<LockstepRegisterLane>,
+}
+
 /// Complete phase bodies for one stateful vector-plan loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoopStatePhases {
@@ -181,6 +219,7 @@ pub struct VectorStatePlan {
     pub loops: Vec<LoopStatePhases>,
     pub delays: Vec<DelayTransition>,
     pub recursions: Vec<RecursionTransition>,
+    pub lockstep_register_bundles: Vec<LockstepRegisterBundle>,
     pub prefixes: Vec<PrefixTransition>,
     pub waveforms: Vec<WaveformTransition>,
     /// Conservative delay effects proven to have no positive-delay use.
@@ -488,6 +527,9 @@ fn build_vector_state_plan_with_resources(
             .entry(loop_id)
             .or_insert_with(|| empty_phases(loop_id));
         match storage {
+            VectorDelayStorage::Register { .. } => {
+                unreachable!("generic delay selection does not produce register storage")
+            }
             VectorDelayStorage::Copy { .. } => {
                 loop_phases
                     .pre
@@ -578,6 +620,10 @@ fn build_vector_state_plan_with_resources(
         });
     }
 
+    let lockstep_register_bundles =
+        canonical_lockstep_register_bundles(prepared, plan, &delays, &recursions);
+    promote_lockstep_register_delays(&lockstep_register_bundles, &mut delays, &mut phases);
+
     let (prefixes, waveforms) = expected_special_transitions(prepared, plan)?;
     for transition in &prefixes {
         phases
@@ -610,6 +656,7 @@ fn build_vector_state_plan_with_resources(
         loops: phases.into_values().collect(),
         delays,
         recursions,
+        lockstep_register_bundles,
         prefixes,
         waveforms,
         no_op_resources: expected_no_op_resources(&source.records),
@@ -704,8 +751,17 @@ fn verify_vector_state_plan_after_vector_plan(
     let records = &decorations.certificate().records;
     verify_source_alignment(records, vector_plan)?;
     verify_supported_state(records, vector_plan, state_plan, clock_plan)?;
-    verify_delays(records, vector_plan, state_plan, clock_plan)?;
     verify_recursions(prepared, records, vector_plan, state_plan, clock_plan)?;
+    verify_delays(records, vector_plan, state_plan, clock_plan)?;
+    let expected_registers = canonical_lockstep_register_bundles(
+        prepared,
+        vector_plan,
+        &state_plan.delays,
+        &state_plan.recursions,
+    );
+    if state_plan.lockstep_register_bundles != expected_registers {
+        return Err(VectorStateError::DelayCoverageMismatch);
+    }
     let (expected_prefixes, expected_waveforms) =
         expected_special_transitions(prepared, vector_plan)?;
     if state_plan.prefixes != expected_prefixes || state_plan.waveforms != expected_waveforms {
@@ -878,13 +934,32 @@ fn verify_delays(
             transition.clock_domain,
             clock_plan,
         )?;
-        let expected_storage = delay_storage(
+        let mut expected_storage = delay_storage(
             transition.signal_id,
             transition.max_delay,
             state_plan.vec_size,
             state_plan.max_copy_delay,
             transition.clock_domain,
         )?;
+        if let Some((bundle, lane)) =
+            state_plan
+                .lockstep_register_bundles
+                .iter()
+                .find_map(|bundle| {
+                    bundle
+                        .lanes
+                        .iter()
+                        .find(|lane| lane.signal_id == transition.signal_id)
+                        .map(|lane| (bundle, lane))
+                })
+        {
+            expected_storage = VectorDelayStorage::Register {
+                local_name: lane.local_name.clone(),
+                persistent_name: lane.persistent_name.clone(),
+                bundle_id: bundle.bundle_id,
+                lane: lane.lane,
+            };
+        }
         if transition.storage != expected_storage {
             return Err(VectorStateError::DelayCoverageMismatch);
         }
@@ -1013,6 +1088,14 @@ fn verify_phases(state_plan: &VectorStatePlan) -> Result<(), VectorStateError> {
             .entry(delay.loop_id)
             .or_insert_with(|| empty_phases(delay.loop_id));
         match delay.storage {
+            VectorDelayStorage::Register { .. } => {
+                phases.pre.push(VectorStateAction::DelayRegisterLoad {
+                    signal_id: delay.signal_id,
+                });
+                phases.post.push(VectorStateAction::DelayRegisterStore {
+                    signal_id: delay.signal_id,
+                });
+            }
             VectorDelayStorage::Copy { .. } => {
                 phases.pre.push(VectorStateAction::DelayCopyIn {
                     signal_id: delay.signal_id,
@@ -1150,6 +1233,130 @@ fn delay_storage(
             capacity,
             mask: capacity - 1,
         })
+    }
+}
+
+/// Reconstructs the only initially supported register-carry shape from
+/// independently checked vector-plan and state facts: every lane in the
+/// bundle owns one scalar recursion projection and one matching top-rate
+/// delay-one carrier. A partially eligible bundle remains array-backed.
+fn canonical_lockstep_register_bundles(
+    prepared: Option<&VerifiedPreparedSignals>,
+    plan: &VectorPlan,
+    delays: &[DelayTransition],
+    recursions: &[RecursionTransition],
+) -> Vec<LockstepRegisterBundle> {
+    let mut result = Vec::new();
+    for bundle in &plan.lockstep_bundles {
+        let lanes = bundle
+            .lanes
+            .iter()
+            .enumerate()
+            .map(|(lane_index, lane)| {
+                let recursion = recursions
+                    .iter()
+                    .find(|recursion| recursion.group == lane.recursion_group)?;
+                let [_projection] = recursion.projections.as_slice() else {
+                    return None;
+                };
+                let matching = delays
+                    .iter()
+                    .filter(|delay| {
+                        delay.loop_id == lane.loop_id
+                            && delay.max_delay == 1
+                            && delay.clock_domain.is_none()
+                    })
+                    .collect::<Vec<_>>();
+                let [delay] = matching.as_slice() else {
+                    return None;
+                };
+                if !has_only_fixed_delay_one_reads(prepared?, delay.signal_id) {
+                    return None;
+                }
+                let lane = u64::try_from(lane_index).ok()?;
+                let base = format!("vlock_b{}_l{lane}_s{}", bundle.bundle_id, delay.signal_id);
+                Some(LockstepRegisterLane {
+                    lane,
+                    loop_id: delay.loop_id,
+                    recursion_group: recursion.group,
+                    signal_id: delay.signal_id,
+                    local_name: format!("{base}_local"),
+                    persistent_name: format!("{base}_state"),
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(lanes) = lanes {
+            result.push(LockstepRegisterBundle {
+                bundle_id: bundle.bundle_id,
+                lanes,
+            });
+        }
+    }
+    result
+}
+
+fn has_only_fixed_delay_one_reads(prepared: &VerifiedPreparedSignals, signal_id: u64) -> bool {
+    let ids = collect_prepared_ids(prepared);
+    let Some(&carrier) = ids.get(&signal_id) else {
+        return false;
+    };
+    let mut found = false;
+    for signal in ids.values().copied() {
+        match match_sig(prepared.arena(), signal) {
+            SigMatch::Delay1(value) if value == carrier => found = true,
+            SigMatch::Delay(value, amount) if value == carrier => {
+                if !matches!(match_sig(prepared.arena(), amount), SigMatch::Int(1)) {
+                    return false;
+                }
+                found = true;
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn promote_lockstep_register_delays(
+    bundles: &[LockstepRegisterBundle],
+    delays: &mut [DelayTransition],
+    phases: &mut BTreeMap<u64, LoopStatePhases>,
+) {
+    for bundle in bundles {
+        for lane in &bundle.lanes {
+            let delay = delays
+                .iter_mut()
+                .find(|delay| delay.signal_id == lane.signal_id)
+                .expect("canonical register lane names one delay transition");
+            delay.storage = VectorDelayStorage::Register {
+                local_name: lane.local_name.clone(),
+                persistent_name: lane.persistent_name.clone(),
+                bundle_id: bundle.bundle_id,
+                lane: lane.lane,
+            };
+            let loop_phases = phases
+                .get_mut(&lane.loop_id)
+                .expect("delay construction created owner phases");
+            loop_phases.pre.retain(|action| {
+                *action
+                    != VectorStateAction::DelayCopyIn {
+                        signal_id: lane.signal_id,
+                    }
+            });
+            loop_phases.post.retain(|action| {
+                *action
+                    != VectorStateAction::DelayCopyOut {
+                        signal_id: lane.signal_id,
+                    }
+            });
+            loop_phases.pre.push(VectorStateAction::DelayRegisterLoad {
+                signal_id: lane.signal_id,
+            });
+            loop_phases
+                .post
+                .push(VectorStateAction::DelayRegisterStore {
+                    signal_id: lane.signal_id,
+                });
+        }
     }
 }
 
@@ -1696,19 +1903,49 @@ mod tests {
     use crate::clk_env::annotate;
     use crate::signal_fir::decoration_verify::certify_decorations;
     use crate::signal_fir::pv_slice::build_pv_signals;
-    use crate::signal_fir::vector_plan::build_vector_plan;
+    use crate::signal_fir::vector_clock_ad::build_vector_clock_ad_plan;
+    use crate::signal_fir::vector_plan::{build_vector_plan, build_vector_plan_with_lockstep};
     use crate::signal_prepare::prepare_signals_for_fir_verified;
 
     fn certify(arena: &TreeArena, roots: &[signals::SigId]) -> VerifiedDecorationCertificate {
         let prepared =
             prepare_signals_for_fir_verified(arena, roots, &ui::UiProgram::empty()).unwrap();
-        let clocks = annotate(
-            prepared.arena(),
-            &ClockDomainTable::new(),
-            prepared.outputs(),
-        )
-        .unwrap();
+        let domains = ClockDomainTable::new();
+        let clocks = annotate(prepared.arena(), &domains, prepared.outputs()).unwrap();
         certify_decorations(&prepared, &clocks).unwrap()
+    }
+
+    fn lockstep_delay_one_fixture() -> (
+        VerifiedPreparedSignals,
+        ClockDomainTable,
+        VerifiedDecorationCertificate,
+        VerifiedVectorPlan,
+    ) {
+        let mut arena = TreeArena::new();
+        let mut roots = Vec::new();
+        for channel in 0..2 {
+            let self_ref = tlib::de_bruijn_ref(&mut arena, 1);
+            let body = {
+                let mut builder = SigBuilder::new(&mut arena);
+                let feedback = builder.proj(0, self_ref);
+                let previous = builder.delay1(feedback);
+                let input = builder.input(channel);
+                let half = builder.real(0.5);
+                let scaled = builder.binop(signals::BinOp::Mul, previous, half);
+                builder.binop(signals::BinOp::Add, input, scaled)
+            };
+            let nil = arena.nil();
+            let bodies = arena.cons(body, nil);
+            let recursion = tlib::de_bruijn_rec(&mut arena, bodies);
+            roots.push(SigBuilder::new(&mut arena).proj(0, recursion));
+        }
+        let prepared =
+            prepare_signals_for_fir_verified(&arena, &roots, &ui::UiProgram::empty()).unwrap();
+        let domains = ClockDomainTable::new();
+        let clocks = annotate(prepared.arena(), &domains, prepared.outputs()).unwrap();
+        let decorations = certify_decorations(&prepared, &clocks).unwrap();
+        let vector_plan = build_vector_plan_with_lockstep(&prepared, &decorations, 8).unwrap();
+        (prepared, domains, decorations, vector_plan)
     }
 
     #[test]
@@ -1926,6 +2163,64 @@ mod tests {
             verify_vector_state_plan(&decorations, vector_plan.plan(), &phase),
             Err(VectorStateError::LoopPhaseMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn lockstep_delay_one_register_mapping_is_checked_independently() {
+        let (prepared, clocks, decorations, vector_plan) = lockstep_delay_one_fixture();
+        let clock_plan =
+            build_vector_clock_ad_plan(&prepared, &clocks, &decorations, &vector_plan).unwrap();
+        let verified = build_vector_state_plan_with_clock(
+            &prepared,
+            &decorations,
+            &vector_plan,
+            &clock_plan,
+            16,
+        )
+        .unwrap();
+        let [bundle] = verified.plan().lockstep_register_bundles.as_slice() else {
+            panic!("one register-carried lockstep bundle");
+        };
+        assert_eq!(bundle.lanes.len(), 2);
+        assert!(
+            verified
+                .plan()
+                .delays
+                .iter()
+                .all(|delay| matches!(delay.storage, VectorDelayStorage::Register { .. }))
+        );
+
+        let mut missing_store = verified.plan().clone();
+        missing_store
+            .loops
+            .iter_mut()
+            .find(|phases| phases.loop_id == bundle.lanes[0].loop_id)
+            .unwrap()
+            .post
+            .clear();
+        assert!(matches!(
+            verify_vector_state_plan_with_clock(
+                &prepared,
+                &decorations,
+                vector_plan.plan(),
+                &clock_plan,
+                &missing_store,
+            ),
+            Err(VectorStateError::LoopPhaseMismatch { .. })
+        ));
+
+        let mut crossed = verified.into_plan();
+        crossed.lockstep_register_bundles[0].lanes.swap(0, 1);
+        assert_eq!(
+            verify_vector_state_plan_with_clock(
+                &prepared,
+                &decorations,
+                vector_plan.plan(),
+                &clock_plan,
+                &crossed,
+            ),
+            Err(VectorStateError::DelayCoverageMismatch)
+        );
     }
 
     #[test]

@@ -1068,8 +1068,28 @@ impl PureVectorLowerer<'_> {
             });
         }
         let typ = value_fir_type(&transition.value_type, self.real_type.clone());
+        if let VectorDelayStorage::Register { local_name, .. } = &transition.storage {
+            if !matches!(
+                match_fir(&self.store, amount),
+                FirMatch::Int32 { value: 1, .. }
+            ) {
+                return Err(PureVectorLowerError::UnsupportedSignal {
+                    signal_id: carrier_id,
+                    expression: "register-carried lockstep state requires a fixed delay of one"
+                        .to_owned(),
+                });
+            }
+            return Ok(FirBuilder::new(&mut self.store).load_var(
+                local_name,
+                AccessType::Stack,
+                typ,
+            ));
+        }
         let mut builder = FirBuilder::new(&mut self.store);
         let index = match &transition.storage {
+            VectorDelayStorage::Register { .. } => {
+                unreachable!("register storage returned before indexed lowering")
+            }
             VectorDelayStorage::Copy { history_length, .. } => {
                 let i0 = builder.load_var("i0", AccessType::Loop, FirType::Int32);
                 let vindex = builder.load_var("vindex", AccessType::Loop, FirType::Int32);
@@ -1115,6 +1135,9 @@ impl PureVectorLowerer<'_> {
             }
         };
         Ok(match &transition.storage {
+            VectorDelayStorage::Register { .. } => {
+                unreachable!("register storage returned before table lowering")
+            }
             VectorDelayStorage::Copy { temporary_name, .. } => {
                 builder.load_table(temporary_name, AccessType::Stack, index, typ)
             }
