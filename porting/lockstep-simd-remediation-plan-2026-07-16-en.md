@@ -2,7 +2,7 @@
 
 Date: 2026-07-16
 
-Status: planned; structural lockstep is implemented, but native-SIMD acceptance is reopened
+Status: implementation in progress; Step 0 completed, Steps 1-4 pending
 
 Scope: checked signal-level vector mode, lockstep event certification, FIR state lowering, and C++ SIMD evidence
 
@@ -238,6 +238,13 @@ inspection may remain diagnostic evidence.
 
 Pass condition: the corrected gate fails for the documented current reason and
 cannot pass on scalar fallback.
+
+Implementation status (2026-07-16): complete. The gate now lowers to
+`FirCompileOutput`, requires both certified status and effective checked-vector
+mode with no fallback detail, and only then emits C++. Unit tests reject an
+`EventCertificate` scalar fallback and accept the exact certified tuple. The
+command fails on the current default-size corpus with the expected 4243/4096
+diagnostic, establishing the intended red baseline for Step 1.
 
 ### Step 1 — compact lockstep event certificate
 

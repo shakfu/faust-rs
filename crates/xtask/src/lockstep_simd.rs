@@ -2,11 +2,14 @@
 //!
 //! Section 8 of the vector-mode port plan deliberately lowers each certified
 //! bundle as one C++ sample loop containing unchanged scalar lane expressions.
-//! This workflow checks the final part of that adapted contract: Clang at
+//! This workflow first requires [`compiler::VectorPipelineStatus::Certified`]
+//! and [`compiler::VectorEffectiveMode::CertifiedVector`], then checks the
+//! final part of that adapted contract: Clang at
 //! `-O3`, without fast-math or FMA contraction, must turn the representative
 //! four-lane recursive expressions into LLVM vector floating-point operations.
 //! It complements the FIR certificate and bit-exact interpreter tests; it does
-//! not make a target-specific instruction-set assumption.
+//! not make a target-specific instruction-set assumption and cannot accept
+//! SIMD emitted from a scalar fallback module.
 
 use super::*;
 
@@ -15,6 +18,30 @@ const SIMD_CASES: [(&str, usize); 3] = [
     ("tests/corpus/vector_lockstep_mixed_reduce.dsp", 10),
     ("tests/corpus/vector_lockstep_mixed_branch.dsp", 10),
 ];
+
+fn require_checked_vector_status(
+    relative: &str,
+    status: compiler::VectorPipelineStatus,
+    effective: compiler::VectorEffectiveMode,
+    detail: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if status != compiler::VectorPipelineStatus::Certified
+        || effective != compiler::VectorEffectiveMode::CertifiedVector
+    {
+        return Err(format!(
+            "{relative}: lockstep SIMD evidence requires checked vector FIR; status={status:?}, effective={effective:?}, detail={}",
+            detail.unwrap_or("none")
+        )
+        .into());
+    }
+    if let Some(detail) = detail {
+        return Err(format!(
+            "{relative}: certified vector FIR unexpectedly retained fallback detail: {detail}"
+        )
+        .into());
+    }
+    Ok(())
+}
 
 /// Compiles the complex lockstep corpus through vector C++, then asks Clang for
 /// optimized LLVM IR and requires profitable four-wide floating-point SLP.
@@ -40,17 +67,27 @@ pub(crate) fn lockstep_simd_check(
                 .file_stem()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| format!("invalid corpus file name: {}", source_path.display()))?;
-            let cpp = compiler::Compiler::new()
+            let fir = compiler::Compiler::new()
                 .with_compute_mode(compiler::ComputeMode::Vector {
                     vec_size: 32,
                     loop_variant: 1,
                 })
-                .compile_source_to_cpp_with_lane(
+                .compile_source_to_fir_with_lane(
                     relative,
                     &source,
-                    &codegen::backends::cpp::CppOptions::default(),
                     compiler::SignalFirLane::TransformFastLane,
                 )?;
+            require_checked_vector_status(
+                relative,
+                fir.vector_pipeline_status,
+                fir.vector_effective_mode,
+                fir.vector_pipeline_detail.as_deref(),
+            )?;
+            let cpp = codegen::backends::cpp::generate_cpp_module(
+                &fir.store,
+                fir.module,
+                &codegen::backends::cpp::CppOptions::default(),
+            )?;
             let cpp_path = temp_root.join(format!("{stem}.cpp"));
             let llvm_path = temp_root.join(format!("{stem}.ll"));
             fs::write(&cpp_path, cpp)?;
@@ -106,4 +143,34 @@ pub(crate) fn lockstep_simd_check(
 
     let _ = fs::remove_dir_all(&temp_root);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_fallback_cannot_count_as_lockstep_simd_evidence() {
+        let error = require_checked_vector_status(
+            "fallback.dsp",
+            compiler::VectorPipelineStatus::Fallback(
+                compiler::VectorFallbackReason::EventCertificate,
+            ),
+            compiler::VectorEffectiveMode::Scalar,
+            Some("bounded event table"),
+        )
+        .expect_err("scalar fallback must be rejected");
+        assert!(error.to_string().contains("requires checked vector FIR"));
+    }
+
+    #[test]
+    fn certified_vector_without_fallback_detail_is_accepted() {
+        require_checked_vector_status(
+            "certified.dsp",
+            compiler::VectorPipelineStatus::Certified,
+            compiler::VectorEffectiveMode::CertifiedVector,
+            None,
+        )
+        .expect("checked vector status");
+    }
 }
