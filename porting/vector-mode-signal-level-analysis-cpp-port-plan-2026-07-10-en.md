@@ -2452,10 +2452,42 @@ levelization compatibility setting, with deterministic Rust tie ordering.
 
 ## 8. Lockstep instance vectorization extension
 
-**Status:** planned extension, sequenced after P5/P6; measured feasibility
-evidence exists. It is recorded here because it constrains `LoopKind`,
-transports, and the certificate schema now, even though implementation comes
-later.
+**Status:** implementation in progress after P5/P6; measured feasibility
+evidence exists.
+
+### 8.0 Implementation decision and acceptance gate
+
+Lockstep detection is automatic whenever signal-level vector mode (`-vec`) is
+selected. It introduces no second public scheduling or vectorization option;
+unsupported or non-isomorphic candidates simply retain their existing serial
+loops.
+
+The Rust plan uses an adapted representation that preserves each lane's stable
+logical loop identity and adds one `LockstepBundleRecord` over those loops. The
+scheduler treats the bundle as one epoch-DAG node and FIR assembly emits one
+physical sample loop containing the lane iterations. This differs from the
+Lean presentation's single synthetic loop record, but retains the pre-bundle
+graph needed by the independent checker to re-derive incomparability, epoch
+agreement, and effect commutation. The bundle record co-locates its lane
+identities and isomorphism witness; no index-based side table is introduced.
+
+Implementation deliverables and pass criteria are:
+
+1. schema v2 adds `LoopKind::Lockstep { width }`, transport layout, canonical
+   bundle/lane witnesses, and rejecting mutations for malformed width,
+   dependency-connected lanes, and corrupted leaf mappings;
+2. the producer detects exact prepared-signal isomorphism modulo leaves,
+   confirms hash matches by parallel traversal, and leaves unsupported shapes
+   unchanged;
+3. scheduling and FIR assembly collapse each accepted bundle into one physical
+   sample loop while retaining the planar external `compute` ABI and the scalar
+   IEEE operation order of every lane;
+4. focused unit/integration tests compare scalar and lockstep results and
+   optimization levels, committed `tests/corpus/` cases exercise accepted and
+   rejected bundles, and golden snapshots remain deterministic;
+5. the maintained `tests/impulse-tests` DSP corpus compiles in vector mode,
+   followed by the repository formatting, Clippy, workspace test, and golden
+   gates required by `AGENTS.md`.
 
 Time-direction vectorization leaves every recursive loop serial: the carried
 dependence `y(i-1) -> y(i)` forbids computing a chunk in parallel. Yet many real
