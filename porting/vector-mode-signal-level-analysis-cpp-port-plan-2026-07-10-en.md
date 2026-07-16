@@ -2452,8 +2452,9 @@ levelization compatibility setting, with deterministic Rust tie ordering.
 
 ## 8. Lockstep instance vectorization extension
 
-**Status:** implemented and validated on 2026-07-16; measured feasibility and
-corpus evidence exist.
+**Status:** structural lockstep implemented and parity-validated on 2026-07-16;
+native-SIMD acceptance reopened after a scalar-fallback false positive. See the
+[lockstep SIMD remediation plan](lockstep-simd-remediation-plan-2026-07-16-en.md).
 
 ### 8.0 Implementation decision and acceptance gate
 
@@ -2503,21 +2504,23 @@ mutation, a profitable four-lane arithmetic chain, and two mixed DSPs where the
 bundle is only one subgraph (a downstream reduction and an unrelated side
 branch remain separate). Scalar/vector interpreter outputs are bit-identical
 for both loop variants and all four scheduling strategies; the representative
-complex lockstep case also matches between interpreter optimization levels zero
-and maximum.
+accepted pair also matches between interpreter optimization levels zero and
+maximum.
 The maintained impulse harness compiles and compares 92 expected DSPs for each
 of `-lv 0` and `-lv 1`; `subcontainer1` remains the harness's single
 pre-existing documented exclusion.
 
-Native SIMD is checked separately from structural fusion. The repository's
-`lockstep-simd-check` compiles three profitability-oriented four-lane corpus
-cases through checked vector C++, asks Clang for optimized LLVM IR with `-O3`
-and `-ffp-contract=off`, and requires at least ten `<4 x float>` arithmetic
-operations per case. The current results are 14 operations for the recursive
-bank, 17 when followed by a reduction, and 14 beside an unrelated branch. The
-elementary pair and quad remain legality tests: their tiny bodies fuse correctly
-but do not cross Clang's SLP profitability threshold, so they are deliberately
-not presented as SIMD evidence.
+**SIMD evidence correction (2026-07-16).** The initial
+`lockstep-simd-check` did not inspect effective vector-pipeline status. At the
+default `-vs 32`, the three complex cases exceeded the expanded event-table
+limit and fell back to scalar FIR; the reported 14/17/14 four-wide LLVM
+operations therefore came from scalar C++, not checked lockstep lowering. At
+`-vs 24`, the representative case retains checked vector FIR but Clang emits no
+four-wide operations because the current per-lane `vstate_*_tmp` histories are
+not a profitable SLP shape. Those counts are invalidated as lockstep evidence.
+The remediation plan linked above requires compact event evidence,
+register-carried delay-one state, and a gate that fails unless
+`VectorPipelineStatus::Certified` is established before C++ generation.
 
 The full workspace Clippy gate passes with warnings denied. The workspace test
 gate currently stops at the unrelated existing Wasm control-flow assertion
