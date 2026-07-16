@@ -98,8 +98,10 @@ private to `transform`/scalar lowering.
 Completion (2026-07-16): the private summary recognizes direct table reads,
 constant-index writes, dynamic-index writes, history shifts, and conservative
 barriers. The initial exact-index proof accepts only literal `Int32` indices;
-calls, tee writes, local stores, and nested control invalidate reuse rather
-than relying on an unproven purity or alias claim.
+calls, tee writes, and nested control invalidate reuse rather than relying on
+an unproven purity or alias claim. Plain `StoreVar` is proven disjoint from a
+named table location and therefore preserves the table cache; a nested unknown
+effect in its value remains a barrier.
 
 ### Phase C — Add straight-line load reuse
 

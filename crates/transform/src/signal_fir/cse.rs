@@ -200,9 +200,9 @@ fn has_unknown_value_effect(store: &FirStore, value: FirId) -> bool {
 /// Summarizes the effects of one straight-line statement for scalar load CSE.
 ///
 /// Nested control flow is a scope boundary and therefore an unknown barrier.
-/// `StoreVar` is also a barrier: although ordinary local writes do not alias a
-/// table today, this conservative rule prevents the cache from becoming an
-/// accidental data-flow/scheduling pass.
+/// A plain `StoreVar` is not a table barrier: FIR names table storage
+/// explicitly, so assigning a scalar/struct variable cannot alias a named
+/// `LoadTable`. Its value is still checked for a nested call or `TeeVar`.
 fn scalar_load_effects(store: &FirStore, stmt: FirId) -> Vec<ScalarLoadEffect> {
     let matched = match_fir(store, stmt);
     match matched {
@@ -253,8 +253,14 @@ fn scalar_load_effects(store: &FirStore, stmt: FirId) -> Vec<ScalarLoadEffect> {
                 index: CanonicalTableIndex::Unknown,
             })]
         }
-        FirMatch::StoreVar { .. }
-        | FirMatch::If { .. }
+        FirMatch::StoreVar { value, .. } => {
+            if has_unknown_value_effect(store, value) {
+                vec![ScalarLoadEffect::UnknownBarrier]
+            } else {
+                Vec::new()
+            }
+        }
+        FirMatch::If { .. }
         | FirMatch::Control { .. }
         | FirMatch::Block(_)
         | FirMatch::ForLoop { .. }
@@ -1187,6 +1193,34 @@ mod tests {
             2,
             "dynamic subscripts are not an exact cache key"
         );
+    }
+
+    #[test]
+    fn straight_line_load_reuse_survives_unrelated_scalar_store() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let one = b.int32(1);
+        let zero = b.float32(0.0);
+        let read0 = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let first = b.declare_var("fTemp0", FirType::Float32, AccessType::Stack, Some(read0));
+        let scalar_store = b.store_var("phase", AccessType::Struct, zero);
+        let read1 = b.load_table("state", AccessType::Struct, one, FirType::Float32);
+        let second = b.declare_var("fTemp1", FirType::Float32, AccessType::Stack, Some(read1));
+        let second_use = b.load_var("fTemp1", AccessType::Stack, FirType::Float32);
+        let use_stmt = b.drop_(second_use);
+        let mut statements = vec![first, scalar_store, second, use_stmt];
+
+        reuse_straight_line_scalar_loads(&mut store, &mut statements);
+
+        assert_eq!(statements.len(), 3);
+        assert!(matches!(
+            match_fir(&store, statements[2]),
+            FirMatch::Drop(value)
+                if matches!(
+                    match_fir(&store, value),
+                    FirMatch::LoadVar { ref name, .. } if name == "fTemp0"
+                )
+        ));
     }
 
     #[test]
