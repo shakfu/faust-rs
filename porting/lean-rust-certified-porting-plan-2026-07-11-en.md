@@ -1,9 +1,9 @@
 # Lean/Rust Certified Porting Plan and Canonical Certificate Boundary
 
-Status: normative porting plan; implementation in progress. RV and R1 are
-implemented, and the first additive R3/P5 vector-plan verification and
-per-epoch scheduling slices are implemented; production P4/P5 integration is
-not complete (2026-07-13).
+Status: normative porting plan; implementation in progress. The P4-P6
+producer/checker chain and its production integration through P6.6 were
+delivered on 2026-07-14. Canonical serialization, Lean cross-checking, and the
+R5 semantic relation remain open.
 
 Date: 2026-07-11.
 

@@ -177,8 +177,8 @@ impl RealType {
 /// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). P6.6 activates
 /// the independently checked signal-level path for pure graphs, fixed and
 /// bounded-variable delays, symbolic recursion, stateful clock islands, and
-/// expanded FAD graphs. Other shapes retain the transitional vector builder
-/// with an observable [`VectorPipelineStatus::Fallback`] reason.
+/// expanded FAD graphs. Other shapes fail closed to scalar lowering with an
+/// observable [`VectorPipelineStatus::Fallback`] reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComputeMode {
     /// One scalar loop over the whole block (`for i in 0..count`).
@@ -207,8 +207,8 @@ impl ComputeMode {
     }
 }
 
-/// Stable reason why a requested vector compile used the transitional module
-/// builder instead of the independently checked signal-level pipeline.
+/// Stable reason why a requested vector compile used scalar lowering instead
+/// of the independently checked signal-level pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorFallbackReason {
     UiProgram,
@@ -253,7 +253,7 @@ pub enum VectorPipelineStatus {
     NotRequested,
     /// The P4/P5/P6 producer/checker chain accepted the emitted module.
     Certified,
-    /// A named unsupported shape retained the transitional vector builder.
+    /// A named unsupported shape failed closed to scalar lowering.
     Fallback(VectorFallbackReason),
 }
 
@@ -314,7 +314,7 @@ pub struct SignalFirOptions {
     pub delay_line_threshold: u32,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
     /// (`-vec`). Accepted P6.6 programs use the checked P4/P5/P6 path; named
-    /// unsupported shapes retain the transitional vector builder.
+    /// unsupported shapes fail closed to scalar lowering.
     pub compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
     /// `--scheduling-strategy`). Deliberately independent of [`ComputeMode`]:

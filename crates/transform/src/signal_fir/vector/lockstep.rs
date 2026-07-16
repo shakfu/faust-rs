@@ -50,6 +50,9 @@ struct ParallelShape<'a> {
     hasher: ShapeHasher,
     leaves: BTreeMap<u64, u64>,
     active: BTreeSet<(u64, u64)>,
+    verified: BTreeSet<(u64, u64)>,
+    #[cfg(test)]
+    expanded_pairs: usize,
 }
 
 impl<'a> ParallelShape<'a> {
@@ -59,6 +62,9 @@ impl<'a> ParallelShape<'a> {
             hasher: ShapeHasher::new(),
             leaves: BTreeMap::new(),
             active: BTreeSet::new(),
+            verified: BTreeSet::new(),
+            #[cfg(test)]
+            expanded_pairs: 0,
         }
     }
 
@@ -92,8 +98,15 @@ impl<'a> ParallelShape<'a> {
 
     fn visit(&mut self, representative: SigId, lane: SigId) -> Option<()> {
         let pair = (u64::from(representative.as_u32()), u64::from(lane.as_u32()));
+        if self.verified.contains(&pair) {
+            return Some(());
+        }
         if !self.active.insert(pair) {
             return None;
+        }
+        #[cfg(test)]
+        {
+            self.expanded_pairs += 1;
         }
 
         let arena = self.prepared.arena();
@@ -210,6 +223,9 @@ impl<'a> ParallelShape<'a> {
             }
         };
         self.active.remove(&pair);
+        if result.is_some() {
+            self.verified.insert(pair);
+        }
         result
     }
 }
@@ -599,5 +615,46 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn parallel_shape_memoizes_deeply_shared_lane_pairs() {
+        const LAYERS: usize = 18;
+
+        let mut arena = TreeArena::new();
+        let representative = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let mut node = builder.input(0);
+            for _ in 0..LAYERS {
+                let sine = builder.sin(node);
+                let cosine = builder.cos(node);
+                node = builder.binop(signals::BinOp::Add, sine, cosine);
+            }
+            node
+        };
+        let lane = {
+            let mut builder = SigBuilder::new(&mut arena);
+            let mut node = builder.input(1);
+            for _ in 0..LAYERS {
+                let sine = builder.sin(node);
+                let cosine = builder.cos(node);
+                node = builder.binop(signals::BinOp::Add, sine, cosine);
+            }
+            node
+        };
+        let prepared = prepare_signals_for_fir_verified(
+            &arena,
+            &[representative, lane],
+            &ui::UiProgram::empty(),
+        )
+        .unwrap();
+        let mut shape = ParallelShape::new(&prepared);
+
+        shape
+            .visit(prepared.outputs()[0], prepared.outputs()[1])
+            .expect("the two shared DAGs are isomorphic");
+
+        assert_eq!(shape.expanded_pairs, LAYERS * 3 + 1);
+        assert_eq!(shape.verified.len(), LAYERS * 3 + 1);
     }
 }

@@ -165,7 +165,9 @@ fn recursive_apf_compute_body_reflects_all_four_cpp_schedules() {
             conv2(k0, k1, v) = k0 * v + k1 * v';
             conv3(k0, k1, k2, v) = k0 * v + k1 * v' + k2 * v'';
         };
-        process(x) = biquad(x, c0, c1, 1, c1, c0);
+        process(x, y) =
+            biquad(x, c0, c1, 1, c1, c0),
+            biquad(y, c0 * 0.75, c1 * 0.5, 1, c1 * 0.5, c0 * 0.75);
     "#;
     let strategies = [
         SchedulingStrategy::DepthFirst,
@@ -173,7 +175,7 @@ fn recursive_apf_compute_body_reflects_all_four_cpp_schedules() {
         SchedulingStrategy::Special,
         SchedulingStrategy::ReverseBreadthFirst,
     ];
-    let mut compute_bodies = BTreeSet::new();
+    let mut compute_bodies = Vec::new();
     for strategy in strategies {
         let cpp = Compiler::new()
             .with_scheduling_strategy(strategy)
@@ -192,11 +194,33 @@ fn recursive_apf_compute_body_reflects_all_four_cpp_schedules() {
             compute.contains("fRec") && compute.contains("fTemp"),
             "APF must expose scheduled recursion snapshots under {strategy:?}:\n{compute}"
         );
-        compute_bodies.insert(compute.to_owned());
+        compute_bodies.push((strategy, compute.to_owned()));
     }
     assert_eq!(
-        compute_bodies.len(),
+        compute_bodies
+            .iter()
+            .map(|(_, compute)| compute)
+            .collect::<BTreeSet<_>>()
+            .len(),
         4,
         "the four C++ scheduling strategies must remain visible in recursive APF code"
     );
+    for left in 0..compute_bodies.len() {
+        for right in left + 1..compute_bodies.len() {
+            let left_lines = compute_bodies[left].1.lines().collect::<Vec<_>>();
+            let right_lines = compute_bodies[right].1.lines().collect::<Vec<_>>();
+            let positional_distance = left_lines
+                .iter()
+                .zip(&right_lines)
+                .filter(|(left, right)| left != right)
+                .count()
+                + left_lines.len().abs_diff(right_lines.len());
+            assert!(
+                positional_distance >= 4,
+                "APF schedules {:?} and {:?} differ by only {positional_distance} lines",
+                compute_bodies[left].0,
+                compute_bodies[right].0,
+            );
+        }
+    }
 }
