@@ -34,8 +34,8 @@
 use ahash::{AHashMap, AHashSet};
 use std::fmt;
 
+pub use super::analysis::EffectAtom;
 use super::decoration_verify::VerifiedDecorationCertificate;
-pub use super::vector_analysis::EffectAtom;
 use super::vector_analysis::{DepKind, ForeignPurity, StateResource};
 
 /// `$defs/signalType`: the v1 value-type vocabulary (matches the Lean

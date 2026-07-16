@@ -20,8 +20,8 @@ use tlib::{match_sym_ref, tree_to_int, tree_to_str};
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
 
+use super::super::module::map_binop;
 use super::cse::materialize_shared_values;
-use super::module::map_binop;
 use super::recursion::{decode_group_projection, decode_symbolic_group_bodies};
 use super::siggen::interpret_generator;
 use super::vector_analysis::EffectAtom;

@@ -26,8 +26,11 @@ use signals::SigId;
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::VerifiedPreparedSignals;
 
+use super::super::module::{INT_FUN_PROTO_ORDER, MATH_PROTO_ORDER};
+use super::super::{
+    ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
+};
 use super::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
-use super::module::{INT_FUN_PROTO_ORDER, MATH_PROTO_ORDER};
 use super::vector_analysis::DepKind;
 use super::vector_assemble::{
     VectorClockOutputStore, VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir,
@@ -42,9 +45,6 @@ use super::vector_route::{VectorRegion, VerifiedRoutedFir};
 use super::vector_state::build_vector_state_plan_with_clock;
 use super::vector_ui::{VectorUiFir, build_vector_ui_fir};
 use super::vector_verify::VectorPlan;
-use super::{
-    ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
-};
 
 /// Failure stage retained by the production selector as an observable fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1077,15 +1077,15 @@ mod tests {
 
     #[test]
     fn production_selector_certifies_pure_and_fixed_delay() {
-        let options = super::super::SignalFirOptions {
+        let options = super::super::super::SignalFirOptions {
             compute_mode: ComputeMode::Vector {
                 vec_size: 8,
                 loop_variant: 0,
             },
-            ..super::super::SignalFirOptions::default()
+            ..super::super::super::SignalFirOptions::default()
         };
         let (arena, roots) = raw_pure_fixture();
-        let pure = super::super::compile_signals_to_fir_fastlane_with_ui(
+        let pure = super::super::super::compile_signals_to_fir_fastlane_with_ui(
             &arena,
             &roots,
             1,
@@ -1104,7 +1104,7 @@ mod tests {
             let delayed = builder.delay(input, amount);
             vec![builder.output(0, delayed)]
         };
-        let stateful = super::super::compile_signals_to_fir_fastlane_with_ui(
+        let stateful = super::super::super::compile_signals_to_fir_fastlane_with_ui(
             &arena,
             &roots,
             1,

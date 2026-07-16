@@ -22,12 +22,12 @@ use std::fmt;
 
 use sigtype::{Nature, Variability, Vectorability as SigVectorability};
 
-use super::decoration_verify::{
+use super::super::decoration_verify::{
     CanonicalSigType, DecorationRecord, DependencyFact, VerifiedDecorationCertificate,
 };
-use super::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_loop};
-use super::vector_analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
-use super::vector_verify::{
+use super::super::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_loop};
+use super::super::vector_analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
+use super::super::vector_verify::{
     EpochRecord, FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate,
     SignalRecord, TransportRecord, ValueType, VecSafeWitness, VectorPlan, VectorPlanError,
     Vectorability, WitnessKind, effects_duplicable, effects_sample_reorderable,
