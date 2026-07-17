@@ -29,15 +29,15 @@ include common.mk
 
 MAKE ?= make
 
-BACKENDS := cpp c interp cranelift wasm assemblyscript
+BACKENDS := cpp c interp cranelift wasm assemblyscript rust
 SS_VALUES := 0 1 2 3
 SCALAR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach ss,$(SS_VALUES),$(backend)-ss$(ss)))
 VECTOR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach lv,0 1,$(foreach ss,$(SS_VALUES),$(backend)-vec$(lv)-ss$(ss))))
 P7_SMOKE_DSPFILES ?= dsp/APF.dsp dsp/delays.dsp dsp/select2.dsp
 
-.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss p7-matrix p7-smoke p7-clean p7-report p7-full reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 bench vec-bench compile-bench build tools help clean distclean
+.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss p7-matrix p7-smoke p7-clean p7-report p7-full reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 rust bench vec-bench compile-bench build tools help clean distclean
 
-all: cpp c interp cranelift wasm assemblyscript
+all: cpp c interp cranelift wasm assemblyscript rust
 
 all-vec0: cpp-vec0 c-vec0 interp-vec0 cranelift-vec0 wasm-vec0 assemblyscript-vec0
 
@@ -134,6 +134,9 @@ wasm-vec0:
 wasm-vec1:
 	$(MAKE) -f Make.wasm all outdir=wasm-vec1 VECOPTS="-vec -lv 1"
 
+rust:
+	$(MAKE) -f Make.rust all outdir=rust
+
 assemblyscript:
 	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript
 
@@ -177,6 +180,7 @@ help:
 	@echo "  cranelift      : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
 	@echo "  wasm           : check the faust-rs WASM backend (scalar prefix, 64-bit, Node)"
 	@echo "  assemblyscript : check the faust-rs AssemblyScript backend (scalar prefix, Node/asc)"
+	@echo "  rust           : check the faust-rs Rust backend (scalar prefix, rustc)"
 	@echo "  *-vec0/*-vec1  : check a backend with -vec -lv 0 / -vec -lv 1"
 	@echo "  all-vec        : run all vector-mode backend variants"
 	@echo "  <backend>-ssN  : check scalar mode with -ss N (N=0..3)"

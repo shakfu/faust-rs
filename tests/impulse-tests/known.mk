@@ -67,6 +67,10 @@ KNOWN_FAIL_wasm :=
 # fixture through imported soundfile helpers.
 KNOWN_FAIL_assemblyscript :=
 
+# --- Rust backend (scalar prefix through rustc) ------------------------------
+# Generated source is appended to archs/impulserust.rs and compiled natively.
+KNOWN_FAIL_rust :=
+
 # --- mode/scheduling variants ------------------------------------------------
 # Variant outdirs inherit their base backend's known failures. Any divergence
 # specific to one mode/strategy can be added as KNOWN_FAIL_<outdir>, for example
