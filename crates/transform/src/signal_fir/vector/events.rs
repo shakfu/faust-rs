@@ -374,9 +374,13 @@ pub fn precheck_state_event_bound(
             per_sample = per_sample
                 .checked_add(1)
                 .and_then(|count| {
+                    // Emission now attributes an effect to its performer, so a
+                    // root contributes only its direct set; counting the
+                    // transitive union here would exceed actual emission and
+                    // turn this lower bound into a spurious rejection.
                     count.checked_add(
                         signal
-                            .effects
+                            .direct_effects
                             .iter()
                             .filter(|effect| !effect_is_managed(effect, &managed))
                             .count(),
@@ -764,7 +768,15 @@ fn independently_expected_event_keys(
         } else {
             keys.push((EventRegion::Control, None, definition_kind));
         }
-        for (effect_index, effect) in signals[&definition.signal_id].effects.iter().enumerate() {
+        // An effect event models one actual operation, so it belongs to the
+        // signal that performs it. Enumerating the transitive closure instead
+        // emits one event per carrier and invents conflicts between signals
+        // that merely contain the performer in their subtree.
+        for (effect_index, effect) in signals[&definition.signal_id]
+            .direct_effects
+            .iter()
+            .enumerate()
+        {
             if effect_is_managed(effect, &managed) {
                 continue;
             }
@@ -1303,7 +1315,11 @@ fn event_templates(
             .push(VectorEventKind::Definition {
                 signal_id: definition.signal_id,
             });
-        for (index, effect) in signals[&definition.signal_id].effects.iter().enumerate() {
+        for (index, effect) in signals[&definition.signal_id]
+            .direct_effects
+            .iter()
+            .enumerate()
+        {
             if effect_is_managed(effect, &managed) {
                 continue;
             }
@@ -2501,14 +2517,18 @@ mod tests {
     }
 
     fn split_effect_plan(left: EffectAtom, right: EffectAtom) -> VerifiedVectorPlan {
+        split_plan_with_signals(vec![
+            signal(0, Placement::Owned(0), vec![left]),
+            signal(1, Placement::Owned(1), vec![right]),
+        ])
+    }
+
+    fn split_plan_with_signals(signals: Vec<SignalRecord>) -> VerifiedVectorPlan {
         verified_vector_plan_for_test(VectorPlan {
             schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
             lockstep_bundles: Vec::new(),
             vec_size: 3,
-            signals: vec![
-                signal(0, Placement::Owned(0), vec![left]),
-                signal(1, Placement::Owned(1), vec![right]),
-            ],
+            signals,
             loops: vec![serial_loop(0, vec![0]), serial_loop(1, vec![1])],
             epochs: vec![EpochRecord {
                 epoch_id: 0,
@@ -2729,6 +2749,7 @@ mod tests {
             },
             clock_id: 0,
             duplicable: effects.is_empty(),
+            direct_effects: effects.clone(),
             effects,
             placement,
         }
@@ -3162,6 +3183,51 @@ mod tests {
             build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS),
             Err(VectorEventError::FissionSafeViolation { .. })
         ));
+    }
+
+    #[test]
+    fn a_transitive_carrier_of_an_effect_manufactures_no_conflict() {
+        // Same two-loop shape as the rejected case above, but the second
+        // signal only contains the performer in its subtree: its transitive
+        // set holds the atom while its direct set is empty. Attributing the
+        // operation to the carrier as well is what made `mixer` report a
+        // write-after-write on a UI zone the compiler stores once.
+        let atom = EffectAtom::WriteOutput(0);
+        let carrier = SignalRecord {
+            signal_id: 1,
+            value_type: ValueType::Real,
+            structural: false,
+            rate: Rate::Samp,
+            vectorability: Vectorability::Scal,
+            clock_id: 0,
+            duplicable: false,
+            direct_effects: Vec::new(),
+            effects: vec![atom.clone()],
+            placement: Placement::Owned(1),
+        };
+        let plan = split_plan_with_signals(vec![
+            signal(0, Placement::Owned(0), vec![atom.clone()]),
+            carrier,
+        ]);
+        let routed = route(&plan, SchedulingStrategy::DepthFirst, false);
+        let verified = build_event_order_certificate(&plan, &routed, DEFAULT_EVENT_LIMITS)
+            .expect("a carrier must not conflict with the performer it inherits from");
+        let performers = verified
+            .certificate()
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                VectorEventKind::Effect {
+                    signal_id, effect, ..
+                } if *effect == atom => Some(*signal_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            performers,
+            BTreeSet::from([0]),
+            "only the performing signal may emit the effect event"
+        );
     }
 
     #[test]

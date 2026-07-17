@@ -41,9 +41,12 @@ pub use super::analysis::EffectAtom;
 use super::decoration_verify::VerifiedDecorationCertificate;
 use super::vector_analysis::{DepKind, ForeignPurity, StateResource, effects_conflict};
 
-/// Current in-memory vector-plan schema. Version 3 generalizes fused serial
-/// groups from one recursive carrier to a canonical delayed-state carrier set.
-pub const VECTOR_PLAN_SCHEMA_VERSION: u32 = 3;
+/// Current in-memory vector-plan schema. Version 4 records, per signal, the
+/// effects the signal performs itself alongside its transitive closure, so the
+/// event model can attribute an operation to its performer rather than to every
+/// carrier. Version 3 generalized fused serial groups from one recursive
+/// carrier to a canonical delayed-state carrier set.
+pub const VECTOR_PLAN_SCHEMA_VERSION: u32 = 4;
 
 /// `$defs/signalType`: the v1 value-type vocabulary (matches the Lean
 /// `ValueTy`). FIR widths / `FaustFloat` live in the routed-FIR layer, not
@@ -112,6 +115,15 @@ pub struct SignalRecord {
     pub vectorability: Vectorability,
     pub clock_id: u64,
     pub effects: Vec<EffectAtom>,
+    /// Effects this signal performs itself, a sorted subset of `effects`.
+    ///
+    /// The event model attributes an effect operation to the signal that
+    /// performs it. Attributing it to every transitive carrier instead invents
+    /// conflicts between signals that only contain the performer in their
+    /// subtree. `duplicable` keeps reading `effects`: a signal whose subtree
+    /// has any effect must not be duplicated, which is what keeps performers
+    /// unique.
+    pub direct_effects: Vec<EffectAtom>,
     pub placement: Placement,
     pub duplicable: bool,
 }
@@ -2033,6 +2045,7 @@ mod tests {
             rate: Rate::Samp,
             vectorability: Vectorability::Scal,
             clock_id: 0,
+            direct_effects: effects.clone(),
             effects,
             placement: Placement::Owned(signal_id),
             duplicable: false,
@@ -2066,6 +2079,7 @@ mod tests {
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
                     effects: vec![],
+                    direct_effects: vec![],
                     placement: Placement::Owned(0),
                     duplicable: true,
                 },
@@ -2077,6 +2091,7 @@ mod tests {
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
                     effects: vec![],
+                    direct_effects: vec![],
                     placement: Placement::Owned(1),
                     duplicable: true,
                 },
@@ -2271,6 +2286,7 @@ mod tests {
                     .clock_domain
                     .map_or(0, |clock| u64::from(clock) + 1),
                 effects: decoration.effects.clone(),
+                direct_effects: decoration.direct_effects.clone(),
                 placement: Placement::Owned(owner),
                 duplicable: effects_duplicable(&decoration.effects),
             }
@@ -2712,6 +2728,7 @@ mod tests {
                 vectorability: Vectorability::Vect,
                 clock_id: 0,
                 effects: vec![],
+                direct_effects: vec![],
                 placement: Placement::Owned(0),
                 duplicable: true,
             },

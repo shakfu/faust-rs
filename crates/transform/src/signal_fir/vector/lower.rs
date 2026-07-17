@@ -2342,6 +2342,7 @@ mod tests {
                 },
                 clock_id: 0,
                 effects: record.effects.clone(),
+                direct_effects: record.direct_effects.clone(),
                 placement: if record.signal_id == producer.as_u32() {
                     Placement::Owned(0)
                 } else if record.signal_id == consumer.as_u32() {

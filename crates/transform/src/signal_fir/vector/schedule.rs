@@ -417,6 +417,7 @@ mod tests {
                     vectorability: Vectorability::Vect,
                     clock_id: 0,
                     effects: Vec::new(),
+                    direct_effects: Vec::new(),
                     placement: Placement::Owned(loop_id),
                     duplicable: true,
                 })

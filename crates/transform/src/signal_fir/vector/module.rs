@@ -31,7 +31,7 @@ use super::super::{
     ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
 };
 use super::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
-use super::vector_analysis::DepKind;
+use super::vector_analysis::{DepKind, EffectAtom};
 use super::vector_assemble::{
     VectorClockOutputStore, VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir,
     fir_reachable,
@@ -294,10 +294,14 @@ fn build_verified_vector_module_with_evidence(
     verify_final_module(
         program.store(),
         module,
-        &assembly,
-        &output_stores,
-        &ui_fir,
-        &static_declarations,
+        &FinalModuleExpectations {
+            assembly: &assembly,
+            output_stores: &output_stores,
+            ui_fir: &ui_fir,
+            static_declarations: &static_declarations,
+            ui,
+            plan: routed.plan(),
+        },
     )?;
     trace_stage("module-assembly-verification");
 
@@ -841,6 +845,69 @@ fn build_fast_driver(store: &mut FirStore, chunk: FirId, vec_size: i32) -> Vec<F
     vec![guarded_main, guarded_rem]
 }
 
+/// Rejects a UI write event attributed to a signal that performs no such write.
+///
+/// The event model now attributes an effect operation to the signal performing
+/// it, read from the plan's `direct_effects`. Producer and checker both derive
+/// that projection from the same analysis, so their agreement cannot catch a
+/// misprojection. This counts the physical zone stores in the emitted `compute`
+/// body instead and requires one per claimed performer: attributing a zone
+/// write to every transitive carrier of it is exactly what made `mixer` report
+/// 38 operations on a zone the compiler stores once.
+///
+/// FIR nodes are interned, so a body duplicated across chunk drivers yields one
+/// node per physical store rather than one per driver.
+fn verify_ui_write_attribution(
+    store: &FirStore,
+    compute: FirId,
+    ui: &ui::UiProgram,
+    plan: &VectorPlan,
+) -> Result<(), VectorModuleFailure> {
+    let mut claimed = BTreeMap::<u32, usize>::new();
+    for signal in &plan.signals {
+        for effect in &signal.direct_effects {
+            if let EffectAtom::WriteUi(control) = effect {
+                *claimed.entry(*control).or_default() += 1;
+            }
+        }
+    }
+    let mut physical = BTreeMap::<String, usize>::new();
+    for node in fir_reachable(store, compute) {
+        if let FirMatch::StoreVar { name, .. } = match_fir(store, node) {
+            *physical.entry(name).or_default() += 1;
+        }
+    }
+    let mut zones = BTreeMap::<String, u32>::new();
+    for spec in &ui.controls {
+        zones.insert(super::vector_ui::zone_name(spec.kind, spec.id), spec.id);
+    }
+    for (control, count) in &claimed {
+        let Some(spec) = ui.controls.iter().find(|spec| spec.id == *control) else {
+            return Err(module_shape(format!(
+                "event certificate writes unknown UI control {control}"
+            )));
+        };
+        let zone = super::vector_ui::zone_name(spec.kind, spec.id);
+        let emitted = physical.get(&zone).copied().unwrap_or(0);
+        if emitted != *count {
+            return Err(module_shape(format!(
+                "UI control {control} has {count} claimed writers but compute stores its zone {emitted} times"
+            )));
+        }
+    }
+    for (zone, emitted) in &physical {
+        let Some(control) = zones.get(zone) else {
+            continue;
+        };
+        if claimed.get(control).copied().unwrap_or(0) != *emitted {
+            return Err(module_shape(format!(
+                "compute stores UI zone {zone} {emitted} times with no matching claimed writer"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Rejects any store into a table the lowering declared read-only.
 ///
 /// The signal-level effect model and the pure lowerer share one read-only
@@ -878,14 +945,30 @@ fn verify_readonly_table_stores(
     Ok(())
 }
 
+/// Everything the final independent module check compares the emitted FIR
+/// against.
+struct FinalModuleExpectations<'a> {
+    assembly: &'a VectorFirAssembly,
+    output_stores: &'a [FirId],
+    ui_fir: &'a VectorUiFir,
+    static_declarations: &'a [FirId],
+    ui: &'a ui::UiProgram,
+    plan: &'a VectorPlan,
+}
+
 fn verify_final_module(
     store: &FirStore,
     module: FirId,
-    assembly: &VectorFirAssembly,
-    output_stores: &[FirId],
-    ui_fir: &VectorUiFir,
-    expected_static_declarations: &[FirId],
+    expected: &FinalModuleExpectations<'_>,
 ) -> Result<(), VectorModuleFailure> {
+    let FinalModuleExpectations {
+        assembly,
+        output_stores,
+        ui_fir,
+        static_declarations: expected_static_declarations,
+        ui,
+        plan,
+    } = *expected;
     let report = verify_fir_module(store, module);
     if report.has_errors() {
         let detail = report
@@ -985,6 +1068,7 @@ fn verify_final_module(
         ));
     }
     verify_readonly_table_stores(store, compute, expected_static_declarations)?;
+    verify_ui_write_attribution(store, compute, ui, plan)?;
     for output in output_stores {
         if !contains_statement(store, compute, *output) {
             return Err(module_shape("compute does not cover every output store"));
@@ -1036,6 +1120,101 @@ mod tests {
     use tlib::TreeArena;
 
     use crate::signal_prepare::prepare_signals_for_fir_verified;
+
+    use super::super::vector_verify::{
+        Placement, Rate, SignalRecord, VECTOR_PLAN_SCHEMA_VERSION, ValueType, Vectorability,
+    };
+
+    /// A plan claiming no UI writes, for fixtures whose programs have no UI.
+    fn empty_ui_plan() -> VectorPlan {
+        VectorPlan {
+            schema_version: VECTOR_PLAN_SCHEMA_VERSION,
+            vec_size: 32,
+            signals: Vec::new(),
+            loops: Vec::new(),
+            epochs: Vec::new(),
+            transports: Vec::new(),
+            data_edges: Vec::new(),
+            effect_edges: Vec::new(),
+            vec_safe_witnesses: Vec::new(),
+            fused_serial_groups: Vec::new(),
+            lockstep_bundles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ui_write_attribution_must_match_the_emitted_zone_stores() {
+        let mut ui = ui::UiProgram::empty();
+        ui.controls.push(ui::ControlSpec {
+            id: 2,
+            kind: ui::ControlKind::VBargraph,
+            label: "meter".to_owned(),
+            metadata: ui::UiMetadata::default(),
+            range: None,
+        });
+        let mut store = FirStore::new();
+        let compute = {
+            let mut b = FirBuilder::new(&mut store);
+            let value = b.float64(1.0);
+            let write = b.store_var("fVbargraph2", AccessType::Struct, value);
+            b.block(&[write])
+        };
+        let signal = |signal_id: u64, direct: Vec<EffectAtom>| SignalRecord {
+            signal_id,
+            value_type: ValueType::Real,
+            structural: false,
+            rate: Rate::Samp,
+            vectorability: Vectorability::Scal,
+            clock_id: 0,
+            effects: direct.clone(),
+            direct_effects: direct,
+            placement: Placement::Owned(0),
+            duplicable: false,
+        };
+        let plan = |signals: Vec<SignalRecord>| VectorPlan {
+            schema_version: VECTOR_PLAN_SCHEMA_VERSION,
+            vec_size: 32,
+            signals,
+            loops: Vec::new(),
+            epochs: Vec::new(),
+            transports: Vec::new(),
+            data_edges: Vec::new(),
+            effect_edges: Vec::new(),
+            vec_safe_witnesses: Vec::new(),
+            fused_serial_groups: Vec::new(),
+            lockstep_bundles: Vec::new(),
+        };
+
+        // One performer, one physical store.
+        verify_ui_write_attribution(
+            &store,
+            compute,
+            &ui,
+            &plan(vec![signal(1, vec![EffectAtom::WriteUi(2)])]),
+        )
+        .expect("one claimed writer matches one emitted zone store");
+
+        // A carrier promoted to a performer: two claims, one store.
+        let promoted = verify_ui_write_attribution(
+            &store,
+            compute,
+            &ui,
+            &plan(vec![
+                signal(1, vec![EffectAtom::WriteUi(2)]),
+                signal(2, vec![EffectAtom::WriteUi(2)]),
+            ]),
+        )
+        .expect_err("a carrier claiming a zone write it does not perform must be rejected");
+        assert!(promoted.detail.contains("2 claimed writers"), "{promoted}");
+
+        // The performer demoted to a carrier: no claim, one store.
+        let demoted = verify_ui_write_attribution(&store, compute, &ui, &plan(Vec::new()))
+            .expect_err("an emitted zone store with no claimed writer must be rejected");
+        assert!(
+            demoted.detail.contains("no matching claimed writer"),
+            "{demoted}"
+        );
+    }
 
     #[test]
     fn a_store_into_a_declared_readonly_table_is_rejected() {
@@ -1284,10 +1463,14 @@ mod tests {
             verify_final_module(
                 &built.output.store,
                 built.output.module,
-                &built.assembly,
-                &[forged],
-                &ui_fir,
-                &[],
+                &FinalModuleExpectations {
+                    assembly: &built.assembly,
+                    output_stores: &[forged],
+                    ui_fir: &ui_fir,
+                    static_declarations: &[],
+                    ui: &ui::UiProgram::empty(),
+                    plan: &empty_ui_plan(),
+                },
             ),
             Err(VectorModuleFailure {
                 reason: VectorFallbackReason::ModuleVerification,
@@ -1323,10 +1506,14 @@ mod tests {
             verify_final_module(
                 &built.output.store,
                 built.output.module,
-                &built.assembly,
-                &output_stores,
-                &ui_fir,
-                &[forged],
+                &FinalModuleExpectations {
+                    assembly: &built.assembly,
+                    output_stores: &output_stores,
+                    ui_fir: &ui_fir,
+                    static_declarations: &[forged],
+                    ui: &ui::UiProgram::empty(),
+                    plan: &empty_ui_plan(),
+                },
             ),
             Err(VectorModuleFailure {
                 reason: VectorFallbackReason::ModuleVerification,

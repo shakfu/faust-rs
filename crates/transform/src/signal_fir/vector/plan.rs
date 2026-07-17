@@ -587,6 +587,7 @@ pub fn build_vector_plan(
                 .clock_domain
                 .map_or(0, |domain| u64::from(domain) + 1),
             effects: record.effects.clone(),
+            direct_effects: record.direct_effects.clone(),
             placement: state.placement[&record.signal_id],
             duplicable: effects_duplicable(&record.effects),
         })

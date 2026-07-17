@@ -119,6 +119,11 @@ pub struct DecorationRecord {
     pub recursive_projection: Option<RecursiveProjectionFact>,
     pub very_simple: bool,
     pub effects: Vec<EffectAtom>,
+    /// Effects this signal performs itself, always a sorted subset of
+    /// `effects`. Consumers that model actual effect operations must read this
+    /// rather than the transitive set; consumers that ask whether a subtree is
+    /// free of effects, such as duplicability, must keep reading `effects`.
+    pub direct_effects: Vec<EffectAtom>,
 }
 
 /// Labelled scheduling dependency with source-local edge identity.
@@ -191,6 +196,7 @@ pub enum DecorationField {
     RecursiveProjection,
     VerySimple,
     Effects,
+    DirectEffects,
 }
 
 /// Why [`verify_decorations`] rejected a certificate.
@@ -370,6 +376,7 @@ fn decoration_record(signal_id: u32, info: &SignalUseInfo) -> DecorationRecord {
         recursive_projection: projection_fact(info.recursive_projection),
         very_simple: info.very_simple,
         effects: info.effects.clone(),
+        direct_effects: info.direct_effects.clone(),
     }
 }
 
@@ -470,6 +477,20 @@ fn verify_canonical_shape(certificate: &DecorationCertificate) -> Result<(), Dec
     }
     for record in &certificate.records {
         check_strict_order(&record.effects, "effect atoms")?;
+        check_strict_order(&record.direct_effects, "direct effect atoms")?;
+        // A signal cannot perform an effect its own transitive closure omits.
+        // The relation is cheap and total, and holds whatever produced either
+        // set, so both checkers can assert it without sharing derivation state.
+        if let Some(at) = record
+            .direct_effects
+            .iter()
+            .position(|effect| record.effects.binary_search(effect).is_err())
+        {
+            return Err(DecorationError::NotCanonical {
+                what: "direct effect atom absent from the transitive effects",
+                at,
+            });
+        }
         check_strict_order(
             &record
                 .occurrences
@@ -604,6 +625,9 @@ fn verify_record(
     }
     if actual.effects != expected.effects {
         return mismatch(actual.signal_id, DecorationField::Effects);
+    }
+    if actual.direct_effects != expected.direct_effects {
+        return mismatch(actual.signal_id, DecorationField::DirectEffects);
     }
     Ok(())
 }
@@ -872,6 +896,35 @@ mod tests {
             })
         ));
 
+        // A signal cannot perform an effect its own transitive closure omits.
+        let direct_record = certificate
+            .records
+            .iter()
+            .position(|record| !record.direct_effects.is_empty())
+            .unwrap();
+        let mut mutated = certificate.clone();
+        mutated.records[direct_record].direct_effects = vec![EffectAtom::WriteOutput(31)];
+        assert!(matches!(
+            verify_decorations(&prepared, &clocks, &mutated),
+            Err(DecorationError::NotCanonical {
+                what: "direct effect atom absent from the transitive effects",
+                ..
+            })
+        ));
+
+        let mut mutated = certificate.clone();
+        let direct_duplicate = mutated.records[direct_record].direct_effects[0].clone();
+        mutated.records[direct_record]
+            .direct_effects
+            .insert(0, direct_duplicate);
+        assert!(matches!(
+            verify_decorations(&prepared, &clocks, &mutated),
+            Err(DecorationError::NotCanonical {
+                what: "direct effect atoms",
+                ..
+            })
+        ));
+
         let effect_record = certificate
             .records
             .iter()
@@ -961,7 +1014,13 @@ mod tests {
             .position(|record| !record.effects.is_empty())
             .unwrap();
         let mut mutated = certificate.clone();
-        mutated.records[effect_record].effects.pop();
+        // Drop the atom from both projections so the direct-subset invariant
+        // still holds and the fact comparison is what rejects the certificate;
+        // dropping it from the transitive set alone is covered separately.
+        let dropped = mutated.records[effect_record].effects.pop().unwrap();
+        mutated.records[effect_record]
+            .direct_effects
+            .retain(|effect| *effect != dropped);
         assert!(matches!(
             verify_decorations(&prepared, &clocks, &mutated),
             Err(DecorationError::SignalFactMismatch {

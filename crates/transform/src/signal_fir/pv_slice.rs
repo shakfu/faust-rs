@@ -194,6 +194,7 @@ impl PvPlan {
             vectorability: vv::Vectorability::Vect,
             clock_id: 0,
             effects: Vec::new(),
+            direct_effects: Vec::new(),
             placement: vv::Placement::Owned(loop_id),
             duplicable: true,
         };

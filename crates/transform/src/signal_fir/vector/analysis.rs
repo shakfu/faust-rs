@@ -608,10 +608,11 @@ pub struct SignalUseInfo {
     pub effects: Vec<EffectAtom>,
     /// Sorted effects performed by this node itself, excluding child effects.
     ///
-    /// This internal projection lets scalar scheduling orient actual effect
-    /// operations without paying a quadratic cost over every transitive
-    /// effect carrier in the signal graph.
-    direct_effects: Vec<EffectAtom>,
+    /// This projection lets scalar scheduling and the vector event model
+    /// orient actual effect operations without paying a quadratic cost over
+    /// every transitive effect carrier in the signal graph. It is always a
+    /// sorted subset of `effects`.
+    pub direct_effects: Vec<EffectAtom>,
 }
 
 /// Deterministic record pairing a `SigId` with its P4.2 facts.
