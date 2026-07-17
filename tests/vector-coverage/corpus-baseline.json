@@ -11,11 +11,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -105,6 +105,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -143,13 +144,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -168,11 +162,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -262,6 +256,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -300,13 +295,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -325,11 +313,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -419,6 +407,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -457,13 +446,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -482,11 +464,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -576,6 +558,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -614,13 +597,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -639,11 +615,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -733,6 +709,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -771,13 +748,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -796,11 +766,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -890,6 +860,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -928,13 +899,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -953,11 +917,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1047,6 +1011,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -1085,13 +1050,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -1110,11 +1068,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1204,6 +1162,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -1242,13 +1201,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -1267,11 +1219,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1361,6 +1313,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -1399,13 +1352,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -1424,11 +1370,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1518,6 +1464,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -1556,13 +1503,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -1581,11 +1521,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1675,6 +1615,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -1713,13 +1654,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -1738,11 +1672,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1832,6 +1766,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -1870,13 +1805,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -1895,11 +1823,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1989,6 +1917,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -2027,13 +1956,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -2052,11 +1974,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -2146,6 +2068,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -2184,13 +2107,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -2209,11 +2125,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -2303,6 +2219,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -2341,13 +2258,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [
@@ -2366,11 +2276,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 86,
-        "fallback": 6,
+        "certified": 87,
+        "fallback": 5,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 2,
+          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -2460,6 +2370,7 @@
         "tests/impulse-tests/dsp/waveform2.dsp",
         "tests/impulse-tests/dsp/waveform3.dsp",
         "tests/impulse-tests/dsp/waveform4.dsp",
+        "tests/impulse-tests/dsp/waveform5.dsp",
         "tests/impulse-tests/dsp/waveform6.dsp",
         "tests/impulse-tests/dsp/zita_rev1.dsp"
       ],
@@ -2498,13 +2409,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/waveform5.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 14 -> 402"
         }
       ],
       "error_files": [

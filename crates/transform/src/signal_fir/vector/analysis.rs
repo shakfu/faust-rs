@@ -523,6 +523,20 @@ pub enum EffectAtom {
     },
 }
 
+/// Returns whether a `WrTbl` has no live writer port.
+///
+/// `rdtable` lowers to `WrTbl(size, generator, nil, nil)`: its content is
+/// produced once by its generator before `compute` and is immutable for the
+/// whole of it. `rwtable` binds both ports and stays mutable. Every component
+/// that classifies table effects or admits a read-only generator must decide
+/// this from one definition: reading a read-only table as a writer costs
+/// coverage, and reading a mutable table as read-only would admit an unsound
+/// program.
+#[must_use]
+pub fn wrtbl_is_readonly(arena: &TreeArena, write_index: SigId, write_value: SigId) -> bool {
+    arena.is_nil(write_index) && arena.is_nil(write_value)
+}
+
 /// Returns whether two atoms cannot be freely reordered.
 #[must_use]
 pub fn effects_conflict(left: &EffectAtom, right: &EffectAtom) -> bool {
@@ -1196,6 +1210,15 @@ fn direct_effects(
                 EffectAtom::ReadState(resource.clone()),
                 EffectAtom::WriteState(resource),
             ])
+        }
+        // A read-only table has no live writer port, so it contributes no
+        // compute-time write. Its generator subtree keeps its own effects, and
+        // fill-before-read stays carried by the data edge from every `RdTbl` to
+        // its table operand.
+        SigMatch::WrTbl(_, _, write_index, write_value)
+            if wrtbl_is_readonly(arena, write_index, write_value) =>
+        {
+            BTreeSet::new()
         }
         SigMatch::WrTbl(_, _, _, _) => BTreeSet::from([EffectAtom::WriteTable(sig.as_u32())]),
         SigMatch::RdTbl(table, _) => BTreeSet::from([EffectAtom::ReadTable(table.as_u32())]),
@@ -2592,6 +2615,79 @@ mod tests {
                 .condition(conditions.signal_condition(value))
                 .unwrap()
                 .is_unconditional()
+        );
+    }
+
+    #[test]
+    fn the_readonly_table_predicate_requires_both_write_ports_nil() {
+        let mut arena = TreeArena::new();
+        let nil = arena.nil();
+        let (write_index, write_value) = {
+            let mut b = SigBuilder::new(&mut arena);
+            (b.input(1), b.input(2))
+        };
+        assert!(
+            wrtbl_is_readonly(&arena, nil, nil),
+            "rdtable binds neither write port"
+        );
+        assert!(
+            !wrtbl_is_readonly(&arena, write_index, nil),
+            "a live write index alone keeps the table mutable"
+        );
+        assert!(
+            !wrtbl_is_readonly(&arena, nil, write_value),
+            "a live write value alone keeps the table mutable"
+        );
+        assert!(!wrtbl_is_readonly(&arena, write_index, write_value));
+    }
+
+    #[test]
+    fn readonly_tables_carry_no_write_effect_while_mutable_tables_keep_one() {
+        let mut arena = TreeArena::new();
+        let (readonly, mutable, readonly_read, mutable_read, outputs) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let read_index = b.input(0);
+            let size = b.int(8);
+            let generator = b.input(1);
+            let readonly = b.wrtbl_readonly(size, generator);
+            let readonly_read = b.rdtbl(readonly, read_index);
+            let mutable_size = b.int(16);
+            let mutable_generator = b.input(2);
+            let write_index = b.input(3);
+            let write_value = b.input(4);
+            let mutable = b.wrtbl(mutable_size, mutable_generator, write_index, write_value);
+            let mutable_read = b.rdtbl(mutable, read_index);
+            let first = b.output(0, readonly_read);
+            let second = b.output(1, mutable_read);
+            (
+                readonly,
+                mutable,
+                readonly_read,
+                mutable_read,
+                vec![first, second],
+            )
+        };
+        let types = sigtype::TypeAnnotator::new(&arena, &ui::UiProgram::empty())
+            .annotate(&outputs)
+            .unwrap();
+        let analysis = SignalAnalysisContext::new(&arena, &types, &outputs).unwrap();
+        assert!(
+            direct_effects(&analysis, readonly).unwrap().is_empty(),
+            "a read-only table has no live writer and so no compute-time write effect"
+        );
+        assert_eq!(
+            direct_effects(&analysis, mutable).unwrap(),
+            BTreeSet::from([EffectAtom::WriteTable(mutable.as_u32())]),
+            "a table with live write ports keeps its write effect"
+        );
+        assert_eq!(
+            direct_effects(&analysis, readonly_read).unwrap(),
+            BTreeSet::from([EffectAtom::ReadTable(readonly.as_u32())]),
+            "reads are unchanged by the writer classification"
+        );
+        assert_eq!(
+            direct_effects(&analysis, mutable_read).unwrap(),
+            BTreeSet::from([EffectAtom::ReadTable(mutable.as_u32())])
         );
     }
 

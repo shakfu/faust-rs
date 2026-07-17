@@ -13,7 +13,7 @@
 //! output coverage, inclusion of the accepted P6.3b body, and generic FIR type
 //! and scope correctness before it can replace the transitional vector module.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use fir::checker::verify_fir_module;
@@ -34,6 +34,7 @@ use super::decoration_verify::{VerifiedDecorationCertificate, certify_decoration
 use super::vector_analysis::DepKind;
 use super::vector_assemble::{
     VectorClockOutputStore, VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir,
+    fir_reachable,
 };
 use super::vector_clock_ad::build_vector_clock_ad_plan;
 use super::vector_events::{
@@ -840,6 +841,43 @@ fn build_fast_driver(store: &mut FirStore, chunk: FirId, vec_size: i32) -> Vec<F
     vec![guarded_main, guarded_rem]
 }
 
+/// Rejects any store into a table the lowering declared read-only.
+///
+/// The signal-level effect model and the pure lowerer share one read-only
+/// predicate, so their agreement cannot catch a misclassification of one. This
+/// reads the emitted body instead: a table whose content is declared once with
+/// initializers must carry no `StoreTable` anywhere in `compute`, whatever the
+/// signal-level model believed. Every table reaching a checked vector module is
+/// read-only today because `lower_readonly_table_definition` rejects live write
+/// ports; admitting mutable tables must extend this check rather than drop it.
+fn verify_readonly_table_stores(
+    store: &FirStore,
+    compute: FirId,
+    static_declarations: &[FirId],
+) -> Result<(), VectorModuleFailure> {
+    let readonly = static_declarations
+        .iter()
+        .filter_map(|declaration| match match_fir(store, *declaration) {
+            FirMatch::DeclareTable { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if readonly.is_empty() {
+        return Ok(());
+    }
+    for node in fir_reachable(store, compute) {
+        let FirMatch::StoreTable { name, .. } = match_fir(store, node) else {
+            continue;
+        };
+        if readonly.contains(&name) {
+            return Err(module_shape(format!(
+                "compute stores into read-only table {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn verify_final_module(
     store: &FirStore,
     module: FirId,
@@ -946,6 +984,7 @@ fn verify_final_module(
             "compute does not contain the accepted P6.3b body",
         ));
     }
+    verify_readonly_table_stores(store, compute, expected_static_declarations)?;
     for output in output_stores {
         if !contains_statement(store, compute, *output) {
             return Err(module_shape("compute does not cover every output store"));
@@ -997,6 +1036,39 @@ mod tests {
     use tlib::TreeArena;
 
     use crate::signal_prepare::prepare_signals_for_fir_verified;
+
+    #[test]
+    fn a_store_into_a_declared_readonly_table_is_rejected() {
+        let mut store = FirStore::new();
+        let (declaration, clean_compute, storing_compute) = {
+            let mut b = FirBuilder::new(&mut store);
+            let first = b.int32(10);
+            let second = b.int32(20);
+            let declaration = b.declare_table(
+                "iTbl0",
+                AccessType::Static,
+                FirType::Int32,
+                &[first, second],
+            );
+            let index = b.int32(1);
+            let value = b.int32(99);
+            let load = b.load_table("iTbl0", AccessType::Static, index, FirType::Int32);
+            let drop_load = b.drop_(load);
+            let clean_compute = b.block(&[drop_load]);
+            let forged = b.store_table("iTbl0", AccessType::Static, index, value);
+            let storing_compute = b.block(&[forged]);
+            (declaration, clean_compute, storing_compute)
+        };
+        verify_readonly_table_stores(&store, clean_compute, &[declaration])
+            .expect("reading a read-only table is accepted");
+        let rejected = verify_readonly_table_stores(&store, storing_compute, &[declaration])
+            .expect_err("a store into a declared read-only table must be rejected");
+        assert!(
+            rejected.detail.contains("iTbl0"),
+            "the rejection must name the table, got {}",
+            rejected.detail
+        );
+    }
 
     fn raw_pure_fixture() -> (TreeArena, Vec<SigId>) {
         let mut arena = TreeArena::new();

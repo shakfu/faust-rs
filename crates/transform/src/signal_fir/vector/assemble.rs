@@ -2080,7 +2080,7 @@ fn verify_assembled_lockstep_bundles(
 ///
 /// Callers checking several targets against one body must reuse this set: a
 /// per-target traversal walks the whole body once per question.
-fn fir_reachable(store: &FirStore, root: FirId) -> BTreeSet<FirId> {
+pub(super) fn fir_reachable(store: &FirStore, root: FirId) -> BTreeSet<FirId> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
     while let Some(node) = pending.pop() {

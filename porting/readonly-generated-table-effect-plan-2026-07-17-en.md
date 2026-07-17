@@ -1,7 +1,7 @@
 # Read-Only Generated Table Effect Plan
 
 Date: 2026-07-17
-Status: E0 diagnosed and reproduced; implementation pending
+Status: complete; E0.1-E0.3 implemented and qualified on 2026-07-17
 Scope: compute-time effect identity of `rdtable` generated tables
 
 ## 1. Objective and baseline

@@ -24,7 +24,7 @@ use super::super::module::map_binop;
 use super::cse::materialize_shared_values;
 use super::recursion::{decode_group_projection, decode_symbolic_group_bodies};
 use super::siggen::interpret_generator;
-use super::vector_analysis::EffectAtom;
+use super::vector_analysis::{EffectAtom, wrtbl_is_readonly};
 use super::vector_clock_ad::VerifiedVectorClockAdPlan;
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_route::{
@@ -1302,8 +1302,7 @@ impl PureVectorLowerer<'_> {
         write_index: SigId,
         write_value: SigId,
     ) -> Result<FirId, PureVectorLowerError> {
-        if !self.prepared.arena().is_nil(write_index) || !self.prepared.arena().is_nil(write_value)
-        {
+        if !wrtbl_is_readonly(self.prepared.arena(), write_index, write_value) {
             return Err(PureVectorLowerError::UnsupportedSignal {
                 signal_id,
                 expression: "mutable write-table state is not certified in checked vector lowering"
@@ -1321,8 +1320,7 @@ impl PureVectorLowerer<'_> {
                 match_sig(self.prepared.arena(), candidate),
                 SigMatch::WrTbl(_, generator, write_index, write_value)
                     if u64::from(generator.as_u32()) == signal_id
-                        && self.prepared.arena().is_nil(write_index)
-                        && self.prepared.arena().is_nil(write_value)
+                        && wrtbl_is_readonly(self.prepared.arena(), write_index, write_value)
             )
         });
         if !is_readonly_generator {

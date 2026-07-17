@@ -14,6 +14,17 @@ use compiler::{
     VectorFallbackReason, VectorPipelineStatus,
 };
 
+// A read-only `rdtable` whose index is block-invariant (a UI slider rather than
+// an input sample). The invariant index splits the program into two loops, so
+// the generator and the read can be fissioned into opposite orders; a
+// per-sample index keeps everything in one unfissionable loop and hides the
+// case. The table is filled before `compute` and never stored to, so the
+// generator carries no compute-time write to reverse against the read.
+const READONLY_TABLE_INVARIANT_INDEX_SOURCE: &str = concat!(
+    "w(x) = waveform{10,20,30,40,50}, int(x) : rdtable;\n",
+    "process = *(sin(w(4*hslider(\"value\",0,0,1,0.01)))),",
+    " w(4*hslider(\"value\",0,0,1,0.01));"
+);
 const PULSE_COUNTUP_LOOP_SOURCE: &str =
     "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;";
 const PULSE_COUNTDOWN_LOOP_SOURCE: &str =
@@ -382,6 +393,25 @@ fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
         .find("output0[i0] =")
         .expect("safe pure tail in fused loop");
     assert!(write < tail, "the state write must precede the pure tail");
+}
+
+#[test]
+fn readonly_table_with_block_invariant_index_is_certified() {
+    assert_vector_pipeline_certified(
+        "readonly_table_invariant_index",
+        READONLY_TABLE_INVARIANT_INDEX_SOURCE,
+        32,
+    );
+    assert_scalar_vector_bit_exact(
+        "readonly_table_invariant_index",
+        READONLY_TABLE_INVARIANT_INDEX_SOURCE,
+        32,
+    );
+    assert_scalar_vector_bit_exact(
+        "readonly_table_invariant_index_tail",
+        READONLY_TABLE_INVARIANT_INDEX_SOURCE,
+        24,
+    );
 }
 
 #[test]
