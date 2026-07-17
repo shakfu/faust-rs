@@ -11,11 +11,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -92,6 +92,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -123,20 +125,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -155,11 +143,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -236,6 +224,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -267,20 +257,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -299,11 +275,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -380,6 +356,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -411,20 +389,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -443,11 +407,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -524,6 +488,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -555,20 +521,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -587,11 +539,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -668,6 +620,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -699,20 +653,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -731,11 +671,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -812,6 +752,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -843,20 +785,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -875,11 +803,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -956,6 +884,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -987,20 +917,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1019,11 +935,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1100,6 +1016,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1131,20 +1049,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1163,11 +1067,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1244,6 +1148,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1275,20 +1181,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1307,11 +1199,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1388,6 +1280,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1419,20 +1313,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1451,11 +1331,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1532,6 +1412,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1563,20 +1445,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1595,11 +1463,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1676,6 +1544,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1707,20 +1577,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1739,11 +1595,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1820,6 +1676,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1851,20 +1709,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -1883,11 +1727,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -1964,6 +1808,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -1995,20 +1841,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -2027,11 +1859,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -2108,6 +1940,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -2139,20 +1973,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [
@@ -2171,11 +1991,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 88,
-        "fallback": 4,
+        "certified": 90,
+        "fallback": 2,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 3,
+          "FRS-VEC-FALLBACK-PURE": 1,
           "FRS-VEC-FALLBACK-UI": 1
         }
       },
@@ -2252,6 +2072,8 @@
         "tests/impulse-tests/dsp/stereoecho.dsp",
         "tests/impulse-tests/dsp/switcher.dsp",
         "tests/impulse-tests/dsp/table.dsp",
+        "tests/impulse-tests/dsp/table1.dsp",
+        "tests/impulse-tests/dsp/table2.dsp",
         "tests/impulse-tests/dsp/tapiir.dsp",
         "tests/impulse-tests/dsp/tester.dsp",
         "tests/impulse-tests/dsp/tester2.dsp",
@@ -2283,20 +2105,6 @@
           "reason_code": "FRS-VEC-FALLBACK-UI",
           "effective_mode": "Scalar",
           "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table1.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 55 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(8), SIGGEN(SIGWAVEFORM(float_bits(0x0000000000000000), float_bits(0x3fe0000000000000), float_bits(0x3ff0000000000000), float_bits(0x3fe0000000000000), float_bits(0x0000000000000000), float_bits(0xbfe0000000000000), float_bits(0xbff0000000000000), float_bits(0xbfe0000000000000))), SIGBINOP(op=rem (%), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(8)), SIGWAVEFORM(float_bits(0x4024000000000000), float_bits(0x4025000000000000), float_bits(0x4026000000000000), float_bits(0x4025000000000000), float_bits(0x4024000000000000), float_bits(0xc025000000000000), float_bits(0xc026000000000000), float_bits(0xc025000000000000))); effects=[ReadState(Signal { owner: 32, cell: Delay }), ReadState(Signal { owner: 54, cell: WaveformIndex }), ReadState(Recursion { group: 36, projection: 0 }), WriteState(Signal { owner: 32, cell: Delay }), WriteState(Signal { owner: 54, cell: WaveformIndex }), WriteState(Recursion { group: 36, projection: 0 }), WriteTable(55)]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/table2.dsp",
-          "status": "Fallback(PureLowering)",
-          "reason_code": "FRS-VEC-FALLBACK-PURE",
-          "effective_mode": "Scalar",
-          "detail": "signal 79 is effectful and cannot enter pure P5.2 lowering: SIGWRTBL(int(10), SIGGEN(SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil)))), SIGBINOP(op=rem (%), SIGBINOP(op=add (+), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))), int(1)), int(10)), SIGBINOP(op=mul (*), int(2), SIGPROJ(int(0), SYMREC(sym(\"W0\"), cons(SIGBINOP(op=add (+), SIGDELAY1(SIGPROJ(int(0), SYMREF(sym(\"W0\")))), int(1)), nil))))); effects=[ReadState(Signal { owner: 69, cell: Delay }), ReadState(Recursion { group: 73, projection: 0 }), WriteState(Signal { owner: 69, cell: Delay }), WriteState(Recursion { group: 73, projection: 0 }), WriteTable(79)]"
         }
       ],
       "error_files": [

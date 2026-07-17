@@ -1,7 +1,7 @@
 # Mutable Table Vector Lowering Plan
 
 Date: 2026-07-17
-Status: E1 diagnosed; implementation pending
+Status: complete; E1.1 in `d1292292`, E1.2 qualified on 2026-07-17
 Scope: `rwtable` admission, lowering, and verification in the checked vector pipeline
 
 ## 1. Objective and baseline
