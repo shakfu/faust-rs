@@ -366,11 +366,11 @@ fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
     let first_loop = cpp
         .find("for (int i0 = vindex;")
         .expect("fused serial sample loop");
-    let second_loop = cpp[first_loop + 1..]
-        .find("for (int i0 = vindex;")
-        .map(|offset| first_loop + 1 + offset)
-        .expect("safe pure tail loop");
-    let fused = &cpp[first_loop..second_loop];
+    assert!(
+        !cpp[first_loop + 1..].contains("for (int i0 = vindex;"),
+        "the safe pure tail must stay fused inside the single sample loop"
+    );
+    let fused = &cpp[first_loop..];
     let read = fused
         .find("transport_s23_l2_l1 = vstate_s22_tmp")
         .expect("recursive delayed read in fused loop");
@@ -378,6 +378,10 @@ fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
         .find("vstate_s22_tmp[(4 + (i0 - vindex))] =")
         .expect("recursive state write in fused loop");
     assert!(read < write, "delayed read must precede the state write");
+    let tail = fused
+        .find("output0[i0] =")
+        .expect("safe pure tail in fused loop");
+    assert!(write < tail, "the state write must precede the pure tail");
 }
 
 #[test]

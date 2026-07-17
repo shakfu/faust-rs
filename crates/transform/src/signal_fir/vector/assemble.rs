@@ -1823,6 +1823,7 @@ fn verify_assembled_fused_serial_groups(
             }
             island.statement
         };
+        let body_nodes = fir_reachable(store, physical_body);
 
         for &signal_id in &group.delayed_read_signal_ids {
             let definitions = routed
@@ -1834,7 +1835,7 @@ fn verify_assembled_fused_serial_groups(
                         && matches!(definition.region, VectorRegion::Loop(loop_id) if group.member_loop_ids.contains(&loop_id))
                 })
                 .collect::<Vec<_>>();
-            if definitions.len() != 1 || !fir_contains(store, physical_body, definitions[0].value) {
+            if definitions.len() != 1 || !body_nodes.contains(&definitions[0].value) {
                 return Err(reject());
             }
         }
@@ -1864,7 +1865,7 @@ fn verify_assembled_fused_serial_groups(
                 })
                 .collect::<Vec<_>>();
             if definitions.len() != 1
-                || !fir_contains(store, physical_body, definitions[0].value)
+                || !body_nodes.contains(&definitions[0].value)
                 || group.member_loop_ids.binary_search(&owner_loop_id).is_err()
             {
                 return Err(reject());
@@ -1891,7 +1892,7 @@ fn verify_assembled_fused_serial_groups(
                 .flat_map(|loop_id| loop_by_id[loop_id].exec_actions.iter())
                 .filter(|action| action.action == (VectorStateAction::DelayWrite { signal_id }))
                 .collect::<Vec<_>>();
-            if writes.len() != 1 || !fir_contains(store, physical_body, writes[0].statement) {
+            if writes.len() != 1 || !body_nodes.contains(&writes[0].statement) {
                 return Err(reject());
             }
         }
@@ -1911,10 +1912,10 @@ fn verify_assembled_fused_serial_groups(
                 })
                 || transport
                     .store
-                    .is_none_or(|statement| !fir_contains(store, physical_body, statement))
+                    .is_none_or(|statement| !body_nodes.contains(&statement))
                 || transport
                     .load
-                    .is_none_or(|value| !fir_contains(store, physical_body, value))
+                    .is_none_or(|value| !body_nodes.contains(&value))
             {
                 return Err(reject());
             }
@@ -2075,13 +2076,14 @@ fn verify_assembled_lockstep_bundles(
     Ok(())
 }
 
-fn fir_contains(store: &FirStore, root: FirId, target: FirId) -> bool {
+/// Every FIR node reachable from `root`, including `root` itself.
+///
+/// Callers checking several targets against one body must reuse this set: a
+/// per-target traversal walks the whole body once per question.
+fn fir_reachable(store: &FirStore, root: FirId) -> BTreeSet<FirId> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
     while let Some(node) = pending.pop() {
-        if node == target {
-            return true;
-        }
         if !seen.insert(node) {
             continue;
         }
@@ -2124,7 +2126,7 @@ fn fir_contains(store: &FirStore, root: FirId, target: FirId) -> bool {
             _ => {}
         }
     }
-    false
+    seen
 }
 
 fn verify_clock_output_stores(

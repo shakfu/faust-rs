@@ -795,7 +795,65 @@ fn build_fused_serial_groups(
     let mut ordering_edges = data_edges.clone();
     ordering_edges.extend(effect_edges.iter().copied());
     let reachability = PlanReachability::new(loop_ids, &ordering_edges);
+    // Transposed closure: `reverse_rows[to]` holds every loop that reaches
+    // `to`. Path queries below need that direction, and a column of the
+    // forward closure cannot be read without scanning every row.
+    let reverse_rows = {
+        let words = reachability.words();
+        let mut rows = vec![vec![0_u64; words]; loop_ids.len()];
+        for (to, row) in rows.iter_mut().enumerate() {
+            for from in 0..loop_ids.len() {
+                if reachability.bit(from, to) {
+                    set_bit(row, from);
+                }
+            }
+        }
+        rows
+    };
     let mut seeds = Vec::<Candidate>::new();
+
+    // `loop_effects` depends only on the immutable placement state, so the
+    // component fixpoint below would otherwise recompute identical effect sets
+    // once per loop per component per iteration. Loops absent from
+    // `roots_by_loop` contribute no effects, so this map is exhaustive.
+    let effects_by_loop = state
+        .roots_by_loop
+        .keys()
+        .map(|&loop_id| (loop_id, loop_effects(loop_id, state)))
+        .collect::<BTreeMap<_, _>>();
+
+    // A carrier qualifies for absorption when a placed read reaches it through
+    // a positive delay or a delayed immediate pair. That predicate never
+    // mentions a component, so only the owning-loop membership test below
+    // varies. Index the qualifying carriers by owner once instead of rescanning
+    // every record/dependency pair per component per fixpoint iteration.
+    let mut carrier_targets = BTreeSet::<u32>::new();
+    for dependency in &certificate.dependencies {
+        let placed_read = state
+            .placement
+            .get(&dependency.from)
+            .is_some_and(|placement| matches!(placement, Placement::Owned(_)));
+        let carries = matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
+            || (matches!(dependency.kind, DepKind::Immediate)
+                && state
+                    .delayed_pairs
+                    .contains(&(dependency.from, dependency.to)));
+        if placed_read && carries {
+            carrier_targets.insert(dependency.to);
+        }
+    }
+    let mut carriers_by_owner = BTreeMap::<u64, Vec<u64>>::new();
+    for record in &certificate.records {
+        if record.max_delay == 0 || !carrier_targets.contains(&record.signal_id) {
+            continue;
+        }
+        if let Some(Placement::Owned(loop_id)) = state.placement.get(&record.signal_id).copied() {
+            carriers_by_owner
+                .entry(loop_id)
+                .or_default()
+                .push(u64::from(record.signal_id));
+        }
+    }
 
     // Delayed recursion dependencies run from the delayed read towards the
     // recursive writer. Close every loop on that same-sample path.
@@ -860,8 +918,10 @@ fn build_fused_serial_groups(
         else {
             continue;
         };
-        let mut candidate = Candidate::default();
-        candidate.close_effect_users = true;
+        let mut candidate = Candidate {
+            close_effect_users: true,
+            ..Default::default()
+        };
         candidate.carriers.insert(u64::from(dependency.to));
         candidate.delayed_reads.insert(u64::from(dependency.from));
         candidate.members.insert(writer_loop_id);
@@ -976,33 +1036,12 @@ fn build_fused_serial_groups(
                 component.state_effects.len(),
             );
             component.carriers.extend(
-                certificate
-                    .records
+                component
+                    .members
                     .iter()
-                    .filter(|record| {
-                        record.max_delay > 0
-                            && state.placement.get(&record.signal_id).is_some_and(
-                                |placement| {
-                                    matches!(placement, Placement::Owned(loop_id) if component.members.contains(loop_id))
-                                },
-                            )
-                            && certificate.dependencies.iter().any(|dependency| {
-                                dependency.to == record.signal_id
-                                    && state
-                                        .placement
-                                        .get(&dependency.from)
-                                        .is_some_and(|placement| {
-                                            matches!(placement, Placement::Owned(_))
-                                        })
-                                    && (matches!(dependency.kind, DepKind::Delayed { amount } if amount > 0)
-                                        || (matches!(dependency.kind, DepKind::Immediate)
-                                            && state.delayed_pairs.contains(&(
-                                                dependency.from,
-                                                dependency.to,
-                                            ))))
-                            })
-                    })
-                    .map(|record| u64::from(record.signal_id)),
+                    .filter_map(|loop_id| carriers_by_owner.get(loop_id))
+                    .flatten()
+                    .copied(),
             );
             for dependency in &certificate.dependencies {
                 let carrier_id = u64::from(dependency.to);
@@ -1049,7 +1088,9 @@ fn build_fused_serial_groups(
                 component
                     .members
                     .iter()
-                    .flat_map(|loop_id| loop_effects(*loop_id, state)),
+                    .filter_map(|loop_id| effects_by_loop.get(loop_id))
+                    .flatten()
+                    .cloned(),
             );
             component.close_effect_users |= !component.state_effects.is_empty();
             if component.close_effect_users {
@@ -1066,9 +1107,11 @@ fn build_fused_serial_groups(
                     .iter()
                     .copied()
                     .filter(|loop_id| {
-                        loop_effects(*loop_id, state).iter().any(|effect| {
-                            component.state_effects.iter().any(|carrier| {
-                                super::super::vector_analysis::effects_conflict(carrier, effect)
+                        effects_by_loop.get(loop_id).is_some_and(|effects| {
+                            effects.iter().any(|effect| {
+                                component.state_effects.iter().any(|carrier| {
+                                    super::super::vector_analysis::effects_conflict(carrier, effect)
+                                })
                             })
                         })
                     })
@@ -1083,12 +1126,22 @@ fn build_fused_serial_groups(
                         } else {
                             continue;
                         };
+                        // Every loop on the start->end path is reachable from
+                        // `start` (or is `start`) and reaches `end` (or is
+                        // `end`). Intersecting the forward row of `start` with
+                        // the reverse row of `end` yields that path in one pass
+                        // over the bitset, where testing each candidate loop
+                        // costs two indexed closure probes per loop instead.
+                        let start_index = reachability.index[&start];
+                        let end_index = reachability.index[&end];
+                        let mut path = reachability.rows[start_index].clone();
+                        set_bit(&mut path, start_index);
+                        let mut backward = reverse_rows[end_index].clone();
+                        set_bit(&mut backward, end_index);
+                        and_bits(&mut path, &backward);
                         component
                             .members
-                            .extend(loop_ids.iter().copied().filter(|&loop_id| {
-                                (loop_id == start || reachability.reaches(start, loop_id))
-                                    && (loop_id == end || reachability.reaches(loop_id, end))
-                            }));
+                            .extend(set_bit_indices(&path).map(|index| loop_ids[index]));
                     }
                 }
             }
@@ -1099,16 +1152,35 @@ fn build_fused_serial_groups(
                     component.delayed_reads.len(),
                     component.state_effects.len(),
                 );
+            // A loop joins the component when some member reaches it and it
+            // reaches some member. Both quantifiers are one bitset operation
+            // against the closure rows: the union of the members' rows answers
+            // the first for every loop at once, and intersecting a loop's own
+            // row with the member set answers the second. Scanning member/loop
+            // pairs instead costs `loops * members` indexed lookups per
+            // component per iteration.
+            let words = reachability.words();
+            let mut reachable_from_members = vec![0_u64; words];
+            let mut member_bits = vec![0_u64; words];
+            for member_index in component
+                .members
+                .iter()
+                .map(|member| reachability.index[member])
+            {
+                or_bits(
+                    &mut reachable_from_members,
+                    &reachability.rows[member_index],
+                );
+                set_bit(&mut member_bits, member_index);
+            }
             let additions = loop_ids
                 .iter()
                 .copied()
                 .filter(|loop_id| !component.members.contains(loop_id))
                 .filter(|loop_id| {
-                    component.members.iter().any(|member| {
-                        *member == *loop_id || reachability.reaches(*member, *loop_id)
-                    }) && component.members.iter().any(|member| {
-                        *member == *loop_id || reachability.reaches(*loop_id, *member)
-                    })
+                    let loop_index = reachability.index[loop_id];
+                    bit_at(&reachable_from_members, loop_index)
+                        && bits_intersect(&reachability.rows[loop_index], &member_bits)
                 })
                 .collect::<Vec<_>>();
             changed |= !additions.is_empty();
@@ -1493,6 +1565,20 @@ impl PlanReachability {
     fn bit(&self, from: usize, to: usize) -> bool {
         self.rows[from][to / u64::BITS as usize] & (1_u64 << (to % u64::BITS as usize)) != 0
     }
+
+    fn words(&self) -> usize {
+        self.rows.first().map_or(0, Vec::len)
+    }
+}
+
+fn bit_at(bits: &[u64], index: usize) -> bool {
+    bits[index / u64::BITS as usize] & (1_u64 << (index % u64::BITS as usize)) != 0
+}
+
+fn bits_intersect(left: &[u64], right: &[u64]) -> bool {
+    left.iter()
+        .zip(right)
+        .any(|(left, right)| left & right != 0)
 }
 
 fn set_bit(bits: &mut [u64], index: usize) {
@@ -1503,6 +1589,21 @@ fn or_bits(target: &mut [u64], additions: &[u64]) {
     for (target, additions) in target.iter_mut().zip(additions) {
         *target |= additions;
     }
+}
+
+fn and_bits(target: &mut [u64], mask: &[u64]) {
+    for (target, mask) in target.iter_mut().zip(mask) {
+        *target &= mask;
+    }
+}
+
+fn set_bit_indices(bits: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    bits.iter().enumerate().flat_map(|(word, value)| {
+        let base = word * u64::BITS as usize;
+        (0..u64::BITS as usize)
+            .filter(move |bit| value & (1_u64 << bit) != 0)
+            .map(move |bit| base + bit)
+    })
 }
 
 fn loop_effects(
