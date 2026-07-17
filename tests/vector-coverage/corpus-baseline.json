@@ -11,11 +11,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -56,6 +55,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -116,13 +116,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -162,11 +155,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -207,6 +199,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -267,13 +260,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -313,11 +299,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -358,6 +343,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -418,13 +404,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -464,11 +443,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -509,6 +487,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -569,13 +548,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -615,11 +587,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -660,6 +631,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -720,13 +692,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -766,11 +731,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -811,6 +775,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -871,13 +836,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -917,11 +875,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -962,6 +919,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1022,13 +980,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1068,11 +1019,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1113,6 +1063,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1173,13 +1124,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1219,11 +1163,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1264,6 +1207,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1324,13 +1268,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1370,11 +1307,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1415,6 +1351,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1475,13 +1412,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1521,11 +1451,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1566,6 +1495,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1626,13 +1556,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1672,11 +1595,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1717,6 +1639,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1777,13 +1700,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1823,11 +1739,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -1868,6 +1783,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -1928,13 +1844,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -1974,11 +1883,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -2019,6 +1927,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -2079,13 +1988,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -2125,11 +2027,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -2170,6 +2071,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -2230,13 +2132,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",
@@ -2276,11 +2171,10 @@
       },
       "summary": {
         "total": 93,
-        "certified": 87,
-        "fallback": 5,
+        "certified": 88,
+        "fallback": 4,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-EVENTS": 1,
           "FRS-VEC-FALLBACK-PURE": 3,
           "FRS-VEC-FALLBACK-UI": 1
         }
@@ -2321,6 +2215,7 @@
         "tests/impulse-tests/dsp/math_simp.dsp",
         "tests/impulse-tests/dsp/matrix.dsp",
         "tests/impulse-tests/dsp/midi_tester.dsp",
+        "tests/impulse-tests/dsp/mixer.dsp",
         "tests/impulse-tests/dsp/modulations.dsp",
         "tests/impulse-tests/dsp/multibandfilter.dsp",
         "tests/impulse-tests/dsp/noise.dsp",
@@ -2381,13 +2276,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/mixer.dsp",
-          "status": "Fallback(EventCertificate)",
-          "reason_code": "FRS-VEC-FALLBACK-EVENTS",
-          "effective_mode": "Scalar",
-          "detail": "vector execution reverses scalar dependence 155 -> 747"
         },
         {
           "path": "tests/impulse-tests/dsp/sound.dsp",

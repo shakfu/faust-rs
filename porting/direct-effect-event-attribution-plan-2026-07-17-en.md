@@ -1,7 +1,7 @@
 # Direct Effect Event Attribution Plan
 
 Date: 2026-07-17
-Status: E4 diagnosed and reproduced; implementation pending
+Status: complete; E4.1-E4.2 in `241b1e98`, E4.3 qualified on 2026-07-17
 Scope: which signal an effect event is attributed to in the vector event model
 
 ## 1. Objective and baseline

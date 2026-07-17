@@ -33,6 +33,7 @@ tests/impulse-tests/dsp/lowcut.dsp
 tests/impulse-tests/dsp/math_simp.dsp
 tests/impulse-tests/dsp/matrix.dsp
 tests/impulse-tests/dsp/midi_tester.dsp
+tests/impulse-tests/dsp/mixer.dsp
 tests/impulse-tests/dsp/modulations.dsp
 tests/impulse-tests/dsp/multibandfilter.dsp
 tests/impulse-tests/dsp/noise.dsp
