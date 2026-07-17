@@ -1,7 +1,7 @@
 # Cranelift Local SSA Dominance Plan
 
 Date: 2026-07-17
-Status: CR0 diagnosed; implementation pending
+Status: complete; CR1-CR2 implemented and qualified on 2026-07-18
 Scope: cross-block FIR stack locals in the Cranelift `compute` lowering
 
 ## 1. Objective and baseline
