@@ -64,6 +64,9 @@ impl PureVectorRegionBody {
 pub struct VerifiedPureVectorProgram {
     store: FirStore,
     static_declarations: Vec<FirId>,
+    table_declarations: Vec<FirId>,
+    table_init_statements: Vec<FirId>,
+    mutable_tables: BTreeMap<u64, (String, usize, FirType)>,
     transport_declarations: Vec<FirId>,
     control_statements: Vec<FirId>,
     regions: Vec<PureVectorRegionBody>,
@@ -99,6 +102,24 @@ impl VerifiedPureVectorProgram {
     #[must_use]
     pub fn static_declarations(&self) -> &[FirId] {
         &self.static_declarations
+    }
+
+    /// Mutable table DSP-struct field declarations.
+    #[must_use]
+    pub fn table_declarations(&self) -> &[FirId] {
+        &self.table_declarations
+    }
+
+    /// Element-wise mutable-table initialization for `instanceConstants`.
+    #[must_use]
+    pub fn table_init_statements(&self) -> &[FirId] {
+        &self.table_init_statements
+    }
+
+    /// Accepted mutable tables by signal id: field name, length, element type.
+    #[must_use]
+    pub fn mutable_tables(&self) -> &BTreeMap<u64, (String, usize, FirType)> {
+        &self.mutable_tables
     }
 
     /// Fixed control-scope statements, including input pointer aliases.
@@ -282,6 +303,10 @@ struct PureVectorLowerer<'a> {
     static_declarations: Vec<FirId>,
     waveform_tables: BTreeMap<u64, String>,
     readonly_tables: BTreeMap<u64, (String, usize, FirType)>,
+    mutable_tables: BTreeMap<u64, (String, usize, FirType)>,
+    table_declarations: Vec<FirId>,
+    table_init_statements: Vec<FirId>,
+    table_stores: BTreeMap<u64, Vec<FirId>>,
     math_ops: HashSet<FirMathOp>,
     int_helpers: BTreeSet<&'static str>,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
@@ -416,6 +441,10 @@ fn lower_vector_program_impl<'a>(
         static_declarations: Vec::new(),
         waveform_tables: BTreeMap::new(),
         readonly_tables: BTreeMap::new(),
+        mutable_tables: BTreeMap::new(),
+        table_declarations: Vec::new(),
+        table_init_statements: Vec::new(),
+        table_stores: BTreeMap::new(),
         math_ops: HashSet::new(),
         int_helpers: BTreeSet::new(),
         state_plan,
@@ -491,6 +520,10 @@ fn lower_vector_program_impl<'a>(
             &mut lowerer.store,
             &root_values,
             VectorRegion::Loop(region.loop_id),
+            lowerer
+                .table_stores
+                .remove(&region.loop_id)
+                .unwrap_or_default(),
             &format!("fVecL{}Temp", region.loop_id),
             &format!("iVecL{}Temp", region.loop_id),
         )?;
@@ -560,6 +593,9 @@ fn lower_vector_program_impl<'a>(
     Ok(VerifiedPureVectorProgram {
         store: lowerer.store,
         static_declarations: lowerer.static_declarations,
+        table_declarations: lowerer.table_declarations,
+        table_init_statements: lowerer.table_init_statements,
+        mutable_tables: lowerer.mutable_tables,
         transport_declarations,
         control_statements,
         regions,
@@ -778,17 +814,20 @@ impl PureVectorLowerer<'_> {
                 self.lower_prefix(scope, signal_id, value, cache, active)?
             }
             SigMatch::Waveform(values) => self.lower_waveform(scope, signal_id, values)?,
-            SigMatch::Gen(_) => self.lower_readonly_generator(signal_id)?,
+            SigMatch::Gen(_) => self.lower_table_generator(signal_id)?,
             SigMatch::RdTbl(table, index) => {
                 self.lower_readonly_table(scope, signal_id, table, index, cache, active)?
             }
             SigMatch::WrTbl(size, generator, write_index, write_value) => self
-                .lower_readonly_table_definition(
+                .lower_table_definition(
+                    scope,
                     signal_id,
                     size,
                     generator,
                     write_index,
                     write_value,
+                    cache,
+                    active,
                 )?,
             SigMatch::Proj(index, group) => {
                 if let Some(var) = match_sym_ref(self.prepared.arena(), group) {
@@ -1294,39 +1333,86 @@ impl PureVectorLowerer<'_> {
         ))
     }
 
-    fn lower_readonly_table_definition(
+    #[allow(clippy::too_many_arguments)]
+    fn lower_table_definition(
         &mut self,
+        scope: LowerScope,
         signal_id: u64,
         size: SigId,
         generator: SigId,
         write_index: SigId,
         write_value: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
     ) -> Result<FirId, PureVectorLowerError> {
-        if !wrtbl_is_readonly(self.prepared.arena(), write_index, write_value) {
+        if wrtbl_is_readonly(self.prepared.arena(), write_index, write_value) {
+            let _ = self.ensure_readonly_table(signal_id, size, generator)?;
+            let typ = self.fir_type(signal_id)?;
+            return self.zero_value(&typ);
+        }
+        // A live-port table writes once per sample, so its store belongs to
+        // the writer's own sample loop. The store statement is head-inserted
+        // into that loop's body: CSE hoists the index and value definitions
+        // before their first use, and every same-sample read materializes
+        // after, which is the rwtable write-before-read contract the scalar
+        // backend emits.
+        let LowerScope::Loop(loop_id) = scope else {
             return Err(PureVectorLowerError::UnsupportedSignal {
                 signal_id,
-                expression: "mutable write-table state is not certified in checked vector lowering"
-                    .to_owned(),
+                expression: "mutable table write outside a sample loop".to_owned(),
+            });
+        };
+        let (name, length, elem_type) = self.ensure_mutable_table(signal_id, size, generator)?;
+        let raw_index = self.lower_dep(scope, write_index, cache, active)?;
+        if self.store.value_type(raw_index) != Some(FirType::Int32) {
+            return Err(PureVectorLowerError::FirTypeMismatch {
+                signal_id: u64::from(write_index.as_u32()),
+                expected: FirType::Int32,
+                actual: self.store.value_type(raw_index),
             });
         }
-        let _ = self.ensure_readonly_table(signal_id, size, generator)?;
+        let value = self.lower_dep(scope, write_value, cache, active)?;
+        if self.store.value_type(value) != Some(elem_type.clone()) {
+            return Err(PureVectorLowerError::FirTypeMismatch {
+                signal_id: u64::from(write_value.as_u32()),
+                expected: elem_type,
+                actual: self.store.value_type(value),
+            });
+        }
+        let length_i32 =
+            i32::try_from(length).map_err(|_| PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "mutable table length exceeds FIR i32".to_owned(),
+            })?;
+        // The scalar backend wraps the write index as ((i % n) + n) % n;
+        // mirror it exactly so both paths store to identical cells.
+        let mut builder = FirBuilder::new(&mut self.store);
+        let len = builder.int32(length_i32);
+        let rem = builder.binop(fir::FirBinOp::Rem, raw_index, len, FirType::Int32);
+        let shifted = builder.binop(fir::FirBinOp::Add, rem, len, FirType::Int32);
+        let wrapped = builder.binop(fir::FirBinOp::Rem, shifted, len, FirType::Int32);
+        let store = builder.store_table(name, AccessType::Struct, wrapped, value);
+        self.table_stores.entry(loop_id).or_default().push(store);
         let typ = self.fir_type(signal_id)?;
         self.zero_value(&typ)
     }
 
-    fn lower_readonly_generator(&mut self, signal_id: u64) -> Result<FirId, PureVectorLowerError> {
-        let is_readonly_generator = self.signal_ids.values().any(|&candidate| {
+    fn lower_table_generator(&mut self, signal_id: u64) -> Result<FirId, PureVectorLowerError> {
+        // `Gen` is a lifecycle boundary: its content runs through the SIGGEN
+        // interpreter at init, never at compute time, so the node itself is a
+        // zero placeholder. Read-only and mutable owners both qualify; the
+        // owning table's own lowering decides how the content is emitted.
+        let is_table_generator = self.signal_ids.values().any(|&candidate| {
             matches!(
                 match_sig(self.prepared.arena(), candidate),
-                SigMatch::WrTbl(_, generator, write_index, write_value)
+                SigMatch::WrTbl(_, generator, _, _)
                     if u64::from(generator.as_u32()) == signal_id
-                        && wrtbl_is_readonly(self.prepared.arena(), write_index, write_value)
             )
         });
-        if !is_readonly_generator {
+        if !is_table_generator {
             return Err(PureVectorLowerError::UnsupportedSignal {
                 signal_id,
-                expression: "generator is not owned by an accepted immutable table".to_owned(),
+                expression: "generator is not owned by an accepted table".to_owned(),
             });
         }
         let typ = self.fir_type(signal_id)?;
@@ -1344,14 +1430,19 @@ impl PureVectorLowerer<'_> {
     ) -> Result<FirId, PureVectorLowerError> {
         let table_id = u64::from(table.as_u32());
         let _ = self.lower_dep(scope, table, cache, active)?;
-        let (name, length, elem_type) =
-            self.readonly_tables
-                .get(&table_id)
-                .cloned()
-                .ok_or_else(|| PureVectorLowerError::UnsupportedSignal {
-                    signal_id,
-                    expression: "table read source is not an accepted immutable table".to_owned(),
-                })?;
+        let (name, length, elem_type, access) = if let Some((name, length, elem_type)) =
+            self.readonly_tables.get(&table_id).cloned()
+        {
+            (name, length, elem_type, AccessType::Static)
+        } else if let Some((name, length, elem_type)) = self.mutable_tables.get(&table_id).cloned()
+        {
+            (name, length, elem_type, AccessType::Struct)
+        } else {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "table read source is not an accepted table".to_owned(),
+            });
+        };
         let raw_index = self.lower_dep(scope, index, cache, active)?;
         if self.store.value_type(raw_index) != Some(FirType::Int32) {
             return Err(PureVectorLowerError::FirTypeMismatch {
@@ -1369,12 +1460,7 @@ impl PureVectorLowerer<'_> {
                 actual: Some(elem_type),
             });
         }
-        Ok(FirBuilder::new(&mut self.store).load_table(
-            name,
-            AccessType::Static,
-            checked_index,
-            expected,
-        ))
+        Ok(FirBuilder::new(&mut self.store).load_table(name, access, checked_index, expected))
     }
 
     fn ensure_readonly_table(
@@ -1386,6 +1472,36 @@ impl PureVectorLowerer<'_> {
         if let Some(table) = self.readonly_tables.get(&signal_id) {
             return Ok(table.clone());
         }
+        let (length, elem_type, initializers) =
+            self.table_initializers(signal_id, size, generator)?;
+        let prefix = if elem_type == FirType::Int32 {
+            "iVecTbl"
+        } else {
+            "fVecTbl"
+        };
+        let name = format!("{prefix}{signal_id}");
+        let declaration = FirBuilder::new(&mut self.store).declare_table(
+            name.clone(),
+            AccessType::Static,
+            elem_type.clone(),
+            &initializers,
+        );
+        self.static_declarations.push(declaration);
+        let table = (name, length, elem_type);
+        self.readonly_tables.insert(signal_id, table.clone());
+        Ok(table)
+    }
+
+    /// Evaluates a table's constant length, element type, and per-element
+    /// initial content. Shared by the read-only and mutable table paths: both
+    /// classes const-fold their generator through the same SIGGEN interpreter,
+    /// differing only in where the declaration and the initial content land.
+    fn table_initializers(
+        &mut self,
+        signal_id: u64,
+        size: SigId,
+        generator: SigId,
+    ) -> Result<(usize, FirType, Vec<FirId>), PureVectorLowerError> {
         let length = match match_sig(self.prepared.arena(), size) {
             SigMatch::Int(value) if value > 0 => {
                 usize::try_from(value).map_err(|_| PureVectorLowerError::UnsupportedSignal {
@@ -1439,21 +1555,47 @@ impl PureVectorLowerer<'_> {
                 }
             }
         }
-        let prefix = if elem_type == FirType::Int32 {
-            "iVecTbl"
-        } else {
-            "fVecTbl"
-        };
-        let name = format!("{prefix}{signal_id}");
-        let declaration = FirBuilder::new(&mut self.store).declare_table(
+        Ok((length, elem_type, initializers))
+    }
+
+    /// Declares one mutable table as a DSP-struct array field and queues its
+    /// element-wise initial content for `instanceConstants`, mirroring the
+    /// scalar lifecycle: runtime writes must persist across compute calls, so
+    /// the content is written once at init, never per block.
+    fn ensure_mutable_table(
+        &mut self,
+        signal_id: u64,
+        size: SigId,
+        generator: SigId,
+    ) -> Result<(String, usize, FirType), PureVectorLowerError> {
+        if let Some(table) = self.mutable_tables.get(&signal_id) {
+            return Ok(table.clone());
+        }
+        let (length, elem_type, initializers) =
+            self.table_initializers(signal_id, size, generator)?;
+        let name = mutable_table_name(signal_id, &elem_type);
+        let mut builder = FirBuilder::new(&mut self.store);
+        let declaration = builder.declare_var(
             name.clone(),
-            AccessType::Static,
-            elem_type.clone(),
-            &initializers,
+            FirType::Array(Box::new(elem_type.clone()), length),
+            AccessType::Struct,
+            None,
         );
-        self.static_declarations.push(declaration);
+        let mut init_statements = Vec::with_capacity(length);
+        for (index, &value) in initializers.iter().enumerate() {
+            let index_i32 = i32::try_from(index).expect("table length fits i32");
+            let position = builder.int32(index_i32);
+            init_statements.push(builder.store_table(
+                name.clone(),
+                AccessType::Struct,
+                position,
+                value,
+            ));
+        }
+        self.table_declarations.push(declaration);
+        self.table_init_statements.extend(init_statements);
         let table = (name, length, elem_type);
-        self.readonly_tables.insert(signal_id, table.clone());
+        self.mutable_tables.insert(signal_id, table.clone());
         Ok(table)
     }
 
@@ -1910,6 +2052,7 @@ fn verify_plan_prepared_boundary(
             }
             EffectAtom::ReadTable(table) | EffectAtom::WriteTable(table) => {
                 readonly_table_signal(prepared, ids, u64::from(*table))
+                    || mutable_table_signal(prepared, ids, u64::from(*table))
             }
             EffectAtom::WriteOutput(channel) => output_channels.contains(channel),
             EffectAtom::WriteUi(control) => ui.control(*control).is_some_and(|spec| {
@@ -1929,6 +2072,34 @@ fn verify_plan_prepared_boundary(
         }
     }
     Ok(())
+}
+
+/// Canonical DSP-struct field name for one mutable table.
+///
+/// Shared by the lowerer and the final-module verifier so the emitted
+/// declaration, the compute stores, and the attribution check cannot drift
+/// onto different names.
+pub(super) fn mutable_table_name(signal_id: u64, elem_type: &FirType) -> String {
+    let prefix = if *elem_type == FirType::Int32 {
+        "iVecMutTbl"
+    } else {
+        "fVecMutTbl"
+    };
+    format!("{prefix}{signal_id}")
+}
+
+fn mutable_table_signal(
+    prepared: &VerifiedPreparedSignals,
+    ids: &BTreeMap<u64, SigId>,
+    signal_id: u64,
+) -> bool {
+    ids.get(&signal_id).is_some_and(|&sig| {
+        matches!(
+            match_sig(prepared.arena(), sig),
+            SigMatch::WrTbl(_, _, write_index, write_value)
+                if !wrtbl_is_readonly(prepared.arena(), write_index, write_value)
+        )
+    })
 }
 
 fn readonly_table_signal(
@@ -1963,6 +2134,7 @@ fn materialize_region_roots(
         store,
         values,
         region,
+        Vec::new(),
         "fVecControlTemp",
         "iVecControlTemp",
     )
@@ -1972,14 +2144,17 @@ fn materialize_region_roots_with_prefix(
     store: &mut FirStore,
     values: &[FirId],
     region: VectorRegion,
+    head_statements: Vec<FirId>,
     float_prefix: &str,
     int_prefix: &str,
 ) -> Result<(Vec<FirId>, Vec<FirId>), PureVectorLowerError> {
+    // Head statements run before every root of the region. Mutable-table
+    // stores are placed here: shared-value materialization inserts each
+    // definition before its first use, so a store's index and value land
+    // above it while every dependent read materializes below.
     let mut builder = FirBuilder::new(store);
-    let mut statements = values
-        .iter()
-        .map(|&value| builder.drop_(value))
-        .collect::<Vec<_>>();
+    let mut statements = head_statements;
+    statements.extend(values.iter().map(|&value| builder.drop_(value)));
     materialize_shared_values(store, &mut statements, float_prefix, 0, int_prefix, 0);
     let rewritten = statements
         .iter()

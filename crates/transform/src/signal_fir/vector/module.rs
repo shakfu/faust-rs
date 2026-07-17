@@ -275,6 +275,8 @@ fn build_verified_vector_module_with_evidence(
         .map_err(|error| VectorModuleFailure::new(VectorFallbackReason::UiProgram, error))?;
     trace_stage("ui-lifecycle");
     let static_declarations = program.static_declarations().to_vec();
+    let table_declarations = program.table_declarations().to_vec();
+    let table_init_statements = program.table_init_statements().to_vec();
     let module_context = FinalModuleContext {
         module_name,
         num_inputs,
@@ -283,6 +285,8 @@ fn build_verified_vector_module_with_evidence(
         vec_size,
         loop_variant,
         control_statements: &control_statements,
+        table_declarations: &table_declarations,
+        table_init_statements: &table_init_statements,
         math_ops: &math_ops,
         int_helpers: &int_helpers,
         assembly: &assembly,
@@ -299,6 +303,7 @@ fn build_verified_vector_module_with_evidence(
             output_stores: &output_stores,
             ui_fir: &ui_fir,
             static_declarations: &static_declarations,
+            table_declarations: &table_declarations,
             ui,
             plan: routed.plan(),
         },
@@ -520,6 +525,8 @@ struct FinalModuleContext<'a> {
     vec_size: u32,
     loop_variant: u8,
     control_statements: &'a [FirId],
+    table_declarations: &'a [FirId],
+    table_init_statements: &'a [FirId],
     math_ops: &'a std::collections::HashSet<fir::FirMathOp>,
     int_helpers: &'a std::collections::BTreeSet<&'static str>,
     assembly: &'a VectorFirAssembly,
@@ -539,6 +546,8 @@ fn assemble_module(
     let vec_size = context.vec_size;
     let loop_variant = context.loop_variant;
     let control_statements = context.control_statements;
+    let table_declarations = context.table_declarations;
+    let table_init_statements = context.table_init_statements;
     let math_ops = context.math_ops;
     let int_helpers = context.int_helpers;
     let assembly = context.assembly;
@@ -572,7 +581,12 @@ fn assemble_module(
         FirBuilder::new(store).load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
     let sample_rate_store =
         FirBuilder::new(store).store_var("fSampleRate", AccessType::Struct, sample_rate);
-    let constants_body = FirBuilder::new(store).block(&[sample_rate_store]);
+    // Mutable-table content is written once at init and persists across
+    // compute calls; emitting it in the per-block control section would reset
+    // runtime writes every block.
+    let mut constants_statements = vec![sample_rate_store];
+    constants_statements.extend(table_init_statements.iter().copied());
+    let constants_body = FirBuilder::new(store).block(&constants_statements);
     let instance_constants = FirBuilder::new(store).declare_fun(
         "instanceConstants",
         FirType::Fun {
@@ -669,6 +683,7 @@ fn assemble_module(
     let mut fields = vec![sample_rate_field];
     fields.extend(ui_fir.struct_declarations.iter().copied());
     fields.extend(assembly.state_declarations.iter().copied());
+    fields.extend(table_declarations.iter().copied());
     let dsp_struct = FirBuilder::new(store).block(&fields);
     let static_declarations = FirBuilder::new(store).block(static_declarations);
     Ok(FirBuilder::new(store).module(
@@ -845,6 +860,127 @@ fn build_fast_driver(store: &mut FirStore, chunk: FirId, vec_size: i32) -> Vec<F
     vec![guarded_main, guarded_rem]
 }
 
+/// Verifies mutable-table writes and initialization against the emitted FIR.
+///
+/// The mutable-table set is read from the emitted DSP-struct declarations, not
+/// from the effect model or the lowerer registry, so a misprojection on either
+/// side surfaces as a count mismatch here. Three obligations: every claimed
+/// direct `WriteTable` performer is backed by exactly one physical `StoreTable`
+/// on its table's field in `compute` and vice versa (the table analogue of the
+/// UI-write attribution check), and `instanceConstants` initializes every cell
+/// of every mutable table exactly once. Initial values themselves are numeric
+/// claims the certificate does not carry; the native oracle matrix is their
+/// arbiter.
+fn verify_mutable_table_attribution(
+    store: &FirStore,
+    compute: FirId,
+    instance_constants: FirId,
+    table_declarations: &[FirId],
+    plan: &VectorPlan,
+) -> Result<(), VectorModuleFailure> {
+    let mut declared = BTreeMap::<String, usize>::new();
+    for declaration in table_declarations {
+        let FirMatch::DeclareVar {
+            name,
+            typ: FirType::Array(_, length),
+            ..
+        } = match_fir(store, *declaration)
+        else {
+            return Err(module_shape(
+                "mutable table declaration is not a struct array field",
+            ));
+        };
+        declared.insert(name, length);
+    }
+    let mut claimed = BTreeMap::<String, usize>::new();
+    for signal in &plan.signals {
+        for effect in &signal.direct_effects {
+            let EffectAtom::WriteTable(table) = effect else {
+                continue;
+            };
+            let table_id = u64::from(*table);
+            let name = [FirType::Int32, FirType::Float32]
+                .iter()
+                .map(|elem| super::vector_lower::mutable_table_name(table_id, elem))
+                .chain(std::iter::once(super::vector_lower::mutable_table_name(
+                    table_id,
+                    &FirType::Float64,
+                )))
+                .find(|name| declared.contains_key(name));
+            let Some(name) = name else {
+                return Err(module_shape(format!(
+                    "claimed mutable table writer {table_id} has no declared struct field"
+                )));
+            };
+            *claimed.entry(name).or_default() += 1;
+        }
+    }
+    let mut physical = BTreeMap::<String, usize>::new();
+    for node in fir_reachable(store, compute) {
+        let FirMatch::StoreTable { name, .. } = match_fir(store, node) else {
+            continue;
+        };
+        if declared.contains_key(&name) {
+            *physical.entry(name).or_default() += 1;
+        }
+    }
+    for (name, count) in &claimed {
+        let emitted = physical.get(name).copied().unwrap_or(0);
+        if emitted != *count {
+            return Err(module_shape(format!(
+                "mutable table {name} has {count} claimed writers but compute stores it {emitted} times"
+            )));
+        }
+    }
+    for (name, emitted) in &physical {
+        if claimed.get(name).copied().unwrap_or(0) != *emitted {
+            return Err(module_shape(format!(
+                "compute stores mutable table {name} {emitted} times with no matching claimed writer"
+            )));
+        }
+    }
+    let FirMatch::Block(init_statements) = match_fir(store, instance_constants) else {
+        return Err(module_shape("instanceConstants is not a block"));
+    };
+    let mut covered = BTreeMap::<String, BTreeSet<i32>>::new();
+    for statement in &init_statements {
+        let FirMatch::StoreTable { name, index, .. } = match_fir(store, *statement) else {
+            continue;
+        };
+        if !declared.contains_key(&name) {
+            return Err(module_shape(format!(
+                "instanceConstants stores unknown table {name}"
+            )));
+        }
+        let FirMatch::Int32 { value, .. } = match_fir(store, index) else {
+            return Err(module_shape(format!(
+                "mutable table {name} initialization index is not a constant"
+            )));
+        };
+        if !covered.entry(name.clone()).or_default().insert(value) {
+            return Err(module_shape(format!(
+                "mutable table {name} cell {value} initialized twice"
+            )));
+        }
+    }
+    for (name, length) in &declared {
+        let cells = covered.get(name).map_or(0, BTreeSet::len);
+        let complete = cells == *length
+            && covered.get(name).is_some_and(|cells| {
+                cells.first().is_some_and(|&first| first == 0)
+                    && cells
+                        .last()
+                        .is_some_and(|&last| last + 1 == i32::try_from(*length).unwrap_or(i32::MAX))
+            });
+        if !complete {
+            return Err(module_shape(format!(
+                "mutable table {name} initialization covers {cells} of {length} cells"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Rejects a UI write event attributed to a signal that performs no such write.
 ///
 /// The event model now attributes an effect operation to the signal performing
@@ -952,6 +1088,7 @@ struct FinalModuleExpectations<'a> {
     output_stores: &'a [FirId],
     ui_fir: &'a VectorUiFir,
     static_declarations: &'a [FirId],
+    table_declarations: &'a [FirId],
     ui: &'a ui::UiProgram,
     plan: &'a VectorPlan,
 }
@@ -966,6 +1103,7 @@ fn verify_final_module(
         output_stores,
         ui_fir,
         static_declarations: expected_static_declarations,
+        table_declarations,
         ui,
         plan,
     } = *expected;
@@ -1011,6 +1149,14 @@ fn verify_final_module(
         .any(|declaration| !fields.contains(declaration))
     {
         return Err(module_shape("UI zone declaration missing from DSP struct"));
+    }
+    if table_declarations
+        .iter()
+        .any(|declaration| !fields.contains(declaration))
+    {
+        return Err(module_shape(
+            "mutable table declaration missing from DSP struct",
+        ));
     }
     let FirMatch::Block(functions) = match_fir(store, functions) else {
         return Err(module_shape("function section is not a block"));
@@ -1069,6 +1215,13 @@ fn verify_final_module(
     }
     verify_readonly_table_stores(store, compute, expected_static_declarations)?;
     verify_ui_write_attribution(store, compute, ui, plan)?;
+    verify_mutable_table_attribution(
+        store,
+        compute,
+        bodies["instanceConstants"],
+        table_declarations,
+        plan,
+    )?;
     for output in output_stores {
         if !contains_statement(store, compute, *output) {
             return Err(module_shape("compute does not cover every output store"));
@@ -1140,6 +1293,130 @@ mod tests {
             fused_serial_groups: Vec::new(),
             lockstep_bundles: Vec::new(),
         }
+    }
+
+    #[test]
+    fn mutable_table_attribution_must_match_the_emitted_stores_and_init() {
+        let mut store = FirStore::new();
+        let table_id = 55_u64;
+        let name = super::super::vector_lower::mutable_table_name(table_id, &FirType::Float64);
+        let (declaration, compute_with_store, compute_empty, full_init, partial_init) = {
+            let mut b = FirBuilder::new(&mut store);
+            let declaration = b.declare_var(
+                name.clone(),
+                FirType::Array(Box::new(FirType::Float64), 3),
+                AccessType::Struct,
+                None,
+            );
+            let index = b.int32(1);
+            let value = b.float64(0.5);
+            let write = b.store_table(name.clone(), AccessType::Struct, index, value);
+            let compute_with_store = b.block(&[write]);
+            let compute_empty = b.block(&[]);
+            let inits = (0..3)
+                .map(|cell| {
+                    let position = b.int32(cell);
+                    let content = b.float64(f64::from(cell));
+                    b.store_table(name.clone(), AccessType::Struct, position, content)
+                })
+                .collect::<Vec<_>>();
+            let full_init = b.block(&inits);
+            let partial_init = b.block(&inits[..2]);
+            (
+                declaration,
+                compute_with_store,
+                compute_empty,
+                full_init,
+                partial_init,
+            )
+        };
+        let signal = |signal_id: u64, direct: Vec<EffectAtom>| SignalRecord {
+            signal_id,
+            value_type: ValueType::Real,
+            structural: false,
+            rate: Rate::Samp,
+            vectorability: Vectorability::Scal,
+            clock_id: 0,
+            effects: direct.clone(),
+            direct_effects: direct,
+            placement: Placement::Owned(0),
+            duplicable: false,
+        };
+        let plan = |signals: Vec<SignalRecord>| VectorPlan {
+            signals,
+            ..empty_ui_plan()
+        };
+        let writer = plan(vec![signal(
+            table_id,
+            vec![EffectAtom::WriteTable(u32::try_from(table_id).unwrap())],
+        )]);
+
+        verify_mutable_table_attribution(
+            &store,
+            compute_with_store,
+            full_init,
+            &[declaration],
+            &writer,
+        )
+        .expect("one claimed writer, one store, complete init");
+
+        let missing_store = verify_mutable_table_attribution(
+            &store,
+            compute_empty,
+            full_init,
+            &[declaration],
+            &writer,
+        )
+        .expect_err("a claimed writer with no emitted store must be rejected");
+        assert!(
+            missing_store.detail.contains("stores it 0 times"),
+            "{missing_store}"
+        );
+
+        let unclaimed = verify_mutable_table_attribution(
+            &store,
+            compute_with_store,
+            full_init,
+            &[declaration],
+            &plan(Vec::new()),
+        )
+        .expect_err("an emitted store with no claimed writer must be rejected");
+        assert!(
+            unclaimed.detail.contains("no matching claimed writer"),
+            "{unclaimed}"
+        );
+
+        let double_claim = verify_mutable_table_attribution(
+            &store,
+            compute_with_store,
+            full_init,
+            &[declaration],
+            &plan(vec![
+                signal(
+                    table_id,
+                    vec![EffectAtom::WriteTable(u32::try_from(table_id).unwrap())],
+                ),
+                signal(
+                    table_id + 1,
+                    vec![EffectAtom::WriteTable(u32::try_from(table_id).unwrap())],
+                ),
+            ]),
+        )
+        .expect_err("two claimed writers for one store must be rejected");
+        assert!(
+            double_claim.detail.contains("2 claimed writers"),
+            "{double_claim}"
+        );
+
+        let incomplete = verify_mutable_table_attribution(
+            &store,
+            compute_with_store,
+            partial_init,
+            &[declaration],
+            &writer,
+        )
+        .expect_err("an init that skips one cell must be rejected");
+        assert!(incomplete.detail.contains("covers 2 of 3"), "{incomplete}");
     }
 
     #[test]
@@ -1468,6 +1745,7 @@ mod tests {
                     output_stores: &[forged],
                     ui_fir: &ui_fir,
                     static_declarations: &[],
+                    table_declarations: &[],
                     ui: &ui::UiProgram::empty(),
                     plan: &empty_ui_plan(),
                 },
@@ -1511,6 +1789,7 @@ mod tests {
                     output_stores: &output_stores,
                     ui_fir: &ui_fir,
                     static_declarations: &[forged],
+                    table_declarations: &[],
                     ui: &ui::UiProgram::empty(),
                     plan: &empty_ui_plan(),
                 },

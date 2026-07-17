@@ -25,6 +25,20 @@ const READONLY_TABLE_INVARIANT_INDEX_SOURCE: &str = concat!(
     "process = *(sin(w(4*hslider(\"value\",0,0,1,0.01)))),",
     " w(4*hslider(\"value\",0,0,1,0.01));"
 );
+// One read-only table, one float `rwtable`, and one int `rwtable` with a
+// recursive generator, sharing a recursive index: the `table1`/`table2`
+// corpus shapes. Admission rejected every live-port table outright before
+// mutable lowering landed, so certification alone discriminates.
+const MUTABLE_TABLE_SOURCE: &str = concat!(
+    "wf = waveform{0,0.5,1,0.5,0,-0.5,-1,-0.5};\n",
+    "size = wf : _,!;\n",
+    "idx = (+(1)~_) % size;\n",
+    "tro = wf, idx : rdtable;\n",
+    "trw = wf, idx, (waveform{10,10.5,11,10.5,10,-10.5,-11,-10.5} : !,_), idx : rwtable;\n",
+    "iinteg = +(1)~_;\n",
+    "irw = rwtable(6, iinteg, (iinteg+1)%6, 2*iinteg, (iinteg+2)%6);\n",
+    "process = tro, trw, irw;"
+);
 const PULSE_COUNTUP_LOOP_SOURCE: &str =
     "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;";
 const PULSE_COUNTDOWN_LOOP_SOURCE: &str =
@@ -393,6 +407,13 @@ fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
         .find("output0[i0] =")
         .expect("safe pure tail in fused loop");
     assert!(write < tail, "the state write must precede the pure tail");
+}
+
+#[test]
+fn mutable_rwtable_is_certified_and_bit_exact() {
+    assert_vector_pipeline_certified("mutable_rwtable", MUTABLE_TABLE_SOURCE, 32);
+    assert_scalar_vector_bit_exact("mutable_rwtable", MUTABLE_TABLE_SOURCE, 32);
+    assert_scalar_vector_bit_exact("mutable_rwtable_tail", MUTABLE_TABLE_SOURCE, 24);
 }
 
 #[test]
