@@ -1,7 +1,7 @@
 # General Fused Serial Group Certificate Plan
 
 Date: 2026-07-16
-Status: D0-D2 implemented; D3 corpus qualification pending
+Status: complete; D3 qualified on 2026-07-17 in `2d0a2a49`
 Scope: checked serial fusion for every immediate state-mediated delay crossing
 
 ## 1. Objective and baseline
