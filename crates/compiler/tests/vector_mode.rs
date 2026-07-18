@@ -8,7 +8,7 @@
 
 use std::io::Cursor;
 
-use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
+use codegen::backends::interp::{read_fbc, FbcDspInstance, InterpOptions};
 use compiler::{
     Compiler, ComputeMode, SchedulingStrategy, SignalFirLane, VectorEffectiveMode,
     VectorFallbackReason, VectorPipelineStatus,
@@ -48,12 +48,17 @@ const SOUNDFILE_READ_SOURCE: &str = concat!(
     "sf = soundfile(\"son[url:{'sound1';'sound2'}]\", 2);\n",
     "process = 0, _~+(1) : sf : _,!,_,_;"
 );
-const PULSE_COUNTUP_LOOP_SOURCE: &str =
-    "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;";
-const PULSE_COUNTDOWN_LOOP_SOURCE: &str =
-    "ba = library(\"basics.lib\"); process = ba.pulse_countdown_loop(4, 1) + 0.001;";
+const PULSE_COUNTUP_LOOP_SOURCE: &str = r#"
+    pulse_countup_loop(n, trig) = + ~ cond(n) * trig with { cond(n, x) = x * (x <= n); };
+    process = pulse_countup_loop(4, 1) + 0.001;
+"#;
+const PULSE_COUNTDOWN_LOOP_SOURCE: &str = r#"
+    pulse_countdown_loop(n, trig) = - ~ cond(n) * trig with { cond(n, x) = x * (x >= n); };
+    process = pulse_countdown_loop(4, 1) + 0.001;
+"#;
 const INDIRECT_RECURSIVE_DELAY_SOURCE: &str = r#"
-    import("music.lib");
+    SR = min(192000.0, max(1.0, fconstant(int fSamplingFreq, <math.h>)));
+    decimal(x) = x - floor(x);
     indirect(freq, reset, replacement) =
         (select2(prefix(1, clock), +(increment), replacement) : decimal) ~ _
     with {
@@ -76,7 +81,19 @@ const LOCKSTEP_MIXED_BRANCH_SOURCE: &str =
     include_str!("../../../tests/corpus/vector_lockstep_mixed_branch.dsp");
 const LOCKSTEP_NEAR_ISOMORPHIC_SOURCE: &str =
     include_str!("../../../tests/corpus/vector_lockstep_near_isomorphic.dsp");
-const SMOOTHDELAY_SOURCE: &str = include_str!("../../../tests/impulse-tests/dsp/smoothdelay.dsp");
+const SMOOTHDELAY_SOURCE: &str = r#"
+    delay(n, d, x) = x@(int(d) & (n - 1));
+    feedback = hslider("feedback", 0.8711, 0.0, 1.0, 0.001);
+    delay_time = hslider("delay", 5496.0, 0.0, 16384.0, 1.0);
+    voice = (+ : delay(32768, delay_time)) ~ *(feedback);
+    process = par(i, 2, voice);
+"#;
+const APF_VECTOR_SOURCE: &str = r#"
+    conv2(c0, c1, x) = c0 * x + c1 * x';
+    conv3(c0, c1, c2, x) = c0 * x + c1 * x' + c2 * x'';
+    biquad(x, a0, a1, a2, b1, b2) = x : + ~ ((-1) * conv2(b1, b2)) : conv3(a0, a1, a2);
+    process = _, 0.9, -0.2, 0.1, -0.4, 0.2 : biquad;
+"#;
 
 /// Compiles `source` to interpreter bytecode with the given compute and
 /// scheduling modes, then runs one block with the provided input channels.
@@ -729,12 +746,15 @@ fn phase2_plan_accepts_multi_projection_recursion_and_table_value_transports() {
                 vec_size: 32,
                 loop_variant: 0,
             });
-            let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/impulse-tests/dsp");
-            for name in ["APF.dsp", "pow.dsp"] {
-                let path = corpus.join(name);
+            for (name, source) in [
+                ("apf_vector.dsp", APF_VECTOR_SOURCE),
+                (
+                    "pow.dsp",
+                    include_str!("../../../tests/impulse-tests/dsp/pow.dsp"),
+                ),
+            ] {
                 let output = compiler
-                    .compile_file_default_to_fir_with_lane(&path, SignalFirLane::TransformFastLane)
+                    .compile_source_to_fir_with_lane(name, source, SignalFirLane::TransformFastLane)
                     .unwrap_or_else(|error| panic!("{name} vector FIR: {error}"));
                 assert_ne!(
                     output.vector_pipeline_status,
