@@ -81,6 +81,11 @@ pub enum VectorPlanBuildError {
     VecSizeZero,
     /// A certified dependency unexpectedly names no certified record.
     MissingRecord { signal_id: u32 },
+    /// A certificate dependency endpoint carries a record and possibly a
+    /// placement, but the placement traversal never reached it, so it has no
+    /// execution context. Distinct from [`Self::MissingRecord`]: the record
+    /// exists, the plan's context model is incomplete.
+    MissingContext { signal_id: u32 },
     /// A compute-visible sample signal was not reached by occurrence facts.
     SampleSignalUnplaced { signal_id: u32 },
     /// A possible zero-delay state read crosses loops without one serial
@@ -96,6 +101,12 @@ impl fmt::Display for VectorPlanBuildError {
             Self::VecSizeZero => write!(f, "vector-plan chunk size must be positive"),
             Self::MissingRecord { signal_id } => {
                 write!(f, "vector-plan dependency names missing signal {signal_id}")
+            }
+            Self::MissingContext { signal_id } => {
+                write!(
+                    f,
+                    "vector-plan placement traversal never reached signal {signal_id}: it has a record but no execution context"
+                )
             }
             Self::SampleSignalUnplaced { signal_id } => {
                 write!(f, "sample signal {signal_id} has no vector placement")
@@ -1327,11 +1338,11 @@ fn add_dependency_edges(
         state
             .contexts
             .get(&dependency.from)
-            .ok_or(VectorPlanBuildError::MissingRecord {
+            .ok_or(VectorPlanBuildError::MissingContext {
                 signal_id: dependency.from,
             })?;
     let target = state.placement.get(&dependency.to).copied().ok_or(
-        VectorPlanBuildError::MissingRecord {
+        VectorPlanBuildError::MissingContext {
             signal_id: dependency.to,
         },
     )?;

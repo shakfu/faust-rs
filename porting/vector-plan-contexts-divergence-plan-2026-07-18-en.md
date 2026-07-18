@@ -1,7 +1,7 @@
 # Vector Plan Contexts Divergence Plan
 
 Date: 2026-07-18
-Status: X0 diagnosed (class A traced to its mechanism; B/C mechanism pending X1)
+Status: X1 complete (all three mechanisms traced; diagnostic corrected); X2 pending
 Scope: agreement between the vector plan's execution-context model and what the
 lowering materializes
 
@@ -64,51 +64,70 @@ The diagnostic is also misleading: the record is present, only the context is
 missing, yet the message says "dependency names missing signal 2196". This
 cost real diagnosis time and is fixed independently of the substance.
 
-## 3. Established facts - classes B and C
+## 3. Established mechanisms - classes B and C (X1)
 
-What is established:
+Both trace to symbolic multi-projection recursion groups, and together with A
+they sharpen the unified statement: the certificate's dependency edges carry
+three distinct semantics - value use, scheduling-only, and delayed - and the
+plan flattens all three into one context/transport model, each wrongly.
 
-- **B** (`karplus.dsp`, `chain.dsp`, identical shape): the lowering resolves a
-  use of signal S owned by loop 2 from consumer loop 3; the plan planned
-  **zero** transports for S (`planned_routes=[]`). The signal is
-  non-duplicable, `Scal`, with **38 effects**.
-- **C** (`virtualAnalogForBrowser.dsp`): the plan planned
-  `transport_s5550_l4_l148`; loop 148's body loads four other transports and
-  never that one. The signal is non-duplicable, `Scal`, `Owned(4)`, with
-  **4 effects**.
-- C is **not** the typed-walker blindness fixed for soundfiles in E2: a
-  generic child enumeration over the consumer body does not find the load
-  either, so the load is genuinely absent rather than invisible.
-- C is **not** a state-plan consumption: the signal appears in no prefix,
-  delay, recursion, or waveform transition of the consumer loop. The existing
-  escape hatch in the body check covers prefixes only.
-- Both classes involve heavily effectful, non-duplicable, `Scal` signals -
-  exactly where duplicability and effects decide materialization.
+**B - a `Delayed` edge nobody serves.** One-line reproducer
+`import("stdfaust.lib"); process = pm.ks(200, 0.5);`. Consumer 235
+(`SIGPROJ(0, SYMREF(W1))`, loop 1) depends `Delayed { amount: 1 }` on 1036
+(`SIGPROJ(1, SYMREC(W2))`, loop 0, the group's value signal). The decoration
+record of 1036 carries `max_delay = 0, delay_reads = 0`: **the certificate is
+self-inconsistent** - a delayed scheduling edge targets a record with no delay
+facts, because the delay facts and the dependency edges come from different
+projections that disagree on cross-group symbolic reads. Consequently nobody
+serves the read: transports are derived only from `delay == 0` occurrences
+(plan.rs, `cross_uses` filter) and `DelayTransition`s only from
+`max_delay > 0` records (state.rs). The lowering then resolves the raw value
+cross-loop (`lower_raw -> resolve_in_loop`, backtraced) and fails
+`MissingTransport`. A stdlib-free reduction was attempted (multi-projection
+cross-group delayed reads, with and without state) and certifies; the
+karplus termination/chain structure resists synthetic reduction, so the
+one-liner above is the regression instance.
 
-What is **not** established: why `contexts` is too narrow in B and too wide in
-C. The unified attribution rests on all three classes reading or writing the
-same map, plus the measured symptoms above; the precise divergence path in B
-and C has not been traced to a line. X1 establishes it before any fix is
-designed.
+**C - a scheduling-only edge transported as a value.** Minimal stdlib-free
+reproducer:
 
-## 4. Correction shape
+```
+fA(x,y) = y + 0.125, x * 0.5;
+gA = fA ~ (_,_);
+aOut = gA : _,!;
+process = attach(_, aOut);
+```
 
-One phase, not three. The deliverable is agreement between the plan's context
-model and the lowering's materialization, established as an invariant rather
-than repaired per symptom. Two candidate shapes, to be decided by X1's
-evidence:
+Consumer 5551 in the WAC case is `SIGATTACH(x, SIGPROJ(0, SYMREC(W21)))` with
+an `Immediate` edge to the projection. `attach(x, y)` returns `x` and only
+forces `y`'s computation - a pure ordering edge. The plan flattens the
+`Immediate` edge into `cross_uses` and plans a value transport; the
+`SIGATTACH` lowering discards the attached value, so the consumer body never
+loads it, and the body check rejects - correctly, which is why this class
+fails closed. Negative results that narrowed it: not the E2 walker blindness
+(a generic child enumeration does not find the load either), not a state-plan
+consumption (no prefix, delay, recursion, or waveform transition consumes it).
 
-- **Close the traversal**: make `visit` recurse through structural carriers to
-  their executable children, so `contexts` covers every signal the certificate
-  can reach, and make the pre-seeded `owner` placements enter the traversal.
-  This directly addresses A and plausibly B.
-- **Make the disagreement impossible**: derive transports from the same
-  materialization decision the lowering makes, rather than from an
-  independently computed context set.
+## 4. Correction shape (informed by X1)
 
-The second is the stronger invariant and the larger change. X1 decides;
-whichever is chosen, anything that cannot be proven stays fail-closed with a
-diagnostic.
+One phase, three edge semantics handled explicitly:
+
+- **A - traversal closure**: `visit` must recurse through structural carriers
+  to their executable children (the module's own stated contract), and
+  pre-seeded `owner` placements must enter the traversal, so every signal a
+  certificate dependency names carries a context.
+- **B - certificate consistency**: a `Delayed { amount }` dependency must
+  target a record with `max_delay >= amount`. This is a **decoration checker
+  obligation** that neither side currently states; today's self-inconsistent
+  certificate is accepted and the failure surfaces two stages later. Once the
+  obligation holds, the serving decision (delay cell vs transport plus local
+  history) is well-defined and fail-closed.
+- **C - scheduling-only edges**: `attach`-style forcing edges must produce
+  ordering edges, never `cross_uses` transports. The dependency projection
+  knows the source shape; the flattening point in `add_dependency_edges` is
+  where the distinction dies today.
+
+Anything that cannot be proven stays fail-closed with its diagnostic.
 
 ## 5. Independence obligation
 
