@@ -127,6 +127,12 @@ fn clocked_not_lowered(message: impl Into<String>) -> SignalFirError {
 }
 
 impl<'a> SignalToFirLower<'a> {
+    /// Clock-domain instance owning state emitted at the current region depth.
+    pub(super) fn current_clock_context(&self) -> Option<u32> {
+        self.effective_domain()
+            .map(propagate::ClockDomainId::as_u32)
+    }
+
     /// Records the closure that must be materialized inside guarded hold
     /// payloads. This enforces the C++ `generatePermVar` exception before the
     /// top-level scalar schedule starts lowering ancestor-domain nodes.
@@ -241,6 +247,7 @@ impl<'a> SignalToFirLower<'a> {
         carried: SigId,
     ) -> Result<DelayLineInfo, SignalFirError> {
         let mut line = self.delay_line_info(carried)?;
+        let clock_context = self.current_clock_context();
         let Some(domain) = self.effective_domain() else {
             return Ok(line);
         };
@@ -248,13 +255,14 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(line);
         }
 
-        let was_inner = self.delay.is_line_inner(carried);
-        self.delay.mark_line_inner(carried);
+        let was_inner = self.delay.is_line_inner(carried, clock_context);
+        self.delay.mark_line_inner(carried, clock_context);
         match line.strategy.clone() {
             super::super::delay::DelayKind::Shift => {}
             super::super::delay::DelayKind::CircularPow2 => {
                 let cursor = self.active_circular_cursor_name();
-                self.delay.set_line_cursor(carried, cursor.clone());
+                self.delay
+                    .set_line_cursor(carried, clock_context, cursor.clone());
                 line.cursor = Some(cursor);
             }
             super::super::delay::DelayKind::IfWrapping { counter_name } => {
@@ -341,17 +349,23 @@ impl<'a> SignalToFirLower<'a> {
     pub(super) fn assign_clocked_delay_cursors(&mut self) -> Result<(), SignalFirError> {
         use super::super::delay::DelayKind;
 
-        let Some(clocked) = self.clocked.as_ref() else {
+        if self.clocked.is_none() {
             return Ok(());
-        };
+        }
         let mut inner_lines: Vec<(SigId, propagate::ClockDomainId, DelayKind, usize)> = Vec::new();
-        for (&carried, info) in self.delay.lines() {
-            if let Some(Some(domain)) = clocked.envs.env(carried) {
-                inner_lines.push((carried, domain, info.strategy.clone(), info.size));
+        for (&(carried, clock_context), info) in self.delay.lines() {
+            if let Some(domain) = clock_context {
+                inner_lines.push((
+                    carried,
+                    propagate::ClockDomainId::from_u32(domain),
+                    info.strategy.clone(),
+                    info.size,
+                ));
             }
         }
         for (carried, domain, strategy, size) in inner_lines {
-            self.delay.mark_line_inner(carried);
+            let clock_context = Some(domain.as_u32());
+            self.delay.mark_line_inner(carried, clock_context);
             match strategy {
                 DelayKind::Shift => {}
                 DelayKind::CircularPow2 => {
@@ -368,7 +382,7 @@ impl<'a> SignalToFirLower<'a> {
                         };
                         self.domain_counters.declare_retrieve_iota(domain, &mut ctx)
                     };
-                    self.delay.set_line_cursor(carried, cursor);
+                    self.delay.set_line_cursor(carried, clock_context, cursor);
                     self.clocked
                         .as_mut()
                         .expect("clocked state present")

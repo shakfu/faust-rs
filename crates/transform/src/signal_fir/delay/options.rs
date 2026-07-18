@@ -44,14 +44,26 @@ impl Default for DelayOptions {
 /// - `delay_u < max_copy_delay` → [`DelayKind::Shift`]
 /// - `max_copy_delay ≤ delay_u < delay_line_threshold` → [`DelayKind::CircularPow2`]
 /// - `delay_u ≥ delay_line_threshold` → [`DelayKind::IfWrapping`]
-pub(super) fn select_delay_kind(delay_u: u32, options: &DelayOptions, carried: SigId) -> DelayKind {
+pub(super) fn select_delay_kind(
+    delay_u: u32,
+    options: &DelayOptions,
+    carried: SigId,
+    clock_context: Option<u32>,
+) -> DelayKind {
     if delay_u < options.max_copy_delay {
         DelayKind::Shift
     } else if delay_u < options.delay_line_threshold {
         DelayKind::CircularPow2
     } else {
         DelayKind::IfWrapping {
-            counter_name: format!("fIdx{}", carried.as_u32()),
+            counter_name: contextual_name("fIdx", carried, clock_context),
         }
+    }
+}
+
+pub(super) fn contextual_name(prefix: &str, signal: SigId, clock_context: Option<u32>) -> String {
+    match clock_context {
+        Some(domain) => format!("{prefix}{}_d{domain}", signal.as_u32()),
+        None => format!("{prefix}{}", signal.as_u32()),
     }
 }

@@ -173,9 +173,9 @@ pub(super) struct RecursionGroupProjection {
 /// - per-sample scheduling dedup for recursive body materialization.
 #[derive(Default)]
 pub(super) struct RecursionState {
-    /// Maps `(group_id, body_index)` to the recursion array allocated for that
-    /// output slot of a recursion group.
-    pub(super) rec_array_by_group_index: HashMap<(u32, usize), RecArrayInfo>,
+    /// Maps `(group_id, body_index, clock_context)` to the recursion array
+    /// allocated for that output occurrence of a recursion group.
+    pub(super) rec_array_by_group_index: HashMap<(u32, usize, Option<u32>), RecArrayInfo>,
     /// Resolves a symbolic recursion variable to its owning `SYMREC` group.
     ///
     /// C++ uses `Tree` identity and vector-name properties for this binding.
@@ -198,11 +198,12 @@ pub(super) struct RecursionState {
     pub(super) recursion_stack: Vec<Vec<RecArrayInfo>>,
     /// Stack of active symbolic recursion variables matching `recursion_stack`.
     pub(super) recursion_vars: Vec<SigId>,
-    /// Current-sample bindings for scalar recursion carriers keyed by
-    /// `(group_id, body_index)`.
-    pub(super) current_value_by_group_index: HashMap<(u32, usize), RecursionCurrentValueBinding>,
-    /// Groups whose recursive body pass has already been scheduled this sample.
-    pub(super) scheduled_groups: HashSet<SigId>,
+    /// Current-sample bindings for scalar recursion carriers keyed by group
+    /// output and occurrence clock context.
+    pub(super) current_value_by_group_index:
+        HashMap<(u32, usize, Option<u32>), RecursionCurrentValueBinding>,
+    /// Group occurrences whose recursive body pass has been scheduled this sample.
+    pub(super) scheduled_groups: HashSet<(SigId, Option<u32>)>,
 }
 
 impl RecursionState {
@@ -227,9 +228,14 @@ impl RecursionState {
 
     /// Returns the already materialized carrier metadata for one recursion
     /// output slot, if that slot has been allocated.
-    pub(super) fn carrier_info(&self, group: SigId, index: usize) -> Option<RecArrayInfo> {
+    pub(super) fn carrier_info(
+        &self,
+        group: SigId,
+        index: usize,
+        clock_context: Option<u32>,
+    ) -> Option<RecArrayInfo> {
         self.rec_array_by_group_index
-            .get(&(group.as_u32(), index))
+            .get(&(group.as_u32(), index, clock_context))
             .cloned()
     }
 
@@ -247,8 +253,12 @@ impl RecursionState {
 
     /// Marks a recursion group as already scheduled for body lowering in the
     /// current sample and returns `true` only on the first mark.
-    pub(super) fn mark_group_scheduled(&mut self, group: SigId) -> bool {
-        self.scheduled_groups.insert(group)
+    pub(super) fn mark_group_scheduled(
+        &mut self,
+        group: SigId,
+        clock_context: Option<u32>,
+    ) -> bool {
+        self.scheduled_groups.insert((group, clock_context))
     }
 
     /// Records the stack-local current-sample binding for one scalar carrier.
@@ -256,10 +266,11 @@ impl RecursionState {
         &mut self,
         group: SigId,
         index: usize,
+        clock_context: Option<u32>,
         binding: RecursionCurrentValueBinding,
     ) {
         self.current_value_by_group_index
-            .insert((group.as_u32(), index), binding);
+            .insert((group.as_u32(), index, clock_context), binding);
     }
 
     /// Returns the current-sample binding for one scalar carrier, if any.
@@ -268,11 +279,12 @@ impl RecursionState {
         arena: &TreeArena,
         group: SigId,
         index: usize,
+        clock_context: Option<u32>,
     ) -> Option<RecursionCurrentValueBinding> {
         let group = self.canonical_group(arena, group)?;
         let canonical_index = canonical_group_index(arena, group, index)?;
         self.current_value_by_group_index
-            .get(&(group.as_u32(), canonical_index))
+            .get(&(group.as_u32(), canonical_index, clock_context))
             .cloned()
     }
 
@@ -288,10 +300,11 @@ impl RecursionState {
         arena: &TreeArena,
         group: SigId,
         index: usize,
+        clock_context: Option<u32>,
     ) -> Option<RecursionCarrierRef> {
         let group = self.canonical_group(arena, group)?;
         let canonical_index = canonical_group_index(arena, group, index)?;
-        self.carrier_info(group, canonical_index)
+        self.carrier_info(group, canonical_index, clock_context)
             .map(RecursionCarrierRef::new)
     }
 
@@ -305,11 +318,12 @@ impl RecursionState {
         arena: &TreeArena,
         group: SigId,
         index: usize,
+        clock_context: Option<u32>,
     ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
         if let Some(carrier) = resolve_active_recursion_carrier(arena, self, group, index)? {
             return Ok(Some(carrier));
         }
-        Ok(self.resolve_materialized_carrier(arena, group, index))
+        Ok(self.resolve_materialized_carrier(arena, group, index, clock_context))
     }
 
     /// Resolves a delay chain rooted at a recursion projection against the
@@ -318,6 +332,7 @@ impl RecursionState {
         &self,
         arena: &TreeArena,
         value: SigId,
+        clock_context: Option<u32>,
     ) -> Result<Option<RecursionDelayRef>, SignalFirError> {
         let Some(key) = match_recursion_delay_key(arena, value) else {
             return Ok(None);
@@ -332,7 +347,7 @@ impl RecursionState {
             )
         })?;
         Ok(self
-            .resolve_carrier(arena, key.group, proj_index)?
+            .resolve_carrier(arena, key.group, proj_index, clock_context)?
             .map(|carrier| RecursionDelayRef {
                 carrier,
                 implicit_delay: key.implicit_delay,
@@ -505,6 +520,8 @@ pub(super) struct RecursionAllocCtx<'a> {
     pub(super) clear_init_seen: &'a mut HashSet<String>,
     pub(super) next_loop_var_id: &'a mut usize,
     pub(super) recursion: &'a mut RecursionState,
+    /// Occurrence clock domain of the group being allocated.
+    pub(super) clock_context: Option<u32>,
 }
 
 impl RecursionAllocCtx<'_> {
@@ -579,7 +596,7 @@ impl RecursionAllocCtx<'_> {
         typ: FirType,
         init: FirId,
     ) -> Result<RecArrayInfo, SignalFirError> {
-        let key = (group.as_u32(), index);
+        let key = (group.as_u32(), index, self.clock_context);
         if let Some(info) = self.recursion.rec_array_by_group_index.get(&key) {
             return Ok(info.clone());
         }
@@ -588,13 +605,21 @@ impl RecursionAllocCtx<'_> {
         } else {
             "fRec"
         };
-        let name = if index == 0 {
+        let base_name = if index == 0 {
             format!("{prefix}{}", group.as_u32())
         } else {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
+        let name = match self.clock_context {
+            Some(domain) => format!("{base_name}_d{domain}"),
+            None => base_name,
+        };
         let (size, strategy) = match decode_symbolic_group_bodies(self.arena, group) {
-            Some((var, bodies)) => match self.delay.rec_output_analysis(var.as_u32(), index) {
+            Some((var, bodies)) => match self.delay.rec_output_analysis_in_context(
+                var.as_u32(),
+                index,
+                self.clock_context,
+            ) {
                 Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => {
                     (1, RecursionStorageStrategy::SingleScalar)
                 }

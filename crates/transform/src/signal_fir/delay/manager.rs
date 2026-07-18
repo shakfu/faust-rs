@@ -9,7 +9,7 @@ use signals::SigId;
 use super::circular_pow2::GlobalCircularCursor;
 use super::context::DelayFirCtx;
 use super::if_wrapping;
-use super::options::{self, DelayOptions};
+use super::options::{self, DelayOptions, contextual_name};
 use super::plan::DelayAnalysisEntry;
 use super::{DelayKind, DelayLineInfo};
 use super::{SignalFirError, SignalFirErrorCode};
@@ -23,9 +23,9 @@ use super::{SignalFirError, SignalFirErrorCode};
 /// | Field | Type | Role |
 /// |-------|------|------|
 /// | `options` | [`DelayOptions`] | `-mcd` / `-dlt` strategy thresholds |
-/// | `delay_lines` | `HashMap<SigId, DelayLineInfo>` | Allocated buffers, keyed by carried signal |
-/// | `rec_output_analysis` | `HashMap<(u32, usize), DelayAnalysisEntry>` | Read-only accumulated delay metadata per recursion output |
-/// | `scheduled_delay_writes` | `HashSet<SigId>` | Dedup guard for per-sample delay writes |
+/// | `delay_lines` | `HashMap<(SigId, Option<u32>), DelayLineInfo>` | Allocated buffers, keyed by carried signal and clock occurrence |
+/// | `rec_output_analysis` | `HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>` | Accumulated delay metadata per recursion output and clock occurrence |
+/// | `scheduled_delay_writes` | `HashSet<(SigId, Option<u32>)>` | Per-occurrence dedup guard for delay writes |
 ///
 /// # Planning / allocation flow
 ///
@@ -33,7 +33,7 @@ use super::{SignalFirError, SignalFirErrorCode};
 ///    a [`DelayPlan`] (per-carrier max delays + recursion-output sizing metadata),
 ///    then stores the recursion-output map via [`Self::set_rec_output_analysis`].
 /// 2. `prepare_delay_lines` allocates each owned delay line from `plan.lines`
-///    through [`Self::ensure_delay_line`] using a [`DelayFirCtx`].
+///    through [`Self::ensure_delay_line_in_context`] using a [`DelayFirCtx`].
 /// 3. During lowering, the orchestration in `module/` delegates strategy-local
 ///    FIR emission to [`emit_fixed_delay_for_line`] / [`emit_delay1_for_line`].
 /// 4. `ensure_recursion_array_for_group` consumes the recursion-output analysis
@@ -46,14 +46,15 @@ use super::{SignalFirError, SignalFirErrorCode};
 pub(crate) struct DelayManager {
     /// Strategy selection thresholds (`-mcd` / `-dlt` options).
     options: DelayOptions,
-    /// Allocated delay buffers, keyed by carried-signal id.
-    delay_lines: HashMap<SigId, DelayLineInfo>,
-    /// Read-only accumulated delay metadata keyed by `(rec_var_id, proj_index)`.
-    rec_output_analysis: HashMap<(u32, usize), DelayAnalysisEntry>,
-    /// Dedup guard: ensures the delay-write store for a given carried signal is
-    /// emitted at most once per sample, even when the same signal is used by
-    /// multiple `SIGDELAY` reads.
-    scheduled_delay_writes: HashSet<SigId>,
+    /// Allocated delay buffers, keyed by carried signal and clock occurrence.
+    delay_lines: HashMap<(SigId, Option<u32>), DelayLineInfo>,
+    /// Read-only accumulated delay metadata keyed by recursion output and clock
+    /// occurrence.
+    rec_output_analysis: HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
+    /// Dedup guard: ensures the delay-write store for one carried-signal
+    /// occurrence is emitted at most once per sample, even when it feeds
+    /// multiple `SIGDELAY` reads in the same region.
+    scheduled_delay_writes: HashSet<(SigId, Option<u32>)>,
 }
 
 impl DelayManager {
@@ -89,14 +90,15 @@ impl DelayManager {
     /// - `delay ≥ delay_line_threshold` → [`DelayKind::IfWrapping`] (exact size,
     ///   per-line `fIdx<id>` counter declared via `ctx`)
     ///
-    /// On first call for `carried`, emits the struct declaration and registers an
-    /// `instanceClear` zeroing loop via `ctx`.  Subsequent calls for the same
-    /// `carried` return the cached info; an error is returned if the cached size is
-    /// smaller than what the current delay requires.
-    pub(crate) fn ensure_delay_line(
+    /// On first call for `(carried, clock_context)`, emits the struct declaration
+    /// and registers an `instanceClear` zeroing loop via `ctx`. Subsequent calls
+    /// for the same occurrence return the cached info; an error is returned if
+    /// the cached size is smaller than what the current delay requires.
+    pub(crate) fn ensure_delay_line_in_context(
         &mut self,
         carried: SigId,
         delay: i32,
+        clock_context: Option<u32>,
         ctx: &mut DelayFirCtx<'_>,
     ) -> Result<DelayLineInfo, SignalFirError> {
         if delay < 0 {
@@ -107,14 +109,15 @@ impl DelayManager {
         }
         // Select strategy based on delay amount and options.
         let delay_u = delay as u32;
-        let strategy = options::select_delay_kind(delay_u, &self.options, carried);
+        let strategy = options::select_delay_kind(delay_u, &self.options, carried, clock_context);
 
         // Compute required buffer size via the unified DelayKind method.
         let required_size = strategy.buffer_size(delay)?;
 
         let elem_type = ctx.signal_elem_type(carried)?;
 
-        if let Some(existing) = self.delay_lines.get(&carried) {
+        let key = (carried, clock_context);
+        if let Some(existing) = self.delay_lines.get(&key) {
             if existing.size < required_size {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -151,7 +154,7 @@ impl DelayManager {
         } else {
             "fVec"
         };
-        let name = format!("{prefix}{}", carried.as_u32());
+        let name = contextual_name(prefix, carried, clock_context);
         let array_ty = fir::FirType::Array(Box::new(elem_type), required_size);
         let decl = {
             let mut b = fir::FirBuilder::new(ctx.store);
@@ -166,19 +169,26 @@ impl DelayManager {
             cursor: None,
             inner_clocked: false,
         };
-        self.delay_lines.insert(carried, info.clone());
+        self.delay_lines.insert(key, info.clone());
         Ok(info)
     }
 
     /// Iterates the planned delay lines (carried signal, line info).
-    pub(in crate::signal_fir) fn lines(&self) -> impl Iterator<Item = (&SigId, &DelayLineInfo)> {
+    pub(in crate::signal_fir) fn lines(
+        &self,
+    ) -> impl Iterator<Item = (&(SigId, Option<u32>), &DelayLineInfo)> {
         self.delay_lines.iter()
     }
 
     /// Overrides the circular cursor of one planned line (per-domain IOTA,
-    /// roadmap P3). Later `get_delay_line` clones observe the new cursor.
-    pub(in crate::signal_fir) fn set_line_cursor(&mut self, carried: SigId, cursor: String) {
-        if let Some(info) = self.delay_lines.get_mut(&carried) {
+    /// roadmap P3). Later `get_delay_line_in_context` clones observe the cursor.
+    pub(in crate::signal_fir) fn set_line_cursor(
+        &mut self,
+        carried: SigId,
+        clock_context: Option<u32>,
+        cursor: String,
+    ) {
+        if let Some(info) = self.delay_lines.get_mut(&(carried, clock_context)) {
             info.cursor = Some(cursor);
         }
     }
@@ -186,28 +196,36 @@ impl DelayManager {
     /// Returns the carriers of every planned `CircularPow2` line still using
     /// the shared global cursor (`cursor == None`) — i.e. the lines that
     /// require the global `fIOTA` to be declared/advanced (roadmap P3 slice 4).
-    pub(in crate::signal_fir) fn global_circular_carriers(&self) -> Vec<SigId> {
+    pub(in crate::signal_fir) fn global_circular_carriers(&self) -> Vec<(SigId, Option<u32>)> {
         self.delay_lines
             .iter()
             .filter(|(_, info)| {
                 info.cursor.is_none() && matches!(info.strategy, DelayKind::CircularPow2)
             })
-            .map(|(&carried, _)| carried)
+            .map(|(&key, _)| key)
             .collect()
     }
 
     /// Marks one planned line as living inside a clocked block: its
     /// end-of-sample maintenance moves into the guarded region (roadmap P3
     /// slice 4), so `emit_sample_end_updates` skips it at the top level.
-    pub(in crate::signal_fir) fn mark_line_inner(&mut self, carried: SigId) {
-        if let Some(info) = self.delay_lines.get_mut(&carried) {
+    pub(in crate::signal_fir) fn mark_line_inner(
+        &mut self,
+        carried: SigId,
+        clock_context: Option<u32>,
+    ) {
+        if let Some(info) = self.delay_lines.get_mut(&(carried, clock_context)) {
             info.inner_clocked = true;
         }
     }
 
-    pub(in crate::signal_fir) fn is_line_inner(&self, carried: SigId) -> bool {
+    pub(in crate::signal_fir) fn is_line_inner(
+        &self,
+        carried: SigId,
+        clock_context: Option<u32>,
+    ) -> bool {
         self.delay_lines
-            .get(&carried)
+            .get(&(carried, clock_context))
             .is_some_and(|info| info.inner_clocked)
     }
 
@@ -248,27 +266,47 @@ impl DelayManager {
 
     // ── Query / dedup accessors ───────────────────────────────────────────────
 
-    /// Schedules the delay write for `carried` if not yet scheduled.
+    /// Schedules the delay write for one occurrence if not yet scheduled.
     ///
-    /// Returns `true` on the first call for a given `carried` (the write store
+    /// Returns `true` on the first call for a given occurrence (the write store
     /// should be emitted); `false` on subsequent calls (dedup — write already
-    /// scheduled earlier in this sample).
-    pub(crate) fn schedule_delay_write(&mut self, carried: SigId) -> bool {
-        self.scheduled_delay_writes.insert(carried)
+    /// scheduled earlier in this sample and clock region).
+    pub(crate) fn schedule_delay_write_in_context(
+        &mut self,
+        carried: SigId,
+        clock_context: Option<u32>,
+    ) -> bool {
+        self.scheduled_delay_writes.insert((carried, clock_context))
     }
 
-    /// Returns the allocated delay line for `carried`, if any.
-    pub(crate) fn get_delay_line(&self, carried: SigId) -> Option<&DelayLineInfo> {
-        self.delay_lines.get(&carried)
+    /// Returns the allocated delay line for one carried-signal occurrence.
+    pub(crate) fn get_delay_line_in_context(
+        &self,
+        carried: SigId,
+        clock_context: Option<u32>,
+    ) -> Option<&DelayLineInfo> {
+        self.delay_lines.get(&(carried, clock_context))
+    }
+
+    pub(crate) fn planned_contexts(&self, carried: SigId) -> Vec<Option<u32>> {
+        let mut contexts: Vec<_> = self
+            .delay_lines
+            .keys()
+            .filter_map(|&(candidate, context)| (candidate == carried).then_some(context))
+            .collect();
+        contexts.sort_unstable();
+        contexts
     }
 
     /// Returns read-only delay-analysis metadata for one recursion output.
-    pub(crate) fn rec_output_analysis(
+    pub(crate) fn rec_output_analysis_in_context(
         &self,
         var_id: u32,
         index: usize,
+        clock_context: Option<u32>,
     ) -> Option<&DelayAnalysisEntry> {
-        self.rec_output_analysis.get(&(var_id, index))
+        self.rec_output_analysis
+            .get(&(var_id, index, clock_context))
     }
 
     /// Replaces the internal rec-output analysis map with the one from a [`DelayPlan`].
@@ -279,7 +317,7 @@ impl DelayManager {
     /// [`plan_delays`]: super::plan::plan_delays
     pub(crate) fn set_rec_output_analysis(
         &mut self,
-        rec_outputs: HashMap<(u32, usize), DelayAnalysisEntry>,
+        rec_outputs: HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
     ) {
         self.rec_output_analysis = rec_outputs;
     }

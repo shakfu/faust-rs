@@ -81,7 +81,7 @@ impl<'a> SignalToFirLower<'a> {
             .recursion
             .rec_array_by_group_index
             .iter()
-            .filter(|&(&(group_id, _), _)| reverse_ids.contains(&group_id))
+            .filter(|&(&(group_id, _, _), _)| reverse_ids.contains(&group_id))
             .map(|(_, info)| info.clone())
             .collect();
         carriers.sort_by(|a, b| a.name.cmp(&b.name));

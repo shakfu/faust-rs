@@ -381,16 +381,16 @@ struct SignalToFirLower<'a> {
     suppress_clocked_redirect: bool,
     /// Per-clock-domain `IOTA`/`DSCounter` field registry (roadmap P2.3).
     domain_counters: DomainCounters,
-    /// Maps each signal node to its generated state-variable name.
-    state_name_by_node: HashMap<SigId, String>,
+    /// Maps each signal occurrence to its generated state-variable name.
+    state_name_by_node: HashMap<(SigId, Option<u32>), String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.
     ///
     /// Kept separate from `state_name_by_node` so a delay-node `SigId` and a
     /// `(group, index)` pair can coexist safely even when they refer to the
     /// same signal (tf22 pattern).
     recursion: RecursionState,
-    /// Guards against emitting duplicate state-update stores for shared nodes.
-    scheduled_state_updates: HashSet<SigId>,
+    /// Guards against duplicate state-update stores within one clock occurrence.
+    scheduled_state_updates: HashSet<(SigId, Option<u32>)>,
     /// Delay-line exclusive state: allocated ring buffers, recursion-merge
     /// table, and write-scheduling dedup guard.  See [`DelayManager`].
     delay: DelayManager,

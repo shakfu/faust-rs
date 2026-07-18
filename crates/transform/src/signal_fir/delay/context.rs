@@ -37,7 +37,8 @@ use super::{SignalFirError, SignalFirErrorCode};
 ///     next_loop_var_id: &mut self.next_loop_var_id,
 ///     uses_iota: &mut self.uses_iota,
 /// };
-/// self.delay.ensure_delay_line(carried, delay, &mut ctx)?;
+/// self.delay
+///     .ensure_delay_line_in_context(carried, delay, clock_context, &mut ctx)?;
 /// ```
 ///
 /// **Do not** construct via a `&mut self` method call — that would borrow all of

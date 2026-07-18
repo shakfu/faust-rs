@@ -268,6 +268,7 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         let canonical_group = self.recursion.canonical_group(self.arena, group);
+        let clock_context = self.current_clock_context();
         let is_symbolic_reference = match_sym_ref(self.arena, group).is_some();
 
         // C++ permits a delayed recursive reference to appear before the
@@ -286,7 +287,12 @@ impl<'a> SignalToFirLower<'a> {
             let _ = self.ensure_recursion_group_carriers(canonical_group)?;
             let rec_ref = self
                 .recursion
-                .resolve_materialized_carrier(self.arena, canonical_group, index_usize)
+                .resolve_materialized_carrier(
+                    self.arena,
+                    canonical_group,
+                    index_usize,
+                    clock_context,
+                )
                 .expect("registered symbolic group must have an allocated carrier");
             return self.load_recursion_carrier_storage(node, &rec_ref);
         }
@@ -294,18 +300,23 @@ impl<'a> SignalToFirLower<'a> {
         // A preallocated top-level carrier is not a completed projection: the
         // body update still has to be emitted. Reuse is valid only after that
         // group has been scheduled in the current sample.
-        let group_is_scheduled = canonical_group
-            .is_some_and(|canonical| self.recursion.scheduled_groups.contains(&canonical));
+        let group_is_scheduled = canonical_group.is_some_and(|canonical| {
+            self.recursion
+                .scheduled_groups
+                .contains(&(canonical, clock_context))
+        });
         if group_is_scheduled {
             if let Some(current_value) =
                 self.load_scalar_recursion_current_value(group, index_usize)?
             {
                 return Ok(current_value);
             }
-            if let Some(rec_ref) =
-                self.recursion
-                    .resolve_materialized_carrier(self.arena, group, index_usize)
-            {
+            if let Some(rec_ref) = self.recursion.resolve_materialized_carrier(
+                self.arena,
+                group,
+                index_usize,
+                clock_context,
+            ) {
                 return self.load_recursion_carrier_storage(node, &rec_ref);
             }
         }
@@ -365,7 +376,7 @@ impl<'a> SignalToFirLower<'a> {
 
         // ── Push group context, lower ALL bodies, emit stores ──
         // Use recursion-owned scheduling so each group's body pass runs only once.
-        if self.recursion.mark_group_scheduled(group) {
+        if self.recursion.mark_group_scheduled(group, clock_context) {
             self.with_active_recursion_group(var, group_arrays.clone(), |this, active_arrays| {
                 let zero = this.lower_int32_const(0);
                 let mut body_values = Vec::with_capacity(bodies.len());
@@ -434,7 +445,12 @@ impl<'a> SignalToFirLower<'a> {
                     if info.storage_strategy() == RecursionStorageStrategy::SingleScalar {
                         let binding = this
                             .recursion
-                            .current_value_binding(this.arena, group, i)
+                            .current_value_binding(
+                                this.arena,
+                                group,
+                                i,
+                                this.current_clock_context(),
+                            )
                             .expect("scalar recursion binding should be recorded before finalize");
                         let current_value = {
                             let mut b = FirBuilder::new(&mut this.store);
@@ -519,6 +535,7 @@ impl<'a> SignalToFirLower<'a> {
             };
             body_infos.push((state_ty, init));
         }
+        let clock_context = self.current_clock_context();
         let arrays = {
             let mut ctx = RecursionAllocCtx {
                 arena: self.arena,
@@ -529,6 +546,7 @@ impl<'a> SignalToFirLower<'a> {
                 clear_init_seen: &mut self.sections.clear_init_seen,
                 next_loop_var_id: &mut self.name_gen.next_loop_var_id,
                 recursion: &mut self.recursion,
+                clock_context,
             };
             ctx.allocate_group_arrays(group, &body_infos)?
         };

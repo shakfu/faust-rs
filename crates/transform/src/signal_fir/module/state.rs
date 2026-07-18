@@ -58,7 +58,11 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         value: SigId,
     ) -> Result<Option<RecursionDelayRef>, SignalFirError> {
-        if let Some(delay_ref) = self.recursion.resolve_delay_ref(self.arena, value)? {
+        let clock_context = self.current_clock_context();
+        if let Some(delay_ref) =
+            self.recursion
+                .resolve_delay_ref(self.arena, value, clock_context)?
+        {
             return Ok(Some(delay_ref));
         }
         let Some(key) = match_recursion_delay_key(self.arena, value) else {
@@ -96,10 +100,12 @@ impl<'a> SignalToFirLower<'a> {
                 format!("negative SIGPROJ index {index} in recursion carrier lookup"),
             )
         })?;
-        if let Some(info) = self
-            .recursion
-            .resolve_carrier(self.arena, group, index_usize)?
-        {
+        if let Some(info) = self.recursion.resolve_carrier(
+            self.arena,
+            group,
+            index_usize,
+            self.current_clock_context(),
+        )? {
             return Ok(Some(info));
         }
         let Some(canonical_group) = self.recursion.canonical_group(self.arena, group) else {
@@ -114,8 +120,12 @@ impl<'a> SignalToFirLower<'a> {
         // reads may reserve a carrier before the scheduled projection computes
         // and stores its next value.
         let _ = self.ensure_recursion_group_carriers(canonical_group)?;
-        self.recursion
-            .resolve_carrier(self.arena, canonical_group, index_usize)
+        self.recursion.resolve_carrier(
+            self.arena,
+            canonical_group,
+            index_usize,
+            self.current_clock_context(),
+        )
     }
 
     /// Declares a stack-local current-sample binding for one scalar recursion
@@ -150,6 +160,7 @@ impl<'a> SignalToFirLower<'a> {
         self.recursion.set_current_value_binding(
             group,
             index,
+            self.current_clock_context(),
             RecursionCurrentValueBinding {
                 name: name.clone(),
                 typ: info.typ.clone(),
@@ -165,10 +176,12 @@ impl<'a> SignalToFirLower<'a> {
         group: SigId,
         index: usize,
     ) -> Result<Option<FirId>, SignalFirError> {
-        let Some(binding) = self
-            .recursion
-            .current_value_binding(self.arena, group, index)
-        else {
+        let Some(binding) = self.recursion.current_value_binding(
+            self.arena,
+            group,
+            index,
+            self.current_clock_context(),
+        ) else {
             return Ok(None);
         };
         let mut b = FirBuilder::new(&mut self.store);
@@ -184,10 +197,12 @@ impl<'a> SignalToFirLower<'a> {
     /// (prefixed `iRec` for `Int32`, `fRec` otherwise) and registers an
     /// `instanceClear` zeroing loop.  Returns the generated variable name.
     ///
-    /// Keyed by `node` SigId in `state_name_by_node` — separate from
+    /// Keyed by `(node, clock_context)` in `state_name_by_node` — separate from
     /// `rec_array_by_group_index` to avoid aliasing (see `build_module` doc).
     pub(super) fn ensure_state_slot(&mut self, node: SigId, typ: FirType, init: FirId) -> String {
-        if let Some(name) = self.state_name_by_node.get(&node) {
+        let clock_context = self.current_clock_context();
+        let key = (node, clock_context);
+        if let Some(name) = self.state_name_by_node.get(&key) {
             return name.clone();
         }
         let prefix = if typ == FirType::Int32 {
@@ -195,29 +210,27 @@ impl<'a> SignalToFirLower<'a> {
         } else {
             "fRec"
         };
-        let name = format!("{prefix}{}", node.as_u32());
+        let name = match clock_context {
+            Some(domain) => format!("{prefix}{}_d{domain}", node.as_u32()),
+            None => format!("{prefix}{}", node.as_u32()),
+        };
         // Allocate a 2-element circular buffer (matching C++ signalFIRCompiler DelayLine).
         let array_ty = FirType::Array(Box::new(typ), 2);
         let mut b = FirBuilder::new(&mut self.store);
         let dec = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
         self.sections.struct_declarations.push(dec);
         self.register_clear_recursion_array(name.clone(), init, 2);
-        self.state_name_by_node.insert(node, name.clone());
+        self.state_name_by_node.insert(key, name.clone());
         name
     }
 
-    /// Declares the struct array for one circular delay line, idempotent.
-    ///
-    /// Thin delegate to [`DelayManager::ensure_delay_line`]; constructs a
-    /// [`DelayFirCtx`] from disjoint fields via split-borrow struct literal so
-    /// that `self.delay` can be borrowed simultaneously.
-    pub(super) fn ensure_delay_line_decl(
+    /// Declares one preplanned delay line in its occurrence clock context.
+    pub(super) fn ensure_delay_line_decl_in_context(
         &mut self,
         carried: SigId,
         delay: i32,
+        clock_context: Option<u32>,
     ) -> Result<DelayLineInfo, SignalFirError> {
-        // Explicit field-level split borrows: `self.delay` is NOT included here,
-        // so it can be mutably borrowed below without conflict.
         let mut ctx = DelayFirCtx {
             store: &mut self.store,
             real_ty: self.real_ty.clone(),
@@ -228,7 +241,8 @@ impl<'a> SignalToFirLower<'a> {
             next_loop_var_id: &mut self.name_gen.next_loop_var_id,
             uses_iota: &mut self.uses_iota,
         };
-        self.delay.ensure_delay_line(carried, delay, &mut ctx)
+        self.delay
+            .ensure_delay_line_in_context(carried, delay, clock_context, &mut ctx)
     }
 
     /// Returns the canonical pre-allocated delay line for `carried`.
@@ -237,15 +251,21 @@ impl<'a> SignalToFirLower<'a> {
     /// [`Self::prepare_delay_lines`]. Lowering paths should only query that
     /// decision, not allocate new delay lines opportunistically.
     pub(super) fn delay_line_info(&self, carried: SigId) -> Result<DelayLineInfo, SignalFirError> {
-        self.delay.get_delay_line(carried).cloned().ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!(
-                    "internal fast-lane missing pre-allocated delay line for signal {}",
-                    carried.as_u32()
-                ),
-            )
-        })
+        let clock_context = self.current_clock_context();
+        self.delay
+            .get_delay_line_in_context(carried, clock_context)
+            .cloned()
+            .ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "internal fast-lane missing pre-allocated delay line for signal {} in clock context {:?}; planned contexts: {:?}",
+                        carried.as_u32(),
+                        clock_context,
+                        self.delay.planned_contexts(carried)
+                    ),
+                )
+            })
     }
 
     /// Declares the shared global circular cursor state (`fIOTA`), idempotent.

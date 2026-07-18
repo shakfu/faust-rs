@@ -735,7 +735,9 @@ impl<'a> SignalToFirLower<'a> {
         let current = self.lower_signal(value)?;
         let read_ty = self.signal_fir_type(node)?;
         let amount_value = self.lower_signal(amount)?;
-        let schedule_write = self.delay.schedule_delay_write(value);
+        let schedule_write = self
+            .delay
+            .schedule_delay_write_in_context(value, self.current_clock_context());
         let phases = self.regions.current_phases_mut();
         let mut delay_ctx = DelayLoweringCtx {
             store: &mut self.store,
@@ -838,7 +840,10 @@ impl<'a> SignalToFirLower<'a> {
             b.load_table(name.clone(), AccessType::Struct, read_index, state_ty)
         };
         // Write current value: state[fIOTA & 1] = next (immediate)
-        if self.scheduled_state_updates.insert(node) {
+        if self
+            .scheduled_state_updates
+            .insert((node, self.current_clock_context()))
+        {
             let next = self.lower_signal(value)?;
             let write_index = self.global_circular_current_index(2);
             let mut b = FirBuilder::new(&mut self.store);
@@ -938,7 +943,9 @@ impl<'a> SignalToFirLower<'a> {
         let line = self.delay_line_info_for_current_region(value)?;
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
-        let schedule_write = self.delay.schedule_delay_write(value);
+        let schedule_write = self
+            .delay
+            .schedule_delay_write_in_context(value, self.current_clock_context());
         let phases = self.regions.current_phases_mut();
         let mut delay_ctx = DelayLoweringCtx {
             store: &mut self.store,

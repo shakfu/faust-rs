@@ -174,10 +174,17 @@ impl<'a> SignalToFirLower<'a> {
     /// This pre-pass ensures all resource-sizing decisions are registered
     /// before reads are emitted during lowering.
     pub(super) fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
-        let plan = plan_delays(self.arena, self.sig_types, outputs, &self.delay.options())?;
+        let clock_domains = self.clocked.as_ref().map(|clocked| clocked.domains);
+        let plan = plan_delays(
+            self.arena,
+            self.sig_types,
+            outputs,
+            &self.delay.options(),
+            clock_domains,
+        )?;
         self.delay.set_rec_output_analysis(plan.rec_outputs);
-        for (carried, delay) in plan.lines {
-            self.ensure_delay_line_decl(carried, delay)?;
+        for ((carried, clock_context), delay) in plan.lines {
+            self.ensure_delay_line_decl_in_context(carried, delay, clock_context)?;
         }
         Ok(())
     }

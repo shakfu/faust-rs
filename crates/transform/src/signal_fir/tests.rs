@@ -158,10 +158,69 @@ fn analyze_delays_for_prepared(prepared: &crate::signal_prepare::PreparedSignals
         prepared.sig_types_map(),
         prepared.outputs(),
         &delay.options(),
+        None,
     )
     .expect("delay planning should succeed on prepared signals");
     delay.set_rec_output_analysis(plan.rec_outputs);
     delay
+}
+
+#[test]
+fn delay_plan_keeps_hash_consed_carrier_state_per_clock_context() {
+    let mut arena = TreeArena::new();
+    let (carried, clocked0, clocked1) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let carried = b.int(1);
+        let delayed = b.delay1(carried);
+        let env0 = b.clock_env_token(0);
+        let env1 = b.clock_env_token(1);
+        (carried, b.clocked(env0, delayed), b.clocked(env1, delayed))
+    };
+    let plan = plan_delays(
+        &arena,
+        &std::collections::HashMap::new(),
+        &[clocked0, clocked1],
+        &DelayOptions::default(),
+        None,
+    )
+    .expect("clock-context delay planning should succeed");
+
+    assert_eq!(plan.lines.get(&(carried, Some(0))), Some(&1));
+    assert_eq!(plan.lines.get(&(carried, Some(1))), Some(&1));
+    assert_eq!(plan.lines.len(), 2, "sibling domains need distinct lines");
+}
+
+#[test]
+fn delay_plan_keeps_wrapper_clock_state_in_the_parent_context() {
+    let mut arena = TreeArena::new();
+    let (clock_carried, payload_carried, wrapper) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let clock_carried = b.int(1);
+        let payload_carried = b.int(2);
+        let clock = b.delay1(clock_carried);
+        let payload = b.delay1(payload_carried);
+        let env = b.clock_env_token(0);
+        let guarded_clock = b.clocked(env, clock);
+        let guarded_payload = b.clocked(env, payload);
+        let held_payload = b.perm_var(guarded_payload);
+        (
+            clock_carried,
+            payload_carried,
+            b.on_demand(&[guarded_clock, held_payload]),
+        )
+    };
+    let plan = plan_delays(
+        &arena,
+        &std::collections::HashMap::new(),
+        &[wrapper],
+        &DelayOptions::default(),
+        None,
+    )
+    .expect("clock-wrapper delay planning should succeed");
+
+    assert_eq!(plan.lines.get(&(clock_carried, None)), Some(&1));
+    assert_eq!(plan.lines.get(&(payload_carried, Some(0))), Some(&1));
+    assert_eq!(plan.lines.len(), 2);
 }
 
 // ── UI fixture builders ───────────────────────────────────────────────────────
@@ -1479,7 +1538,7 @@ fn delay_analysis_attributes_nested_delay1_chain_to_recursion_output() {
     let (var, _bodies) = match_sym_rec(prepared.arena(), prepared_group)
         .expect("prepared projection should target a symbolic recursion group");
     let analysis = delay
-        .rec_output_analysis(var.as_u32(), index as usize)
+        .rec_output_analysis_in_context(var.as_u32(), index as usize, None)
         .expect("nested delay1 chain should be attributed to the recursion output");
     assert_eq!(
         analysis.max_delay, 2,
@@ -1522,7 +1581,7 @@ fn delay_analysis_attributes_fixed_delay_over_feedback_delay1_to_recursion_outpu
     let (var, _bodies) = match_sym_rec(prepared.arena(), prepared_group)
         .expect("prepared projection should target a symbolic recursion group");
     let analysis = delay
-        .rec_output_analysis(var.as_u32(), index as usize)
+        .rec_output_analysis_in_context(var.as_u32(), index as usize, None)
         .expect("Delay(Delay1(Proj), 10) should be attributed to the recursion output");
     assert_eq!(
         analysis.max_delay, 11,

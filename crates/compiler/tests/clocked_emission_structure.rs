@@ -73,6 +73,50 @@ fn sibling_ondemand_regions_do_not_reuse_local_scheduled_temporaries() {
 }
 
 #[test]
+fn shared_stateful_payload_gets_independent_state_per_sibling_domain() {
+    // Reduced form of `ondemand_18_toggle_morph.dsp`: the exact same
+    // hash-consed oscillator is consumed by two sibling `ondemand` instances.
+    // C++ gives each occurrence its own startup delay and recursion carrier;
+    // signal-only state keys instead leak the first sibling's `fRecCur*` local
+    // into the second sibling and couple their fire-time histories.
+    let source = r#"
+        decimal(x) = x - floor(x);
+        startup = 1 - (1');
+        phase = (select2(startup, +(0.01), 0) : decimal) ~ _;
+        process = (button("a") : ondemand(phase)),
+                  (button("b") : ondemand(phase));
+    "#;
+
+    for strategy in [
+        SchedulingStrategy::DepthFirst,
+        SchedulingStrategy::BreadthFirst,
+        SchedulingStrategy::Special,
+        SchedulingStrategy::ReverseBreadthFirst,
+    ] {
+        let cpp = Compiler::new()
+            .with_scheduling_strategy(strategy)
+            .compile_source_to_cpp_with_lane(
+                "sibling_shared_state.dsp",
+                source,
+                &CppOptions::default(),
+                SignalFirLane::TransformFastLane,
+            )
+            .unwrap_or_else(|error| {
+                panic!("shared sibling state lowering failed under {strategy:?}: {error}")
+            });
+        let body = compute_body(&cpp);
+        assert!(
+            cpp.contains("_d0") && cpp.contains("_d1"),
+            "sibling domains must own distinct persistent state:\n{cpp}"
+        );
+        assert!(
+            body.contains("fRecCur"),
+            "the reduced oscillator must exercise scalar recursion:\n{body}"
+        );
+    }
+}
+
+#[test]
 fn boolean_ondemand_emits_guarded_if_with_hold_field() {
     let cpp = compile_cpp(
         "struct_od_bool",
