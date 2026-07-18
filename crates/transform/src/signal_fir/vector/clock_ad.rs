@@ -851,6 +851,7 @@ fn guard_for(
 
 fn scalar_clock_facts(ty: &CanonicalSigType) -> Option<(Nature, bool)> {
     match ty {
+        CanonicalSigType::Sound => None,
         CanonicalSigType::Simple {
             nature, interval, ..
         } => {

@@ -1306,6 +1306,7 @@ pub(super) fn value_fir_type(value_type: &ValueType, real_type: FirType) -> FirT
     match value_type {
         ValueType::Int => FirType::Int32,
         ValueType::Real => real_type,
+        ValueType::Sound => FirType::Sound,
         ValueType::Tuple(components) => {
             let fields = components
                 .iter()
@@ -1320,6 +1321,7 @@ fn tuple_type_name(value_type: &ValueType, real_type: &FirType) -> String {
     fn append_component(name: &mut String, value_type: &ValueType, real_type: &FirType) {
         match value_type {
             ValueType::Int => name.push_str("_i32"),
+            ValueType::Sound => name.push_str("_sound"),
             ValueType::Real => match real_type {
                 FirType::Float32 => name.push_str("_f32"),
                 FirType::Float64 => name.push_str("_f64"),
@@ -1629,6 +1631,7 @@ mod tests {
         match value_type {
             ValueType::Int => FirBuilder::new(store).int32(0),
             ValueType::Real => FirBuilder::new(store).float32(0.0),
+            ValueType::Sound => panic!("route fixture does not synthesize soundfile handles"),
             ValueType::Tuple(components) => {
                 let values = components
                     .iter()

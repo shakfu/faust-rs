@@ -2103,6 +2103,11 @@ pub(super) fn fir_reachable(store: &FirStore, root: FirId) -> BTreeSet<FirId> {
             FirMatch::DeclareVar { init, .. } => pending.extend(init),
             FirMatch::StoreVar { value, .. } => pending.push(value),
             FirMatch::LoadTable { index, .. } => pending.push(index),
+            FirMatch::LoadSoundfileLength { part, .. }
+            | FirMatch::LoadSoundfileRate { part, .. } => pending.push(part),
+            FirMatch::LoadSoundfileBuffer {
+                chan, part, idx, ..
+            } => pending.extend([chan, part, idx]),
             FirMatch::StoreTable { index, value, .. } => pending.extend([index, value]),
             FirMatch::If {
                 cond,
@@ -2633,9 +2638,11 @@ fn state_fir_type(
     match delay.value_type {
         ValueType::Int => Ok(FirType::Int32),
         ValueType::Real => Ok(real_type),
-        ValueType::Tuple(_) => Err(VectorFirAssemblyError::UnsupportedValueType {
-            signal_id: delay.signal_id,
-        }),
+        ValueType::Sound | ValueType::Tuple(_) => {
+            Err(VectorFirAssemblyError::UnsupportedValueType {
+                signal_id: delay.signal_id,
+            })
+        }
     }
 }
 
@@ -2647,7 +2654,9 @@ fn value_type_to_fir(
     match value_type {
         ValueType::Int => Ok(FirType::Int32),
         ValueType::Real => Ok(real_type),
-        ValueType::Tuple(_) => Err(VectorFirAssemblyError::UnsupportedValueType { signal_id }),
+        ValueType::Sound | ValueType::Tuple(_) => {
+            Err(VectorFirAssemblyError::UnsupportedValueType { signal_id })
+        }
     }
 }
 

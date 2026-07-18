@@ -55,6 +55,9 @@ pub const VECTOR_PLAN_SCHEMA_VERSION: u32 = 4;
 pub enum ValueType {
     Int,
     Real,
+    /// Soundfile handle payload, derived from the signal shape exactly as the
+    /// prepared boundary derives `SimpleSigType::Sound`.
+    Sound,
     Tuple(Vec<ValueType>),
 }
 

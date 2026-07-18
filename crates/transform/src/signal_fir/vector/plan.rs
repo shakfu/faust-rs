@@ -1706,6 +1706,7 @@ fn vectorability(vectorability: SigVectorability) -> Vectorability {
 
 fn value_type(sig_type: &CanonicalSigType) -> ValueType {
     match sig_type {
+        CanonicalSigType::Sound => ValueType::Sound,
         CanonicalSigType::Simple { nature, .. } => scalar_value_type(*nature),
         // Table wrappers carry the effective nature of the current signal.
         // This matters for casts around nested read-table types: recursively

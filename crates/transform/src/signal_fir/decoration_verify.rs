@@ -23,8 +23,9 @@
 
 use std::fmt;
 
-use signals::{SigMatch, match_sig};
+use signals::{SigId, SigMatch, match_sig};
 use sigtype::{Boolean, Computability, Nature, Res, SigType, Variability, Vectorability};
+use tlib::TreeArena;
 
 use crate::clk_env::ClkEnvMap;
 use crate::signal_prepare::VerifiedPreparedSignals;
@@ -57,6 +58,10 @@ pub struct CanonicalInterval {
 /// Exact boundary representation of `SigType`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CanonicalSigType {
+    /// Soundfile handle payload, derived from the signal shape exactly as the
+    /// prepared boundary derives `SimpleSigType::Sound`: the sig-type nature
+    /// says nothing about the handle.
+    Sound,
     Simple {
         nature: Nature,
         variability: Variability,
@@ -319,6 +324,14 @@ fn canonical_interval(lo: f64, hi: f64, lsb: i32) -> CanonicalInterval {
     }
 }
 
+/// Canonical type of one signal, shape-aware for soundfile handles.
+fn canonical_sig_type_of(arena: &TreeArena, sig: SigId, sig_type: &SigType) -> CanonicalSigType {
+    if matches!(match_sig(arena, sig), SigMatch::Soundfile(_)) {
+        return CanonicalSigType::Sound;
+    }
+    canonical_sig_type(sig_type)
+}
+
 fn canonical_sig_type(sig_type: &SigType) -> CanonicalSigType {
     match sig_type {
         SigType::Simple(ty) => CanonicalSigType::Simple {
@@ -358,10 +371,10 @@ fn projection_fact(projection: Option<RecursiveProjection>) -> Option<RecursiveP
     })
 }
 
-fn decoration_record(signal_id: u32, info: &SignalUseInfo) -> DecorationRecord {
+fn decoration_record(arena: &TreeArena, sig: SigId, info: &SignalUseInfo) -> DecorationRecord {
     DecorationRecord {
-        signal_id,
-        sig_type: canonical_sig_type(&info.sig_type),
+        signal_id: sig.as_u32(),
+        sig_type: canonical_sig_type_of(arena, sig, &info.sig_type),
         variability: info.variability,
         vectorability: info.vectorability,
         clock_domain: info.clk_env.map(|domain| domain.as_u32()),
@@ -397,7 +410,7 @@ pub fn export_decoration_certificate(
         .uses
         .records()
         .iter()
-        .map(|record| decoration_record(record.sig.as_u32(), &record.info))
+        .map(|record| decoration_record(prepared.arena(), record.sig, &record.info))
         .collect::<Vec<_>>();
     DecorationCertificate {
         schema_version: DECORATION_CERTIFICATE_VERSION,
@@ -546,7 +559,7 @@ fn verify_record(
     let Some(authoritative_type) = prepared.sig_types_map().get(&sig) else {
         return Err(DecorationError::SignalCoverageMismatch);
     };
-    if actual.sig_type != canonical_sig_type(authoritative_type) {
+    if actual.sig_type != canonical_sig_type_of(prepared.arena(), sig, authoritative_type) {
         return Err(DecorationError::TypeMismatch {
             signal_id: actual.signal_id,
         });

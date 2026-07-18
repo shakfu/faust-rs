@@ -39,6 +39,15 @@ const MUTABLE_TABLE_SOURCE: &str = concat!(
     "irw = rwtable(6, iinteg, (iinteg+1)%6, 2*iinteg, (iinteg+2)%6);\n",
     "process = tro, trw, irw;"
 );
+// The `sound.dsp` shape - a recursive index into a multi-part soundfile -
+// with a live length read so `LoadSoundfileLength` sits on the certified
+// path. The pipeline rejected every soundfile program outright before E2, so
+// certification alone discriminates. Numeric coverage is the native C++
+// matrix: the interpreter lane does not run soundfiles.
+const SOUNDFILE_READ_SOURCE: &str = concat!(
+    "sf = soundfile(\"son[url:{'sound1';'sound2'}]\", 2);\n",
+    "process = 0, _~+(1) : sf : _,!,_,_;"
+);
 const PULSE_COUNTUP_LOOP_SOURCE: &str =
     "ba = library(\"basics.lib\"); process = ba.pulse_countup_loop(4, 1) + 0.001;";
 const PULSE_COUNTDOWN_LOOP_SOURCE: &str =
@@ -407,6 +416,11 @@ fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
         .find("output0[i0] =")
         .expect("safe pure tail in fused loop");
     assert!(write < tail, "the state write must precede the pure tail");
+}
+
+#[test]
+fn soundfile_reads_are_certified() {
+    assert_vector_pipeline_certified("soundfile_read", SOUNDFILE_READ_SOURCE, 32);
 }
 
 #[test]

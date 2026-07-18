@@ -747,6 +747,28 @@ impl PureVectorLowerer<'_> {
             SigMatch::NumEntry(control) => {
                 self.lower_ui_input(control, ui::ControlKind::NumEntry)?
             }
+            SigMatch::Soundfile(control) => self.lower_soundfile_handle(control)?,
+            SigMatch::SoundfileLength(sf, part) => {
+                let var = self.soundfile_zone_name(sf)?;
+                let _ = self.lower_dep(scope, sf, cache, active)?;
+                let part = self.lower_dep(scope, part, cache, active)?;
+                FirBuilder::new(&mut self.store).load_soundfile_length(var, part)
+            }
+            SigMatch::SoundfileRate(sf, part) => {
+                let var = self.soundfile_zone_name(sf)?;
+                let _ = self.lower_dep(scope, sf, cache, active)?;
+                let part = self.lower_dep(scope, part, cache, active)?;
+                FirBuilder::new(&mut self.store).load_soundfile_rate(var, part)
+            }
+            SigMatch::SoundfileBuffer(sf, chan, part, ridx) => {
+                let var = self.soundfile_zone_name(sf)?;
+                let _ = self.lower_dep(scope, sf, cache, active)?;
+                let chan = self.lower_dep(scope, chan, cache, active)?;
+                let part = self.lower_dep(scope, part, cache, active)?;
+                let idx = self.lower_dep(scope, ridx, cache, active)?;
+                let typ = self.fir_type(signal_id)?;
+                FirBuilder::new(&mut self.store).load_soundfile_buffer(var, chan, part, idx, typ)
+            }
             SigMatch::VBargraph(control, inner) => self.lower_bargraph(
                 scope,
                 control,
@@ -1001,6 +1023,66 @@ impl PureVectorLowerer<'_> {
             }
         };
         Ok(value)
+    }
+
+    /// Loads the `Sound` struct handle for one soundfile control.
+    ///
+    /// Soundfile data is immutable at compute time, so like the sliders this
+    /// is a pure zone read; the data accessors below address the handle by
+    /// its zone name exactly as the scalar template does.
+    fn lower_soundfile_handle(
+        &mut self,
+        control: ui::ControlId,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(control),
+                expression,
+            }
+        })?;
+        if zone.kind != ui::ControlKind::Soundfile {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id: u64::from(control),
+                expression: format!(
+                    "soundfile control {control} kind mismatch: got {:?}",
+                    zone.kind
+                ),
+            });
+        }
+        Ok(
+            FirBuilder::new(&mut self.store).load_var(
+                zone.name,
+                AccessType::Struct,
+                FirType::Sound,
+            ),
+        )
+    }
+
+    /// Resolves the zone name of a `SIGSOUNDFILE` operand.
+    fn soundfile_zone_name(&mut self, sf: SigId) -> Result<String, PureVectorLowerError> {
+        let signal_id = u64::from(sf.as_u32());
+        let SigMatch::Soundfile(control) = match_sig(self.prepared.arena(), sf) else {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "soundfile accessor operand is not a SIGSOUNDFILE".to_owned(),
+            });
+        };
+        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+            PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression,
+            }
+        })?;
+        if zone.kind != ui::ControlKind::Soundfile {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: format!(
+                    "soundfile control {control} kind mismatch: got {:?}",
+                    zone.kind
+                ),
+            });
+        }
+        Ok(zone.name)
     }
 
     fn lower_ui_input(
@@ -2024,7 +2106,8 @@ fn verify_plan_prepared_boundary(
         let prepared_type = prepared.ty(sig);
         let matches = match (&record.value_type, prepared_type) {
             (ValueType::Int, Some(SimpleSigType::Int))
-            | (ValueType::Real, Some(SimpleSigType::Real)) => true,
+            | (ValueType::Real, Some(SimpleSigType::Real))
+            | (ValueType::Sound, Some(SimpleSigType::Sound)) => true,
             (ValueType::Tuple(_), _) => {
                 decode_symbolic_group_bodies(prepared.arena(), sig).is_some()
                     || match_sym_ref(prepared.arena(), sig).is_some()
@@ -2121,6 +2204,7 @@ fn value_type_to_fir(value_type: &ValueType, real_type: &FirType) -> Option<FirT
     match value_type {
         ValueType::Int => Some(FirType::Int32),
         ValueType::Real => Some(real_type.clone()),
+        ValueType::Sound => Some(FirType::Sound),
         ValueType::Tuple(_) => Some(value_fir_type(value_type, real_type.clone())),
     }
 }
@@ -2447,6 +2531,12 @@ fn fir_children(store: &FirStore, value: FirId) -> Vec<FirId> {
         } => vec![cond, then_value, else_value],
         FirMatch::FunCall { args, .. } => args,
         FirMatch::LoadTable { index, .. } => vec![index],
+        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
+            vec![part]
+        }
+        FirMatch::LoadSoundfileBuffer {
+            chan, part, idx, ..
+        } => vec![chan, part, idx],
         FirMatch::DeclareVar { init, .. } => init.into_iter().collect(),
         FirMatch::StoreTable { index, value, .. } => vec![index, value],
         _ => Vec::new(),
@@ -2608,6 +2698,7 @@ mod tests {
 
     fn canonical_value_type(sig_type: &CanonicalSigType) -> ValueType {
         match sig_type {
+            CanonicalSigType::Sound => ValueType::Sound,
             CanonicalSigType::Simple { nature, .. } => match nature {
                 Nature::Int => ValueType::Int,
                 Nature::Real | Nature::Any => ValueType::Real,

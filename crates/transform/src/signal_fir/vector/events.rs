@@ -2897,7 +2897,9 @@ mod tests {
         match signal.value_type {
             ValueType::Int => builder.int32(0),
             ValueType::Real => builder.float32(0.0),
-            ValueType::Tuple(_) => panic!("event route fixture does not synthesize tuple FIR"),
+            ValueType::Sound | ValueType::Tuple(_) => {
+                panic!("event route fixture does not synthesize handle or tuple FIR")
+            }
         }
     }
 

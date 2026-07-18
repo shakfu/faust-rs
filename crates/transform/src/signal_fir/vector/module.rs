@@ -130,19 +130,6 @@ fn build_verified_vector_module_with_evidence(
             "checked vector module requested for scalar compute mode",
         ));
     };
-    if let Some(soundfile) = ui
-        .controls
-        .iter()
-        .find(|control| control.kind == ui::ControlKind::Soundfile)
-    {
-        return Err(VectorModuleFailure::new(
-            VectorFallbackReason::UiProgram,
-            format!(
-                "soundfile control {} has checked UI lifecycle state, but vector sound data lowering is not yet certified",
-                soundfile.id
-            ),
-        ));
-    }
     let timing_enabled = std::env::var_os("FAUST_RS_VECTOR_TIMING").is_some();
     let mut stage_started = std::time::Instant::now();
     let mut trace_stage = |stage: &str| {
@@ -860,6 +847,45 @@ fn build_fast_driver(store: &mut FirStore, chunk: FirId, vec_size: i32) -> Vec<F
     vec![guarded_main, guarded_rem]
 }
 
+/// Rejects any compute-time store into a `Sound`-typed DSP-struct field.
+///
+/// Soundfile data is loaded at lifecycle time and immutable during `compute`;
+/// admitting soundfile reads widened what compute may contain, so the
+/// read-only claim must be carried by the emitted FIR itself. The field set is
+/// derived from the emitted struct declarations alone, exactly as the table
+/// checks derive theirs.
+fn verify_sound_field_immutability(
+    store: &FirStore,
+    compute: FirId,
+    struct_fields: &[FirId],
+) -> Result<(), VectorModuleFailure> {
+    let sound_fields = struct_fields
+        .iter()
+        .filter_map(|field| match match_fir(store, *field) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Sound,
+                ..
+            } => Some(name),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if sound_fields.is_empty() {
+        return Ok(());
+    }
+    for node in fir_reachable(store, compute) {
+        let FirMatch::StoreVar { name, .. } = match_fir(store, node) else {
+            continue;
+        };
+        if sound_fields.contains(&name) {
+            return Err(module_shape(format!(
+                "compute stores into soundfile field {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Verifies mutable-table writes and initialization against the emitted FIR.
 ///
 /// The mutable-table set is read from the emitted DSP-struct declarations, not
@@ -1214,6 +1240,7 @@ fn verify_final_module(
         ));
     }
     verify_readonly_table_stores(store, compute, expected_static_declarations)?;
+    verify_sound_field_immutability(store, compute, &fields)?;
     verify_ui_write_attribution(store, compute, ui, plan)?;
     verify_mutable_table_attribution(
         store,
@@ -1293,6 +1320,27 @@ mod tests {
             fused_serial_groups: Vec::new(),
             lockstep_bundles: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_store_into_a_sound_field_is_rejected() {
+        let mut store = FirStore::new();
+        let (field, clean_compute, storing_compute) = {
+            let mut b = FirBuilder::new(&mut store);
+            let field = b.declare_var("fSound0", FirType::Sound, AccessType::Struct, None);
+            let load = b.load_var("fSound0", AccessType::Struct, FirType::Sound);
+            let drop_load = b.drop_(load);
+            let clean_compute = b.block(&[drop_load]);
+            let value = b.float64(0.0);
+            let forged = b.store_var("fSound0", AccessType::Struct, value);
+            let storing_compute = b.block(&[forged]);
+            (field, clean_compute, storing_compute)
+        };
+        verify_sound_field_immutability(&store, clean_compute, &[field])
+            .expect("reading a soundfile field is accepted");
+        let rejected = verify_sound_field_immutability(&store, storing_compute, &[field])
+            .expect_err("a store into a soundfile field must be rejected");
+        assert!(rejected.detail.contains("fSound0"), "{rejected}");
     }
 
     #[test]
