@@ -106,7 +106,7 @@ There is no `reference` rebuild on every run: delete `reference/` (or
 
 | Path | Purpose |
 |---|---|
-| `dsp/` | 93 test DSP programs (from the C++ suite) |
+| `dsp/` | 132 test DSP programs (93 baseline + 21 ondemand + 18 multirate) |
 | `common.mk` | shared, overridable configuration |
 | `known.mk` | per-DSP tolerances + known-failure exclusion lists |
 | `KNOWN_FAILURES.md` | documented gaps/tolerances with causes |
@@ -124,7 +124,8 @@ There is no `reference` rebuild on every run: delete `reference/` (or
 
 ## Status
 
-Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
+Historical raw sweep over the original 93 DSPs at the default `2e-06`
+tolerance (before the 21-case `ondemand_*` extension):
 
 | Backend | Match | Mismatch | Compile-fail |
 |---|---|---|---|
@@ -137,14 +138,34 @@ Raw sweep over the 93 DSPs at the default `2e-06` tolerance:
 | Rust (scalar prefix, `-part`, `rustc`) | **92** | 0 | 1 (`subcontainer1`) |
 | Vector variants (`-vec -lv 0` / `-vec -lv 1`) | inherit backend gates |  |  |
 
-The C++ backend reproduces the full 60000-frame reference exactly on 92/93 DSPs,
-so the remaining mismatches are backend-specific divergences the harness
-pinpoints. Each was classified by its *max* delta and either given a per-DSP
-tolerance (bounded rounding) or listed as a known failure (real gap) in
-[`known.mk`](known.mk) / [`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those
-applied, the aggregate targets are **green gates**: `make cpp` (92), `make c`
-(92), `make cranelift` (92), `make interp` (92), `make wasm` (92), and
-`make assemblyscript` (92), and `make rust` (92) build and pass. The vector-mode gates use suffixed
+The corpus now also includes `ondemand_01_basic.dsp` through
+`ondemand_21_nested_delay_counter.dsp`. Their genuine C++ 60000-frame
+references all contain finite non-zero signal, and their faust-rs interpreter
+15000-frame scalar responses are finite, non-silent, and match the C++
+reference prefixes at the default tolerance. The smallest non-zero sample
+count is 144 (`ondemand_03_input_filter`), so none of these cases can pass as a
+silent-response test.
+
+The 18 multirate cases, `upsampling_01_accumulator.dsp` through
+`upsampling_09_sr_filter.dsp` and their `downsampling_*` counterparts, cover
+input-consuming and domain-free state, parallel recursion, delay lines,
+dynamic UI rates, multiple branches, nested domains, delayed selectors, and a
+two-oscillator filtered signal whose phase and filter coefficients depend on
+the domain-local `ma.SR`. Every 15000-frame interpreter response is finite and
+non-silent (between 3 and 30000 non-zero output samples), and every response
+matches the genuine C++ reference prefix at the default tolerance. Dedicated
+runtime and C++ differential compiler tests additionally assert that `ma.SR`
+is `SR*H` under upsampling and `SR/H` under downsampling, including nested
+factor composition.
+
+In the historical baseline, the C++ backend reproduced the full 60000-frame
+reference exactly on 92/93 DSPs. The remaining mismatches were classified by
+their *max* delta and either given a per-DSP tolerance (bounded rounding) or
+listed as a known failure (real gap) in [`known.mk`](known.mk) /
+[`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those applied, the original
+93-DSP aggregate targets were green: `make cpp` (92), `make c` (92),
+`make cranelift` (92), `make interp` (92), `make wasm` (92),
+`make assemblyscript` (92), and `make rust` (92). The vector-mode gates use suffixed
 outdirs such as `cpp-vec0` / `cpp-vec1`, inherit the base backend known-failure
 lists, and can be run per backend or together with `make all-vec`; excluded
 cases are documented in `known.mk` to fix later.
