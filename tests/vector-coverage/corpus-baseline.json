@@ -11,12 +11,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -86,6 +85,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -118,13 +118,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -143,12 +136,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -218,6 +210,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -250,13 +243,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -275,12 +261,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -350,6 +335,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -382,13 +368,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -407,12 +386,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -482,6 +460,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -514,13 +493,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -539,12 +511,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -614,6 +585,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -646,13 +618,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -671,12 +636,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -746,6 +710,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -778,13 +743,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -803,12 +761,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -878,6 +835,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -910,13 +868,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -935,12 +886,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1010,6 +960,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1042,13 +993,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1067,12 +1011,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1142,6 +1085,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1174,13 +1118,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1199,12 +1136,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1274,6 +1210,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1306,13 +1243,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1331,12 +1261,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1406,6 +1335,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1438,13 +1368,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1463,12 +1386,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1538,6 +1460,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1570,13 +1493,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1595,12 +1511,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1670,6 +1585,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1702,13 +1618,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1727,12 +1636,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1802,6 +1710,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1834,13 +1743,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1859,12 +1761,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -1934,6 +1835,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -1966,13 +1868,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [
@@ -1991,12 +1886,11 @@
       },
       "summary": {
         "total": 93,
-        "certified": 90,
-        "fallback": 2,
+        "certified": 91,
+        "fallback": 1,
         "error": 1,
         "fallback_by_reason": {
-          "FRS-VEC-FALLBACK-PURE": 1,
-          "FRS-VEC-FALLBACK-UI": 1
+          "FRS-VEC-FALLBACK-PURE": 1
         }
       },
       "certified_files": [
@@ -2066,6 +1960,7 @@
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
         "tests/impulse-tests/dsp/smoothdelay.dsp",
+        "tests/impulse-tests/dsp/sound.dsp",
         "tests/impulse-tests/dsp/spat.dsp",
         "tests/impulse-tests/dsp/spectral_level.dsp",
         "tests/impulse-tests/dsp/spectral_tilt.dsp",
@@ -2098,13 +1993,6 @@
           "reason_code": "FRS-VEC-FALLBACK-PURE",
           "effective_mode": "Scalar",
           "detail": "signal 28 is effectful and cannot enter pure P5.2 lowering: SIGFFUN(FFUN(cons(int(0), cons(cons(sym(\"isnanf\"), cons(sym(\"isnan\"), cons(sym(\"isnanl\"), cons(sym(\"isnanfx\"), nil)))), cons(int(1), nil))), sym(\"<math.h>\"), sym(\"\\\"\\\"\")), cons(SIGINPUT(int(0)), nil)); effects=[Foreign { resource: Function(ForeignSignature { names: [\"isnanf\", \"isnan\", \"isnanl\", \"isnanfx\"], return_type: ForeignTypeCode(0), arguments: [ForeignTypeCode(1)] }), purity: Unknown }]"
-        },
-        {
-          "path": "tests/impulse-tests/dsp/sound.dsp",
-          "status": "Fallback(UiProgram)",
-          "reason_code": "FRS-VEC-FALLBACK-UI",
-          "effective_mode": "Scalar",
-          "detail": "soundfile control 0 has checked UI lifecycle state, but vector sound data lowering is not yet certified"
         }
       ],
       "error_files": [

@@ -1,7 +1,7 @@
 # Soundfile Vector Lowering Plan
 
 Date: 2026-07-18
-Status: E2 diagnosed; implementation pending
+Status: complete; E2.1 in `c04fc58a`, E2.2 qualified on 2026-07-18
 Scope: soundfile data reads in the checked vector pipeline
 
 ## 1. Objective and baseline

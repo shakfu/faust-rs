@@ -64,6 +64,7 @@ tests/impulse-tests/dsp/reverb_designer.dsp
 tests/impulse-tests/dsp/reverb_tester.dsp
 tests/impulse-tests/dsp/select2.dsp
 tests/impulse-tests/dsp/smoothdelay.dsp
+tests/impulse-tests/dsp/sound.dsp
 tests/impulse-tests/dsp/spat.dsp
 tests/impulse-tests/dsp/spectral_level.dsp
 tests/impulse-tests/dsp/spectral_tilt.dsp
