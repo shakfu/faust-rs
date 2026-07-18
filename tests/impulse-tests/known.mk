@@ -71,6 +71,9 @@ KNOWN_FAIL_assemblyscript :=
 # Generated source is appended to archs/impulserust.rs and compiled natively.
 KNOWN_FAIL_rust :=
 
+# --- Julia backend (scalar prefix through the local Julia harness) ----------
+KNOWN_FAIL_julia :=
+
 # --- mode/scheduling variants ------------------------------------------------
 # Variant outdirs inherit their base backend's known failures. Any divergence
 # specific to one mode/strategy can be added as KNOWN_FAIL_<outdir>, for example
@@ -87,6 +90,10 @@ KNOWN_FAIL_wasm-vec0 :=
 KNOWN_FAIL_wasm-vec1 :=
 KNOWN_FAIL_assemblyscript-vec0 :=
 KNOWN_FAIL_assemblyscript-vec1 :=
+KNOWN_FAIL_rust-vec0 :=
+KNOWN_FAIL_rust-vec1 :=
+KNOWN_FAIL_julia-vec0 :=
+KNOWN_FAIL_julia-vec1 :=
 
 # Tolerance to apply when a per-DSP override exists, else the global `precision`.
 dsp_precision = $(if $(PRECISION_$1),$(PRECISION_$1),$(precision))

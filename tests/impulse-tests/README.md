@@ -38,14 +38,17 @@ See the design write-up in
    - `make rust` — the faust-rs Rust backend is appended to the native Rust
      impulse architecture, compiled with `rustc -O`, and compared on the
      scalar prefix with `filesCompare -part` in 64-bit (`-double`) mode.
+   - `make julia` — the faust-rs Julia backend is appended to a self-contained
+     Julia impulse runtime, run by `julia`, and compared on the scalar prefix
+     with `filesCompare -part` in 64-bit (`-double`) mode.
    - `make <backend>-vec0` / `make <backend>-vec1` — run the same backend with
      `-vec -lv 0` or `-vec -lv 1` respectively. Available for `cpp`, `c`,
-     `interp`, `cranelift`, `wasm`, and `assemblyscript`; `make all-vec` runs
+     `interp`, `cranelift`, `wasm`, `assemblyscript`, `rust`, and `julia`; `make all-vec` runs
      both vector loop variants across all backends.
    - `make <backend>-ssN` / `make <backend>-vecL-ssN` — cross scalar mode or
      vector loop variant `L` with scheduling strategy `N`. `make all-ss` runs
      scalar `-ss 0..3`, `make all-vec-ss` runs `-lv 0/1 x -ss 0..3`, and
-     `make p7-matrix` runs all 72 backend/mode/strategy combinations.
+     `make backend-matrix` runs all 96 backend/mode/strategy combinations.
 
 ## Requirements
 
@@ -58,9 +61,11 @@ See the design write-up in
 - `c++` and the Faust standard libraries (default `/usr/local/share/faust`).
 - Node.js for the WASM and AssemblyScript impulse runners.
 - `rustc` (already required to build the workspace) for the Rust backend gate.
+- Julia with the `StaticArrays` package for the Julia backend gate.
 - `asc` (AssemblyScript compiler) on `PATH`, or `ASC=/path/to/asc`.
-- The Node runners use a 600-second compiler timeout so heavily parallel P7
-  runs do not inherit the interactive CLI's 120-second limit. Override it with
+- The Node runners use a 600-second compiler timeout so heavily parallel
+  backend-matrix runs do not inherit the interactive CLI's 120-second limit.
+  Override it with
   `FAUST_RS_TIMEOUT_SECONDS=<positive-seconds>`.
 
 ## Usage
@@ -76,14 +81,15 @@ make cranelift     # check the Cranelift JIT backend (64-bit)
 make wasm          # check the WASM backend (64-bit scalar prefix)
 make assemblyscript # check the AssemblyScript backend (scalar prefix)
 make rust          # check the Rust backend (scalar prefix, rustc)
+make julia         # check the Julia backend (scalar prefix, Julia)
 make cpp-vec0      # check the C++ backend with -vec -lv 0
 make cpp-vec1      # check the C++ backend with -vec -lv 1
 make all-vec       # check -vec -lv 0 and -vec -lv 1 across all backends
 make cpp-ss2       # check scalar C++ with scheduling strategy 2
 make cpp-vec1-ss3  # check C++ with -vec -lv 1 -ss 3
-make p7-smoke      # run all 72 combinations on the representative P7 corpus
-make p7-matrix     # run all 72 combinations on the full configured corpus
-make -j8 p7-full   # fresh full matrix plus the versioned audited report
+make backend-matrix-smoke # run the representative backend matrix corpus
+make backend-matrix       # run all 96 backend/mode/strategy combinations
+make -j8 backend-matrix-full # fresh full matrix plus the audited report
 make bench         # compare C++ Faust and faust-rs performance with faustbench -single
 make vec-bench     # compare scalar/vec0/vec1 C++ throughput under -ss 0..3 for checked vector DSPs
 make compile-bench # compare C++ Faust and faust-rs compile time
@@ -143,13 +149,13 @@ outdirs such as `cpp-vec0` / `cpp-vec1`, inherit the base backend known-failure
 lists, and can be run per backend or together with `make all-vec`; excluded
 cases are documented in `known.mk` to fix later.
 
-The P7 scheduling matrix uses separate outdirs such as `cpp-ss2` and
-`wasm-vec1-ss3`. `P7_SMOKE_DSPFILES` defaults to `APF`, `delays`, and
+The backend matrix uses separate outdirs such as `cpp-ss2` and
+`wasm-vec1-ss3`. `BACKEND_MATRIX_SMOKE_DSPFILES` defaults to `APF`, `delays`, and
 `select2`, covering recursion, delay storage, and conditional selection. The
-full-corpus P7 gate is `make -j8 p7-matrix`; `dspfiles` can also be overridden
+full-corpus gate is `make -j8 backend-matrix`; `dspfiles` can also be overridden
 explicitly for a targeted run.
 
-`make -j8 p7-full` is the reproducible P7.2 gate. It removes only scheduling
+`make -j8 backend-matrix-full` is the reproducible full gate. It removes only scheduling
 matrix outdirs, executes all 6,624 comparisons from fresh artifacts, and writes
 `porting/generated/p7-executable-backend-matrix-2026-07-14-en.md`. The report
 checks every expected response and records one aggregate SHA-256 per

@@ -4,8 +4,8 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
-use codegen::backends::cranelift::{generate_cranelift_module, CraneliftOptions};
-use codegen::backends::interp::{read_fbc, FbcDspInstance, InterpOptions};
+use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
+use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{Compiler, RealType, SignalFirLane};
 use std::path::PathBuf;
 

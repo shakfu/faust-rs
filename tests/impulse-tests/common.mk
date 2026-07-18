@@ -47,7 +47,7 @@ precision ?=
 # Compatibility alias retained for the original vector-only targets.
 VECOPTS ?=
 # Extra faust-rs / runner options injected into every backend invocation.
-# P7 scheduling targets use this for scalar `-ss N` and vector
+# Backend-matrix scheduling targets use this for scalar `-ss N` and vector
 # `-vec -lv N -ss M` combinations. Command-line VECOPTS still propagates.
 COMPILER_OPTS ?= $(VECOPTS)
 

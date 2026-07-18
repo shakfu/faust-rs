@@ -1,0 +1,39 @@
+# Test the faust-rs Julia backend against the C++ impulse reference.
+#
+# The generated `-lang julia -double` source is appended to the local,
+# self-contained impulse runtime (`archs/impulsejulia.jl`) and executed by
+# Julia. The harness deliberately mirrors the scalar prefix used by the Rust,
+# Wasm, AssemblyScript, interpreter, and Cranelift impulse runners.
+
+include common.mk
+
+outdir ?= julia
+ARCH_JULIA ?= archs/impulsejulia.jl
+ARCH_JULIA_TAIL ?= archs/runimpulsejulia.jl
+JULIA ?= julia
+
+allnames := $(dspfiles:dsp/%.dsp=%)
+testnames := $(filter-out $(call known_fail_for,$(outdir)),$(allnames))
+listfiles := $(testnames:%=ir/$(outdir)/%.ir)
+
+.PHONY: all
+.DELETE_ON_ERROR:
+
+all: $(COMPARE) ir/$(outdir)/.dir build/$(outdir)/.dir $(listfiles)
+
+ir/$(outdir)/.dir:
+	mkdir -p ir/$(outdir)
+	touch $@
+
+build/$(outdir)/.dir:
+	mkdir -p build/$(outdir)
+	touch $@
+
+$(COMPARE): tools/filesCompare.cpp
+	$(CXX) -O2 -std=c++11 $< -o $@
+
+ir/$(outdir)/%.ir: dsp/%.dsp reference/%.ir $(ARCH_JULIA) $(ARCH_JULIA_TAIL) | ir/$(outdir)/.dir build/$(outdir)/.dir
+	$(FAUST_RS) -lang julia -double -cn mydsp $(COMPILER_OPTS) -I dsp -I $(FAUSTLIBS) $< -o build/$(outdir)/$*.jl
+	cat $(ARCH_JULIA) build/$(outdir)/$*.jl $(ARCH_JULIA_TAIL) > build/$(outdir)/$*_main.jl
+	$(JULIA) build/$(outdir)/$*_main.jl > $@
+	$(COMPARE) $@ reference/$*.ir -part $(call dsp_precision,$*) || (rm -f $@; false)

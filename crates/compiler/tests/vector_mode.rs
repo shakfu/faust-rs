@@ -8,7 +8,7 @@
 
 use std::io::Cursor;
 
-use codegen::backends::interp::{read_fbc, FbcDspInstance, InterpOptions};
+use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{
     Compiler, ComputeMode, SchedulingStrategy, SignalFirLane, VectorEffectiveMode,
     VectorFallbackReason, VectorPipelineStatus,

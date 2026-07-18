@@ -897,7 +897,7 @@ fn emit_faust_dsp_trait_impl(out: &mut String, class_name: &str) {
     );
     let _ = writeln!(
         out,
-        "    fn compute(&mut self, count: i32, inputs: &[&[Self::T]], outputs: &mut [&mut [Self::T]]) {{ self.compute(count as usize, inputs, outputs) }}"
+        "    fn compute(&mut self, count: i32, inputs: &[&[Self::T]], outputs: &mut [&mut [Self::T]]) {{ self.compute(usize::try_from(count).expect(\"DSP block length must be non-negative\"), inputs, outputs) }}"
     );
     let _ = writeln!(out, "}}");
 }
@@ -943,7 +943,25 @@ fn emit_named_method(
     let body = decl
         .body
         .expect("emit_named_method called with prototype-only DeclareFunView");
+    if decl.name == "compute" {
+        // Vector transport temporaries retain explicit neutral initializers so
+        // every legal FIR control-flow path has a value. In common vector
+        // loops the first assignment dominates every read, which Rust reports
+        // as an unused initial assignment although it is intentional in the
+        // generic emitted shape.
+        let _ = writeln!(out, "    #[allow(unused_assignments)]");
+    }
     let _ = writeln!(out, "    {signature} {{");
+    if decl.name == "compute" {
+        // The public Rust API uses `usize` for slice lengths, while canonical
+        // FIR retains Faust's `i32` `count` argument. Shadow at the boundary so
+        // vector loop variables and every FIR arithmetic expression keep their
+        // C/C++ integer type instead of mixing `usize` with `i32`.
+        let _ = writeln!(
+            out,
+            "        let count: i32 = i32::try_from(count).expect(\"DSP block length exceeds i32::MAX\");"
+        );
+    }
     if decl.name == "instanceConstants" && !block_stores_var(store, body, "fSampleRate") {
         let _ = writeln!(out, "        self.fSampleRate = sample_rate;");
     }
@@ -1096,9 +1114,9 @@ fn collect_ui_params(store: &FirStore, root: FirId) -> HashMap<String, usize> {
 /// Finds stack/local variables that are assigned after declaration.
 ///
 /// Faust C++ emits mutable locals indiscriminately.  Rust only needs `mut`
-/// when a later `StoreVar` targets the same non-struct binding; keeping this
-/// prepass local to one FIR function removes `unused_mut` diagnostics without
-/// changing evaluation order or storage semantics.
+/// when a later `StoreVar` or `StoreTable` targets the same non-struct binding;
+/// keeping this prepass local to one FIR function removes `unused_mut`
+/// diagnostics without changing evaluation order or storage semantics.
 fn collect_mutable_local_vars(store: &FirStore, root: FirId) -> HashSet<String> {
     fn visit(store: &FirStore, node: FirId, vars: &mut HashSet<String>) {
         match match_fir(store, node) {
@@ -1108,6 +1126,11 @@ fn collect_mutable_local_vars(store: &FirStore, root: FirId) -> HashSet<String> 
                 }
             }
             FirMatch::StoreVar { name, access, .. }
+                if !matches!(access, AccessType::Struct | AccessType::Static) =>
+            {
+                vars.insert(name);
+            }
+            FirMatch::StoreTable { name, access, .. }
                 if !matches!(access, AccessType::Struct | AccessType::Static) =>
             {
                 vars.insert(name);
@@ -2585,14 +2608,33 @@ fn rust_string_literal(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodegenErrorCode, EmitCtx, EmitMode, RustOptions, RustRealType, StateTypes, emit_block,
-        emit_fun_call, emit_rust_header, generate_rust_module,
+        CodegenErrorCode, EmitCtx, EmitMode, RustOptions, RustRealType, StateTypes,
+        collect_mutable_local_vars, emit_block, emit_fun_call, emit_rust_header,
+        generate_rust_module,
     };
     use crate::fixtures::{
         build_gain_bias_ui_meta_test_module, build_passthrough_test_module,
         build_sine_phasor_test_module, build_table_state_delay_test_module,
     };
-    use fir::{FirBuilder, FirStore, FirType};
+    use fir::{AccessType, FirBuilder, FirStore, FirType};
+
+    #[test]
+    fn mutable_local_analysis_marks_stack_arrays_written_by_store_table() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let zero = b.float64(0.0);
+        let array = b.declare_var(
+            "vstate_tmp",
+            FirType::Array(Box::new(FirType::Float64), 4),
+            AccessType::Stack,
+            None,
+        );
+        let index = b.int32(0);
+        let write = b.store_table("vstate_tmp", AccessType::Stack, index, zero);
+        let body = b.block(&[array, write]);
+
+        assert!(collect_mutable_local_vars(&store, body).contains("vstate_tmp"));
+    }
 
     #[test]
     fn emits_single_precision_c_math_bridge_matching_cpp_rust_backend() {
@@ -2710,6 +2752,13 @@ mod tests {
         assert!(out.contains("ui_interface.add_horizontal_slider(\"freq\", ParamIndex(0)"));
         assert!(out.contains(
             "pub fn compute(&mut self, count: usize, inputs: &[impl AsRef<[FaustFloat]>], outputs: &mut [impl AsMut<[FaustFloat]>])"
+        ));
+        assert!(out.contains("#[allow(unused_assignments)]\n    pub fn compute"));
+        assert!(out.contains(
+            "let count: i32 = i32::try_from(count).expect(\"DSP block length exceeds i32::MAX\");"
+        ));
+        assert!(out.contains(
+            "self.compute(usize::try_from(count).expect(\"DSP block length must be non-negative\"), inputs, outputs)"
         ));
         assert!(out.contains("let mut outputs_iter = outputs.iter_mut();"));
         assert!(out.contains(
