@@ -1967,6 +1967,70 @@ impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
 /// The cloner preserves FIR semantics while renaming stack/loop locals to avoid
 /// capture, and can additionally remap `kFunArgs` references to materialized
 /// temporary stack slots during inline preparation.
+/// Rebuilds a module while removing pure `Drop` roots introduced only to
+/// materialize a shared expression DAG during FIR construction.
+///
+/// This is a mandatory canonicalization boundary for verified FIR: a retained
+/// `Drop` always has a potentially observable evaluation, while loads,
+/// constants, and pure arithmetic roots are removed once for every backend.
+/// Local names are deliberately preserved so textual output remains stable.
+#[must_use]
+pub fn sweep_scaffolding_drop_roots(src_store: &FirStore, module: FirId) -> (FirStore, FirId) {
+    let mut dst_store = FirStore::new();
+    let mut state = FirHygienicCloneState::default();
+    let mut cloner = HygienicCloner::new(src_store, &mut dst_store, &mut state);
+    cloner.preserve_local_names = true;
+    cloner.sweep_scaffolding_drop_roots = true;
+    cloner.push_scope();
+    let module = cloner
+        .clone_node(module)
+        .expect("verified FIR must contain only cloneable node kinds");
+    cloner.pop_scope();
+    (dst_store, module)
+}
+
+fn is_obviously_side_effect_free_value(store: &FirStore, value: FirId) -> bool {
+    match match_fir(store, value) {
+        FirMatch::Int32 { .. }
+        | FirMatch::Int64 { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Quad { .. }
+        | FirMatch::FixedPoint { .. }
+        | FirMatch::Int32Array { .. }
+        | FirMatch::Float32Array { .. }
+        | FirMatch::Float64Array { .. }
+        | FirMatch::QuadArray { .. }
+        | FirMatch::FixedPointArray { .. }
+        | FirMatch::LoadVar { .. }
+        | FirMatch::LoadVarAddress { .. }
+        | FirMatch::NullValue { .. } => true,
+        FirMatch::LoadTable { index, .. } => is_obviously_side_effect_free_value(store, index),
+        FirMatch::ValueArray { values, .. } => values
+            .iter()
+            .all(|&item| is_obviously_side_effect_free_value(store, item)),
+        FirMatch::BinOp { lhs, rhs, .. } => {
+            is_obviously_side_effect_free_value(store, lhs)
+                && is_obviously_side_effect_free_value(store, rhs)
+        }
+        FirMatch::Neg { value, .. }
+        | FirMatch::Cast { value, .. }
+        | FirMatch::Bitcast { value, .. } => is_obviously_side_effect_free_value(store, value),
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
+            is_obviously_side_effect_free_value(store, cond)
+                && is_obviously_side_effect_free_value(store, then_value)
+                && is_obviously_side_effect_free_value(store, else_value)
+        }
+        _ => false,
+    }
+}
+
 struct HygienicCloner<'a, 'b> {
     src: &'a FirStore,
     dst: &'b mut FirStore,
@@ -1974,6 +2038,8 @@ struct HygienicCloner<'a, 'b> {
     scopes: Vec<HashMap<String, String>>,
     fun_arg_subst: HashMap<String, String>,
     local_renames: Vec<FirLocalRename>,
+    preserve_local_names: bool,
+    sweep_scaffolding_drop_roots: bool,
 }
 
 impl<'a, 'b> HygienicCloner<'a, 'b> {
@@ -1986,6 +2052,8 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             scopes: Vec::new(),
             fun_arg_subst: HashMap::new(),
             local_renames: Vec::new(),
+            preserve_local_names: false,
+            sweep_scaffolding_drop_roots: false,
         }
     }
 
@@ -2068,18 +2136,24 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
         if let Some(existing) = existing {
             return existing;
         }
-        let renamed = self.fresh_local_name(original);
+        let renamed = if self.preserve_local_names {
+            original.to_string()
+        } else {
+            self.fresh_local_name(original)
+        };
         let Some(scope) = self.scopes.last_mut() else {
             return original.to_string();
         };
         scope.insert(original.to_string(), renamed.clone());
-        self.local_renames.push(FirLocalRename {
-            origin_node,
-            original: original.to_string(),
-            renamed: renamed.clone(),
-            access,
-            kind,
-        });
+        if !self.preserve_local_names {
+            self.local_renames.push(FirLocalRename {
+                origin_node,
+                original: original.to_string(),
+                renamed: renamed.clone(),
+                access,
+                kind,
+            });
+        }
         renamed
     }
 
@@ -2361,6 +2435,12 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 self.push_scope();
                 let mut cloned = Vec::with_capacity(stmts.len());
                 for s in stmts {
+                    if self.sweep_scaffolding_drop_roots
+                        && let FirMatch::Drop(value) = match_fir(self.src, s)
+                        && is_obviously_side_effect_free_value(self.src, value)
+                    {
+                        continue;
+                    }
                     cloned.push(self.clone_node(s)?);
                 }
                 self.pop_scope();

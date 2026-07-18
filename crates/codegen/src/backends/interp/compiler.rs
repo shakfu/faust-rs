@@ -26,8 +26,6 @@ use fir::{
     UiBoxType, match_fir,
 };
 
-use crate::backends::purity::is_obviously_side_effect_free_value;
-
 use super::bytecode::{
     BlockId, BlockStoreData, FbcBlock, FbcBlockArena, FbcInstruction, FbcUiInstruction,
 };
@@ -327,7 +325,6 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             FirMatch::ShiftArrayVar {
                 ref name, delay, ..
             } => self.compile_shift_array(name, delay),
-            FirMatch::Drop(inner) if is_obviously_side_effect_free_value(store, inner) => Ok(()),
             FirMatch::Drop(inner) => self.compile_node(store, inner),
 
             // --- Arithmetic ---

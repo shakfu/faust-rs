@@ -31,6 +31,53 @@ fn assert_no_checker_errors(store: &FirStore, module: FirId) {
 }
 
 #[test]
+fn scaffolding_drop_sweep_removes_only_pure_block_roots() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let one = b.float32(1.0);
+    let pure = b.binop(crate::FirBinOp::Add, one, one, FirType::Float32);
+    let foreign = b.fun_call("observable", &[], FirType::Void);
+    let pure_drop = b.drop_(pure);
+    let foreign_drop = b.drop_(foreign);
+    let body = b.block(&[pure_drop, foreign_drop]);
+    let function = fun(&mut b, "compute", &[], FirType::Void, Some(body), false);
+    let globals = b.block(&[]);
+    let functions = b.block(&[function]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        0,
+        "drop_sweep",
+        globals,
+        globals,
+        functions,
+        static_decls,
+    );
+
+    let (swept_store, swept_module) = sweep_scaffolding_drop_roots(&store, module);
+    let FirMatch::Module { functions, .. } = match_fir(&swept_store, swept_module) else {
+        panic!("sweep must preserve module root");
+    };
+    let FirMatch::Block(functions) = match_fir(&swept_store, functions) else {
+        panic!("module functions must remain a block");
+    };
+    let FirMatch::DeclareFun {
+        body: Some(body), ..
+    } = match_fir(&swept_store, functions[0])
+    else {
+        panic!("function definition must remain present");
+    };
+    let FirMatch::Block(stmts) = match_fir(&swept_store, body) else {
+        panic!("function body must remain a block");
+    };
+    assert_eq!(stmts.len(), 1, "pure Drop root must be swept");
+    assert!(matches!(
+        match_fir(&swept_store, stmts[0]),
+        FirMatch::Drop(_)
+    ));
+}
+
+#[test]
 fn analyzes_call_graph_sizes_and_candidates() {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);

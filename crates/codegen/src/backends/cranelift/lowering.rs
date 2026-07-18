@@ -7,7 +7,6 @@
 use cranelift_frontend::Variable;
 
 use super::*;
-use crate::backends::purity::is_obviously_side_effect_free_value;
 
 /// Lowered expression value tracked in the local Cranelift lowering environment.
 ///
@@ -607,9 +606,6 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                     .to_string(),
             )),
             FirMatch::Drop(value) => {
-                if is_obviously_side_effect_free_value(self.store, value) {
-                    return Ok(());
-                }
                 let _ = self.lower_expr(value, None)?;
                 Ok(())
             }

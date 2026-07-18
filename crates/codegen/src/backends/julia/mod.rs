@@ -40,7 +40,7 @@ use std::fmt::Write as _;
 
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
-use crate::backends::{faust_api, purity::is_obviously_side_effect_free_value};
+use crate::backends::faust_api;
 
 pub const BACKEND_NAME: &str = "julia";
 
@@ -902,9 +902,6 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::Drop(value) => {
-            if is_obviously_side_effect_free_value(store, value) {
-                return Ok(());
-            }
             let value = emit_value(store, value)?;
             let _ = writeln!(out, "{tab}_ = {value}");
             Ok(())
@@ -1691,7 +1688,7 @@ mod tests {
     use fir::{FirBuilder, FirStore, FirType};
 
     #[test]
-    fn pure_drop_is_elided_but_foreign_call_drop_is_retained() {
+    fn raw_fir_drops_are_emitted_after_canonicalization_moves_upstream() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
         let one = b.float32(1.0);
@@ -1701,8 +1698,8 @@ mod tests {
         let mut out = String::new();
         let mut mode = EmitMode::Default;
 
-        emit_stmt(&store, &mut out, pure, 0, &mut mode).expect("pure drop should emit");
-        assert!(out.is_empty());
+        emit_stmt(&store, &mut out, pure, 0, &mut mode).expect("raw pure drop should emit");
+        assert!(out.contains("_ ="));
 
         emit_stmt(&store, &mut out, effectful, 0, &mut mode).expect("effectful drop should emit");
         assert!(out.contains("_ = foreign()"));

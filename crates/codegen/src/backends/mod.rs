@@ -24,7 +24,6 @@
 
 pub(crate) mod c_family;
 pub(crate) mod faust_api;
-pub(crate) mod purity;
 
 pub mod asc;
 pub mod c;

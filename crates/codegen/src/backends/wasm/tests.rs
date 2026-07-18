@@ -565,10 +565,9 @@ fn wasm_compute_lowers_control_flow_statements() {
             >= 2
     );
     assert!(ops.iter().any(|op| matches!(op, Operator::Else)));
-    // The fixture's two Drop roots contain only an input load and its negation.
-    // Since commit a29954d8, all active backends elide such structurally pure
-    // roots; calls and unknown FIR values remain conservatively effectful.
-    assert!(!ops.iter().any(|op| matches!(op, Operator::Drop)));
+    // Raw codegen accepts manually constructed FIR too; canonical compiler
+    // output has already swept these pure Drop roots before reaching WASM.
+    assert!(ops.iter().any(|op| matches!(op, Operator::Drop)));
     assert!(ops.iter().any(|op| matches!(op, Operator::I32Eq)));
 }
 

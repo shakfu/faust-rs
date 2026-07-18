@@ -77,6 +77,7 @@ use errors::{
 use fir::{
     FirId, FirStore,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
+    inliner::sweep_scaffolding_drop_roots,
 };
 use parser::VirtualSourceMap;
 use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};

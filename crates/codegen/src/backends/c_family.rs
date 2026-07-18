@@ -32,8 +32,6 @@ use std::fmt::Write as _;
 
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
 
-use crate::backends::purity::is_obviously_side_effect_free_value;
-
 /// Syntax parameters distinguishing the C-family textual backends (`c`, `cpp`).
 ///
 /// Every field is a fixed token leaf, not behavior — plain data, matching the
@@ -713,26 +711,13 @@ pub(crate) fn emit_stmt_common<E>(
             }
             (Err(err), _) | (_, Err(err)) => Err(err),
         },
-        FirMatch::Drop(value) => {
-            // Vector FIR uses Drop roots to materialize and verify a shared
-            // expression DAG. Once the roots have become ordinary loads,
-            // constants, or pure arithmetic, emitting `(void)(...)` only
-            // bloats generated C/C++ and cannot affect execution. Keep every
-            // call or unrecognised node: FIR has no general purity annotation
-            // for foreign functions, so the conservative fallback preserves
-            // potential side effects.
-            if is_obviously_side_effect_free_value(store, value) {
+        FirMatch::Drop(value) => match (ctx.render_value)(value) {
+            Ok(value) => {
+                let _ = writeln!(out, "{tab}(void)({value});");
                 Ok(())
-            } else {
-                match (ctx.render_value)(value) {
-                    Ok(value) => {
-                        let _ = writeln!(out, "{tab}(void)({value});");
-                        Ok(())
-                    }
-                    Err(err) => Err(err),
-                }
             }
-        }
+            Err(err) => Err(err),
+        },
         FirMatch::NullStatement => {
             let _ = writeln!(out, "{tab};");
             Ok(())
@@ -1005,8 +990,7 @@ mod tests {
         CFamilySyntax, emit_binop, emit_binop_expr, emit_type, format_float32, string_literal,
         trim_float,
     };
-    use crate::backends::purity::is_obviously_side_effect_free_value;
-    use fir::{AccessType, FirBinOp, FirBuilder, FirStore, FirType};
+    use fir::{FirBinOp, FirType};
 
     const TEST_SYNTAX: CFamilySyntax = CFamilySyntax {
         bool_type: "bool",
@@ -1059,19 +1043,6 @@ mod tests {
             emit_binop_expr(FirBinOp::LRsh, "n", "3"),
             "((int32_t)(((uint32_t)(n)) >> (3)))"
         );
-    }
-
-    #[test]
-    fn redundant_drop_purity_is_conservative_about_calls() {
-        let mut store = FirStore::new();
-        let mut builder = FirBuilder::new(&mut store);
-        let one = builder.float32(1.0);
-        let local = builder.load_var("local", AccessType::Stack, FirType::Float32);
-        let sum = builder.binop(FirBinOp::Add, one, local, FirType::Float32);
-        let foreign = builder.fun_call("foreign_side_effect", &[], FirType::Float32);
-
-        assert!(is_obviously_side_effect_free_value(&store, sum));
-        assert!(!is_obviously_side_effect_free_value(&store, foreign));
     }
 
     #[test]

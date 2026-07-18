@@ -315,9 +315,13 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
         &signal_fir_options,
         timing_sink.map(|sink| sink.as_ref()),
     )?;
+    // Canonicalize every FIR artifact before it reaches any backend or FIR
+    // dump. This is deliberately independent of `--no-fir-verify`: pure Drop
+    // roots are construction scaffolding, not an optional backend optimization.
+    let (store, module) = sweep_scaffolding_drop_roots(&lowered.store, lowered.module);
     Ok(FirCompileOutput {
-        store: lowered.store,
-        module: lowered.module,
+        store,
+        module,
         vector_pipeline_status: lowered.vector_pipeline_status,
         vector_effective_mode: lowered.vector_effective_mode,
         vector_pipeline_detail: lowered.vector_pipeline_detail,

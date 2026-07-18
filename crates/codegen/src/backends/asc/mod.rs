@@ -28,7 +28,7 @@ use fir::{
     AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
 };
 
-use crate::backends::{faust_api, purity::is_obviously_side_effect_free_value};
+use crate::backends::faust_api;
 
 pub const BACKEND_NAME: &str = "asc";
 
@@ -646,9 +646,6 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::Drop(value) => {
-            if is_obviously_side_effect_free_value(store, value) {
-                return Ok(());
-            }
             let value = emit_value(store, options, class_name, value)?;
             let _ = writeln!(out, "{tab}{value};");
             Ok(())
@@ -1417,7 +1414,7 @@ mod tests {
     use fir::{FirBuilder, FirType};
 
     #[test]
-    fn pure_drop_is_elided_but_foreign_call_drop_is_retained() {
+    fn raw_fir_drops_are_emitted_after_canonicalization_moves_upstream() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
         let one = b.float32(1.0);
@@ -1435,8 +1432,8 @@ mod tests {
             0,
             Phase::Body,
         )
-        .expect("pure drop should emit");
-        assert!(out.is_empty());
+        .expect("raw pure drop should emit");
+        assert!(out.contains("1.0"));
 
         emit_stmt(
             &store,

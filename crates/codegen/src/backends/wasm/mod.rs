@@ -44,7 +44,6 @@
 use fir::{AccessType, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use std::collections::HashMap;
 
-use crate::backends::purity::is_obviously_side_effect_free_value;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, ImportSection, Instruction, MemArg, MemorySection, MemoryType,
@@ -1157,9 +1156,6 @@ impl ComputeSubsetLowerer<'_> {
                 default,
             } => self.lower_switch_stmt(cond, &cases, default, function),
             FirMatch::Drop(value) => {
-                if is_obviously_side_effect_free_value(self.store, value) {
-                    return Ok(());
-                }
                 self.lower_expr(value, function)?;
                 function.instruction(&Instruction::Drop);
                 Ok(())
