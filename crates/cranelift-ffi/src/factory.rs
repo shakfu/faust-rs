@@ -193,7 +193,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                     dsp_source: &dsp_source,
                     argv: args,
                     opt_level,
-                    semantic_fingerprint: &compiled.fir_dump,
                     foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
                 },
                 &compiled.fir,
@@ -251,7 +250,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                     dsp_code: dsp_content,
                     argv: args,
                     opt_level,
-                    semantic_fingerprint: &compiled.fir_dump,
                     foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
                     source_is_faust: true,
                 },
@@ -316,7 +314,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
                     dsp_code: &fir_dump,
                     argv: args,
                     opt_level,
-                    semantic_fingerprint: &fir_dump,
                     foreign_function_fingerprint: &foreign_function_fingerprint,
                     source_is_faust: false,
                 },
@@ -377,7 +374,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
                     dsp_code: &fir_dump,
                     argv: args,
                     opt_level,
-                    semantic_fingerprint: &fir_dump,
                     foreign_function_fingerprint: &foreign_function_fingerprint,
                     source_is_faust: false,
                 },
@@ -742,7 +738,6 @@ struct FactoryBuildSpec<'a> {
     dsp_code: &'a str,
     argv: &'a [String],
     opt_level: c_int,
-    semantic_fingerprint: &'a str,
     foreign_function_fingerprint: &'a str,
     source_is_faust: bool,
 }
@@ -753,7 +748,6 @@ struct FileFactoryBuildSpec<'a> {
     dsp_source: &'a str,
     argv: &'a [String],
     opt_level: c_int,
-    semantic_fingerprint: &'a str,
     foreign_function_fingerprint: &'a str,
 }
 
@@ -772,7 +766,6 @@ fn build_scaffold_factory_from_file(
         dsp_source,
         argv,
         opt_level,
-        semantic_fingerprint,
         foreign_function_fingerprint,
         ..
     } = spec;
@@ -782,7 +775,6 @@ fn build_scaffold_factory_from_file(
             dsp_code: dsp_source,
             argv,
             opt_level,
-            semantic_fingerprint,
             foreign_function_fingerprint,
             source_is_faust: true,
         },
@@ -836,6 +828,21 @@ fn canonicalize_cache_identity_argv(argv: &[String]) -> Vec<String> {
     out
 }
 
+fn format_factory_sha_key(
+    opt_level: c_int,
+    identity_argv: &[String],
+    foreign_function_fingerprint: &str,
+    semantic_fingerprint: &str,
+) -> String {
+    format!(
+        "cranelift:{}:{}:{}:{}",
+        opt_level,
+        identity_argv.join("\x1f"),
+        foreign_function_fingerprint,
+        semantic_fingerprint
+    )
+}
+
 /// Shared factory object builder.
 ///
 /// This is the point where FIR-derived runtime metadata, cache identity, JSON
@@ -851,7 +858,6 @@ fn build_scaffold_factory_common(
         dsp_code,
         argv,
         opt_level,
-        semantic_fingerprint,
         foreign_function_fingerprint,
         source_is_faust,
     } = spec;
@@ -862,6 +868,7 @@ fn build_scaffold_factory_common(
     // `canonicalize_cache_identity_argv`) before it contributes to cache
     // identity; `compile_argv` below still stores the caller's raw argv.
     let identity_argv = canonicalize_cache_identity_argv(argv);
+    let semantic_fingerprint = fir::canonical_fir_fingerprint(&fir.store, fir.module);
     let compile_options = if identity_argv.is_empty() {
         format!(
             "opt_level={opt_level}; compute_body_lowered={compute_body_lowered}; foreign_functions={foreign_function_fingerprint}"
@@ -872,12 +879,11 @@ fn build_scaffold_factory_common(
             identity_argv.join(" ")
         )
     };
-    let sha_key = format!(
-        "cranelift:{}:{}:{}:{}",
+    let sha_key = format_factory_sha_key(
         opt_level,
-        identity_argv.join("\x1f"),
+        &identity_argv,
         foreign_function_fingerprint,
-        semantic_fingerprint
+        &semantic_fingerprint,
     );
     let runtime = build_runtime_descriptor(&fir.store, fir.module)?;
     let num_inputs = fir.num_inputs;
@@ -922,7 +928,6 @@ fn decode_c_argv(argc: c_int, argv: *const *const c_char) -> Result<Vec<String>,
 struct CompiledCraneliftFactory {
     fir: BoxFfiFirModule,
     jit: JitDspModule,
-    fir_dump: String,
     foreign_function_fingerprint: String,
 }
 
@@ -963,7 +968,6 @@ fn preflight_compile_file_to_cranelift(
     let fir = compiler
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
-    let fir_dump = fir::dump_fir(&fir.store, fir.module);
     let num_inputs = fir_module_num_inputs(&fir.store, fir.module)?;
     let num_outputs = fir_module_num_outputs(&fir.store, fir.module)?;
     let fir = BoxFfiFirModule {
@@ -976,7 +980,6 @@ fn preflight_compile_file_to_cranelift(
     Ok(CompiledCraneliftFactory {
         fir,
         jit,
-        fir_dump,
         foreign_function_fingerprint: foreign_function_registry_fingerprint(),
     })
 }
@@ -993,7 +996,6 @@ fn preflight_compile_source_to_cranelift(
     let fir = compiler
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
-    let fir_dump = fir::dump_fir(&fir.store, fir.module);
     let num_inputs = fir_module_num_inputs(&fir.store, fir.module)?;
     let num_outputs = fir_module_num_outputs(&fir.store, fir.module)?;
     let fir = BoxFfiFirModule {
@@ -1006,7 +1008,6 @@ fn preflight_compile_source_to_cranelift(
     Ok(CompiledCraneliftFactory {
         fir,
         jit,
-        fir_dump,
         foreign_function_fingerprint: foreign_function_registry_fingerprint(),
     })
 }
@@ -1203,13 +1204,21 @@ fn rebuild_factory_from_source(
     expected_compile_options: &str,
 ) -> Result<CraneliftDspFactory, String> {
     let compiled = preflight_compile_source_to_cranelift(name, source, opt_level, argv)?;
-    let rebuilt = build_scaffold_factory_common(
+    // V1/V2 payloads written before allocation-independent fingerprints used
+    // the diagnostic FIR dump directly. Keep accepting that identity so the
+    // existing source-backed container compatibility contract remains intact.
+    let legacy_sha = format_factory_sha_key(
+        opt_level,
+        &canonicalize_cache_identity_argv(argv),
+        &compiled.foreign_function_fingerprint,
+        &fir::dump_fir(&compiled.fir.store, compiled.fir.module),
+    );
+    let mut rebuilt = build_scaffold_factory_common(
         FactoryBuildSpec {
             name,
             dsp_code: source,
             argv,
             opt_level,
-            semantic_fingerprint: &compiled.fir_dump,
             foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
             source_is_faust: true,
         },
@@ -1217,10 +1226,14 @@ fn rebuild_factory_from_source(
         Some(compiled.jit),
     )?;
     if rebuilt.sha_key != expected_sha {
-        return Err(format!(
-            "bitcode SHA mismatch: expected '{}', rebuilt '{}'",
-            expected_sha, rebuilt.sha_key
-        ));
+        if legacy_sha == expected_sha {
+            rebuilt.sha_key = expected_sha.to_owned();
+        } else {
+            return Err(format!(
+                "bitcode SHA mismatch: expected '{}', rebuilt '{}'",
+                expected_sha, rebuilt.sha_key
+            ));
+        }
     }
     if rebuilt.compile_options != expected_compile_options {
         return Err("bitcode compile options mismatch after rebuild".to_owned());
@@ -1932,6 +1945,52 @@ mod tests {
     }
 
     #[test]
+    fn source_rebuild_accepts_legacy_allocation_dependent_sha() {
+        let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
+        let name = "legacy_sha";
+        let source = "process = _;";
+        let argv = Vec::<String>::new();
+        let opt_level = 1;
+
+        let compiled =
+            super::preflight_compile_source_to_cranelift(name, source, opt_level, &argv).unwrap();
+        let legacy_sha = super::format_factory_sha_key(
+            opt_level,
+            &super::canonicalize_cache_identity_argv(&argv),
+            &compiled.foreign_function_fingerprint,
+            &fir::dump_fir(&compiled.fir.store, compiled.fir.module),
+        );
+        let current = super::build_scaffold_factory_common(
+            super::FactoryBuildSpec {
+                name,
+                dsp_code: source,
+                argv: &argv,
+                opt_level,
+                foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
+                source_is_faust: true,
+            },
+            &compiled.fir,
+            Some(compiled.jit),
+        )
+        .unwrap();
+        assert_ne!(current.sha_key, legacy_sha);
+        let expected_compile_options = current.compile_options.clone();
+        drop(current);
+
+        let rebuilt = super::rebuild_factory_from_source(
+            name,
+            source,
+            &argv,
+            opt_level,
+            &legacy_sha,
+            &expected_compile_options,
+        )
+        .unwrap();
+        assert_eq!(rebuilt.sha_key, legacy_sha);
+    }
+
+    #[test]
     fn clif_bitcode_roundtrip_via_file_rebuilds_runnable_factory() {
         let _guard = crate::test_serial_guard();
         let name = c"cliffile";
@@ -2012,7 +2071,6 @@ mod tests {
                 dsp_code: "process = _;",
                 argv: &[],
                 opt_level: 1,
-                semantic_fingerprint: "fingerprint",
                 foreign_function_fingerprint: "",
                 source_is_faust: true,
             },

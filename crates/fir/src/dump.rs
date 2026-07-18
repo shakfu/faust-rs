@@ -5,6 +5,7 @@
 //! because `match_fir` reconstructs them.
 
 use super::*;
+use std::collections::HashMap;
 
 /// Deterministic structural dump helper for FIR differential checks.
 ///
@@ -15,6 +16,92 @@ pub fn dump_fir(store: &FirStore, root: FirId) -> String {
     let mut seen = HashSet::new();
     dump_node(store, root, 0, &mut out, &mut seen);
     out
+}
+
+/// Returns an allocation-independent structural encoding of reachable FIR.
+///
+/// Unlike [`dump_fir`], this encoding traverses the complete internal tree,
+/// including type and access atoms, and assigns local node numbers in ordered
+/// preorder. Arena-local [`FirId`] values and interned numeric tag ids therefore
+/// cannot affect the result. Sharing remains observable because repeated edges
+/// reference the same local node number.
+///
+/// This is suitable for cache identity. Human diagnostics should continue to
+/// use [`dump_fir`], whose original ids are useful when inspecting a store.
+#[must_use]
+pub fn canonical_fir_fingerprint(store: &FirStore, root: FirId) -> String {
+    let mut out = String::new();
+    let mut labels = HashMap::new();
+    labels.insert(root, 0_u32);
+    let mut emitted = HashSet::new();
+    fingerprint_node(store, root, &mut labels, &mut emitted, &mut out);
+    out
+}
+
+fn fingerprint_node(
+    store: &FirStore,
+    id: FirId,
+    labels: &mut HashMap<FirId, u32>,
+    emitted: &mut HashSet<FirId>,
+    out: &mut String,
+) {
+    if !emitted.insert(id) {
+        return;
+    }
+    let node = store
+        .arena
+        .node(id)
+        .expect("FIR fingerprint root and children must belong to the store");
+    let children = node.children.as_slice();
+    let child_labels: Vec<u32> = children
+        .iter()
+        .map(|child| {
+            let next = u32::try_from(labels.len()).expect("FIR fingerprint exceeds u32::MAX nodes");
+            *labels.entry(*child).or_insert(next)
+        })
+        .collect();
+    let label = labels[&id];
+
+    let _ = write!(out, "@{label}=");
+    write_canonical_kind(store, &node.kind, out);
+    out.push('[');
+    for (index, child_label) in child_labels.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "@{child_label}");
+    }
+    out.push_str("]\n");
+
+    for child in children {
+        fingerprint_node(store, *child, labels, emitted, out);
+    }
+}
+
+fn write_canonical_kind(store: &FirStore, kind: &NodeKind, out: &mut String) {
+    match kind {
+        NodeKind::Nil => out.push_str("Nil"),
+        NodeKind::Cons => out.push_str("Cons"),
+        NodeKind::Symbol(value) => {
+            let _ = write!(out, "Symbol({value:?})");
+        }
+        NodeKind::StringLiteral(value) => {
+            let _ = write!(out, "StringLiteral({value:?})");
+        }
+        NodeKind::Int(value) => {
+            let _ = write!(out, "Int({value})");
+        }
+        NodeKind::FloatBits(bits) => {
+            let _ = write!(out, "FloatBits(0x{bits:016x})");
+        }
+        NodeKind::Tag(tag) => {
+            let name = store
+                .arena
+                .tag_name(*tag)
+                .expect("FIR tag id must be interned in the store");
+            let _ = write!(out, "Tag({name:?})");
+        }
+    }
 }
 
 fn dump_node(

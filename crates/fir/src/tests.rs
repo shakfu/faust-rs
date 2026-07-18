@@ -102,6 +102,46 @@ fn dump_fir_expands_simple_for_loop_body() {
 }
 
 #[test]
+fn canonical_fir_fingerprint_ignores_arena_allocation_history() {
+    fn build(with_unreachable_prefix: bool, value: i32) -> (FirStore, FirId) {
+        let mut store = FirStore::new();
+        let root = {
+            let mut b = FirBuilder::new(&mut store);
+            if with_unreachable_prefix {
+                let unused = b.float64(123.5);
+                let _ = b.neg(unused, FirType::Float64);
+            }
+            let value = b.int32(value);
+            let store_value = b.store_var("state", AccessType::Struct, value);
+            let body = b.block(&[store_value]);
+            let empty = b.block(&[]);
+            b.module(0, 0, "fingerprint", empty, empty, body, empty)
+        };
+        (store, root)
+    }
+
+    let (first_store, first_root) = build(false, 7);
+    let (shifted_store, shifted_root) = build(true, 7);
+    assert_ne!(
+        dump_fir(&first_store, first_root),
+        dump_fir(&shifted_store, shifted_root),
+        "diagnostic dumps should expose their distinct arena ids"
+    );
+    assert_eq!(
+        canonical_fir_fingerprint(&first_store, first_root),
+        canonical_fir_fingerprint(&shifted_store, shifted_root),
+        "cache identity must ignore unrelated allocation history"
+    );
+
+    let (changed_store, changed_root) = build(true, 8);
+    assert_ne!(
+        canonical_fir_fingerprint(&first_store, first_root),
+        canonical_fir_fingerprint(&changed_store, changed_root),
+        "semantic changes must alter the canonical fingerprint"
+    );
+}
+
+#[test]
 fn dump_fir_expands_for_loop_body() {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);

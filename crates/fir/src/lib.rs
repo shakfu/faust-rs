@@ -59,7 +59,7 @@ mod store;
 mod types;
 
 pub use builder::FirBuilder;
-pub use dump::dump_fir;
+pub use dump::{canonical_fir_fingerprint, dump_fir};
 pub use matcher::{FirMatch, match_fir};
 pub use store::FirStore;
 pub use types::{
