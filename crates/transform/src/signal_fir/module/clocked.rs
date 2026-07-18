@@ -439,7 +439,10 @@ impl<'a> SignalToFirLower<'a> {
         };
         let one = self.lower_int32_const(1);
         let mut b = FirBuilder::new(&mut self.store);
-        let idx = b.load_var(loop_ctx.var.clone(), AccessType::Stack, FirType::Int32);
+        // C++ `generateZeroPad` reads the counted block iterator itself; in
+        // FIR that iterator is introduced by `SimpleForLoop`, whose canonical
+        // access class is `Loop` rather than an ordinary stack local.
+        let idx = b.load_var(loop_ctx.var.clone(), AccessType::Loop, FirType::Int32);
         let last = b.binop(FirBinOp::Sub, loop_ctx.bound, one, FirType::Int32);
         let is_last = b.binop(FirBinOp::Eq, idx, last, FirType::Int32);
         Ok(b.select2(is_last, value_fir, zero, ty))

@@ -16,10 +16,14 @@
 //! - `fIOTA_d`    — the per-domain circular cursor for in-block delay state.
 
 use codegen::backends::cpp::CppOptions;
-use compiler::{Compiler, SchedulingStrategy, SignalFirLane};
+use compiler::{Compiler, FirVerifyOptions, SchedulingStrategy, SignalFirLane};
 
 fn compile_cpp(name: &str, source: &str) -> String {
     Compiler::new()
+        .with_fir_verify_options(FirVerifyOptions {
+            enabled: true,
+            strict: false,
+        })
         .compile_source_to_cpp_with_lane(
             name,
             source,
@@ -189,6 +193,8 @@ fn held_domain_free_payload_state_is_inside_guarded_block() {
 
 #[test]
 fn upsampling_emits_counted_inner_loop() {
+    // Consuming an outer input exercises ZeroPad lowering, including the
+    // counted `lOd` iterator access checked by the FIR verifier above.
     let cpp = compile_cpp("struct_us", r#"process = (2, _) : upsampling(+ ~ _);"#);
     let body = compute_body(&cpp);
     assert!(
