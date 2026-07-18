@@ -13,11 +13,11 @@
 //!
 //! # Rust runtime shape
 //!
-//! The generated source follows the same high-level contract as C++ Faust
-//! `-lang rust`: it assumes the host has definitions for runtime names such as
-//! `Meta`, `UI`, and `Soundfile`. This module is responsible for producing
-//! backend text, not for packaging a Rust runtime. The generated unit defines
-//! its own `FaustFloat` alias (`f32` by default, `f64` for double precision).
+//! The generated source follows the public Rust contract of Faust C++
+//! `-lang rust`: the surrounding architecture defines `F32`, `F64`,
+//! `FaustFloat`, `Meta`, `UI`, `ParamIndex`, and `FaustDsp`. The generated
+//! unit is therefore intended for insertion into a Faust Rust architecture,
+//! just like the C++ reference output; it does not package a private runtime.
 //!
 //! # C-semantics preservation
 //!
@@ -42,7 +42,7 @@
 //!
 //! Unsupported FIR nodes fail with `FRS-CGEN-RUST-0003`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
@@ -54,8 +54,8 @@ pub const BACKEND_NAME: &str = "rust";
 /// Rust backend options for module-first emission.
 ///
 /// The backend mirrors the C/C++ convention of defaulting to `mydsp` for
-/// deterministic generated type names. `None` means "use the FIR module name",
-/// which is useful for fixture-level backend tests.
+/// deterministic generated type names. `None` also means `mydsp`, matching
+/// the default of the Faust C and C++ backends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RustOptions {
     /// Optional Rust DSP struct name override for the FIR module name.
@@ -81,15 +81,6 @@ pub enum RustRealType {
     Float32,
     /// Double precision, matching Faust `-double`.
     Float64,
-}
-
-impl RustRealType {
-    fn rust_name(self) -> &'static str {
-        match self {
-            Self::Float32 => "f32",
-            Self::Float64 => "f64",
-        }
-    }
 }
 
 /// Stable machine-readable error codes for the Rust backend emitter.
@@ -160,7 +151,6 @@ impl std::error::Error for CodegenError {}
 /// section is emitted.
 #[derive(Debug, Clone)]
 struct ModuleView {
-    name: String,
     dsp_struct: FirId,
     globals: FirId,
     functions: FirId,
@@ -223,6 +213,10 @@ struct EmitCtx {
     outputs_iter_started: bool,
     /// Number of output channels already consumed from `outputs_iter`.
     outputs_taken: usize,
+    /// Deterministic Faust C++ UI parameter indices, keyed by state field.
+    ui_params: HashMap<String, usize>,
+    /// Local bindings written later in their enclosing FIR function.
+    mutable_vars: HashSet<String>,
 }
 
 impl EmitCtx {
@@ -233,6 +227,8 @@ impl EmitCtx {
             table_elem_types: base.table_elem_types.clone(),
             outputs_iter_started: false,
             outputs_taken: 0,
+            ui_params: HashMap::new(),
+            mutable_vars: HashSet::new(),
         }
     }
 }
@@ -271,7 +267,6 @@ pub fn backend_id() -> &'static str {
 ///
 /// The emitter expects a module produced by the transform fast lane. It emits a
 /// single Rust source unit containing:
-/// - a `FaustFloat` alias plus small math helpers (`remainder_*`),
 /// - static tables,
 /// - a `pub struct` DSP state container with a `new()` constructor,
 /// - Faust lifecycle methods (`init`, `class_init`, `instance_init`, ...),
@@ -292,11 +287,7 @@ pub fn generate_rust_module(
     options: &RustOptions,
 ) -> Result<String, CodegenError> {
     let module = decode_module(store, module)?;
-    let class_name = options
-        .class_name
-        .as_deref()
-        .unwrap_or(module.name.as_str())
-        .to_owned();
+    let class_name = options.class_name.as_deref().unwrap_or("mydsp").to_owned();
     let functions = collect_module_functions(store, module.functions)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
@@ -305,6 +296,11 @@ pub fn generate_rust_module(
         &[module.dsp_struct, module.globals, module.static_decls],
     );
     let state_sections = [module.dsp_struct, module.globals];
+    let ui_stats = functions
+        .iter()
+        .find(|function| function.name == "buildUserInterface")
+        .and_then(|function| function.body)
+        .map_or_else(UiStats::default, |body| collect_ui_stats(store, body));
 
     let mut out = String::new();
     emit_rust_header(&mut out, options);
@@ -316,14 +312,33 @@ pub fn generate_rust_module(
         module.dsp_struct,
         module.globals,
     )?;
+    let _ = writeln!(
+        out,
+        "pub const FAUST_INPUTS: usize = {};",
+        module.num_inputs
+    );
+    let _ = writeln!(
+        out,
+        "pub const FAUST_OUTPUTS: usize = {};",
+        module.num_outputs
+    );
+    let _ = writeln!(
+        out,
+        "pub const FAUST_ACTIVES: usize = {};",
+        ui_stats.actives
+    );
+    let _ = writeln!(
+        out,
+        "pub const FAUST_PASSIVES: usize = {};",
+        ui_stats.passives
+    );
+    let _ = writeln!(out);
     emit_rust_api(
         store,
         &mut out,
         RustApiEmitInput {
             options,
             class_name: &class_name,
-            num_inputs: module.num_inputs,
-            num_outputs: module.num_outputs,
             declared_functions: &functions,
             struct_inits: &struct_inits,
             table_inits: &table_inits,
@@ -337,33 +352,101 @@ pub fn generate_rust_module(
 /// Emits the Rust prologue shared by every generated source unit.
 ///
 /// The `FaustFloat` alias plays the role of the C `FAUSTFLOAT` macro. The
-/// `remainder_*` helpers implement the C99 `remainder` semantics (IEEE
-/// round-half-to-even quotient), which has no direct `std` equivalent.
+/// `remainder_*` and `rint_*` helpers mirror the C++ Rust backend's libm
+/// bridge: native targets call the platform C library, while Wasm uses the
+/// generated crate's `libm` dependency. Rust `std` has no C99 `remainder`
+/// equivalent, and `rint` must preserve the C library's rounding-mode
+/// semantics rather than using Rust's fixed ties-to-even operation.
 fn emit_rust_header(out: &mut String, options: &RustOptions) {
-    let real = options.faust_float_type.rust_name();
     let _ = writeln!(
         out,
         "/* ------------------------------------------------------------"
     );
-    let _ = writeln!(out, "Code generated with faust-rs");
+    let _ = writeln!(out, "Code generated with Faust Rust backend (faust-rs)");
     let _ = writeln!(out, "Compilation options: -lang rust");
     let _ = writeln!(
         out,
         "------------------------------------------------------------ */"
     );
     let _ = writeln!(out);
-    let _ = writeln!(out, "pub type FaustFloat = {real};");
     let _ = writeln!(out);
-    let _ = writeln!(out, "#[allow(dead_code)]");
-    let _ = writeln!(out, "fn remainder_f32(x: f32, y: f32) -> f32 {{");
-    let _ = writeln!(out, "    x - y * (x / y).round_ties_even()");
-    let _ = writeln!(out, "}}");
-    let _ = writeln!(out);
-    let _ = writeln!(out, "#[allow(dead_code)]");
-    let _ = writeln!(out, "fn remainder_f64(x: f64, y: f64) -> f64 {{");
-    let _ = writeln!(out, "    x - y * (x / y).round_ties_even()");
-    let _ = writeln!(out, "}}");
-    let _ = writeln!(out);
+
+    match options.faust_float_type {
+        RustRealType::Float32 => {
+            let _ = writeln!(out, "#[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "mod ffi {{");
+            let _ = writeln!(out, "    use core::ffi::c_float;");
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "    #[cfg_attr(not(target_os = \"windows\"), link(name = \"m\"))]"
+            );
+            let _ = writeln!(out, "    unsafe extern \"C\" {{");
+            let _ = writeln!(
+                out,
+                "        pub fn remainderf(from: c_float, to: c_float) -> c_float;"
+            );
+            let _ = writeln!(out, "        pub fn rintf(val: c_float) -> c_float;");
+            let _ = writeln!(out, "    }}");
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "fn remainder_f32(from: f32, to: f32) -> f32 {{");
+            let _ = writeln!(out, "    #[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "    unsafe {{ ffi::remainderf(from, to) }}");
+            let _ = writeln!(
+                out,
+                "    #[cfg(target_arch = \"wasm32\")]\n    libm::remainderf(from, to)"
+            );
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "fn rint_f32(val: f32) -> f32 {{");
+            let _ = writeln!(out, "    #[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "    unsafe {{ ffi::rintf(val) }}");
+            let _ = writeln!(
+                out,
+                "    #[cfg(target_arch = \"wasm32\")]\n    libm::rintf(val)"
+            );
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+        }
+        RustRealType::Float64 => {
+            let _ = writeln!(out, "#[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "mod ffi {{");
+            let _ = writeln!(out, "    use core::ffi::c_double;");
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "    #[cfg_attr(not(target_os = \"windows\"), link(name = \"m\"))]"
+            );
+            let _ = writeln!(out, "    unsafe extern \"C\" {{");
+            let _ = writeln!(
+                out,
+                "        pub fn remainder(from: c_double, to: c_double) -> c_double;"
+            );
+            let _ = writeln!(out, "        pub fn rint(val: c_double) -> c_double;");
+            let _ = writeln!(out, "    }}");
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "fn remainder_f64(from: f64, to: f64) -> f64 {{");
+            let _ = writeln!(out, "    #[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "    unsafe {{ ffi::remainder(from, to) }}");
+            let _ = writeln!(
+                out,
+                "    #[cfg(target_arch = \"wasm32\")]\n    libm::remainder(from, to)"
+            );
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "fn rint_f64(val: f64) -> f64 {{");
+            let _ = writeln!(out, "    #[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "    unsafe {{ ffi::rint(val) }}");
+            let _ = writeln!(
+                out,
+                "    #[cfg(target_arch = \"wasm32\")]\n    libm::rint(val)"
+            );
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+        }
+    }
 }
 
 /// Emits the DSP state `pub struct` definition and derives nothing.
@@ -382,10 +465,7 @@ fn emit_struct_definition(
     let has_sample_rate_field = block_declares_var(store, dsp_struct, "fSampleRate")
         || block_declares_var(store, globals, "fSampleRate");
 
-    let _ = writeln!(
-        out,
-        "#[allow(non_snake_case, non_camel_case_types, dead_code)]"
-    );
+    let _ = writeln!(out, "#[repr(C)]");
     let _ = writeln!(out, "pub struct {class_name} {{");
     emit_struct_fields(store, out, dsp_struct)?;
     emit_struct_fields(store, out, globals)?;
@@ -445,10 +525,6 @@ struct RustApiEmitInput<'a> {
     options: &'a RustOptions,
     /// Effective Rust DSP struct name.
     class_name: &'a str,
-    /// Propagated input arity reported by the FIR module.
-    num_inputs: usize,
-    /// Propagated output arity reported by the FIR module.
-    num_outputs: usize,
     /// Body-bearing function declarations collected from the module.
     declared_functions: &'a [DeclareFunView],
     /// Scalar state initializers for `new()` and synthesized reset paths.
@@ -480,8 +556,6 @@ fn emit_rust_api(
     let RustApiEmitInput {
         options,
         class_name,
-        num_inputs,
-        num_outputs,
         declared_functions,
         struct_inits,
         table_inits,
@@ -489,10 +563,6 @@ fn emit_rust_api(
         state_sections,
     } = spec;
 
-    let _ = writeln!(
-        out,
-        "#[allow(non_snake_case, dead_code, unused_variables, unused_mut, unused_parens, unused_assignments, clippy::all)]"
-    );
     let _ = writeln!(out, "impl {class_name} {{");
 
     emit_constructor(store, out, options, class_name, state_sections)?;
@@ -501,10 +571,6 @@ fn emit_rust_api(
         emit_named_method(store, out, options, state_types, f)?;
     } else {
         let _ = writeln!(out, "    pub fn metadata(&self, m: &mut dyn Meta) {{");
-        let _ = writeln!(
-            out,
-            "        m.declare(\"faust-rs\", \"module-first rust backend prototype\");"
-        );
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out);
     }
@@ -514,11 +580,11 @@ fn emit_rust_api(
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "    pub fn get_num_inputs(&self) -> i32 {{");
-    let _ = writeln!(out, "        {num_inputs}");
+    let _ = writeln!(out, "        FAUST_INPUTS as i32");
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "    pub fn get_num_outputs(&self) -> i32 {{");
-    let _ = writeln!(out, "        {num_outputs}");
+    let _ = writeln!(out, "        FAUST_OUTPUTS as i32");
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
 
@@ -547,10 +613,7 @@ fn emit_rust_api(
     {
         emit_named_method(store, out, options, state_types, f)?;
     } else {
-        let _ = writeln!(
-            out,
-            "    pub fn instance_reset_user_interface(&mut self) {{"
-        );
+        let _ = writeln!(out, "    pub fn instance_reset_params(&mut self) {{");
         for init in struct_inits {
             let value = emit_value(store, options, init.init)?;
             let value = coerce_rendered(store, &init.typ, init.init, &value);
@@ -583,7 +646,7 @@ fn emit_rust_api(
         "    pub fn instance_init(&mut self, sample_rate: i32) {{"
     );
     let _ = writeln!(out, "        self.instance_constants(sample_rate);");
-    let _ = writeln!(out, "        self.instance_reset_user_interface();");
+    let _ = writeln!(out, "        self.instance_reset_params();");
     let _ = writeln!(out, "        self.instance_clear();");
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
@@ -598,28 +661,53 @@ fn emit_rust_api(
         .iter()
         .find(|f| f.name == "buildUserInterface")
     {
+        let _ = writeln!(
+            out,
+            "    pub fn build_user_interface(&self, ui_interface: &mut dyn UI<FaustFloat>) {{"
+        );
+        let _ = writeln!(
+            out,
+            "        Self::build_user_interface_static(ui_interface);"
+        );
+        let _ = writeln!(out, "    }}");
+        let _ = writeln!(out);
         emit_named_method(store, out, options, state_types, f)?;
     } else {
         let _ = writeln!(
             out,
-            "    pub fn build_user_interface(&mut self, ui_interface: &mut dyn UI<FaustFloat>) {{"
+            "    pub fn build_user_interface(&self, ui_interface: &mut dyn UI<FaustFloat>) {{"
+        );
+        let _ = writeln!(out, "    }}");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "    pub fn build_user_interface_static(ui_interface: &mut dyn UI<FaustFloat>) {{"
         );
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out);
     }
+
+    let ui_stats = declared_functions
+        .iter()
+        .find(|f| f.name == "buildUserInterface")
+        .and_then(|f| f.body)
+        .map_or_else(UiStats::default, |body| collect_ui_stats(store, body));
+    emit_parameter_accessors(out, &ui_stats.params, &ui_stats.soundfile_vars);
 
     if let Some(f) = declared_functions.iter().find(|f| f.name == "compute") {
         emit_named_method(store, out, options, state_types, f)?;
     } else {
         let _ = writeln!(
             out,
-            "    pub fn compute(&mut self, count: i32, inputs: &[&[FaustFloat]], outputs: &mut [&mut [FaustFloat]]) {{"
+            "    pub fn compute(&mut self, count: usize, inputs: &[impl AsRef<[FaustFloat]>], outputs: &mut [impl AsMut<[FaustFloat]>]) {{"
         );
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out);
     }
 
     let _ = writeln!(out, "}}");
+
+    emit_faust_dsp_trait_impl(out, class_name);
 
     for f in declared_functions {
         if matches!(
@@ -649,7 +737,7 @@ fn emit_rust_api(
 fn emit_constructor(
     store: &FirStore,
     out: &mut String,
-    options: &RustOptions,
+    _options: &RustOptions,
     class_name: &str,
     state_sections: [FirId; 2],
 ) -> Result<(), CodegenError> {
@@ -671,12 +759,10 @@ fn emit_constructor(
                     if name == "fSampleRate" {
                         has_sample_rate_field = true;
                     }
-                    let value = if let Some(init) = init {
-                        let rendered = emit_value(store, options, init)?;
-                        coerce_rendered(store, &typ, init, &rendered)
-                    } else {
-                        zero_value(&typ)
-                    };
+                    // Faust C++ constructors zero fields; UI and lifecycle
+                    // bodies apply declared initial values in instance_init.
+                    let _ = init;
+                    let value = zero_value(&typ);
                     let _ = writeln!(out, "            {name}: {value},");
                 }
                 FirMatch::DeclareTable {
@@ -685,12 +771,12 @@ fn emit_constructor(
                     values,
                     ..
                 } => {
-                    let mut rendered = Vec::with_capacity(values.len());
-                    for value in values {
-                        let v = emit_value(store, options, value)?;
-                        rendered.push(coerce_rendered(store, &elem_type, value, &v));
-                    }
-                    let _ = writeln!(out, "            {name}: [{}],", rendered.join(", "));
+                    let _ = writeln!(
+                        out,
+                        "            {name}: [{}; {}],",
+                        zero_value(&elem_type),
+                        values.len()
+                    );
                 }
                 _ => {}
             }
@@ -703,6 +789,117 @@ fn emit_constructor(
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
     Ok(())
+}
+
+/// Emits the C++ Faust Rust backend's index-based UI parameter accessors.
+fn emit_parameter_accessors(
+    out: &mut String,
+    params: &HashMap<String, usize>,
+    soundfile_vars: &HashSet<String>,
+) {
+    let mut entries = params.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(_, index)| **index);
+    let _ = writeln!(
+        out,
+        "    pub fn get_param(&self, param: ParamIndex) -> Option<FaustFloat> {{"
+    );
+    let _ = writeln!(out, "        match param.0 {{");
+    for (name, index) in &entries {
+        if soundfile_vars.contains(*name) {
+            continue;
+        }
+        let _ = writeln!(out, "            {index} => Some(self.{name}),");
+    }
+    let _ = writeln!(out, "            _ => None,");
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "    pub fn set_param(&mut self, param: ParamIndex, value: FaustFloat) {{"
+    );
+    let _ = writeln!(out, "        match param.0 {{");
+    for (name, index) in &entries {
+        if soundfile_vars.contains(*name) {
+            continue;
+        }
+        let _ = writeln!(out, "            {index} => {{ self.{name} = value }},");
+    }
+    let _ = writeln!(out, "            _ => {{}},");
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out);
+}
+
+/// Emits the `FaustDsp` adapter contract used by the C++ Faust Rust architectures.
+fn emit_faust_dsp_trait_impl(out: &mut String, class_name: &str) {
+    let _ = writeln!(out, "impl FaustDsp for {class_name} {{");
+    let _ = writeln!(out, "    type T = FaustFloat;");
+    let _ = writeln!(
+        out,
+        "    fn new() -> Self where Self: Sized {{ Self::new() }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn metadata(&self, m: &mut dyn Meta) {{ self.metadata(m) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn get_sample_rate(&self) -> i32 {{ self.get_sample_rate() }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn get_num_inputs(&self) -> i32 {{ self.get_num_inputs() }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn get_num_outputs(&self) -> i32 {{ self.get_num_outputs() }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn class_init(sample_rate: i32) where Self: Sized {{ Self::class_init(sample_rate); }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn instance_reset_params(&mut self) {{ self.instance_reset_params() }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn instance_clear(&mut self) {{ self.instance_clear() }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn instance_constants(&mut self, sample_rate: i32) {{ self.instance_constants(sample_rate) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn instance_init(&mut self, sample_rate: i32) {{ self.instance_init(sample_rate) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn init(&mut self, sample_rate: i32) {{ self.init(sample_rate) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn build_user_interface(&self, ui: &mut dyn UI<Self::T>) {{ self.build_user_interface(ui) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn build_user_interface_static(ui: &mut dyn UI<Self::T>) where Self: Sized {{ Self::build_user_interface_static(ui); }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn get_param(&self, param: ParamIndex) -> Option<Self::T> {{ self.get_param(param) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn set_param(&mut self, param: ParamIndex, value: Self::T) {{ self.set_param(param, value) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    fn compute(&mut self, count: i32, inputs: &[&[Self::T]], outputs: &mut [&mut [Self::T]]) {{ self.compute(count as usize, inputs, outputs) }}"
+    );
+    let _ = writeln!(out, "}}");
 }
 
 /// Emits one canonical DSP API function from its FIR body.
@@ -731,15 +928,14 @@ fn emit_named_method(
             "pub fn instance_constants(&mut self, sample_rate: i32)".to_owned()
         }
         "instanceResetUserInterface" => {
-            "pub fn instance_reset_user_interface(&mut self)".to_owned()
+            "pub fn instance_reset_params(&mut self)".to_owned()
         }
         "instanceClear" => "pub fn instance_clear(&mut self)".to_owned(),
         "buildUserInterface" => {
-            "pub fn build_user_interface(&mut self, ui_interface: &mut dyn UI<FaustFloat>)"
-                .to_owned()
+            "pub fn build_user_interface_static(ui_interface: &mut dyn UI<FaustFloat>)".to_owned()
         }
         "compute" => {
-            "pub fn compute(&mut self, count: i32, inputs: &[&[FaustFloat]], outputs: &mut [&mut [FaustFloat]])"
+            "pub fn compute(&mut self, count: usize, inputs: &[impl AsRef<[FaustFloat]>], outputs: &mut [impl AsMut<[FaustFloat]>])"
                 .to_owned()
         }
         other => format!("pub fn {other}(&mut self)"),
@@ -757,6 +953,10 @@ fn emit_named_method(
         _ => EmitMode::Default,
     };
     let mut ctx = EmitCtx::new(mode, state_types);
+    ctx.mutable_vars = collect_mutable_local_vars(store, body);
+    if mode == EmitMode::Ui {
+        ctx.ui_params = collect_ui_params(store, body);
+    }
     emit_block(store, out, options, body, 2, &mut ctx)?;
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
@@ -809,6 +1009,141 @@ fn emit_helper_function(
     emit_block(store, out, options, body, 1, &mut ctx)?;
     let _ = writeln!(out, "}}");
     Ok(())
+}
+
+/// UI facts derived from the FIR `buildUserInterface` instruction tree.
+///
+/// This intentionally keeps widget *occurrences* separate from parameter
+/// indices.  In Faust C++, `FAUST_ACTIVES`/`FAUST_PASSIVES` count every UI
+/// instruction, while `UserInterfaceParameterMapping` assigns one `ParamIndex`
+/// per distinct zone (including a zone first encountered by `declare`).
+#[derive(Default)]
+struct UiStats {
+    params: HashMap<String, usize>,
+    soundfile_vars: HashSet<String>,
+    actives: usize,
+    passives: usize,
+}
+
+/// Collects UI constants and field indices in the same source-order convention
+/// as Faust C++ `InstructionsCompiler::generateWidgetCode` and
+/// `UserInterfaceParameterMapping`.
+fn collect_ui_stats(store: &FirStore, root: FirId) -> UiStats {
+    fn insert_param(params: &mut HashMap<String, usize>, var: String) {
+        let next = params.len();
+        params.entry(var).or_insert(next);
+    }
+
+    fn visit(store: &FirStore, node: FirId, stats: &mut UiStats) {
+        match match_fir(store, node) {
+            FirMatch::Block(items) => {
+                for item in items {
+                    visit(store, item, stats);
+                }
+            }
+            FirMatch::AddMetaDeclare { var, .. } if var != "0" => {
+                insert_param(&mut stats.params, var);
+            }
+            FirMatch::AddButton { var, .. } | FirMatch::AddSlider { var, .. } => {
+                stats.actives += 1;
+                insert_param(&mut stats.params, var);
+            }
+            FirMatch::AddBargraph { var, .. } => {
+                stats.passives += 1;
+                insert_param(&mut stats.params, var);
+            }
+            FirMatch::AddSoundfile { var, .. } => {
+                // `InstructionsCompiler::generateWidgetCode` includes soundfiles
+                // in the active-widget total.  The C++ Rust architecture itself
+                // does not implement soundfile UI, but retaining the count keeps
+                // this generated constant faithful for FIR that contains one.
+                stats.actives += 1;
+                stats.soundfile_vars.insert(var.clone());
+                insert_param(&mut stats.params, var);
+            }
+            FirMatch::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                visit(store, then_block, stats);
+                if let Some(else_block) = else_block {
+                    visit(store, else_block, stats);
+                }
+            }
+            FirMatch::Control { stmt, .. } => visit(store, stmt, stats),
+            FirMatch::Switch { cases, default, .. } => {
+                for (_, block) in cases {
+                    visit(store, block, stats);
+                }
+                if let Some(default) = default {
+                    visit(store, default, stats);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut stats = UiStats::default();
+    visit(store, root, &mut stats);
+    stats
+}
+
+fn collect_ui_params(store: &FirStore, root: FirId) -> HashMap<String, usize> {
+    collect_ui_stats(store, root).params
+}
+
+/// Finds stack/local variables that are assigned after declaration.
+///
+/// Faust C++ emits mutable locals indiscriminately.  Rust only needs `mut`
+/// when a later `StoreVar` targets the same non-struct binding; keeping this
+/// prepass local to one FIR function removes `unused_mut` diagnostics without
+/// changing evaluation order or storage semantics.
+fn collect_mutable_local_vars(store: &FirStore, root: FirId) -> HashSet<String> {
+    fn visit(store: &FirStore, node: FirId, vars: &mut HashSet<String>) {
+        match match_fir(store, node) {
+            FirMatch::Block(items) => {
+                for item in items {
+                    visit(store, item, vars);
+                }
+            }
+            FirMatch::StoreVar { name, access, .. }
+                if !matches!(access, AccessType::Struct | AccessType::Static) =>
+            {
+                vars.insert(name);
+            }
+            FirMatch::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                visit(store, then_block, vars);
+                if let Some(else_block) = else_block {
+                    visit(store, else_block, vars);
+                }
+            }
+            FirMatch::Control { stmt, .. } => visit(store, stmt, vars),
+            FirMatch::Switch { cases, default, .. } => {
+                for (_, block) in cases {
+                    visit(store, block, vars);
+                }
+                if let Some(default) = default {
+                    visit(store, default, vars);
+                }
+            }
+            FirMatch::ForLoop { init, body, .. } => {
+                visit(store, init, vars);
+                visit(store, body, vars);
+            }
+            FirMatch::WhileLoop { body, .. } => visit(store, body, vars),
+            FirMatch::SimpleForLoop { body, .. } => visit(store, body, vars),
+            _ => {}
+        }
+    }
+
+    let mut vars = HashSet::new();
+    visit(store, root, &mut vars);
+    vars
 }
 
 /// Emits every statement in a FIR block under the active emission context.
@@ -873,7 +1208,12 @@ fn emit_stmt(
                 // the initializer already made.
                 if let Some(init) = init {
                     let init = emit_value(store, options, init)?;
-                    let _ = writeln!(out, "{tab}let mut {name} = {init};");
+                    let mutable = if ctx.mutable_vars.contains(&name) {
+                        "mut "
+                    } else {
+                        ""
+                    };
+                    let _ = writeln!(out, "{tab}let {mutable}{name} = {init};");
                 } else {
                     return Err(unsupported_node("pointer declaration", stmt, store));
                 }
@@ -886,7 +1226,16 @@ fn emit_stmt(
                 zero_value(&typ)
             };
             ctx.var_types.insert(name.clone(), typ.clone());
-            let _ = writeln!(out, "{tab}let mut {name}: {} = {value};", emit_type(&typ));
+            let mutable = if ctx.mutable_vars.contains(&name) {
+                "mut "
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "{tab}let {mutable}{name}: {} = {value};",
+                emit_type(&typ)
+            );
             Ok(())
         }
         FirMatch::DeclareTable {
@@ -1071,10 +1420,11 @@ fn emit_stmt(
                 fir::ButtonType::Button => "add_button",
                 fir::ButtonType::Checkbox => "add_check_button",
             };
+            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
             let _ = writeln!(
                 out,
-                "{tab}ui_interface.{api}({}, &mut self.{var});",
-                rust_string_literal(&label)
+                "{tab}ui_interface.{api}({}, ParamIndex({param}));",
+                rust_string_literal(&label),
             );
             Ok(())
         }
@@ -1092,9 +1442,10 @@ fn emit_stmt(
                 fir::SliderType::Vertical => "add_vertical_slider",
                 fir::SliderType::NumEntry => "add_num_entry",
             };
+            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
             let _ = writeln!(
                 out,
-                "{tab}ui_interface.{api}({}, &mut self.{var}, {} as FaustFloat, {} as FaustFloat, {} as FaustFloat, {} as FaustFloat);",
+                "{tab}ui_interface.{api}({}, ParamIndex({param}), {} as FaustFloat, {} as FaustFloat, {} as FaustFloat, {} as FaustFloat);",
                 rust_string_literal(&label),
                 trim_float(init),
                 trim_float(lo),
@@ -1114,9 +1465,10 @@ fn emit_stmt(
                 fir::BargraphType::Horizontal => "add_horizontal_bargraph",
                 fir::BargraphType::Vertical => "add_vertical_bargraph",
             };
+            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
             let _ = writeln!(
                 out,
-                "{tab}ui_interface.{api}({}, &mut self.{var}, {} as FaustFloat, {} as FaustFloat);",
+                "{tab}ui_interface.{api}({}, ParamIndex({param}), {} as FaustFloat, {} as FaustFloat);",
                 rust_string_literal(&label),
                 trim_float(lo),
                 trim_float(hi)
@@ -1129,7 +1481,8 @@ fn emit_stmt(
                     let zone = if var == "0" {
                         "None".to_owned()
                     } else {
-                        format!("Some(&mut self.{var})")
+                        let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
+                        format!("Some(ParamIndex({param}))")
                     };
                     let _ = writeln!(
                         out,
@@ -1150,9 +1503,10 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddSoundfile { label, url, var } => {
+            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
             let _ = writeln!(
                 out,
-                "{tab}ui_interface.add_soundfile({}, {}, &mut self.{var});",
+                "{tab}ui_interface.add_soundfile({}, {}, ParamIndex({param}));",
                 rust_string_literal(&label),
                 rust_string_literal(&url)
             );
@@ -1222,11 +1576,11 @@ fn emit_io_alias(
         let skip = chan - ctx.outputs_taken;
         let _ = writeln!(
             out,
-            "{tab}let {name} = outputs_iter.nth({skip}).expect(\"missing output channel\");"
+            "{tab}let {name} = outputs_iter.nth({skip}).expect(\"missing output channel\").as_mut();"
         );
         ctx.outputs_taken = chan + 1;
     } else {
-        let _ = writeln!(out, "{tab}let {name} = inputs[{chan}];");
+        let _ = writeln!(out, "{tab}let {name} = inputs[{chan}].as_ref();");
     }
     ctx.table_elem_types
         .insert(name.to_owned(), FirType::FaustFloat);
@@ -1652,7 +2006,6 @@ fn emit_fun_call(
         "floor" => Some("floor"),
         "ceil" => Some("ceil"),
         "round" => Some("round"),
-        "rint" => Some("round_ties_even"),
         "copysign" | "copysignf" => Some("copysign"),
         _ => None,
     };
@@ -1677,16 +2030,16 @@ fn emit_fun_call(
             let rendered = render_args(store, options, args, Some(typ))?;
             Ok(format!("(({}) % ({}))", rendered[0], rendered[1]))
         }
-        "remainder" => {
+        "remainder" | "rint" => {
             let rendered = render_args(store, options, args, Some(typ))?;
-            let suffix = match resolve_float(typ, options) {
-                RustRealType::Float32 => "f32",
-                RustRealType::Float64 => "f64",
+            let function = match (base, resolve_float(typ, options)) {
+                ("remainder", RustRealType::Float32) => "remainder_f32",
+                ("remainder", RustRealType::Float64) => "remainder_f64",
+                ("rint", RustRealType::Float32) => "rint_f32",
+                ("rint", RustRealType::Float64) => "rint_f64",
+                _ => unreachable!("base is constrained to remainder or rint"),
             };
-            Ok(format!(
-                "remainder_{suffix}({}, {})",
-                rendered[0], rendered[1]
-            ))
+            Ok(format!("{function}({})", rendered.join(", ")))
         }
         "exp10" => {
             let rendered = render_args(store, options, args, Some(typ))?;
@@ -2104,7 +2457,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
     if let FirMatch::Module {
         num_inputs,
         num_outputs,
-        name,
+        name: _,
         dsp_struct,
         globals,
         functions,
@@ -2112,7 +2465,6 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
     } = match_fir(store, module)
     {
         Ok(ModuleView {
-            name,
             dsp_struct,
             globals,
             functions,
@@ -2232,12 +2584,112 @@ fn rust_string_literal(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodegenErrorCode, RustOptions, RustRealType, generate_rust_module};
+    use super::{
+        CodegenErrorCode, EmitCtx, EmitMode, RustOptions, RustRealType, StateTypes, emit_block,
+        emit_fun_call, emit_rust_header, generate_rust_module,
+    };
     use crate::fixtures::{
         build_gain_bias_ui_meta_test_module, build_passthrough_test_module,
         build_sine_phasor_test_module, build_table_state_delay_test_module,
     };
-    use fir::{FirBuilder, FirStore};
+    use fir::{FirBuilder, FirStore, FirType};
+
+    #[test]
+    fn emits_single_precision_c_math_bridge_matching_cpp_rust_backend() {
+        let mut out = String::new();
+        emit_rust_header(&mut out, &RustOptions::default());
+
+        assert!(out.contains("use core::ffi::c_float;"));
+        assert!(out.contains("pub fn remainderf(from: c_float, to: c_float) -> c_float;"));
+        assert!(out.contains("pub fn rintf(val: c_float) -> c_float;"));
+        assert!(out.contains("fn remainder_f32(from: f32, to: f32) -> f32 {"));
+        assert!(out.contains("unsafe { ffi::remainderf(from, to) }"));
+        assert!(out.contains("libm::remainderf(from, to)"));
+        assert!(out.contains("fn rint_f32(val: f32) -> f32 {"));
+        assert!(out.contains("unsafe { ffi::rintf(val) }"));
+        assert!(out.contains("libm::rintf(val)"));
+        assert!(!out.contains("c_double"));
+    }
+
+    #[test]
+    fn emits_double_precision_c_math_bridge_matching_cpp_rust_backend() {
+        let mut out = String::new();
+        let options = RustOptions {
+            faust_float_type: RustRealType::Float64,
+            ..RustOptions::default()
+        };
+        emit_rust_header(&mut out, &options);
+
+        assert!(out.contains("use core::ffi::c_double;"));
+        assert!(out.contains("pub fn remainder(from: c_double, to: c_double) -> c_double;"));
+        assert!(out.contains("pub fn rint(val: c_double) -> c_double;"));
+        assert!(out.contains("fn remainder_f64(from: f64, to: f64) -> f64 {"));
+        assert!(out.contains("unsafe { ffi::remainder(from, to) }"));
+        assert!(out.contains("libm::remainder(from, to)"));
+        assert!(out.contains("fn rint_f64(val: f64) -> f64 {"));
+        assert!(out.contains("unsafe { ffi::rint(val) }"));
+        assert!(out.contains("libm::rint(val)"));
+        assert!(!out.contains("c_float"));
+    }
+
+    #[test]
+    fn maps_remainder_and_rint_to_precision_specific_bridges() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let single = b.float32(1.0);
+        let double = b.float64(1.0);
+
+        let single_options = RustOptions::default();
+        assert_eq!(
+            emit_fun_call(
+                &store,
+                &single_options,
+                "remainderf",
+                &[single, single],
+                &FirType::Float32,
+            )
+            .expect("single remainder should render"),
+            "remainder_f32(1.0f32, 1.0f32)"
+        );
+        assert_eq!(
+            emit_fun_call(
+                &store,
+                &single_options,
+                "rintf",
+                &[single],
+                &FirType::Float32,
+            )
+            .expect("single rint should render"),
+            "rint_f32(1.0f32)"
+        );
+
+        let double_options = RustOptions {
+            faust_float_type: RustRealType::Float64,
+            ..RustOptions::default()
+        };
+        assert_eq!(
+            emit_fun_call(
+                &store,
+                &double_options,
+                "remainder",
+                &[double, double],
+                &FirType::Float64,
+            )
+            .expect("double remainder should render"),
+            "remainder_f64(1.0f64, 1.0f64)"
+        );
+        assert_eq!(
+            emit_fun_call(
+                &store,
+                &double_options,
+                "rint",
+                &[double],
+                &FirType::Float64,
+            )
+            .expect("double rint should render"),
+            "rint_f64(1.0f64)"
+        );
+    }
 
     #[test]
     fn emits_rust_module_with_dsp_struct_ui_and_compute_loop() {
@@ -2245,25 +2697,41 @@ mod tests {
         let out = generate_rust_module(&store, module, &RustOptions::default())
             .expect("rust module generation should succeed");
 
-        assert!(out.contains("pub type FaustFloat = f32;"));
+        assert!(!out.contains("pub type FaustFloat ="));
         assert!(out.contains("pub struct mydsp {"));
         assert!(out.contains("fFreq: FaustFloat,"));
         assert!(out.contains("fPhase: f64,"));
         assert!(out.contains("pub fn new() -> mydsp {"));
+        assert!(
+            out.contains(
+                "pub fn build_user_interface(&self, ui_interface: &mut dyn UI<FaustFloat>)"
+            )
+        );
+        assert!(out.contains("ui_interface.add_horizontal_slider(\"freq\", ParamIndex(0)"));
         assert!(out.contains(
-            "pub fn build_user_interface(&mut self, ui_interface: &mut dyn UI<FaustFloat>)"
-        ));
-        assert!(out.contains("ui_interface.add_horizontal_slider(\"freq\", &mut self.fFreq"));
-        assert!(out.contains(
-            "pub fn compute(&mut self, count: i32, inputs: &[&[FaustFloat]], outputs: &mut [&mut [FaustFloat]])"
+            "pub fn compute(&mut self, count: usize, inputs: &[impl AsRef<[FaustFloat]>], outputs: &mut [impl AsMut<[FaustFloat]>])"
         ));
         assert!(out.contains("let mut outputs_iter = outputs.iter_mut();"));
-        assert!(
-            out.contains("let output0 = outputs_iter.nth(0).expect(\"missing output channel\");")
-        );
+        assert!(out.contains(
+            "let output0 = outputs_iter.nth(0).expect(\"missing output channel\").as_mut();"
+        ));
         assert!(out.contains("for i0 in 0..count {"));
         assert!(out.contains("output0[(i0) as usize] = "));
         assert!(out.contains("f64::sin("));
+    }
+
+    #[test]
+    fn defaults_to_mydsp_when_no_class_name_is_supplied() {
+        let (store, module) = build_passthrough_test_module();
+        let options = RustOptions {
+            class_name: None,
+            ..RustOptions::default()
+        };
+        let out = generate_rust_module(&store, module, &options)
+            .expect("rust module generation should succeed");
+
+        assert!(out.contains("pub struct mydsp {"));
+        assert!(out.contains("impl FaustDsp for mydsp {"));
     }
 
     #[test]
@@ -2297,14 +2765,14 @@ mod tests {
             .find("self.instance_constants(sample_rate);")
             .expect("instance_constants call should be emitted");
         let reset_i = out
-            .find("self.instance_reset_user_interface();")
-            .expect("instance_reset_user_interface call should be emitted");
+            .find("self.instance_reset_params();")
+            .expect("instance_reset_params call should be emitted");
         let clear_i = out
             .find("self.instance_clear();")
             .expect("instance_clear call should be emitted");
         assert!(
             instance_init_i < constants_i && constants_i < reset_i && reset_i < clear_i,
-            "instance_init should call constants -> resetUI -> clear in order"
+            "instance_init should call constants -> reset params -> clear in order"
         );
 
         // instance_init must not call class_init.
@@ -2325,11 +2793,11 @@ mod tests {
         let out = generate_rust_module(&store, module, &RustOptions::default())
             .expect("rust module generation should succeed");
 
-        assert!(out.contains("let input0 = inputs[0];"));
+        assert!(out.contains("let input0 = inputs[0].as_ref();"));
         assert!(out.contains("let mut outputs_iter = outputs.iter_mut();"));
-        assert!(
-            out.contains("let output0 = outputs_iter.nth(0).expect(\"missing output channel\");")
-        );
+        assert!(out.contains(
+            "let output0 = outputs_iter.nth(0).expect(\"missing output channel\").as_mut();"
+        ));
         assert!(out.contains("output0[(i0) as usize] = input0[(i0) as usize];"));
     }
 
@@ -2355,22 +2823,38 @@ mod tests {
 
         assert!(out.contains("pub fn metadata(&self, m: &mut dyn Meta) {"));
         assert!(out.contains("m.declare(\"name\", \"gain-bias-ui-meta\");"));
-        assert!(out.contains("ui_interface.add_check_button(\"gate\", &mut self.fGate);"));
-        assert!(out.contains("ui_interface.add_horizontal_bargraph(\"level\", &mut self.fLevel"));
-        assert!(out.contains("pub fn instance_reset_user_interface(&mut self) {"));
+        assert!(out.contains("ui_interface.add_check_button(\"gate\", ParamIndex(0));"));
+        assert!(out.contains("ui_interface.add_horizontal_bargraph(\"level\", ParamIndex(3)"));
+        assert!(out.contains("pub fn instance_reset_params(&mut self) {"));
+        assert!(out.contains("pub const FAUST_ACTIVES: usize = 3;"));
+        assert!(out.contains("pub const FAUST_PASSIVES: usize = 1;"));
     }
 
     #[test]
-    fn emits_float64_faustfloat_alias_when_requested() {
+    fn leaves_faustfloat_precision_to_the_host_architecture() {
         let (store, module) = build_sine_phasor_test_module();
-        let options = RustOptions {
-            faust_float_type: RustRealType::Float64,
-            ..RustOptions::default()
-        };
-        let out = generate_rust_module(&store, module, &options)
+        let out = generate_rust_module(&store, module, &RustOptions::default())
             .expect("rust module generation should succeed");
 
-        assert!(out.contains("pub type FaustFloat = f64;"));
+        assert!(!out.contains("pub type FaustFloat ="));
+    }
+
+    #[test]
+    fn emits_soundfile_ui_as_a_param_index_extension() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let soundfile = b.add_soundfile_with_url("sample", "sample.wav", "fSound0");
+        let body = b.block(&[soundfile]);
+        let mut out = String::new();
+        let mut ctx = EmitCtx::new(EmitMode::Ui, &StateTypes::default());
+        ctx.ui_params.insert("fSound0".to_owned(), 0);
+
+        emit_block(&store, &mut out, &RustOptions::default(), body, 1, &mut ctx)
+            .expect("soundfile UI should be emitted for the faust-rs extension");
+
+        assert!(
+            out.contains("ui_interface.add_soundfile(\"sample\", \"sample.wav\", ParamIndex(0));")
+        );
     }
 
     #[test]

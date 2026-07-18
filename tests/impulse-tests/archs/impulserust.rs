@@ -1,8 +1,7 @@
 // ---------------------------------------------------------------------------
 // impulserust.rs — impulse-test architecture for the faust-rs Rust backend.
 //
-// Appended after the generated `-lang rust -double -cn mydsp` output
-// (top-level Rust items are order-independent, so a plain `cat` works).
+// Prepended to the generated `-lang rust -double -cn mydsp` output.
 // Mirrors the scalar impulse pass of `tools/impulsewasm.js`, which itself
 // mirrors the C++ 4-pass impulse architecture's first pass:
 //   - 44.1 kHz sample rate, blocks of 64 frames;
@@ -14,7 +13,33 @@
 //   - output lines `%6d :  %.6f ...` with |v| < 1e-6 normalized to 0.
 // ---------------------------------------------------------------------------
 
+#![allow(
+    dead_code,
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    unused_parens,
+    unused_variables
+)]
+
+pub type F32 = f64;
+pub type F64 = f64;
+pub type FaustFloat = F64;
+
 use std::rc::Rc;
+
+unsafe extern "C" {
+    #[link_name = "remainder"]
+    fn c_remainder(x: f64, y: f64) -> f64;
+    #[link_name = "remainderf"]
+    fn c_remainderf(x: f32, y: f32) -> f32;
+}
+
+fn remainder(x: f64, y: f64) -> f64 { unsafe { c_remainder(x, y) } }
+fn remainderf(x: f32, y: f32) -> f32 { unsafe { c_remainderf(x, y) } }
+
+#[derive(Clone, Copy)]
+pub struct ParamIndex(pub i32);
 
 pub trait Meta {
     fn declare(&mut self, key: &str, value: &str);
@@ -26,16 +51,39 @@ pub trait UI<T> {
     fn open_horizontal_box(&mut self, label: &str) {}
     fn open_vertical_box(&mut self, label: &str) {}
     fn close_box(&mut self) {}
-    fn add_button(&mut self, label: &str, zone: &mut T) {}
-    fn add_check_button(&mut self, label: &str, zone: &mut T) {}
-    fn add_horizontal_slider(&mut self, label: &str, zone: &mut T, init: T, min: T, max: T, step: T) {
+    fn add_button(&mut self, label: &str, zone: ParamIndex) {}
+    fn add_check_button(&mut self, label: &str, zone: ParamIndex) {}
+    fn add_horizontal_slider(&mut self, label: &str, zone: ParamIndex, init: T, min: T, max: T, step: T) {
     }
-    fn add_vertical_slider(&mut self, label: &str, zone: &mut T, init: T, min: T, max: T, step: T) {}
-    fn add_num_entry(&mut self, label: &str, zone: &mut T, init: T, min: T, max: T, step: T) {}
-    fn add_horizontal_bargraph(&mut self, label: &str, zone: &mut T, min: T, max: T) {}
-    fn add_vertical_bargraph(&mut self, label: &str, zone: &mut T, min: T, max: T) {}
-    fn add_soundfile(&mut self, label: &str, url: &str, sf: &mut Soundfile) {}
-    fn declare(&mut self, zone: Option<&mut T>, key: &str, value: &str) {}
+    fn add_vertical_slider(&mut self, label: &str, zone: ParamIndex, init: T, min: T, max: T, step: T) {}
+    fn add_num_entry(&mut self, label: &str, zone: ParamIndex, init: T, min: T, max: T, step: T) {}
+    fn add_horizontal_bargraph(&mut self, label: &str, zone: ParamIndex, min: T, max: T) {}
+    fn add_vertical_bargraph(&mut self, label: &str, zone: ParamIndex, min: T, max: T) {}
+    /// faust-rs extension: C++ Rust architectures do not currently expose
+    /// soundfile widgets, but the impulse architecture supplies their fixture
+    /// through the generated `Soundfile::default` state value.
+    fn add_soundfile(&mut self, label: &str, url: &str, param: ParamIndex) {}
+    fn declare(&mut self, zone: Option<ParamIndex>, key: &str, value: &str) {}
+}
+
+pub trait FaustDsp {
+    type T;
+    fn new() -> Self where Self: Sized;
+    fn metadata(&self, m: &mut dyn Meta);
+    fn get_sample_rate(&self) -> i32;
+    fn get_num_inputs(&self) -> i32;
+    fn get_num_outputs(&self) -> i32;
+    fn class_init(sample_rate: i32) where Self: Sized;
+    fn instance_reset_params(&mut self);
+    fn instance_clear(&mut self);
+    fn instance_constants(&mut self, sample_rate: i32);
+    fn instance_init(&mut self, sample_rate: i32);
+    fn init(&mut self, sample_rate: i32);
+    fn build_user_interface(&self, ui: &mut dyn UI<Self::T>);
+    fn build_user_interface_static(ui: &mut dyn UI<Self::T>) where Self: Sized;
+    fn get_param(&self, param: ParamIndex) -> Option<Self::T>;
+    fn set_param(&mut self, param: ParamIndex, value: Self::T);
+    fn compute(&mut self, count: i32, inputs: &[&[Self::T]], outputs: &mut [&mut [Self::T]]);
 }
 
 const SAMPLE_RATE: i32 = 44100;
@@ -129,23 +177,15 @@ fn make_soundfile(real_parts: usize) -> Soundfile {
     }
 }
 
-/// UI visitor that installs the soundfile fixture on every soundfile widget.
-struct InstallSoundfiles;
-
-impl UI<FaustFloat> for InstallSoundfiles {
-    fn add_soundfile(&mut self, _label: &str, url: &str, sf: &mut Soundfile) {
-        *sf = make_soundfile(soundfile_part_count(url));
-    }
-}
-
 /// UI visitor that drives button zones only, like the C++ `FUI::setButtons`.
 struct SetButtons {
     value: FaustFloat,
+    params: Vec<ParamIndex>,
 }
 
 impl UI<FaustFloat> for SetButtons {
-    fn add_button(&mut self, _label: &str, zone: &mut FaustFloat) {
-        *zone = self.value;
+    fn add_button(&mut self, _label: &str, param: ParamIndex) {
+        self.params.push(param);
     }
 }
 
@@ -178,8 +218,6 @@ fn run() {
 
     let mut dsp = mydsp::new();
     dsp.init(SAMPLE_RATE);
-    dsp.build_user_interface(&mut InstallSoundfiles);
-
     let num_inputs = dsp.get_num_inputs() as usize;
     let num_outputs = dsp.get_num_outputs() as usize;
 
@@ -207,12 +245,16 @@ fn run() {
             }
         }
         let button = if cycle == 0 { 1.0 } else { 0.0 };
-        dsp.build_user_interface(&mut SetButtons { value: button });
+        let mut buttons = SetButtons { value: button, params: Vec::new() };
+        dsp.build_user_interface(&mut buttons);
+        for param in buttons.params {
+            dsp.set_param(param, button);
+        }
         {
             let inputs: Vec<&[FaustFloat]> = in_bufs.iter().map(|b| b.as_slice()).collect();
             let mut outputs: Vec<&mut [FaustFloat]> =
                 out_bufs.iter_mut().map(|b| b.as_mut_slice()).collect();
-            dsp.compute(n as i32, &inputs, &mut outputs);
+            dsp.compute(n, &inputs, &mut outputs);
         }
         for frame in 0..n {
             out.push_str(&format!("{written:>6} :"));

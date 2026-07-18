@@ -18,9 +18,10 @@ open dx7-piano-c5.wav   # listen (macOS)
 | `src/dx7.rs` | **Generated** by `faust-rs -lang rust -cn Dx7Piano` — regenerate with `./regenerate.sh`. |
 | `src/main.rs` | Host program: `Meta`/`UI` traits, a path-matching UI visitor that programs the E.PIANO 1 patch (values from `javascriptmusic/examples/dx7/dx7-sequence.js`), note rendering, WAV writer. |
 
-The host controls the synth the same way a Faust architecture would: it calls
-the generated `build_user_interface` with a UI visitor that tracks the
-open/close-box group stack and assigns zone values by full path
+The host controls the synth the same way a Faust C++ Rust architecture would:
+it calls the generated `build_user_interface` with a UI visitor that tracks the
+open/close-box group stack, resolves each full path to a `ParamIndex`, then
+applies the values through `set_param`
 (e.g. `DX7/Operator 2/Amp Env Generator/Rates/R1`). The `gate` button is
 driven per block: on for 1.5 s, then released, with 2.5 s of release tail.
 

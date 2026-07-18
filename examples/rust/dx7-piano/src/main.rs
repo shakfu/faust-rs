@@ -1,3 +1,12 @@
+#![allow(
+    dead_code,
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    unused_parens,
+    unused_variables
+)]
+
 // DX7 E.PIANO 1 demo for the faust-rs Rust backend.
 //
 // `src/dx7.rs` is generated from `dsp/dx7_alg5.dsp` (dx.algorithm(5), the
@@ -13,12 +22,16 @@
 //   3. plays the note C5 (523.25 Hz) — gate on for 1.5 s, then release,
 //   4. writes the result to `dx7-piano-c5.wav` (stereo 16-bit PCM, 44.1 kHz).
 
-include!("dx7.rs");
+// ---------------------------------------------------------------------------
+// Host runtime contract used by the Faust C++ Rust architectures.
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Host runtime traits expected by the generated code (same vocabulary as the
-// faust-rs impulse-test architecture).
-// ---------------------------------------------------------------------------
+pub type F32 = f32;
+pub type F64 = f64;
+pub type FaustFloat = F32;
+
+#[derive(Clone, Copy)]
+pub struct ParamIndex(pub i32);
 
 pub trait Meta {
     fn declare(&mut self, key: &str, value: &str);
@@ -30,36 +43,47 @@ pub trait UI<T> {
     fn open_horizontal_box(&mut self, label: &str) {}
     fn open_vertical_box(&mut self, label: &str) {}
     fn close_box(&mut self) {}
-    fn add_button(&mut self, label: &str, zone: &mut T) {}
-    fn add_check_button(&mut self, label: &str, zone: &mut T) {}
+    fn add_button(&mut self, label: &str, param: ParamIndex) {}
+    fn add_check_button(&mut self, label: &str, param: ParamIndex) {}
     fn add_horizontal_slider(
         &mut self,
         label: &str,
-        zone: &mut T,
+        param: ParamIndex,
         init: T,
         min: T,
         max: T,
         step: T,
     ) {
     }
-    fn add_vertical_slider(&mut self, label: &str, zone: &mut T, init: T, min: T, max: T, step: T) {
+    fn add_vertical_slider(&mut self, label: &str, param: ParamIndex, init: T, min: T, max: T, step: T) {
     }
-    fn add_num_entry(&mut self, label: &str, zone: &mut T, init: T, min: T, max: T, step: T) {}
-    fn add_horizontal_bargraph(&mut self, label: &str, zone: &mut T, min: T, max: T) {}
-    fn add_vertical_bargraph(&mut self, label: &str, zone: &mut T, min: T, max: T) {}
-    fn add_soundfile(&mut self, label: &str, url: &str, sf: &mut Soundfile) {}
-    fn declare(&mut self, zone: Option<&mut T>, key: &str, value: &str) {}
+    fn add_num_entry(&mut self, label: &str, param: ParamIndex, init: T, min: T, max: T, step: T) {}
+    fn add_horizontal_bargraph(&mut self, label: &str, param: ParamIndex, min: T, max: T) {}
+    fn add_vertical_bargraph(&mut self, label: &str, param: ParamIndex, min: T, max: T) {}
+    fn declare(&mut self, param: Option<ParamIndex>, key: &str, value: &str) {}
 }
 
-/// Unused by this DSP; present because the UI trait mentions it.
-#[allow(non_snake_case)]
-#[derive(Default)]
-pub struct Soundfile {
-    pub fBuffers: Vec<Vec<FaustFloat>>,
-    pub fLength: Vec<i32>,
-    pub fSR: Vec<i32>,
-    pub fOffset: Vec<i32>,
+pub trait FaustDsp {
+    type T;
+    fn new() -> Self where Self: Sized;
+    fn metadata(&self, m: &mut dyn Meta);
+    fn get_sample_rate(&self) -> i32;
+    fn get_num_inputs(&self) -> i32;
+    fn get_num_outputs(&self) -> i32;
+    fn class_init(sample_rate: i32) where Self: Sized;
+    fn instance_reset_params(&mut self);
+    fn instance_clear(&mut self);
+    fn instance_constants(&mut self, sample_rate: i32);
+    fn instance_init(&mut self, sample_rate: i32);
+    fn init(&mut self, sample_rate: i32);
+    fn build_user_interface(&self, ui: &mut dyn UI<Self::T>);
+    fn build_user_interface_static(ui: &mut dyn UI<Self::T>) where Self: Sized;
+    fn get_param(&self, param: ParamIndex) -> Option<Self::T>;
+    fn set_param(&mut self, param: ParamIndex, value: Self::T);
+    fn compute(&mut self, count: i32, inputs: &[&[Self::T]], outputs: &mut [&mut [Self::T]]);
 }
+
+include!("dx7.rs");
 
 // ---------------------------------------------------------------------------
 // Path-matching parameter setter: tracks the open/close box stack so
@@ -70,6 +94,7 @@ pub struct Soundfile {
 struct SetParams<'a> {
     path: Vec<String>,
     values: &'a [(&'static str, FaustFloat)],
+    updates: Vec<(ParamIndex, FaustFloat)>,
 }
 
 impl<'a> SetParams<'a> {
@@ -77,17 +102,18 @@ impl<'a> SetParams<'a> {
         Self {
             path: Vec::new(),
             values,
+            updates: Vec::new(),
         }
     }
 
-    fn apply(&mut self, label: &str, zone: &mut FaustFloat) {
+    fn apply(&mut self, label: &str, param: ParamIndex) {
         let full = if self.path.is_empty() {
             label.to_owned()
         } else {
             format!("{}/{}", self.path.join("/"), label)
         };
         if let Some((_, value)) = self.values.iter().find(|(path, _)| *path == full) {
-            *zone = *value;
+            self.updates.push((param, *value));
         }
     }
 }
@@ -105,44 +131,44 @@ impl UI<FaustFloat> for SetParams<'_> {
     fn close_box(&mut self) {
         self.path.pop();
     }
-    fn add_button(&mut self, label: &str, zone: &mut FaustFloat) {
-        self.apply(label, zone);
+    fn add_button(&mut self, label: &str, param: ParamIndex) {
+        self.apply(label, param);
     }
-    fn add_check_button(&mut self, label: &str, zone: &mut FaustFloat) {
-        self.apply(label, zone);
+    fn add_check_button(&mut self, label: &str, param: ParamIndex) {
+        self.apply(label, param);
     }
     fn add_horizontal_slider(
         &mut self,
         label: &str,
-        zone: &mut FaustFloat,
+        param: ParamIndex,
         _init: FaustFloat,
         _min: FaustFloat,
         _max: FaustFloat,
         _step: FaustFloat,
     ) {
-        self.apply(label, zone);
+        self.apply(label, param);
     }
     fn add_vertical_slider(
         &mut self,
         label: &str,
-        zone: &mut FaustFloat,
+        param: ParamIndex,
         _init: FaustFloat,
         _min: FaustFloat,
         _max: FaustFloat,
         _step: FaustFloat,
     ) {
-        self.apply(label, zone);
+        self.apply(label, param);
     }
     fn add_num_entry(
         &mut self,
         label: &str,
-        zone: &mut FaustFloat,
+        param: ParamIndex,
         _init: FaustFloat,
         _min: FaustFloat,
         _max: FaustFloat,
         _step: FaustFloat,
     ) {
-        self.apply(label, zone);
+        self.apply(label, param);
     }
 }
 
@@ -255,7 +281,7 @@ const TOTAL_SECONDS: f64 = 4.0;
 fn main() {
     let mut dsp = Dx7Piano::new();
     dsp.init(SAMPLE_RATE as i32);
-    dsp.build_user_interface(&mut SetParams::new(EPIANO1));
+    apply_params(&mut dsp, EPIANO1);
 
     let num_outputs = dsp.get_num_outputs() as usize;
     let total_frames = (TOTAL_SECONDS * SAMPLE_RATE as f64) as usize;
@@ -269,11 +295,11 @@ fn main() {
     while written < total_frames {
         let n = BLOCK_SIZE.min(total_frames - written);
         let gate = if written < gate_off_frame { 1.0 } else { 0.0 };
-        dsp.build_user_interface(&mut SetParams::new(&[("DX7/gate", gate)]));
+        apply_params(&mut dsp, &[("DX7/gate", gate)]);
         {
             let mut outputs: Vec<&mut [FaustFloat]> =
                 out_bufs.iter_mut().map(|b| b.as_mut_slice()).collect();
-            dsp.compute(n as i32, &in_bufs, &mut outputs);
+            dsp.compute(n, &in_bufs, &mut outputs);
         }
         for (channel, buf) in out_bufs.iter().enumerate() {
             rendered[channel].extend_from_slice(&buf[..n]);
@@ -300,6 +326,14 @@ fn main() {
     let path = "dx7-piano-c5.wav";
     write_wav_16bit(path, SAMPLE_RATE as u32, &rendered);
     println!("wrote {path} ({TOTAL_SECONDS} s, note C5 = {C5_HZ} Hz)");
+}
+
+fn apply_params(dsp: &mut Dx7Piano, values: &[(&'static str, FaustFloat)]) {
+    let mut visitor = SetParams::new(values);
+    dsp.build_user_interface(&mut visitor);
+    for (param, value) in visitor.updates {
+        dsp.set_param(param, value);
+    }
 }
 
 /// Minimal 16-bit PCM WAV writer (interleaved, no dependencies).

@@ -982,7 +982,7 @@ pub fn run_main() {
 
         if matches!(cli.lang, Some(CliLang::Rust)) {
             let options = RustOptions {
-                class_name: selected_class_name(&cli),
+                class_name: selected_class_name(&cli).or_else(|| Some("mydsp".to_owned())),
                 faust_float_type: selected_rust_real_type(&cli),
             };
             match generate_rust_module(&store, module, &options) {
@@ -1685,7 +1685,7 @@ pub fn run_main() {
         match result {
             Ok(out) => {
                 let options = RustOptions {
-                    class_name: selected_class_name(&cli),
+                    class_name: selected_class_name(&cli).or_else(|| Some("mydsp".to_owned())),
                     faust_float_type: selected_rust_real_type(&cli),
                 };
                 match generate_rust_module(&out.store, out.module, &options) {
