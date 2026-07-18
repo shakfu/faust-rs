@@ -419,3 +419,37 @@ fn downsampling_domain_free_payload_matches_cpp_reference() {
         1,
     );
 }
+
+#[test]
+fn upsampling_adapts_ma_sr_like_cpp_reference() {
+    // C++ `propagate.cpp` multiplies ma.SR by every active US factor.
+    assert_differential(
+        "us_ma_sr",
+        r#"sr = fconstant(int fSamplingFreq, <math.h>);
+           process = (3, (_ : !)) : upsampling(sr);"#,
+        1,
+    );
+}
+
+#[test]
+fn downsampling_adapts_ma_sr_like_cpp_reference() {
+    // C++ `propagate.cpp` divides ma.SR by every active DS factor.
+    assert_differential(
+        "ds_ma_sr",
+        r#"sr = fconstant(int fSamplingFreq, <math.h>);
+           process = (3, (_ : !)) : downsampling(sr);"#,
+        1,
+    );
+}
+
+#[test]
+fn nested_multirate_domains_compose_ma_sr_like_cpp_reference() {
+    // Inner DS(3) under outer US(2): 48 kHz / 3 * 2 = 32 kHz.
+    assert_differential(
+        "nested_us_ds_ma_sr",
+        r#"sr = fconstant(int fSamplingFreq, <math.h>);
+           inner = (3, _) : downsampling(_ + sr);
+           process = (2, _) : upsampling(inner);"#,
+        1,
+    );
+}

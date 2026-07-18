@@ -243,7 +243,7 @@ only way lowering code appends compute statements.
 
 ### P3.3 SR adaptation + UI inside domains (plan §7 Step 7)
 
-- [ ] `ma.SR` becomes `SR*H` under US and `SR/H` under DS in the Rust
+- [x] `ma.SR` becomes `SR*H` under US and `SR/H` under DS in the Rust
       FConst propagation path, unrolling nested factors (plan §2.3).
 - [ ] UI elements inside a body reach the UI tree with the right path
       (C++ threads `path` through the clock env for this reason).

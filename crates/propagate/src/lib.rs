@@ -112,7 +112,7 @@ use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_aperture_with_memo, list_to_vec, tree_to_int,
-    vec_to_list,
+    tree_to_str, vec_to_list,
 };
 use ui::{
     ControlId, ControlKind, ControlRange, ControlSpec, UiGroupKind, UiGroupPathSegment,

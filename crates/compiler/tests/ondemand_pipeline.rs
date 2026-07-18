@@ -324,6 +324,42 @@ fn boolean_ondemand_with_recursive_state_accumulates_on_fire_only() {
 }
 
 #[test]
+fn multirate_domains_adapt_ma_sr_at_runtime() {
+    let input = vec![0.0_f32; 8];
+    let cases = [
+        (
+            "us_ma_sr_runtime",
+            r#"sr = fconstant(int fSamplingFreq, <math.h>);
+               process = (3, (_ : !)) : upsampling(sr);"#,
+            144_000.0_f32,
+        ),
+        (
+            "ds_ma_sr_runtime",
+            r#"sr = fconstant(int fSamplingFreq, <math.h>);
+               process = (3, (_ : !)) : downsampling(sr);"#,
+            16_000.0_f32,
+        ),
+        (
+            "nested_us_ds_ma_sr_runtime",
+            r#"sr = fconstant(int fSamplingFreq, <math.h>);
+               inner = (3, _) : downsampling(_ + sr);
+               process = (2, _) : upsampling(inner);"#,
+            32_000.0_f32,
+        ),
+    ];
+
+    for (stem, source, expected) in cases {
+        let outputs = run_interp_with_inputs(stem, source, std::slice::from_ref(&input));
+        assert_eq!(outputs.len(), 1, "{stem}: expected one output");
+        assert!(
+            outputs[0].iter().all(|&sample| sample == expected),
+            "{stem}: expected every sample to be {expected}, got {:?}",
+            outputs[0]
+        );
+    }
+}
+
+#[test]
 fn integer_ondemand_repeats_body_clock_times() {
     // Counted-loop OD: the body runs `clock` times per tick, and OD inputs
     // are *not* zero-padded (unlike US) — the accumulator adds the snapshot

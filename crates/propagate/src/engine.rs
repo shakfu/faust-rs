@@ -302,8 +302,17 @@ fn propagate_inner(
                 unreachable!("flat fconst node must decode to BoxMatch::FConst")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let is_sampling_frequency = matches!(
+                tree_to_str(arena, name),
+                Some("fSamplingFreq" | "fSamplingRate")
+            );
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.fconst(ty, name, file)])
+            let fconst = b.fconst(ty, name, file);
+            if ctx.clock_domain.is_some() && is_sampling_frequency {
+                Ok(vec![adapt_sampling_frequency(arena, fconst, ctx)])
+            } else {
+                Ok(vec![fconst])
+            }
         }
         FlatNodeKind::FVar => {
             let BoxMatch::FVar(ty, name, file) = match_box(arena, box_tree.as_tree_id()) else {
@@ -827,6 +836,38 @@ fn propagate_inner(
             ClockedWrapperKind::Downsampling,
         ),
     }
+}
+
+/// Adapts `ma.SR` to the active multirate clock-domain stack.
+///
+/// Mirrors C++ `propagate.cpp`'s `BoxFConst` case: starting at the innermost
+/// domain, multiply by every upsampling clock and divide by every downsampling
+/// clock. `ondemand` changes when a body runs, but not its sampling rate.
+/// Parent links make nested factors compose without embedding the clock
+/// environment's structural representation in the signal graph.
+fn adapt_sampling_frequency(
+    arena: &mut TreeArena,
+    mut sample_rate: SigId,
+    ctx: &PropagateContext<'_>,
+) -> SigId {
+    let mut domain_id = ctx.clock_domain;
+    while let Some(id) = domain_id {
+        let domain = ctx
+            .clock_domains
+            .get(id)
+            .expect("active clock-domain id must exist in its side table");
+        let kind = domain.kind;
+        let clock = domain.clock;
+        domain_id = domain.parent;
+
+        let mut b = SigBuilder::new(arena);
+        sample_rate = match kind {
+            ClockDomainKind::OnDemand => sample_rate,
+            ClockDomainKind::Upsampling => b.mul(sample_rate, clock),
+            ClockDomainKind::Downsampling => b.div(sample_rate, clock),
+        };
+    }
+    sample_rate
 }
 
 #[derive(Clone, Copy)]
