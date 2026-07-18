@@ -190,8 +190,8 @@ cargo run -p compiler -- -lang wast foo.dsp
 
 Use the following variables to increase the evaluation depth stack:
 
-`export FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH=XX` (default: 4096)
-`export FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=XX` (default: 1024)
+- `export FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH=XX` (default: 4096)
+- `export FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=XX` (default: 1024)
 
 ## Documentation
 
