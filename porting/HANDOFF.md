@@ -1,94 +1,81 @@
 # Session Handoff
 
-Date: 2026-07-18
+Date: 2026-07-19
 
 ## Repo State
 
-- Branch: `codex/add-ondemand-impulse-tests`
-- HEAD: `Expand clocked impulse test corpus` (this commit); parent `4de7c8f5`
-  (`Adapt ma.SR in multirate domains`), based on `main-dev` at `434f2eb6`
+- Branch: `transform-cleanup` (linear on top of `main` @ `86be9426`).
+- HEAD: `0c829798` — R0 through R3 of
+  `porting/transform-cleanup-documentation-factorization-plan-2026-07-19-en.md`
+  are complete and committed; R4 is next.
+- Working tree: clean (plus untracked local `tests/impulse-tests/node_modules`
+  etc. for the asc gate).
 
-## Working Tree
+## Plan progress
 
-- Tracked corpus changes in HEAD: 21 new `ondemand_*.dsp` files, 18 new paired
-  `upsampling_*`/`downsampling_*` files, impulse README, journal, and this
-  handoff.
-- Generated ignored files: C++ references, interpreter responses, reference
-  binaries/sources, and `tools/filesCompare` under `tests/impulse-tests/`.
+| Phase | State | Commits |
+|---|---|---|
+| R0 freeze | done, all gates green | `ab14a1ed` |
+| R1 docs rewrite | done (2 parts), full battery green | `0c53de09`, `deebe3d7` |
+| R2 test splits | done (3 parts), full battery green | `6c49e1c5`, `559a79cd`, `c1fd79f3` |
+| R3 namespace | done, gates green (see note below) | `b643fdd7`, `0c829798` |
+| R4–R9 | not started | — |
 
-## Current Goal
+## Byte-identity arbiter (R0.5)
 
-- Land the validated ondemand and multirate DSP corpus in the faust-rs impulse
-  harness.
+- Frozen worktree: `/Users/peter/git/faust-rs-baseline-worktrees/r0-freeze`
+  (commit `86be9426`, release compiler built).
+- Script: `/Users/peter/git/faust-rs-baseline-worktrees/compare-emissions.sh`
+  (outside the repo). Emits `-lang cpp -double` × {scalar, vec0, vec1} for the
+  132 impulse-corpus DSPs from both trees, byte-compares, and rechecks any new
+  difference by *three* working-tree emissions before declaring a defect.
+- **Pre-existing defect (recorded in the R0 journal entry, do not fix inside
+  the cleanup):** scalar emission is nondeterministic run-to-run on
+  delay-heavy DSPs (intermittently!). 76 of 396 cases are frozen in
+  `nondeterministic-frozen.txt`; zero certified-vec cases affected.
+  Reproducer: compile `zita_rev1.dsp` twice, diff. Suspect: `HashMap`
+  iteration in `signal_fir/delay/manager.rs` (`delay_lines`).
+- Environment: Faust libs resolved via gitignored symlink
+  `target/share/faust -> /opt/homebrew/share/faust` in both trees.
 
-## What Changed This Session
+## Decisions taken
 
-- Copied `ondemand_01_basic` through `ondemand_21_nested_delay_counter` exactly
-  from the C++ `tests/impulse-tests/od/` corpus.
-- Added nine upsampling and nine downsampling cases, including complex state,
-  nesting, selection, dynamic-rate, and `ma.SR`-dependent filter cases.
-- Fixed input-consuming upsampling ZeroPad FIR access in separate commit
-  `e75b4289`.
-- Ported and verified C++ `ma.SR` multirate adaptation in separate commit
-  `4de7c8f5`.
-- Documented the resulting 132-DSP corpus size while keeping the historical
-  93-DSP status table distinct.
+- R0 alias policy (plan default): workspace migrated to
+  `signal_fir::vector::{...}`; `pub use vector_*` facade re-exports retained.
+- R2 layout: `signal_fir/tests/` and `signal_prepare/tests/` grouped by
+  contract with `pub(super)` fixtures; the 12 vector stages are now
+  `X/mod.rs` + `X/tests.rs` directories, ready for the R5–R7 splits.
+- Upstream test failures on `main` (if any reappear): verify against a clean
+  worktree before attributing to this branch.
 
-## Decisions / Constraints
+## Validations run (latest per milestone)
 
-- Non-silence was audited before integration rather than inferred from a
-  successful compilation or a reference comparison alone.
-- A valid case must emit at least one finite non-zero scalar sample and match
-  the C++ reference prefix at the default tolerance.
-- `ma.SR` follows `SR*H` under US and `SR/H` under DS, with nested factors
-  composed through the clock-domain parent chain.
+- `cargo test -p transform --lib`: 385 (R0-recorded count, unchanged).
+- Workspace clippy (`+1.97.0`) and tests: green.
+- `golden-check`: 196 OK. `vector-coverage-check`: 1,536 pairs, 16 modes.
+- Arbiter: 0 defects at every milestone (R2: 323/325 + 2 ND; R3: 320/323 +
+  3 ND reclassified after 4×4 manual re-emission — journal entry
+  "R3 milestone gates" has the details).
 
-## Validation Run
+## Next steps (R4)
 
-- Exact byte comparison of all 21 imported DSPs against the C++ source corpus
-  -> passed.
-- `cargo build --release -p impulse-runner` -> passed.
-- Direct 15000-frame scalar run of every case -> all finite and non-silent;
-  non-zero counts range from 144 to 15000.
-- Direct comparison of all 21 scalar responses to existing C++ references with
-  `filesCompare -part` -> passed.
-- `make -j8 -f Make.ref reference` on the 21-case subset -> passed.
-- `make -j8 -f Make.interp all` on the 21-case subset -> passed.
-- Direct 15000-frame scalar runs of all 18 multirate cases -> finite and
-  non-silent; non-zero counts range from 3 to 30000.
-- C++ 60000-frame reference generation plus interpreter prefix comparison for
-  all 18 multirate cases -> passed at the default tolerance.
-- Targeted `make -j3 all` over all 39 additions -> passed on C++, C,
-  interpreter, Cranelift, WebAssembly, AssemblyScript, Rust, and Julia.
-- `ma.SR` runtime checks at 48 kHz -> US(3) = 144 kHz, DS(3) = 16 kHz,
-  nested US(2)/DS(3) = 32 kHz.
-- The same three `ma.SR` cases -> sample-for-sample parity with pinned C++.
-- `cargo fmt --all -- --check` -> passed.
-- `cargo clippy --workspace --all-targets -- -D warnings` -> passed.
-- `cargo test --workspace --all-targets` -> passed.
-- `cargo run -p xtask -- golden-check` -> passed.
+1. Exhaustive FIR child-traversal primitive (plan §4.6/R4.4): replace the
+   silently-skipping `fir_children` (`vector/lower/mod.rs`) and
+   `fir_reachable` (`vector/assemble/mod.rs`) with a shared total walker
+   (prefer `crates/fir`), exhaustive `match` (no wildcard arm) so new
+   `FirMatch` variants fail at compile time; checkers keep their own
+   reachability logic.
+2. Prepared-ID indexing extraction; canonical `ValueType`→FIR conversion.
+3. DTO model modules (prep for R5–R7), re-exported from old paths.
+4. Then R5–R9 per plan; §4.8 guard rule applies to the R6/R7 splits
+   (`reject_unadopted_stateful_reads` must stay on both producer and checker
+   paths, each with a rejection test through the checker entry point).
 
-## Open Issues / Blockers
+## Useful commands
 
-- None for adding these DSPs.
-- Scheduling/vector matrices were not rerun on the extended corpus in this
-  session; all scalar backend targets were run.
-
-## Next Steps
-
-1. Commit the corpus addition separately from both compiler fixes.
-2. Rebase/merge the linear three-commit branch into `main-dev` when requested.
-3. Expand scheduling/vector matrix measurements to the 132-DSP corpus
-   separately.
-
-## Useful Commands to Resume
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace --all-targets`
-- `cargo run -p xtask -- golden-check`
-
-## Notes
-
-- Worktree: `/private/tmp/faust-rs-ondemand-impulse-tests`.
-- The original checkout and its pre-existing untracked files were not modified.
+```bash
+cargo test -p transform --lib                       # quick loop
+/Users/peter/git/faust-rs-baseline-worktrees/compare-emissions.sh   # byte gate
+cargo run -q -p xtask -- golden-check
+cargo run -q -p xtask -- vector-coverage-check      # ~1-2 h
+```
