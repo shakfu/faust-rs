@@ -5,9 +5,15 @@ use propagate::ClockDomainTable;
 use signals::SigBuilder;
 use tlib::{TreeArena, sym_rec, vec_to_list};
 
+use super::effects::{direct_effects, propagate_effect_sets};
+use super::uses::{analyze_forest, finalize_occurrences};
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
+use signals::{SigMatch, match_sig};
+use sigtype::Variability;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use tlib::NodeKind;
 
 fn dep_targets(deps: &[AnalysisDependency]) -> Vec<(u32, DepKind)> {
     deps.iter().map(|dep| (dep.to.as_u32(), dep.kind)).collect()
