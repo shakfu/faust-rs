@@ -530,7 +530,7 @@ fn reject_unadopted_stateful_reads(
     plan: &VectorPlan,
     islands: &[ClockIsland],
 ) -> Result<(), VectorClockAdError> {
-    let ids = signal_ids(prepared);
+    let ids = super::common::ids::prepared_signal_ids(prepared);
     let signals = plan
         .signals
         .iter()
@@ -597,14 +597,6 @@ fn is_stateful_producer(prepared: &VerifiedPreparedSignals, sig: SigId) -> bool 
     }
 }
 
-fn signal_ids(prepared: &VerifiedPreparedSignals) -> BTreeMap<u32, SigId> {
-    prepared
-        .sig_types_map()
-        .keys()
-        .map(|&sig| (sig.as_u32(), sig))
-        .collect()
-}
-
 fn verify_source_alignment(
     prepared: &VerifiedPreparedSignals,
     domains: &ClockDomainTable,
@@ -618,7 +610,7 @@ fn verify_source_alignment(
         });
     }
     let clocks = annotate(prepared.arena(), domains, prepared.outputs())?;
-    let ids = signal_ids(prepared);
+    let ids = super::common::ids::prepared_signal_ids(prepared);
     for (record, signal) in records.iter().zip(&plan.signals) {
         let signal_id = u64::from(record.signal_id);
         if signal.signal_id != signal_id {
@@ -670,7 +662,7 @@ fn derive_clock_islands(
     decorations: &VerifiedDecorationCertificate,
     plan: &VectorPlan,
 ) -> Result<Vec<ClockIsland>, VectorClockAdError> {
-    let ids = signal_ids(prepared);
+    let ids = super::common::ids::prepared_signal_ids(prepared);
     let records = decorations
         .certificate()
         .records
@@ -802,7 +794,7 @@ fn derive_transport_policies(
     prepared: &VerifiedPreparedSignals,
     plan: &VectorPlan,
 ) -> Result<Vec<ClockTransportPolicy>, VectorClockAdError> {
-    let ids = signal_ids(prepared);
+    let ids = super::common::ids::prepared_signal_ids(prepared);
     let signals = plan
         .signals
         .iter()
@@ -861,7 +853,7 @@ fn derive_reverse_fallbacks(
     decorations: &VerifiedDecorationCertificate,
     plan: &VectorPlan,
 ) -> Result<Vec<ReverseAdFallback>, VectorClockAdError> {
-    let ids = signal_ids(prepared);
+    let ids = super::common::ids::prepared_signal_ids(prepared);
     let signals = plan
         .signals
         .iter()

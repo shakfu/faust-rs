@@ -42,6 +42,7 @@ use super::{cse, decoration_verify, recursion, siggen};
 pub mod analysis;
 pub mod assemble;
 pub mod clock_ad;
+pub(crate) mod common;
 pub mod events;
 pub mod lockstep;
 pub mod lower;
