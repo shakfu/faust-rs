@@ -5,6 +5,8 @@ use propagate::ClockDomainTable;
 use signals::SigBuilder;
 use tlib::TreeArena;
 
+use super::super::super::decoration_verify::VerifiedDecorationCertificate;
+use super::super::analysis::{DepKind, ForeignPurity};
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
@@ -12,6 +14,7 @@ use crate::signal_fir::vector::analysis::{
     ForeignResource, ForeignTypeCode, StateCell, StateResource, effect_sets_conflict,
 };
 use crate::signal_prepare::prepare_signals_for_fir_verified;
+use ahash::AHashMap;
 
 #[test]
 fn checked_effect_summaries_match_atom_pair_semantics() {
