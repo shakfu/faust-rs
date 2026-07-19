@@ -1,78 +1,114 @@
 # transform
 
-Mid-level transform passes over signals and FIR.
+Mid-level transform passes between signal propagation and backend emission:
+staging/verification of the propagated signal forest, clock-domain analysis,
+dependency scheduling, and signal-to-FIR lowering — in production for both the
+scalar path and the independently checked vector (`-vec`) path.
 
-This crate hosts transformations that sit between propagation and backend
-emission: neither parser/eval/propagate concerns nor final code-generation, but
-the lowering layer that prepares a propagated signal forest and turns it into a
-structured FIR module.
+## Position in the pipeline
+
+```
+propagate → [signal_prepare] → [clk_env / hgraph / schedule] → [signal_fir] → fir → codegen
+```
+
+## Public modules
+
+| Module | Role |
+|---|---|
+| `signal_prepare` | Arena-owning staging boundary: clone, normalize, type, and verify the propagated forest before lowering |
+| `clk_env` | Clock-environment inference for `ondemand`/`upsampling`/`downsampling` domains |
+| `hgraph` | Hierarchical dependency graph, effect-conflict orientation, and audits over the prepared forest |
+| `schedule` | Dependency scheduling shared by the scalar and vector paths (`SchedulingStrategy`, `-ss 0..3`) |
+| `signal_fir` | Signal→FIR lowering: scalar lowerer, checked vector pipeline, selection and fail-closed fallback |
+
+## Scalar and vector paths
+
+```text
+propagated signal forest + UiProgram
+              |
+              v
+signal_prepare -> VerifiedPreparedSignals
+              |
+              +---------------- scalar -----------------+
+              |                                          |
+              |             clk_env / hgraph / schedule  |
+              |                         |                |
+              |                         v                |
+              |                 scalar SignalToFirLower  |
+              |                                          |
+              +---------------- vector -----------------+
+                                        |
+        analysis -> decorations -> VectorPlan -> state/clock policy
+                                        |
+                route -> lower -> event certificate -> FIR assembly
+                                        |
+                             final module verification
+                                        |
+                                        v
+                                  SignalFirOutput
+```
+
+With `ComputeMode::Vector` (`-vec`), the checked vector pipeline runs first;
+every stage produces an artifact that an **independent checker** must accept
+(see `signal_fir/vector/mod.rs` for the authoritative stage map). Any named
+unsupported shape fails **closed** to scalar lowering, reported through
+`VectorPipelineStatus::Fallback(reason)` with a stable `FRS-VEC-FALLBACK-*`
+code and `VectorEffectiveMode::Scalar`. A fallback is never silently counted
+as vector coverage.
+
+Lifecycle ownership follows the C++ Faust contract: persistent fields belong
+to the DSP struct, compiled constants to `instanceConstants`, resettable
+signal state to `instanceClear`, and UI zone resets to
+`instanceResetUserInterface`.
+
+## API classification
+
+| Tier | Items |
+|---|---|
+| Stable compiler contract | `signal_fir::{compile_signals_to_fir_fastlane_with_ui, compile_signals_to_fir_fastlane_clocked, compile_signals_to_fir_fastlane_clocked_with_timing}`, `SignalFirOptions`, `SignalFirOutput`, `SignalFirError`/`SignalFirErrorCode`, `RealType`, `ComputeMode`, `VectorPipelineStatus`, `VectorFallbackReason`, `VectorEffectiveMode`, `schedule::SchedulingStrategy`, `signal_prepare::{prepare_signals_for_fir, prepare_signals_for_fir_verified, PreparedSignals, VerifiedPreparedSignals}` |
+| Diagnostic / testing surface | `clk_env::annotate`, `hgraph::{build_hgraph, audit_hgraph, audit_control_variability, schedule}`, `signal_fir::decoration_verify`, `signal_fir::shadow`, `signal_fir::pv_slice`, the vector artifact producers/checkers under `signal_fir::vector::*` |
+| Compatibility facade | `signal_fir::vector_*` aliases of the grouped `signal_fir::vector::{...}` modules (retained during the 2026-07 cleanup; do not remove without an explicit API decision) |
+
+### `signal_fir` key items
+
+| Item | Description |
+|---|---|
+| `compile_signals_to_fir_fastlane_with_ui(arena, sigs, n_in, n_out, ui, opts)` | Canonical grouped-UI-aware entry point |
+| `compile_signals_to_fir_fastlane_clocked(..., clock_domains, opts)` | Clock-domain-aware variant (`ondemand`/`upsampling`/`downsampling`) |
+| `SignalFirOptions` | `module_name`, `real_type`, delay thresholds (`-mcd`/`-dlt`), `compute_mode` (`-vec -vs -lv`), `scheduling_strategy` (`-ss`) |
+| `SignalFirOutput` | `FirStore` + module root + vector status/effective mode + diagnostics |
+| `SignalFirError` / `SignalFirErrorCode` | Typed errors with stable `FRS-SFIR-*` codes |
+
+### `signal_prepare` key items
+
+| Item | Description |
+|---|---|
+| `prepare_signals_for_fir(arena, sigs, ui)` | Clone into a private staging arena, normalize, type, and verify fast-lane invariants |
+| `prepare_signals_for_fir_verified(arena, sigs, ui)` | Same, returned as the `VerifiedPreparedSignals` wrapper consumed by lowering |
+| `PreparedSignals` | Encapsulated staging result with read-only accessors |
+| `SimpleSigType` | Reduced type domain (`Int` / `Real` / `Sound`) |
+
+## Validation
+
+```bash
+cargo test -p transform --lib                                  # unit tests
+cargo run -p xtask -- golden-check                             # generated-output parity
+cargo run -p xtask -- vector-coverage-check                    # certified vector retention
+cargo run --release -p xtask -- vector-compile-budget-check    # compile-cost budget
+cargo test -p compiler --test vector_mode                      # scalar/vector bit-exactness oracle
+```
+
+## Active plans
+
+- [`porting/transform-cleanup-documentation-factorization-plan-2026-07-19-en.md`](../../porting/transform-cleanup-documentation-factorization-plan-2026-07-19-en.md)
+- [`porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`](../../porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md)
+- [`porting/scheduling-vectorization-implementation-review-2026-07-16-en.md`](../../porting/scheduling-vectorization-implementation-review-2026-07-16-en.md)
 
 ## C++ provenance
 
 | C++ path | Role |
 |---|---|
 | `compiler/transform/*` | Transform pass infrastructure |
-| `compiler/generator/*` (selected) | FIR-oriented lowering helpers |
-
-## Public API
-
-| Module | Description |
-|---|---|
-| `signal_fir` | Signal → FIR lowering fast-lane |
-| `signal_prepare` | Pre-FIR staging/preparation boundary for the fast-lane |
-
-### `signal_fir` key items
-
-| Item | Description |
-|---|---|
-| `compile_signals_to_fir_fastlane_with_ui(arena, sigs, num_inputs, num_outputs, ui, opts)` | Canonical grouped-UI-aware fast-lane entrypoint |
-| `SignalFirOptions` | Lowering options (`module_name`, `real_type`, delay strategy thresholds, …) |
-| `SignalFirOutput` | Output bundle: `FirStore` + module root `FirId` |
-| `RealType` | Internal DSP precision (`Float32` / `Float64`) |
-| `SignalFirError` / `SignalFirErrorCode` | Typed errors with stable diagnostic codes |
-
-### `signal_prepare` key items
-
-| Item | Description |
-|---|---|
-| `prepare_signals_for_fir(arena, sigs, ui)` | Prepare propagated signals into a private staging arena and verify fast-lane invariants |
-| `prepare_signals_for_fir_verified(arena, sigs, ui)` | Same preparation step, returned as a verified wrapper for downstream lowering |
-| `PreparedSignals` | Encapsulated staging result with read-only accessors for arena, outputs, and type maps |
-| `VerifiedPreparedSignals` | Checked prepared forest that passed explicit postcondition verification |
-| `SimpleSigType` | Reduced type domain (`Int` / `Real` / `Sound`) |
-| `SignalPrepareError` | Typed errors from the preparation pass |
-
-## Status
-
-- `signal_prepare` owns the pre-FIR staging boundary used by the active
-  fast-lane:
-  - clone the output forest into a private arena,
-  - run forest-wide `de_bruijn_to_sym`,
-  - canonicalize degenerate symbolic recursion projections,
-  - infer canonical `SigType` information,
-  - derive the reduced `SimpleSigType` view used by FIR lowering,
-  - insert the current promotion subset, simplify, and canonicalize one-sample
-    delays back to `Delay1`,
-  - explicitly verify the resulting staging contract before FIR lowering.
-- `signal_fir` is implemented for the active fast-lane slice and covered by
-  integration tests and golden checks.
-- `signal_fir` owns concrete `BlockReverseAD` execution for `rad(...)`
-  temporal/recursive fallback:
-  - forward tape allocation and stores,
-  - reverse sweep scheduling,
-  - adjoint carry reset/storage,
-  - FIR type selection for tape values and local math helpers.
-  Local pointwise RAD formulas are shared with `propagate` through
-  `signals::ad_rules`; tape loading and loop placement remain local here.
-- The current fast-lane covers the executable bootstrap path plus the active
-  delay/recursion/table lowering slices. Delay lowering is controlled by:
-  - `max_copy_delay` for shift/copy vs circular buffering,
-  - `delay_line_threshold` for circular-pow2 vs exact-size if-wrapping buffers.
-- Additional transform families (scheduling, vectorisation, algebraic rewrites) are
-  planned but not yet exposed as stable public APIs.
-
-## Position in the pipeline
-
-```
-signals  →  [transform::signal_prepare]  →  [transform::signal_fir]  →  fir  →  codegen
-```
+| `compiler/generator/dag_instructions_compiler.cpp`, `compile_vect.cpp` | Vector loop DAG, delay-line words, placement rules |
+| `compiler/generator/compile_scal.cpp` | Scalar lowering and `ondemand` guard generation |
+| `compiler/Dependencies/*`, `compiler/generator/occurrences.cpp` | Dependency and occurrence rules |

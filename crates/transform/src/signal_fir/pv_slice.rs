@@ -9,7 +9,7 @@
 //! This module drives one deliberately small, non-trivial DSP shape through a
 //! genuine signal-level `VectorPlan`-equivalent: it consumes prepared `SigId`
 //! facts (never discovers the split by re-inspecting fused FIR), decides
-//! placement with the existing [`crate::signal_fir::loop_graph::needs_separate_loop`]
+//! placement with the existing `loop_graph::needs_separate_loop`
 //! precedence rule, allocates one typed cross-loop transport, orders the two
 //! loops with the shared [`crate::schedule`] scheduler at `-ss 0`, and emits
 //! FIR for both vector loop variants (`-lv 0` fixed-chunk-plus-remainder,
@@ -30,7 +30,7 @@
 //!   history spanning the *current* chunk) is `P6` scope, not `PV`.
 //! - Occurrence counting and `max_delay` extraction are a genuine (if
 //!   narrow) walk of the `SigId` forest via
-//!   [`crate::signal_fir::loop_graph::signal_value_children`], not hardcoded
+//!   `loop_graph::signal_value_children`, not hardcoded
 //!   facts. Variability is asserted `Samp` for this DSP shape rather than
 //!   re-run through the full type inferencer — a full context-sensitive
 //!   `SignalUseInfo` pass is `P4` scope (see the port plan, section 4.3).
@@ -365,7 +365,7 @@ pub fn pv_schedule(plan: &PvPlan) -> Vec<PvLoopId> {
 /// Which of the two loop-variant FIR shapes to emit (`-lv 0` / `-lv 1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PvLoopVariant {
-    /// Fixed vector size (chunk width [`LV0_CHUNK`]) plus a remaining loop.
+    /// Fixed vector size (chunk width `LV0_CHUNK`) plus a remaining loop.
     Lv0,
     /// Simple: one loop whose size varies with `count` itself.
     Lv1,

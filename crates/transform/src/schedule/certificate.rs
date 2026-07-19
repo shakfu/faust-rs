@@ -4,7 +4,7 @@
 //! `lean-rust-certified-porting-plan-2026-07-11-en.md`, section
 //! "R1 - Schedule certificate at L2"): "Implement the generic Rust
 //! `GraphSnapshot`, `ScheduleCertificate`, and `verify_schedule` before
-//! activating generalized `-ss`." [`verify_schedule`](super::verify_schedule)
+//! activating generalized `-ss`." [`super::verify_schedule`]
 //! already exists (phase P1); this module adds the canonical, hashable
 //! artifact layer around it.
 //!

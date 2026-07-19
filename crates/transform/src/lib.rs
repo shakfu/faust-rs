@@ -1,25 +1,40 @@
-//! Mid-level transform passes over signals and FIR.
+//! Mid-level transform passes between signal propagation and backend emission.
 //!
 //! # Source provenance (C++)
 //! - `compiler/transform/*`
-//! - selected lowering logic from `compiler/generator/*` for FIR-oriented paths
+//! - `compiler/generator/dag_instructions_compiler.cpp` / `compile_vect.cpp`
+//!   (vector loop DAG and delay-word lowering)
+//! - `compiler/generator/compile_scal.cpp` (scalar and `ondemand` lowering)
+//! - `compiler/Dependencies/*`, `compiler/generator/occurrences.cpp`
+//!   (dependency/occurrence rules)
 //!
 //! # Role in pipeline
-//! - Hosts transformations that are neither parser/eval/propagate concerns nor
-//!   backend emitters.
-//! - Current active slice is signal-to-FIR lowering under [`signal_fir`].
+//! `propagate → [signal_prepare] → [clk_env / hgraph / schedule] →
+//! [signal_fir] → fir → codegen`
 //!
-//! # Current status
-//! - [`signal_fir`] is implemented for the fast-lane prototype and exercised by
-//!   integration tests/golden checks.
-//! - [`signal_prepare`] now owns the pre-FIR staging boundary used to clone the
-//!   output forest and run forest-wide `de_bruijn_to_sym` conversion.
-//! - Additional transform families (scheduling/vectorization/rewrites) are
-//!   planned but not yet exposed as stable public APIs.
+//! The crate owns two production paths behind one facade:
+//! - the **scalar** path: prepared forest → clock/dependency analysis →
+//!   scheduled scalar lowering;
+//! - the **checked vector** path (`-vec`): a producer/checker pipeline whose
+//!   artifacts must each pass an independent checker before the emitted
+//!   module is accepted; any named unsupported shape fails closed to scalar
+//!   lowering with a stable, observable fallback reason.
+//!
+//! # Module map
+//! - [`signal_prepare`] — arena-owning staging/verification boundary.
+//! - [`clk_env`] — clock-environment inference for
+//!   `ondemand`/`upsampling`/`downsampling` domains.
+//! - [`hgraph`] — hierarchical dependency graph, effect orientation, audits.
+//! - [`schedule`] — dependency scheduling shared by both paths
+//!   ([`schedule::SchedulingStrategy`], `-ss 0..3`).
+//! - [`signal_fir`] — signal→FIR lowering, vector selection, and fallback
+//!   policy; see `signal_fir/vector` for the checked pipeline's stage map.
 //!
 //! # API mapping status
-//! - `signal_fir` public entry points are `adapted`: parity-driven behavior with
-//!   Rust typed errors/options.
+//! - `signal_fir` and `signal_prepare` public entry points are `adapted`:
+//!   parity-driven behavior with Rust typed errors/options.
+//! - `clk_env`/`hgraph`/`schedule` internals are `adapted` analysis stages
+//!   exposed for diagnostics and workspace tests.
 
 pub mod clk_env;
 pub mod hgraph;

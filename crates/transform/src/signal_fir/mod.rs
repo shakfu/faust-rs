@@ -1,99 +1,67 @@
-//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D/2E/2F/2G/2H slices).
+//! Signal→FIR lowering: scalar path, checked vector path, and selection.
 //!
-//! # Status
-//! This module currently provides an **executable base slice**:
-//! - contract validation (`Step 1A`),
-//! - lowering for `SIGINPUT`, numeric constants, `SIGBINOP`, and `SIGOUTPUT`
-//!   passthrough (`Step 2A`),
-//! - core math and control/state bootstrap nodes (`Step 2B`),
-//! - explicit state lowering for `delay`-family nodes, including fixed-size
-//!   circular FIR delay lines for constant `SIGDELAY` amounts (`Step 2C` slice),
-//! - first breadth coverage for extended primitives, waveform/table/UI families
-//!   (`Step 2D`),
-//! - first shim-reduction pass replacing several `frs_*` calls with native FIR
-//!   lowering (`Step 2E`),
-//! - critical shim elimination (`Step 2F`): no `frs_*` calls remain in fast-lane
-//!   generated C++,
-//! - first FIR-native table lowering (`Step 2G`) for
-//!   `SIGWAVEFORM` / `SIGRDTBL` / `SIGWRTBL`,
-//! - non-trivial table slice (`Step 2H`) for `SIGWRTBL(size, gen(..), ..)` with
-//!   constant size and deterministic generator expansion.
-//! - pre-lowering staging (`Preparation Step 1`): clone the output forest into a
-//!   private arena and run forest-wide `de_bruijn_to_sym` before FIR emission.
-//! - prepared typing/promotion (`Preparation Step 2/3/4`): consume the reduced
-//!   `signal_prepare` type map so FIR lowering keeps integer delay/recursion/table
-//!   carriers instead of defaulting every internal value to `real_ty`.
-//! - **Vector P5.2 additive artifact**: lower verified effect-free prepared
-//!   signal closures into scheduled P4.4 regions, run CSE per region, and
-//!   independently reconnect final bodies to P5.1 route evidence. This path is
-//!   not yet selected by `build_module` or any backend.
-//! - **Vector P5.3 bounded assurance gate**: expand a complete routed chunk into
-//!   definition/use/transport/effect events, reconstruct scalar and vector
-//!   orders plus dynamic dependencies, and reject any `FissionSafe` reversal.
-//! - **Vector P6.1 state-transition artifact**: derive checked delay and
-//!   recursion `pre/exec/post` phases from accepted signal decorations, refine
-//!   P5.3 state effects with phase events, and exhaustively validate the C++
-//!   copy/ring delay representations against newest-first abstract history.
-//! - **Vector P6.2 clock/AD artifact**: compose the checked vector plan with a
-//!   freshly checked clock environment, materialize nested serial OD/US/DS
-//!   islands, restrict outer-chunk transports to top-rate values, accept FAD
-//!   as an expanded ordinary signal graph, and force reverse-time/BRA carriers
-//!   to scalar `Forward < Reverse` windows. Both P6 gates remain additive and
-//!   are not yet selected by `build_module` or a backend.
-//! - **Vector P6.3a recursive-tuple routing**: retain recursive groups as
-//!   recursively checked typed FIR values while requiring all cross-loop
-//!   transports to use scalar projections, matching C++ `sigProj` lowering.
-//!   A real two-projection prepared graph closes routing under all four `-ss`
-//!   strategies.
-//! - **Vector P6.3b verified FIR assembly**: materialize C++-compatible copy
-//!   and ring delay words, simultaneous recursive projection steps, nested
-//!   OD/US/DS guards, and the three P6.2 transport lifetimes. The independent
-//!   checker requires exact loop/action/island coverage. Final output/module
-//!   placement is supplied by P6.4.
-//! - **Vector P6.4 final module integration**: add checked output stores,
-//!   `-lv 0/1` chunk drivers, lifecycle section placement, generic FIR module
-//!   verification, and production selection after P5.3/P6 acceptance.
-//! - **Vector P6.5 production lowering**: admit fixed delays, symbolic
-//!   recursion, stateless clock islands with held outputs, and expanded FAD
-//!   graphs into the checked final-module path.
-//! - **Vector P6.6 clock-state and variable-delay lowering**: use bounded
-//!   runtime delay amounts, order delayed inter-loop producers before readers,
-//!   and materialize one shared fire-time cursor per stateful clock island.
-//!   UI programs and RAD remain named scalar-compatible fallbacks.
-//! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
-//!   `SigBlockReverseAD` carriers whose body signals are trivially
-//!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
-//! - **RAD Phase B4**: per-sample forward tape for `SigBlockReverseAD`
-//!   carriers whose body contains non-trivially-re-evaluable operands in
-//!   Mul/Div/unary backward rules (e.g. `x' * x`).  Forward values are stored
-//!   in `fBraTapeN` struct arrays during the forward loop and loaded during the
-//!   reverse loop via `load_bra_fwd_value`.
-//! - **RAD Phase B5**: extended backward rules covering all remaining
-//!   differentiable signal forms: `Delay(c, x)` (circular carry buffer of size
-//!   `c` in struct field `fBraDelayCarryN`), `Prefix(init, x)` (scalar carry
-//!   with a boundary condition at sample 0), all smooth unary ops
-//!   (`Tan`, `Asin`, `Acos`, `Atan`, `Log10`, `Abs`, `Pow`, `Atan2`), binary
-//!   `Min`/`Max` (subgradient via `Select2`), `Floor`/`Ceil`/`Rint`/`Round`
-//!   (zero gradient), and discrete `BinOp` variants (zero gradient).
+//! # Inputs and outputs
+//! Entry points take the propagated signal forest, the arity contract, the
+//! grouped [`UiProgram`], optionally the propagation-owned
+//! `ClockDomainTable`, and [`SignalFirOptions`]. They return a
+//! [`SignalFirOutput`]: an owned [`FirStore`] with the module root, plus the
+//! observable vector status (`vector_pipeline_status`,
+//! `vector_effective_mode`, `vector_pipeline_detail`) and diagnostics.
 //!
-//! Current `Step 2H` scope still excludes complex generator forms depending on
-//! runtime context/loop variables; those are reported as typed
-//! `UnsupportedSignalNode` errors.
+//! # Pipeline
+//! 1. **Plan** — validate options and the top-level signal/arity contract.
+//! 2. **Prepare** — [`crate::signal_prepare`] clones the forest into a
+//!    private staging arena, normalizes, types, and verifies it
+//!    (`VerifiedPreparedSignals`).
+//! 3. **Clock/dependency analysis** — [`crate::clk_env`] infers clock
+//!    environments (for `ondemand`/`upsampling`/`downsampling` programs),
+//!    [`crate::hgraph`] builds the hierarchical dependency graph, orients
+//!    effect conflicts (scalar path), and schedules it under the selected
+//!    [`SchedulingStrategy`].
+//! 4. **Selection** — with [`ComputeMode::Vector`], the checked vector
+//!    pipeline under [`vector`] runs first; on acceptance its verified module
+//!    is returned. On a named rejection it **fails closed** to scalar
+//!    lowering and reports [`VectorPipelineStatus::Fallback`].
+//! 5. **Scalar lowering** — `module::build_module` lowers the prepared forest
+//!    along the accepted schedule (delay strategies under `delay/`, recursion,
+//!    tables, UI, clocked regions, and reverse-AD carriers included).
 //!
-//! General `SIGDELAY` parity remains intentionally partial: the fast-lane now
-//! supports constant integer delay amounts through fixed-size circular buffers,
-//! and variable delays where the amount comes from a UI control with a bounded
-//! interval (slider/numentry). Delays with unbounded intervals are currently
-//! rejected as unsupported.
+//! # Fallback semantics
+//! A vector fallback is observable, never silent: the stable reason codes are
+//! [`VectorFallbackReason::code`] (`FRS-VEC-FALLBACK-*`), the returned FIR is
+//! scalar-shaped, and [`VectorEffectiveMode`] stays `Scalar` so retention
+//! gates never count a fallback as vector coverage. Scalar/vector selection
+//! never changes numeric results: vector-certified output is bit-exact
+//! against scalar output for the same program.
 //!
-//! Other signal families still return typed `FRS-SFIR-*` errors until the
-//! remaining lowering slices are implemented.
+//! # Module map
+//! - `module/` — scalar lowerer (decomposed `SignalToFirLower` sub-states).
+//! - `delay/` — delay-line planner/manager/strategies (`-mcd`/`-dlt`).
+//! - [`vector`] — checked vector pipeline; its `mod.rs` holds the
+//!   authoritative producer/checker stage map.
+//! - `block_reverse_ad`/`bra` — reverse-AD (`rad`) carriers: tape-free and
+//!   taped backward sweeps with C++-compatible storage.
+//! - [`decoration_verify`] — certified signal decorations consumed by the
+//!   vector pipeline.
+//! - [`pv_slice`], [`shadow`] — diagnostic/experimental surfaces (P2 vector
+//!   pre-slice; schedule-conformance shadow reports).
+//! - `loop_graph`, `placement`, `planner`, `cse`, `recursion`, `siggen`,
+//!   `error` — internal analysis/lowering support.
+//!
+//! # Known unsupported behavior
+//! Delays with unbounded runtime intervals, complex table-generator forms
+//! depending on runtime context, and foreign functions inside `SIGGEN`
+//! interpretation are rejected with typed `FRS-SFIR-*` errors. UI-program and
+//! reverse-AD graphs under `-vec` fall back to scalar with stable reasons.
 //!
 //! # Crate boundary contract
 //! - `transform` owns signal->FIR lowering entrypoints.
 //! - `fir` owns FIR node model, builder, and matcher.
 //! - `codegen` consumes resulting FIR modules.
 //! - `compiler` chooses whether to route requests to this fast-lane.
+//!
+//! Development history (Step 2A–2H, P4–P6, RAD B3–B5 slices) lives in
+//! `porting/` and the daily journal, not here.
 
 mod block_reverse_ad;
 mod cse;

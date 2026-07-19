@@ -31,9 +31,9 @@
 //! - `R_COMPOSITE` (default, incl. tables): `max` over subsignals.
 //!
 //! # Fixed point
-//! Recursive groups make the bottom-up synthesis circular. [`find_fixpoint`]
+//! Recursive groups make the bottom-up synthesis circular. `find_fixpoint`
 //! runs a Jacobi-style Kleene iteration: the hypothesis `H : group → env`
-//! starts at `nil` for every group collected by [`collect_rec_groups`], and
+//! starts at `nil` for every group collected by `collect_rec_groups`, and
 //! each round recomputes every group against the *previous* hypothesis
 //! (order-independent, deterministic). Monotonicity under `max` plus the
 //! finite domain height bound termination; `MAX_ITERATIONS` is pure safety.
@@ -108,7 +108,7 @@ pub enum ClkEnvError {
     MalformedClockEnv { sig: SigId },
     /// Structural error (malformed list, de Bruijn recursion, unknown node).
     Malformed { sig: SigId, detail: String },
-    /// The Kleene iteration did not stabilize within [`MAX_ITERATIONS`].
+    /// The Kleene iteration did not stabilize within `MAX_ITERATIONS`.
     FixpointDiverged { iterations: usize },
 }
 
