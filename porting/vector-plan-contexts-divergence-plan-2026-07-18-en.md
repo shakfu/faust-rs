@@ -5,13 +5,13 @@ Status: X1 complete (all three mechanisms traced; diagnostic corrected);
 X2 complete (classes A and C fixed and qualified: 16-mode corpus sweep
 unchanged at 97/34/1, byte-identity 180/182 with the two `echo_bug` drifts
 characterized as common-subexpression sharing and oracle-verified 8/8, real
-world directory 159 -> 165 vectorized); X2b pending (class B: serve
-cross-group SYMREF back-edges — a transport would carry current-sample values
-where the back-edge needs previous-sample semantics, so a naive transport is
-a miscompile; candidate designs are RecursionTransition coverage for
-pass-through alias slots, or preparation-phase normalization of non-cyclic
-back-edges to an explicit one-sample delay, the latter rejected for X2
-because it changes scalar codegen globally)
+world directory 159 -> 165 vectorized); X2b complete (class B: P6.1 now
+derives one-sample body history only for delayed recursive projections whose
+alias and selected body have distinct P4.4 loop owners; lowering consumes that
+accepted transition instead of inventing a current-sample transport, while
+same-loop recursion and scalar preparation remain unchanged; `pm.ks` is
+certified and bit-exact for both loop variants, all four strategies, and
+vector sizes 32 and 24); X3 pending
 Scope: agreement between the vector plan's execution-context model and what the
 lowering materializes
 
@@ -98,6 +98,18 @@ cross-group delayed reads, with and without state) and certifies; the
 karplus termination/chain structure resists synthetic reduction, so the
 one-liner above is the regression instance.
 
+**X2b resolution.** The accepted design is vector-local transition coverage,
+not preparation normalization. P6.1 combines the checked delayed dependency
+with checked P4.4 placement: when the dependency source is a recursive
+projection and source/target are owned by distinct loops, the selected body
+receives an effective history bound at least equal to the delayed edge amount.
+The independent P6.1 checker derives the same obligation from the decoration
+certificate and vector plan. `lower_raw` reads that history only when both the
+cross-loop placement and accepted transition are present; otherwise it keeps
+the established same-loop lowering. This excludes the tempting but incorrect
+current-sample transport and avoids duplicating state for explicit same-loop
+`delay1`/lockstep recursions. No scalar signal tree or public API changes.
+
 **C - a scheduling-only edge transported as a value.** Minimal stdlib-free
 reproducer:
 
@@ -126,12 +138,12 @@ One phase, three edge semantics handled explicitly:
   to their executable children (the module's own stated contract), and
   pre-seeded `owner` placements must enter the traversal, so every signal a
   certificate dependency names carries a context.
-- **B - certificate consistency**: a `Delayed { amount }` dependency must
-  target a record with `max_delay >= amount`. This is a **decoration checker
-  obligation** that neither side currently states; today's self-inconsistent
-  certificate is accepted and the failure surfaces two stages later. Once the
-  obligation holds, the serving decision (delay cell vs transport plus local
-  history) is well-defined and fail-closed.
+- **B - state-plan consistency**: the occurrence and scheduling projections
+  remain distinct, but a cross-loop recursive `Delayed { amount }` dependency
+  must produce an effective P6.1 history obligation of at least `amount` for
+  the selected body. The state producer and checker combine the checked
+  dependency with P4.4 ownership; the lowerer consumes only that accepted
+  transition. No current-sample transport is permitted for the back-edge.
 - **C - scheduling-only edges**: `attach`-style forcing edges must produce
   ordering edges, never `cross_uses` transports. The dependency projection
   knows the source shape; the flattening point in `add_dependency_edges` is
@@ -193,6 +205,15 @@ not. Add minimal reproducers. No behavior change beyond the message.
 
 The chosen correction shape, X.C3, and M1-M3 with P1-P3. The widening and its
 check land together.
+
+### X2b - cross-group previous-sample state
+
+Complete. P6.1 materializes checked history for cross-loop symbolic
+pass-through back-edges and the pure lowerer consumes it conditionally. The
+structural transition test pins the cross-loop placement predicate, the real
+`pm.ks` regression is certified, and scalar/vector interpreter output is
+bit-exact for `-lv 0/1`, `-ss 0..3`, and vector sizes 32 and 24. Same-loop
+lockstep coverage remains unchanged and the full workspace gates pass.
 
 ### X3 - qualification
 

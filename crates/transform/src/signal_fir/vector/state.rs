@@ -26,9 +26,11 @@ use std::fmt;
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::{Nature, Variability};
 
-use super::decoration_verify::{CanonicalSigType, DecorationRecord, VerifiedDecorationCertificate};
+use super::decoration_verify::{
+    CanonicalSigType, DecorationCertificate, DecorationRecord, VerifiedDecorationCertificate,
+};
 use super::recursion::decode_symbolic_group_bodies;
-use super::vector_analysis::{EffectAtom, StateCell, StateResource};
+use super::vector_analysis::{DepKind, EffectAtom, StateCell, StateResource};
 use super::vector_clock_ad::VerifiedVectorClockAdPlan;
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_verify::{
@@ -499,8 +501,13 @@ fn build_vector_state_plan_with_resources(
         .collect::<BTreeMap<_, _>>();
     let mut phases = BTreeMap::<u64, LoopStatePhases>::new();
     let mut delays = Vec::new();
+    let placements = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal.placement))
+        .collect::<BTreeMap<_, _>>();
 
-    for record in source.records.iter().filter(|record| record.max_delay > 0) {
+    for (record, max_delay) in effective_delay_requirements(source, &placements) {
         let signal_id = u64::from(record.signal_id);
         let signal = signals_by_id[&signal_id];
         let Placement::Owned(loop_id) = signal.placement else {
@@ -515,7 +522,6 @@ fn build_vector_state_plan_with_resources(
             clock_domain,
             clock_plan,
         )?;
-        let max_delay = u64::from(record.max_delay);
         let storage = delay_storage(
             signal_id,
             max_delay,
@@ -748,11 +754,12 @@ fn verify_vector_state_plan_after_vector_plan(
             actual: vector_plan.vec_size,
         });
     }
-    let records = &decorations.certificate().records;
+    let source = decorations.certificate();
+    let records = &source.records;
     verify_source_alignment(records, vector_plan)?;
     verify_supported_state(records, vector_plan, state_plan, clock_plan)?;
     verify_recursions(prepared, records, vector_plan, state_plan, clock_plan)?;
-    verify_delays(records, vector_plan, state_plan, clock_plan)?;
+    verify_delays(source, vector_plan, state_plan, clock_plan)?;
     let expected_registers = canonical_lockstep_register_bundles(
         prepared,
         vector_plan,
@@ -876,8 +883,111 @@ fn verify_supported_state(
     Ok(())
 }
 
+/// Returns the effective history obligation for every carried signal.
+///
+/// C++ `getSignalDependencies` marks `sigProj(..., sigRef(...))` as a
+/// one-sample dependency on the selected recursive body, while `OccMarkup`
+/// marks the structural recursion carrier and can therefore leave that body
+/// at `max_delay == 0`. P6.1 closes that intentional projection gap locally
+/// when the projection and selected body have distinct loop owners (the
+/// cross-loop pass-through alias case): the delayed scheduling edge then
+/// requires storage for the selected producer. Same-loop and explicitly
+/// delayed projections retain their existing carrier storage. This preserves
+/// the previous-sample back-edge without rewriting the prepared scalar tree.
+fn effective_delay_requirements<'a>(
+    source: &'a DecorationCertificate,
+    placements: &BTreeMap<u64, Placement>,
+) -> Vec<(&'a DecorationRecord, u64)> {
+    let mut maxima = source
+        .records
+        .iter()
+        .map(|record| (record.signal_id, u64::from(record.max_delay)))
+        .collect::<BTreeMap<_, _>>();
+    let records = source
+        .records
+        .iter()
+        .map(|record| (record.signal_id, record))
+        .collect::<BTreeMap<_, _>>();
+    for dependency in &source.dependencies {
+        if let DepKind::Delayed { amount } = dependency.kind {
+            // An explicit `sigDelay` occurrence already allocates storage for
+            // the projection itself. X2b concerns the distinct cross-loop
+            // pass-through case, where lowering the alias also needs history
+            // for its selected body rather than a current-value transport.
+            let pass_through_projection = records
+                .get(&dependency.from)
+                .is_some_and(|record| record.recursive_projection.is_some())
+                && matches!(
+                    (
+                        placements.get(&u64::from(dependency.from)),
+                        placements.get(&u64::from(dependency.to)),
+                    ),
+                    (Some(Placement::Owned(from)), Some(Placement::Owned(to))) if from != to
+                );
+            if !pass_through_projection {
+                continue;
+            }
+            maxima
+                .entry(dependency.to)
+                .and_modify(|maximum| *maximum = (*maximum).max(u64::from(amount)))
+                .or_insert_with(|| u64::from(amount));
+        }
+    }
+    source
+        .records
+        .iter()
+        .filter_map(|record| {
+            maxima
+                .get(&record.signal_id)
+                .copied()
+                .filter(|maximum| *maximum > 0)
+                .map(|maximum| (record, maximum))
+        })
+        .collect()
+}
+
+/// Re-derives delay coverage for the P6.1 checker without calling the
+/// producer's projection helper.
+fn independently_expected_delay_requirements(
+    source: &DecorationCertificate,
+    placements: &BTreeMap<u64, Placement>,
+) -> Vec<(u64, u64)> {
+    let mut expected = source
+        .records
+        .iter()
+        .filter(|record| record.max_delay > 0)
+        .map(|record| (u64::from(record.signal_id), u64::from(record.max_delay)))
+        .collect::<BTreeMap<_, _>>();
+    for dependency in &source.dependencies {
+        let DepKind::Delayed { amount } = dependency.kind else {
+            continue;
+        };
+        let recursive_projection = source
+            .records
+            .binary_search_by_key(&dependency.from, |record| record.signal_id)
+            .ok()
+            .is_some_and(|index| source.records[index].recursive_projection.is_some());
+        let distinct_owners = match (
+            placements.get(&u64::from(dependency.from)),
+            placements.get(&u64::from(dependency.to)),
+        ) {
+            (Some(Placement::Owned(source_loop)), Some(Placement::Owned(target_loop))) => {
+                source_loop != target_loop
+            }
+            _ => false,
+        };
+        if recursive_projection && distinct_owners {
+            expected
+                .entry(u64::from(dependency.to))
+                .and_modify(|maximum| *maximum = (*maximum).max(u64::from(amount)))
+                .or_insert_with(|| u64::from(amount));
+        }
+    }
+    expected.into_iter().collect()
+}
+
 fn verify_delays(
-    records: &[DecorationRecord],
+    source: &DecorationCertificate,
     vector_plan: &VectorPlan,
     state_plan: &VectorStatePlan,
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
@@ -885,10 +995,19 @@ fn verify_delays(
     check_strict_by(&state_plan.delays, "delay transitions", |delay| {
         delay.signal_id
     })?;
-    let expected = records
+    let signals = vector_plan
+        .signals
         .iter()
-        .filter(|record| record.max_delay > 0)
-        .map(|record| u64::from(record.signal_id))
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
+    let placements = signals
+        .iter()
+        .map(|(signal_id, signal)| (*signal_id, signal.placement))
+        .collect::<BTreeMap<_, _>>();
+    let requirements = independently_expected_delay_requirements(source, &placements);
+    let expected = requirements
+        .iter()
+        .map(|(signal_id, _)| *signal_id)
         .collect::<Vec<_>>();
     if state_plan
         .delays
@@ -899,21 +1018,20 @@ fn verify_delays(
     {
         return Err(VectorStateError::DelayCoverageMismatch);
     }
-    let signals = vector_plan
-        .signals
-        .iter()
-        .map(|signal| (signal.signal_id, signal))
-        .collect::<BTreeMap<_, _>>();
     let loops = vector_plan
         .loops
         .iter()
         .map(|record| (record.loop_id, record))
         .collect::<BTreeMap<_, _>>();
-    for (transition, record) in state_plan
-        .delays
-        .iter()
-        .zip(records.iter().filter(|record| record.max_delay > 0))
-    {
+    for (transition, (signal_id, max_delay)) in state_plan.delays.iter().zip(requirements) {
+        let record = source
+            .records
+            .binary_search_by_key(&u32::try_from(signal_id).unwrap_or(u32::MAX), |record| {
+                record.signal_id
+            })
+            .ok()
+            .map(|index| &source.records[index])
+            .ok_or(VectorStateError::SignalCoverageMismatch { signal_id })?;
         let signal = signals[&transition.signal_id];
         let Placement::Owned(loop_id) = signal.placement else {
             return Err(VectorStateError::MissingLoopOwner {
@@ -922,7 +1040,7 @@ fn verify_delays(
         };
         if transition.loop_id != loop_id
             || transition.value_type != signal.value_type
-            || transition.max_delay != u64::from(record.max_delay)
+            || transition.max_delay != max_delay
             || transition.clock_domain != record.clock_domain.map(u64::from)
         {
             return Err(VectorStateError::DelayCoverageMismatch);
@@ -2007,6 +2125,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn delayed_dependency_without_occurrence_delay_still_requires_history() {
+        let mut arena = TreeArena::new();
+        let (from, to) = {
+            let mut builder = SigBuilder::new(&mut arena);
+            (builder.input(0), builder.input(1))
+        };
+        let mut source = certify(&arena, &[from, to]).into_certificate();
+        let from = from.as_u32();
+        let to = to.as_u32();
+        let placements = BTreeMap::from([
+            (u64::from(from), Placement::Owned(0)),
+            (u64::from(to), Placement::Owned(1)),
+        ]);
+        assert!(effective_delay_requirements(&source, &placements).is_empty());
+
+        // This is the exact cross-projection shape X2b must reconcile: the
+        // scheduling certificate says "previous sample", while the separate
+        // OccMarkup projection reports no explicit delay on the selected body.
+        source
+            .records
+            .iter_mut()
+            .find(|record| record.signal_id == from)
+            .expect("source record")
+            .recursive_projection = Some(
+            crate::signal_fir::decoration_verify::RecursiveProjectionFact {
+                index: 0,
+                group: from,
+            },
+        );
+        source
+            .dependencies
+            .push(crate::signal_fir::decoration_verify::DependencyFact {
+                from,
+                to,
+                kind: DepKind::Delayed { amount: 1 },
+                edge_key: 0,
+            });
+        assert_eq!(
+            effective_delay_requirements(&source, &placements)
+                .into_iter()
+                .map(|(record, maximum)| (record.signal_id, maximum))
+                .collect::<Vec<_>>(),
+            vec![(to, 1)]
+        );
+        assert_eq!(
+            independently_expected_delay_requirements(&source, &placements),
+            vec![(u64::from(to), 1)]
+        );
     }
 
     #[test]

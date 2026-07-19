@@ -58,6 +58,13 @@ const ATTACH_CROSS_LOOP_SOURCE: &str = concat!(
     "aOut = gA : _,!;\n",
     "process = attach(_, aOut);"
 );
+// `pm.ks` contains a pass-through symbolic recursion projection whose
+// cross-loop back-edge denotes the previous sample even though the selected
+// body has no explicit delay occurrence. Before X2b the vector lowerer tried
+// to route the body's current value and correctly fell back rather than
+// miscompile it. `pm.ks` itself consumes the deterministic oracle input.
+const KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE: &str =
+    concat!("import(\"stdfaust.lib\");\n", "process = pm.ks(200, 0.5);");
 const PULSE_COUNTUP_LOOP_SOURCE: &str = r#"
     pulse_countup_loop(n, trig) = + ~ cond(n) * trig with { cond(n, x) = x * (x <= n); };
     process = pulse_countup_loop(4, 1) + 0.001;
@@ -450,6 +457,37 @@ fn attach_of_a_cross_loop_symbolic_projection_is_certified() {
     assert_vector_pipeline_certified("attach_cross_loop", ATTACH_CROSS_LOOP_SOURCE, 32);
     assert_scalar_vector_bit_exact("attach_cross_loop", ATTACH_CROSS_LOOP_SOURCE, 32);
     assert_scalar_vector_bit_exact("attach_cross_loop_tail", ATTACH_CROSS_LOOP_SOURCE, 24);
+}
+
+#[test]
+fn karplus_pass_through_backedge_is_certified_and_bit_exact() {
+    // Expanding `stdfaust.lib` needs more stack than libtest gives each test
+    // thread on some hosts; production compilation already runs on the main
+    // process stack. Keep the real library-level regression instead of
+    // weakening it to a hand-reduced signal graph.
+    std::thread::Builder::new()
+        .name("karplus-vector-regression".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            assert_vector_pipeline_certified(
+                "karplus_pass_through_backedge",
+                KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
+                32,
+            );
+            assert_scalar_vector_bit_exact(
+                "karplus_pass_through_backedge",
+                KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
+                32,
+            );
+            assert_scalar_vector_bit_exact(
+                "karplus_pass_through_backedge_tail",
+                KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
+                24,
+            );
+        })
+        .expect("spawn Karplus regression thread")
+        .join()
+        .expect("Karplus regression thread");
 }
 
 #[test]
