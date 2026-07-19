@@ -1,7 +1,7 @@
 //! Count impulse-test DSPs whose requested vector pipeline remains certified.
 //!
 //! Usage:
-//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--precision=f32|f64] [--json] [--filter=TEXT] [--compare-scalar-time]`
+//! `cargo run -p compiler --example count_vector_corpus -- [lv] [ss] [--precision=f32|f64] [--json] [--filter=TEXT] [--shard=INDEX/COUNT] [--compare-scalar-time]`
 //!
 //! The default is `-vec -lv 0 -ss 0`. A DSP is counted as vector-capable only
 //! when the FIR result reports `VectorPipelineStatus::Certified`; a generated
@@ -57,7 +57,54 @@ fn parse_arg(args: &[String], index: usize, default: u8, name: &str) -> u8 {
         })
 }
 
+fn parse_shard(args: &[String]) -> Result<Option<(usize, usize)>, String> {
+    let Some(value) = args.iter().find_map(|arg| arg.strip_prefix("--shard=")) else {
+        return Ok(None);
+    };
+    let (index, count) = value
+        .split_once('/')
+        .ok_or_else(|| format!("invalid shard: {value} (expected INDEX/COUNT)"))?;
+    let index = index
+        .parse::<usize>()
+        .map_err(|_| format!("invalid shard index: {index}"))?;
+    let count = count
+        .parse::<usize>()
+        .map_err(|_| format!("invalid shard count: {count}"))?;
+    if count == 0 || index >= count {
+        return Err(format!(
+            "invalid shard: {value} (COUNT must be positive and INDEX < COUNT)"
+        ));
+    }
+    Ok(Some((index, count)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_shard;
+
+    #[test]
+    fn shard_argument_is_checked() {
+        assert_eq!(
+            parse_shard(&["scan".to_owned(), "--shard=2/4".to_owned()]),
+            Ok(Some((2, 4)))
+        );
+        assert!(parse_shard(&["scan".to_owned(), "--shard=4/4".to_owned()]).is_err());
+        assert!(parse_shard(&["scan".to_owned(), "--shard=0/0".to_owned()]).is_err());
+        assert!(parse_shard(&["scan".to_owned(), "--shard=bad".to_owned()]).is_err());
+    }
+}
+
 fn main() {
+    std::thread::Builder::new()
+        .name("vector-corpus-scan".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run)
+        .expect("spawn vector corpus scan thread")
+        .join()
+        .expect("vector corpus scan thread");
+}
+
+fn run() {
     let args = std::env::args().collect::<Vec<_>>();
     let positional = std::iter::once(args[0].clone())
         .chain(
@@ -70,6 +117,10 @@ fn main() {
     let json = args.iter().any(|arg| arg == "--json");
     let compare_scalar_time = args.iter().any(|arg| arg == "--compare-scalar-time");
     let filter = args.iter().find_map(|arg| arg.strip_prefix("--filter="));
+    let shard = parse_shard(&args).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
     let real_type = parse_precision(&args);
     let loop_variant = parse_arg(&positional, 1, 0, "loop variant");
     let strategy = parse_arg(&positional, 2, 0, "scheduling strategy");
@@ -88,6 +139,13 @@ fn main() {
     files.sort();
     if let Some(filter) = filter {
         files.retain(|path| path.display().to_string().contains(filter));
+    }
+    if let Some((index, count)) = shard {
+        files = files
+            .into_iter()
+            .enumerate()
+            .filter_map(|(position, path)| (position % count == index).then_some(path))
+            .collect();
     }
 
     let mut certified = Vec::new();

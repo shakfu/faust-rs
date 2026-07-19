@@ -16,6 +16,9 @@ tests/impulse-tests/dsp/constant.dsp
 tests/impulse-tests/dsp/cubic_distortion.dsp
 tests/impulse-tests/dsp/dbmeter.dsp
 tests/impulse-tests/dsp/delays.dsp
+tests/impulse-tests/dsp/downsampling_01_accumulator.dsp
+tests/impulse-tests/dsp/downsampling_04_delay.dsp
+tests/impulse-tests/dsp/downsampling_05_parallel_state.dsp
 tests/impulse-tests/dsp/echo.dsp
 tests/impulse-tests/dsp/echo_bug.dsp
 tests/impulse-tests/dsp/freeverb.dsp
@@ -78,6 +81,9 @@ tests/impulse-tests/dsp/tester.dsp
 tests/impulse-tests/dsp/tester2.dsp
 tests/impulse-tests/dsp/tf_exp.dsp
 tests/impulse-tests/dsp/thru_zero_flanger.dsp
+tests/impulse-tests/dsp/upsampling_01_accumulator.dsp
+tests/impulse-tests/dsp/upsampling_02_feedback.dsp
+tests/impulse-tests/dsp/upsampling_05_parallel_state.dsp
 tests/impulse-tests/dsp/vcf_wah_pedals.dsp
 tests/impulse-tests/dsp/virtual_analog_oscillators.dsp
 tests/impulse-tests/dsp/volume.dsp

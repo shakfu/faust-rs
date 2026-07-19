@@ -11,14 +11,21 @@ alias and selected body have distinct P4.4 loop owners; lowering consumes that
 accepted transition instead of inventing a current-sample transport, while
 same-loop recursion and scalar preparation remain unchanged; `pm.ks` is
 certified and bit-exact for both loop variants, all four strategies, and
-vector sizes 32 and 24); X3 pending
+vector sizes 32 and 24); X3 complete (the expanded 132-DSP corpus remains
+97/34/1 in every one of the 16 modes; 192/194 pre-X2b FIR emissions are
+byte-identical, and the two `gate_compressor` emissions have exactly identical
+native output plus an 8/8 C++ oracle; WAC rises 165 -> 173 certified out of
+197; compile-budget, optimized/unoptimized traces, and workspace gates pass)
 Scope: agreement between the vector plan's execution-context model and what the
 lowering materializes
 
 ## 1. Objective and baseline
 
-The 93-DSP impulse corpus stands at 91/93 with only the E3 foreign-function
-class open. Measured against a real-world directory of 197 DSPs
+At X1, the 93-DSP impulse corpus stood at 91/93 with only the E3
+foreign-function class open. The corpus subsequently grew to 132 DSPs through
+the clocked/multirate fixture expansion; X3 measures 97 certified, 34
+fail-closed, and one error in every precision/loop/scheduling mode. Measured
+against a real-world directory of 197 DSPs
 (`WAC 2017/Faust`), the picture is different: 159 vectorize, 34 fall back, 4
 fail to compile. **24 of the 34 fallbacks are one bug** under three
 manifestations, none of which the corpus exercises.
@@ -217,24 +224,45 @@ lockstep coverage remains unchanged and the full workspace gates pass.
 
 ### X3 - qualification
 
-Full 16-mode corpus sweep with no DSP losing certification; byte-identity for
-every already-certified DSP against the pre-change compiler; the native C++
-oracle matrix for every newly certified corpus DSP; the external 197-DSP
-directory re-measured with its fallback classes re-counted; compile-budget and
-the workspace gates.
+Complete. The full `f32/f64 x -lv 0/1 x -ss 0..3` sweep covers 132 DSPs and
+reports exactly 97 certified, 34 fallback, and one error in each mode. No DSP
+loses certification. The versioned baseline was refreshed to include the 39
+clocked/multirate fixtures already present in the corpus; six of those are
+universally certified, so the canonical list now contains 97 DSPs. X2b itself
+does not newly certify a corpus DSP, hence there is no new-corpus-DSP C++
+matrix to run.
+
+Against `e8c49891`, 192 of the 194 `-lv 0/1` FIR emissions for those 97 DSPs
+are byte-identical. The only differences are `gate_compressor` in the two loop
+variants: P6.1 now materializes four cross-loop one-sample histories. Both
+variants produce byte-identical 60,000-frame native output to the pre-X2b
+compiler, and the current compiler passes the C++ reference for all eight
+`-lv 0/1 x -ss 0..3` combinations.
+
+The WAC directory moves from 165 to 173 certified out of 197, exactly closing
+the eight class-B cases. The remainder is 20 fallbacks (11 assembly, six pure
+foreign-function effects, two event-bound cases, and one cyclic plan) plus
+four front-end errors. The scanner now supports checked deterministic shards
+and a 64 MiB worker stack, allowing large library programs to be measured
+without breaking their local imports or overflowing the default stack.
+
+`vector-compile-budget-check` passes all five release cases, and the 40
+optimized/unoptimized vector interpreter traces match. The complete retention
+gate and workspace quality gates pass.
 
 ## 8. Risks and mitigations
 
 - The external directory is not a committed corpus and cannot become a CI
-  gate as it stands. X3 measures it as evidence; if the fix certifies these
-  families, promoting one representative of each (a MIDI physical model, a
-  Karplus, a virtual-analog) into `tests/impulse-tests` is the durable
-  protection and should be weighed then. Without that, the corpus stays blind
-  to exactly this bug.
+  gate as it stands. X3 therefore treats its 173/197 result as evidence, not a
+  gate. X2b's durable protection is the real `pm.ks(200, 0.5)` compiler
+  integration regression, which exercises the previously absent Karplus
+  cross-group back-edge under the full loop/scheduling matrix and two vector
+  sizes without copying an external WAC artifact into the repository.
 - Closing the traversal widens what the plan admits; every newly admitted
-  program must pass the oracle, and byte-identity must hold for everything
-  already certified - the change must alter which programs are admitted, never
-  what they compile to.
+  program must pass the oracle, and already-certified changes require explicit
+  qualification. X3 found only the two `gate_compressor` FIR shapes described
+  above; exact native-output identity and the 8/8 C++ matrix rule out a runtime
+  divergence despite the additional checked history storage.
 - Class A's 49 unvisited signals in one DSP suggest the gap is broad rather
   than a single edge case; the fix must be measured by the visited/record
   ratio reaching parity, not only by the corpus turning green.
