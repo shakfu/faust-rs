@@ -1,4 +1,5 @@
-//! Production P4.4 construction of a strategy-independent vector plan.
+//! Construction of the strategy-independent vector plan (loop placement,
+//! transports, epochs, fused serial groups).
 //!
 //! # C++ provenance and adaptation
 //! Placement uses `DAGInstructionsCompiler::needSeparateLoop` from
@@ -25,6 +26,9 @@
 //! remain structural: their executable children, rather than the containers,
 //! enter the sample closure. The independent checker reconstructs these sets
 //! before routing can consume the certificate.
+//!
+//! Development history: P4.4 of
+//! `porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;

@@ -1,4 +1,5 @@
-//! Typed vector-analysis spine (P4.2/P4.3a).
+//! Vector analysis: execution conditions, dependencies, occurrences,
+//! effects, and use tables over the verified prepared forest.
 //!
 //! # C++ provenance
 //! The dependency projection centralizes the dependency rules previously
@@ -15,7 +16,11 @@
 //! lifecycle boundary, so table-initialization effects require a separate
 //! decoration before a certificate can establish full lifecycle coverage.
 //! The compute-scoped `DecorationCertificate` lives in the adjacent
-//! `decoration_verify` module; production placement consumers remain deferred.
+//! `decoration_verify` module; the production vector plan consumes only
+//! independently certified decorations.
+//!
+//! Development history: P4.2/P4.3a slices of
+//! `porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;

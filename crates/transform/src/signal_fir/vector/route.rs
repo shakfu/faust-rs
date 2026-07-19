@@ -1,4 +1,5 @@
-//! P5.1 region-aware vector routing and routed-FIR verification.
+//! Region-aware vector routing and routed-FIR verification (three
+//! visibility scopes, planned transports only).
 //!
 //! # C++ provenance and adaptation
 //! C++ `DAGInstructionsCompiler` combines loop ownership, value caching, and
@@ -15,12 +16,15 @@
 //! projections may cross loop boundaries. The checker recursively validates
 //! tuple arity and component types instead of trusting the outer FIR type.
 //!
-//! This is an additive P5 routing gate. It emits real FIR declarations,
-//! stores, and loads for planned transports and independently verifies them,
-//! but it is not connected to `build_module` yet. When a checked P6.2 plan is
+//! Routing emits real FIR declarations, stores, and loads for planned
+//! transports and independently verifies them; the production final-module
+//! path consumes the verified result. When a checked clock/AD plan is
 //! supplied, declarations and accesses use its exact outer-chunk,
-//! island-scalar, or held-output lifetime; P6.3b places those words in the
-//! corresponding final region bodies.
+//! island-scalar, or held-output lifetime; the assembly stage places those
+//! words in the corresponding final region bodies.
+//!
+//! Development history: P5.1/P6.2/P6.3b slices of
+//! `porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

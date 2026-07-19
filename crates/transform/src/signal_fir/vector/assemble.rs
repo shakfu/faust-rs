@@ -1,4 +1,5 @@
-//! Verified P6.3b assembly of vector state phases and clock islands.
+//! Verified FIR assembly of vector loops, state phases, and clock islands
+//! (independent exact-coverage inspection of the emitted FIR).
 //!
 //! # C++ provenance and adaptation
 //! State words follow `DAGInstructionsCompiler::generateDlineLoop` and

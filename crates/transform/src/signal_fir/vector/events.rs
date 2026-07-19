@@ -1,4 +1,5 @@
-//! Bounded P5.3 event-order certificates for vector loop fission.
+//! Bounded event-order certificates for vector loop fission
+//! (`FissionSafe`: scalar-ordered dynamic dependences stay ordered).
 //!
 //! # C++ provenance and formal boundary
 //! Faust C++ performs loop fission after signal dependencies and recursive

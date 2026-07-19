@@ -1,7 +1,7 @@
 //! Strategy-dependent vector execution schedules over [`VectorPlan`].
 //!
-//! This is the additive P5 scheduling slice from
-//! `vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`: the
+//! Production scheduling stage (history: P5 slice of
+//! `vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`): the
 //! strategy-independent plan is verified first, then each epoch's induced DAG
 //! is serialized in ascending rank. The R3 plan certificate remains unchanged
 //! when the scheduling strategy changes.

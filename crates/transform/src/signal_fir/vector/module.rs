@@ -8,10 +8,11 @@
 //! the DSP struct, constants to `instanceConstants`, resettable signal state to
 //! `instanceClear`, and all chunk-local buffers to `compute`.
 //!
-//! Rust keeps this integration behind the complete P4/P5/P6 producer/checker
-//! chain. The final FIR module is independently checked for lifecycle shape,
-//! output coverage, inclusion of the accepted P6.3b body, and generic FIR type
-//! and scope correctness before it can replace the transitional vector module.
+//! Rust keeps this integration behind the complete producer/checker chain.
+//! The final FIR module is independently checked for lifecycle shape, output
+//! coverage, inclusion of the accepted assembly body, and generic FIR type
+//! and scope correctness before production selection; rejections map to
+//! stable fallback reasons.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

@@ -1,4 +1,5 @@
-//! Verified P6.2 clock-island and automatic-differentiation execution policy.
+//! Verified clock-island and automatic-differentiation execution policy
+//! (serial OD/US/DS islands, fire-time state, AD windows).
 //!
 //! # C++ provenance and adaptation
 //! Clock guards follow `compile_scal.cpp::generateOD` and the clocked

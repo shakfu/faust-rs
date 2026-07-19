@@ -20,10 +20,10 @@
 //! recursion/island loops, and a `VecSafe` witness for every vectorizable
 //! loop.
 //!
-//! # Scope, deliberately bounded (first P5 slice)
-//! Additive and **not wired into FIR emission**. P4.4 constructs accepted plans
-//! from verified decorations; P5 will route FIR through those plans. Deferred,
-//! matching the certified plan's own staging:
+//! # Scope, deliberately bounded
+//! The plan builder constructs accepted plans from verified decorations and
+//! the routing/lowering stages consume them in production. Two obligations
+//! remain deferred, matching the certified plan's own staging:
 //! - **effect commutation** (`L-Effects` for incomparable loops): the DTO
 //!   retains P4.3a's exact effect identities and the verifier derives
 //!   duplicability and local `VecSafe` instead of trusting producer booleans,

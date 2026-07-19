@@ -1,4 +1,5 @@
-//! Verified P6.1 state-transition plans for vector delays and recursion.
+//! Verified state-transition plans for vector delays and recursion
+//! (`pre/exec/post` phases, C++ copy/ring storage words).
 //!
 //! # C++ provenance and adaptation
 //! The storage equations mirror
