@@ -30,7 +30,7 @@ use tlib::TreeArena;
 use crate::clk_env::ClkEnvMap;
 use crate::signal_prepare::VerifiedPreparedSignals;
 
-use super::vector_analysis::{
+use super::vector::analysis::{
     AnalysisError, CondId, DepKind, EffectAtom, OccInfo, RecursiveProjection, SignalUseInfo,
     UseContext, VectorSignalAnalysis, analyze_vector_signals,
 };

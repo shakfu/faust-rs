@@ -3,25 +3,25 @@
 
 use super::*;
 use crate::schedule::SchedulingStrategy;
-use crate::signal_fir::vector_clock_ad::{
+use crate::signal_fir::vector::clock_ad::{
     ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION, VectorClockAdPlan,
     verified_vector_clock_ad_plan_for_test,
 };
-use crate::signal_fir::vector_plan::verified_vector_plan_for_test;
-use crate::signal_fir::vector_route::{RouteResolution, VectorRouteSession};
-use crate::signal_fir::vector_state::{
+use crate::signal_fir::vector::plan::verified_vector_plan_for_test;
+use crate::signal_fir::vector::route::{RouteResolution, VectorRouteSession};
+use crate::signal_fir::vector::state::{
     DelayTransition, LoopStatePhases, RecursionProjectionTransition, RecursionTransition,
     VECTOR_STATE_PLAN_VERSION, VectorStatePlan, verified_vector_state_plan_for_test,
 };
-use crate::signal_fir::vector_verify::{
+use crate::signal_fir::vector::verify::{
     EpochRecord, FusedSerialGroupRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord,
     LockstepLaneRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
     TransportRecord, VecSafeWitness, VectorPlan, Vectorability, WitnessKind,
 };
 
-fn lockstep_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
+fn lockstep_vector_plan() -> super::super::plan::VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         vec_size: 8,
         signals: (0..2)
             .map(|lane| SignalRecord {
@@ -157,9 +157,9 @@ fn lockstep_lanes_share_one_physical_sample_loop() {
     );
 }
 
-fn state_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
+fn state_vector_plan() -> super::super::plan::VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 8,
         signals: vec![
@@ -208,7 +208,7 @@ fn state_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
     })
 }
 
-fn state_plan(vector: &super::super::vector_plan::VerifiedVectorPlan) -> VerifiedVectorStatePlan {
+fn state_plan(vector: &super::super::plan::VerifiedVectorPlan) -> VerifiedVectorStatePlan {
     verified_vector_state_plan_for_test(
         VectorStatePlan {
             schema_version: VECTOR_STATE_PLAN_VERSION,
@@ -368,9 +368,9 @@ fn materializes_copy_ring_and_simultaneous_recursion_words() {
     ));
 }
 
-fn clock_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
+fn clock_vector_plan() -> super::super::plan::VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 8,
         signals: vec![
@@ -460,7 +460,7 @@ fn clock_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
                 consumer_loop: 2,
                 element_type: ValueType::Real,
                 length: 8,
-                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+                layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
             },
             TransportRecord {
                 transport_id: 1,
@@ -470,7 +470,7 @@ fn clock_vector_plan() -> super::super::vector_plan::VerifiedVectorPlan {
                 consumer_loop: 1,
                 element_type: ValueType::Real,
                 length: 8,
-                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+                layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
             },
         ],
         data_edges: vec![
@@ -521,11 +521,11 @@ fn nests_clock_loop_and_materializes_held_transport_lifetime() {
                 nested_loop_ids: vec![0, 2],
             }],
             transports: vec![
-                super::super::vector_clock_ad::ClockTransportPolicy {
+                super::super::clock_ad::ClockTransportPolicy {
                     transport_id: 0,
                     mode: ClockTransportMode::FusedScalar { group_id: 0 },
                 },
-                super::super::vector_clock_ad::ClockTransportPolicy {
+                super::super::clock_ad::ClockTransportPolicy {
                     transport_id: 1,
                     mode: ClockTransportMode::HeldOutput { domain_id: 7 },
                 },

@@ -9,8 +9,8 @@ use tlib::TreeArena;
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::{CanonicalSigType, certify_decorations};
-use crate::signal_fir::vector_plan::verified_vector_plan_for_test;
-use crate::signal_fir::vector_verify::{
+use crate::signal_fir::vector::plan::verified_vector_plan_for_test;
+use crate::signal_fir::vector::verify::{
     EpochRecord, LoopEdge, LoopKind, LoopRecord, Rate, TransportRecord, VecSafeWitness, VectorPlan,
     Vectorability, WitnessKind,
 };
@@ -77,7 +77,7 @@ fn pure_fixture() -> (VerifiedPreparedSignals, VerifiedVectorPlan) {
         })
         .collect();
     let plan = verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 16,
         signals,
@@ -110,7 +110,7 @@ fn pure_fixture() -> (VerifiedPreparedSignals, VerifiedVectorPlan) {
             consumer_loop: 1,
             element_type: ValueType::Real,
             length: 16,
-            layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+            layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
         }],
         data_edges: vec![LoopEdge {
             consumer: 1,
@@ -346,7 +346,7 @@ fn stateful_signal_fails_closed_before_region_lowering() {
     )
     .unwrap();
     let decorations = certify_decorations(&prepared, &clocks).unwrap();
-    let plan = crate::signal_fir::vector_plan::build_vector_plan(&decorations, 16).unwrap();
+    let plan = crate::signal_fir::vector::plan::build_vector_plan(&decorations, 16).unwrap();
     assert!(matches!(
         lower_pure_vector_program(
             &prepared,

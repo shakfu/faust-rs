@@ -10,7 +10,7 @@ use crate::clk_env::annotate;
 use crate::schedule::SchedulingStrategy;
 use crate::signal_fir::decoration_verify::certify_decorations;
 use crate::signal_fir::pv_slice::build_pv_signals;
-use crate::signal_fir::vector_schedule::schedule_vector_plan;
+use crate::signal_fir::vector::schedule::schedule_vector_plan;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 fn certify(arena: &TreeArena, roots: &[signals::SigId]) -> VerifiedDecorationCertificate {
@@ -26,13 +26,13 @@ fn certify(arena: &TreeArena, roots: &[signals::SigId]) -> VerifiedDecorationCer
 
 #[test]
 fn compact_effect_summaries_match_atom_pair_semantics() {
-    use crate::signal_fir::vector_analysis::{
+    use crate::signal_fir::vector::analysis::{
         ForeignResource, ForeignTypeCode, effect_sets_conflict,
     };
 
     let state = StateResource::Signal {
         owner: 7,
-        cell: crate::signal_fir::vector_analysis::StateCell::Delay,
+        cell: crate::signal_fir::vector::analysis::StateCell::Delay,
     };
     let atoms = vec![
         EffectAtom::ReadState(state.clone()),

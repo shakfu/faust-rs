@@ -417,13 +417,13 @@ impl LoopAssignment {
 /// `int(0)` is hash-consed, would fabricate a spurious cross-loop edge).
 ///
 /// The decoded rules are shared with Hgraph and PV through
-/// [`super::vector_analysis::signal_dependencies`]. Malformed list payloads and
+/// [`super::vector::analysis::signal_dependencies`]. Malformed list payloads and
 /// unsupported legacy recursion are reported instead of becoming silent leaves.
 pub(crate) fn signal_value_children(
-    analysis: &super::vector_analysis::SignalAnalysisContext<'_>,
+    analysis: &super::vector::analysis::SignalAnalysisContext<'_>,
     sig: SigId,
-) -> Result<Vec<SigId>, super::vector_analysis::AnalysisError> {
-    super::vector_analysis::signal_dependencies(analysis, sig).map(|dependencies| {
+) -> Result<Vec<SigId>, super::vector::analysis::AnalysisError> {
+    super::vector::analysis::signal_dependencies(analysis, sig).map(|dependencies| {
         dependencies
             .scheduling()
             .iter()
@@ -1461,7 +1461,7 @@ mod tests {
             .annotate(&[out])
             .unwrap();
         let analysis =
-            super::super::vector_analysis::SignalAnalysisContext::new(&arena, &sig_types, &[out])
+            super::super::vector::analysis::SignalAnalysisContext::new(&arena, &sig_types, &[out])
                 .unwrap();
 
         // Only value operands — no op-code atom, no input index.

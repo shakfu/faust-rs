@@ -30,12 +30,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 #[cfg(test)]
-use super::vector_analysis::effects_conflict;
-use super::vector_analysis::{EffectAtom, ForeignPurity, StateResource};
-use super::vector_plan::VerifiedVectorPlan;
-use super::vector_route::{RoutedUseSource, VectorRegion, VerifiedRoutedFir};
-use super::vector_state::{VectorStateAction, VerifiedVectorStatePlan};
-use super::vector_verify::{LoopEdge, VectorPlan, VectorPlanError, verify_vector_plan};
+use super::analysis::effects_conflict;
+use super::analysis::{EffectAtom, ForeignPurity, StateResource};
+use super::plan::VerifiedVectorPlan;
+use super::route::{RoutedUseSource, VectorRegion, VerifiedRoutedFir};
+use super::state::{VectorStateAction, VerifiedVectorStatePlan};
+use super::verify::{LoopEdge, VectorPlan, VectorPlanError, verify_vector_plan};
 
 /// Suggested upper bound for focused production and differential checks.
 pub const DEFAULT_EVENT_LIMIT: usize = 4096;
@@ -369,7 +369,7 @@ pub fn precheck_state_event_bound(
             let signal = signals
                 .get(root)
                 .ok_or(VectorEventError::EventCountOverflow)?;
-            if matches!(signal.value_type, super::vector_verify::ValueType::Tuple(_)) {
+            if matches!(signal.value_type, super::verify::ValueType::Tuple(_)) {
                 continue;
             }
             per_sample = per_sample
@@ -2158,7 +2158,7 @@ fn state_action_resources(
     match action {
         VectorStateAction::DelayWrite { signal_id } => vec![StateResource::Signal {
             owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
-            cell: super::vector_analysis::StateCell::Delay,
+            cell: super::analysis::StateCell::Delay,
         }],
         VectorStateAction::RecursionStep { group } => state
             .plan()
@@ -2179,11 +2179,11 @@ fn state_action_resources(
             .collect(),
         VectorStateAction::PrefixWrite { signal_id } => vec![StateResource::Signal {
             owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
-            cell: super::vector_analysis::StateCell::Prefix,
+            cell: super::analysis::StateCell::Prefix,
         }],
         VectorStateAction::WaveformAdvance { signal_id } => vec![StateResource::Signal {
             owner: u32::try_from(*signal_id).expect("verified signal id fits u32"),
-            cell: super::vector_analysis::StateCell::WaveformIndex,
+            cell: super::analysis::StateCell::WaveformIndex,
         }],
         VectorStateAction::DelayRegisterLoad { .. }
         | VectorStateAction::DelayRegisterStore { .. }
@@ -2243,7 +2243,7 @@ fn positions(order: &[u64]) -> BTreeMap<u64, usize> {
         .collect()
 }
 
-fn sorted_epochs(plan: &VectorPlan) -> Vec<&super::vector_verify::EpochRecord> {
+fn sorted_epochs(plan: &VectorPlan) -> Vec<&super::verify::EpochRecord> {
     let mut epochs = plan.epochs.iter().collect::<Vec<_>>();
     epochs.sort_unstable_by_key(|epoch| (epoch.rank, epoch.epoch_id));
     epochs

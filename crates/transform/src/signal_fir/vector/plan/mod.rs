@@ -41,14 +41,14 @@ use super::super::decoration_verify::{
     CanonicalSigType, DecorationRecord, DependencyFact, VerifiedDecorationCertificate,
 };
 use super::super::loop_graph::{LoopSeparation, SignalLoopProps, needs_separate_loop};
-use super::super::vector_analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
-use super::super::vector_verify::{
+use super::analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
+use super::lockstep::{detect_lockstep_bundles, verify_lockstep_isomorphism};
+use super::verify::{
     EpochRecord, FusedSerialGroupRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate,
     SignalRecord, TransportLayout, TransportRecord, VECTOR_PLAN_SCHEMA_VERSION, ValueType,
     VecSafeWitness, VectorPlan, VectorPlanError, Vectorability, WitnessKind, effects_duplicable,
     effects_sample_reorderable, verify_fused_serial_groups_after_plan, verify_vector_plan,
 };
-use super::lockstep::{detect_lockstep_bundles, verify_lockstep_isomorphism};
 
 const EFFECT_ISLAND_TAG: u64 = 1 << 63;
 
@@ -992,10 +992,7 @@ fn build_fused_serial_groups(
                         .effects
                         .iter()
                         .any(|read_effect| {
-                            super::super::vector_analysis::effects_conflict(
-                                carrier_effect,
-                                read_effect,
-                            )
+                            super::analysis::effects_conflict(carrier_effect, read_effect)
                         })
                 })
                 .cloned(),
@@ -1068,7 +1065,7 @@ fn build_fused_serial_groups(
                     candidate
                         .state_effects
                         .iter()
-                        .any(|right| super::super::vector_analysis::effects_conflict(left, right))
+                        .any(|right| super::analysis::effects_conflict(left, right))
                 })
             {
                 let existing = components.remove(position);
@@ -1132,7 +1129,7 @@ fn build_fused_serial_groups(
                                     .effects
                                     .iter()
                                     .any(|read_effect| {
-                                        super::super::vector_analysis::effects_conflict(
+                                        super::analysis::effects_conflict(
                                             carrier_effect,
                                             read_effect,
                                         )
@@ -1168,7 +1165,7 @@ fn build_fused_serial_groups(
                         effects_by_loop.get(loop_id).is_some_and(|effects| {
                             effects.iter().any(|effect| {
                                 component.state_effects.iter().any(|carrier| {
-                                    super::super::vector_analysis::effects_conflict(carrier, effect)
+                                    super::analysis::effects_conflict(carrier, effect)
                                 })
                             })
                         })
@@ -1256,10 +1253,7 @@ fn build_fused_serial_groups(
                         .is_disjoint(&components[right].carriers)
                     && !components[left].state_effects.iter().any(|left_effect| {
                         components[right].state_effects.iter().any(|right_effect| {
-                            super::super::vector_analysis::effects_conflict(
-                                left_effect,
-                                right_effect,
-                            )
+                            super::analysis::effects_conflict(left_effect, right_effect)
                         })
                     })
                 {
@@ -1664,10 +1658,7 @@ fn set_bit_indices(bits: &[u64]) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-fn loop_effects(
-    loop_id: u64,
-    state: &PlacementState<'_>,
-) -> Vec<super::vector_analysis::EffectAtom> {
+fn loop_effects(loop_id: u64, state: &PlacementState<'_>) -> Vec<super::analysis::EffectAtom> {
     let mut effects = BTreeSet::new();
     if let Some(roots) = state.roots_by_loop.get(&loop_id) {
         for root in roots {

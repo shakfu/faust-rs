@@ -8,7 +8,7 @@ use tlib::TreeArena;
 
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
-use super::super::vector_verify::{
+use super::super::verify::{
     Placement, Rate, SignalRecord, VECTOR_PLAN_SCHEMA_VERSION, ValueType, Vectorability,
 };
 
@@ -54,7 +54,7 @@ fn a_store_into_a_sound_field_is_rejected() {
 fn mutable_table_attribution_must_match_the_emitted_stores_and_init() {
     let mut store = FirStore::new();
     let table_id = 55_u64;
-    let name = super::super::vector_lower::mutable_table_name(table_id, &FirType::Float64);
+    let name = super::super::lower::mutable_table_name(table_id, &FirType::Float64);
     let (declaration, compute_with_store, compute_empty, full_init, partial_init) = {
         let mut b = FirBuilder::new(&mut store);
         let declaration = b.declare_var(

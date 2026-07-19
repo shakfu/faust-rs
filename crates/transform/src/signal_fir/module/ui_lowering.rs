@@ -56,7 +56,7 @@ impl<'a> SignalToFirLower<'a> {
                 ),
             ));
         }
-        let var = super::super::vector_ui::zone_name(expected_kind, control);
+        let var = super::super::vector::ui::zone_name(expected_kind, control);
         let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
         self.ui.ui_controls.insert(control, var.clone());
@@ -260,7 +260,7 @@ impl<'a> SignalToFirLower<'a> {
                 ),
             ));
         }
-        let var = super::super::vector_ui::zone_name(expected_kind, control);
+        let var = super::super::vector::ui::zone_name(expected_kind, control);
         let range = self.control_range(
             control,
             match typ {
@@ -298,7 +298,7 @@ impl<'a> SignalToFirLower<'a> {
                 ),
             ));
         }
-        let var = super::super::vector_ui::zone_name(expected_kind, control);
+        let var = super::super::vector::ui::zone_name(expected_kind, control);
         let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
         self.ui.ui_controls.insert(control, var.clone());
@@ -324,7 +324,7 @@ impl<'a> SignalToFirLower<'a> {
                 ),
             ));
         }
-        let var = super::super::vector_ui::zone_name(ControlKind::Soundfile, control);
+        let var = super::super::vector::ui::zone_name(ControlKind::Soundfile, control);
         self.ensure_named_struct_var(&var, FirType::Sound, None);
         self.ui.soundfiles.insert(control, var.clone());
         Ok(var)
@@ -372,13 +372,13 @@ impl<'a> SignalToFirLower<'a> {
                     self.ensure_soundfile_zone(control)?;
                 }
             }
-            let zone = super::super::vector_ui::control_zone(self.ui_program, control).map_err(
+            let zone = super::super::vector::ui::control_zone(self.ui_program, control).map_err(
                 |detail| SignalFirError::new(SignalFirErrorCode::UnsupportedSignalNode, detail),
             )?;
             zones.insert(control, zone);
         }
         self.ui.ui_statements =
-            super::super::vector_ui::build_ui_statements(self.ui_program, &zones, &mut self.store)
+            super::super::vector::ui::build_ui_statements(self.ui_program, &zones, &mut self.store)
                 .map_err(|detail| {
                     SignalFirError::new(SignalFirErrorCode::UnsupportedSignalNode, detail)
                 })?;

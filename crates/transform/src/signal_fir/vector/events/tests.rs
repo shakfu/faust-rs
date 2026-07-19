@@ -10,17 +10,17 @@ use crate::clk_env::annotate;
 use crate::schedule::SchedulingStrategy;
 use crate::signal_fir::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
 use crate::signal_fir::pv_slice::build_pv_signals;
-use crate::signal_fir::vector_analysis::{
+use crate::signal_fir::vector::analysis::{
     ForeignResource, ForeignTypeCode, StateCell, StateResource,
 };
-use crate::signal_fir::vector_plan::{build_vector_plan, verified_vector_plan_for_test};
-use crate::signal_fir::vector_route::{RouteResolution, VectorRouteSession};
-use crate::signal_fir::vector_state::{
+use crate::signal_fir::vector::plan::{build_vector_plan, verified_vector_plan_for_test};
+use crate::signal_fir::vector::route::{RouteResolution, VectorRouteSession};
+use crate::signal_fir::vector::state::{
     LoopStatePhases, RecursionProjectionTransition, RecursionTransition, VECTOR_STATE_PLAN_VERSION,
     VectorStateAction, VectorStatePlan, build_vector_state_plan,
     verified_vector_state_plan_for_test,
 };
-use crate::signal_fir::vector_verify::{
+use crate::signal_fir::vector::verify::{
     EpochRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord, LockstepLaneRecord,
     LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord, ValueType,
     VecSafeWitness, Vectorability, WitnessKind,
@@ -143,7 +143,7 @@ fn grouped_effect_dependencies_exhaustively_match_literal_pairing() {
 
 fn pure_transport_plan() -> VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 3,
         signals: vec![
@@ -164,7 +164,7 @@ fn pure_transport_plan() -> VerifiedVectorPlan {
             consumer_loop: 1,
             element_type: ValueType::Real,
             length: 3,
-            layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+            layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
         }],
         data_edges: vec![LoopEdge {
             consumer: 1,
@@ -187,7 +187,7 @@ fn pure_transport_plan() -> VerifiedVectorPlan {
 
 fn compact_lockstep_plan() -> VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         vec_size: 32,
         signals: (0..2)
             .map(|lane| signal(10 + lane, Placement::Owned(lane), vec![]))
@@ -259,7 +259,7 @@ fn split_effect_plan(left: EffectAtom, right: EffectAtom) -> VerifiedVectorPlan 
 
 fn split_plan_with_signals(signals: Vec<SignalRecord>) -> VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 3,
         signals,
@@ -295,7 +295,7 @@ fn colocated_state_plan() -> VerifiedVectorPlan {
         cell: StateCell::Delay,
     };
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 3,
         signals: vec![
@@ -337,7 +337,7 @@ fn recursive_event_plan() -> (VerifiedVectorPlan, VerifiedVectorStatePlan) {
         projection: 1,
     };
     let plan = verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 3,
         signals: vec![

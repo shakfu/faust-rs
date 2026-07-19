@@ -11,7 +11,7 @@ use tlib::TreeArena;
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
-use crate::signal_fir::vector_plan::build_vector_plan;
+use crate::signal_fir::vector::plan::build_vector_plan;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 fn clock_fixture(

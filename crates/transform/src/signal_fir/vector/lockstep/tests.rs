@@ -7,8 +7,8 @@ use tlib::TreeArena;
 
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
-use crate::signal_fir::vector_plan::build_vector_plan_with_lockstep;
-use crate::signal_fir::vector_verify::LoopKind;
+use crate::signal_fir::vector::plan::build_vector_plan_with_lockstep;
+use crate::signal_fir::vector::verify::LoopKind;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 use super::*;

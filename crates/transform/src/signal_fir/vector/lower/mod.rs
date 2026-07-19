@@ -28,18 +28,18 @@ use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::{SimpleSigType, VerifiedPreparedSignals};
 
 use super::super::module::map_binop;
+use super::analysis::{EffectAtom, wrtbl_is_readonly};
+use super::clock_ad::{ClockGuard, VerifiedVectorClockAdPlan};
 use super::cse::materialize_shared_values;
+use super::plan::VerifiedVectorPlan;
 use super::recursion::{decode_group_projection, decode_symbolic_group_bodies};
-use super::siggen::interpret_generator;
-use super::vector_analysis::{EffectAtom, wrtbl_is_readonly};
-use super::vector_clock_ad::{ClockGuard, VerifiedVectorClockAdPlan};
-use super::vector_plan::VerifiedVectorPlan;
-use super::vector_route::{
+use super::route::{
     RouteResolution, RoutedUseSource, VectorRegion, VectorRouteError, VectorRouteSession,
     VerifiedRoutedFir, value_fir_type,
 };
-use super::vector_state::{VectorDelayStorage, VerifiedVectorStatePlan};
-use super::vector_verify::{Placement, SignalRecord, ValueType, VectorPlan};
+use super::siggen::interpret_generator;
+use super::state::{VectorDelayStorage, VerifiedVectorStatePlan};
+use super::verify::{Placement, SignalRecord, ValueType, VectorPlan};
 
 /// One scheduled vector loop and its final CSE-rewritten FIR body.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1095,7 +1095,7 @@ impl PureVectorLowerer<'_> {
         &mut self,
         control: ui::ControlId,
     ) -> Result<FirId, PureVectorLowerError> {
-        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+        let zone = super::ui::control_zone(self.ui, control).map_err(|expression| {
             PureVectorLowerError::UnsupportedSignal {
                 signal_id: u64::from(control),
                 expression,
@@ -1128,7 +1128,7 @@ impl PureVectorLowerer<'_> {
                 expression: "soundfile accessor operand is not a SIGSOUNDFILE".to_owned(),
             });
         };
-        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+        let zone = super::ui::control_zone(self.ui, control).map_err(|expression| {
             PureVectorLowerError::UnsupportedSignal {
                 signal_id,
                 expression,
@@ -1151,7 +1151,7 @@ impl PureVectorLowerer<'_> {
         control: ui::ControlId,
         expected: ui::ControlKind,
     ) -> Result<FirId, PureVectorLowerError> {
-        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+        let zone = super::ui::control_zone(self.ui, control).map_err(|expression| {
             PureVectorLowerError::UnsupportedSignal {
                 signal_id: u64::from(control),
                 expression,
@@ -1183,7 +1183,7 @@ impl PureVectorLowerer<'_> {
         cache: &mut BTreeMap<u64, FirId>,
         active: &mut BTreeSet<(LowerScope, u64)>,
     ) -> Result<FirId, PureVectorLowerError> {
-        let zone = super::vector_ui::control_zone(self.ui, control).map_err(|expression| {
+        let zone = super::ui::control_zone(self.ui, control).map_err(|expression| {
             PureVectorLowerError::UnsupportedSignal {
                 signal_id: u64::from(control),
                 expression,

@@ -31,22 +31,22 @@ use super::super::module::{INT_FUN_PROTO_ORDER, MATH_PROTO_ORDER};
 use super::super::{
     ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
 };
-use super::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
-use super::vector_analysis::{DepKind, EffectAtom};
-use super::vector_assemble::{
+use super::analysis::{DepKind, EffectAtom};
+use super::assemble::{
     VectorClockOutputStore, VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir,
     fir_reachable,
 };
-use super::vector_clock_ad::build_vector_clock_ad_plan;
-use super::vector_events::{
+use super::clock_ad::build_vector_clock_ad_plan;
+use super::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
+use super::events::{
     DEFAULT_EVENT_LIMITS, build_state_event_order_certificate, precheck_state_event_bound,
 };
-use super::vector_lower::{VectorLoweringContext, lower_vector_program};
-use super::vector_plan::build_vector_plan_with_lockstep;
-use super::vector_route::{VectorRegion, VerifiedRoutedFir};
-use super::vector_state::build_vector_state_plan_with_clock;
-use super::vector_ui::{VectorUiFir, build_vector_ui_fir};
-use super::vector_verify::VectorPlan;
+use super::lower::{VectorLoweringContext, lower_vector_program};
+use super::plan::build_vector_plan_with_lockstep;
+use super::route::{VectorRegion, VerifiedRoutedFir};
+use super::state::build_vector_state_plan_with_clock;
+use super::ui::{VectorUiFir, build_vector_ui_fir};
+use super::verify::VectorPlan;
 
 /// Failure stage retained by the production selector as an observable fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +94,7 @@ pub(crate) fn build_verified_vector_module(
         assembly,
         output_stores,
     } = built;
-    if assembly.schema_version != super::vector_assemble::VECTOR_FIR_ASSEMBLY_VERSION
+    if assembly.schema_version != super::assemble::VECTOR_FIR_ASSEMBLY_VERSION
         || output_stores.len() != context.num_outputs
     {
         return Err(module_shape("verified module evidence lost final coverage"));
@@ -382,7 +382,7 @@ struct OutputMaterialization<'a> {
     control_statements: &'a mut Vec<FirId>,
     control_output_stores: &'a mut Vec<FirId>,
     clock_output_stores: &'a mut Vec<VectorClockOutputStore>,
-    clock_plan: &'a super::vector_clock_ad::VerifiedVectorClockAdPlan,
+    clock_plan: &'a super::clock_ad::VerifiedVectorClockAdPlan,
     store: &'a mut FirStore,
 }
 
@@ -419,9 +419,9 @@ fn materialize_outputs(
                 )
             })?;
         let definition_region = match signal.placement {
-            super::vector_verify::Placement::Owned(loop_id) => VectorRegion::Loop(loop_id),
-            super::vector_verify::Placement::Control => VectorRegion::Control,
-            super::vector_verify::Placement::Inline => {
+            super::verify::Placement::Owned(loop_id) => VectorRegion::Loop(loop_id),
+            super::verify::Placement::Control => VectorRegion::Control,
+            super::verify::Placement::Inline => {
                 return Err(VectorModuleFailure::new(
                     VectorFallbackReason::OutputAssembly,
                     format!("output signal {signal_id} remains inline at final assembly"),
@@ -928,8 +928,8 @@ fn verify_mutable_table_attribution(
             let table_id = u64::from(*table);
             let name = [FirType::Int32, FirType::Float32]
                 .iter()
-                .map(|elem| super::vector_lower::mutable_table_name(table_id, elem))
-                .chain(std::iter::once(super::vector_lower::mutable_table_name(
+                .map(|elem| super::lower::mutable_table_name(table_id, elem))
+                .chain(std::iter::once(super::lower::mutable_table_name(
                     table_id,
                     &FirType::Float64,
                 )))
@@ -1042,7 +1042,7 @@ fn verify_ui_write_attribution(
     }
     let mut zones = BTreeMap::<String, u32>::new();
     for spec in &ui.controls {
-        zones.insert(super::vector_ui::zone_name(spec.kind, spec.id), spec.id);
+        zones.insert(super::ui::zone_name(spec.kind, spec.id), spec.id);
     }
     for (control, count) in &claimed {
         let Some(spec) = ui.controls.iter().find(|spec| spec.id == *control) else {
@@ -1050,7 +1050,7 @@ fn verify_ui_write_attribution(
                 "event certificate writes unknown UI control {control}"
             )));
         };
-        let zone = super::vector_ui::zone_name(spec.kind, spec.id);
+        let zone = super::ui::zone_name(spec.kind, spec.id);
         let emitted = physical.get(&zone).copied().unwrap_or(0);
         if emitted != *count {
             return Err(module_shape(format!(

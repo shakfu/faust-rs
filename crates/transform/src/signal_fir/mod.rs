@@ -82,12 +82,10 @@ pub use vector::assemble as vector_assemble;
 pub use vector::clock_ad as vector_clock_ad;
 pub use vector::events as vector_events;
 pub use vector::lower as vector_lower;
-use vector::module as vector_module;
 pub use vector::plan as vector_plan;
 pub use vector::route as vector_route;
 pub use vector::schedule as vector_schedule;
 pub use vector::state as vector_state;
-use vector::ui as vector_ui;
 pub use vector::verify as vector_verify;
 
 pub use error::{SignalFirError, SignalFirErrorCode};
@@ -559,7 +557,7 @@ fn compile_fastlane_inner(
                     if matches!(options.compute_mode, ComputeMode::Scalar) {
                         let effects =
                             time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
-                                vector_analysis::analyze_scalar_scheduling_effects(&prepared)
+                                vector::analysis::analyze_scalar_scheduling_effects(&prepared)
                             })
                             .map_err(|err| {
                                 SignalFirError::new(
@@ -639,7 +637,7 @@ fn compile_fastlane_inner(
                         if matches!(options.compute_mode, ComputeMode::Scalar) {
                             let effects =
                                 time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
-                                    vector_analysis::analyze_scalar_scheduling_effects(&prepared)
+                                    vector::analysis::analyze_scalar_scheduling_effects(&prepared)
                                 })
                                 .map_err(|err| {
                                     SignalFirError::new(
@@ -679,9 +677,9 @@ fn compile_fastlane_inner(
         let empty_domains = propagate::ClockDomainTable::new();
         let domains = clock_domains.unwrap_or(&empty_domains);
         match time_signal_fir_phase(timing_sink, "fir-vector-certification", || {
-            vector_module::build_verified_vector_module(
+            vector::module::build_verified_vector_module(
                 &prepared,
-                &vector_module::VectorModuleContext {
+                &vector::module::VectorModuleContext {
                     domains,
                     ui,
                     num_inputs: plan.num_inputs,

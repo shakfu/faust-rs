@@ -34,15 +34,13 @@ use std::fmt;
 
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType, match_fir};
 
-use super::vector_clock_ad::{
-    ClockGuard, ClockIsland, ClockTransportMode, VerifiedVectorClockAdPlan,
-};
-use super::vector_route::{RoutedDefinition, VectorRegion, VerifiedRoutedFir};
-use super::vector_state::{
+use super::clock_ad::{ClockGuard, ClockIsland, ClockTransportMode, VerifiedVectorClockAdPlan};
+use super::route::{RoutedDefinition, VectorRegion, VerifiedRoutedFir};
+use super::state::{
     DelayTransition, PrefixTransition, RecursionTransition, VectorDelayStorage, VectorStateAction,
     VectorStateInitialValue, VerifiedVectorStatePlan, WaveformTransition,
 };
-use super::vector_verify::{Placement, ValueType, VectorPlan};
+use super::verify::{Placement, ValueType, VectorPlan};
 
 /// Current canonical P6.3b/P6.5 assembly schema.
 pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 3;
@@ -989,7 +987,7 @@ fn fused_member_definition(
 fn materialize_loop(
     loop_id: u64,
     inputs: &[FirId],
-    phases: Option<&super::vector_state::LoopStatePhases>,
+    phases: Option<&super::state::LoopStatePhases>,
     context: &StateMaterializationContext<'_>,
     builder: &mut FirBuilder<'_>,
 ) -> Result<AssembledVectorLoop, VectorFirAssemblyError> {

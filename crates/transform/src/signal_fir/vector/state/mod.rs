@@ -27,14 +27,14 @@ use std::fmt;
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::{Nature, Variability};
 
+use super::analysis::{DepKind, EffectAtom, StateCell, StateResource};
+use super::clock_ad::VerifiedVectorClockAdPlan;
 use super::decoration_verify::{
     CanonicalSigType, DecorationCertificate, DecorationRecord, VerifiedDecorationCertificate,
 };
+use super::plan::VerifiedVectorPlan;
 use super::recursion::decode_symbolic_group_bodies;
-use super::vector_analysis::{DepKind, EffectAtom, StateCell, StateResource};
-use super::vector_clock_ad::VerifiedVectorClockAdPlan;
-use super::vector_plan::VerifiedVectorPlan;
-use super::vector_verify::{
+use super::verify::{
     LoopKind, Placement, Rate, ValueType, VectorPlan, VectorPlanError, verify_vector_plan,
 };
 use crate::signal_prepare::VerifiedPreparedSignals;

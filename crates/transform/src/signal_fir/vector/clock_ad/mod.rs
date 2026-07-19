@@ -35,10 +35,10 @@ use tlib::{match_sym_rec, match_sym_ref};
 use crate::clk_env::{ClkEnvError, annotate};
 use crate::signal_prepare::VerifiedPreparedSignals;
 
+use super::analysis::{DepKind, EffectAtom, StateCell, StateResource};
 use super::decoration_verify::{CanonicalSigType, VerifiedDecorationCertificate};
-use super::vector_analysis::{DepKind, EffectAtom, StateCell, StateResource};
-use super::vector_plan::VerifiedVectorPlan;
-use super::vector_verify::{LoopKind, Placement, VectorPlan, VectorPlanError, verify_vector_plan};
+use super::plan::VerifiedVectorPlan;
+use super::verify::{LoopKind, Placement, VectorPlan, VectorPlanError, verify_vector_plan};
 
 /// Current canonical P6.2 clock/AD-plan schema.
 pub const VECTOR_CLOCK_AD_PLAN_VERSION: u32 = 1;

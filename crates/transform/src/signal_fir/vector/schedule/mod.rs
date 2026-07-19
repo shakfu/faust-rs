@@ -26,8 +26,8 @@ use crate::schedule::{
     ScheduleDag, ScheduleError, SchedulingStrategy, VerifyError, schedule, verify_schedule,
 };
 
-use super::vector_plan::VerifiedVectorPlan;
-use super::vector_verify::{EpochRecord, VectorPlan, VectorPlanError, verify_vector_plan};
+use super::plan::VerifiedVectorPlan;
+use super::verify::{EpochRecord, VectorPlan, VectorPlanError, verify_vector_plan};
 
 /// The selected order for one verified vector-plan epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]

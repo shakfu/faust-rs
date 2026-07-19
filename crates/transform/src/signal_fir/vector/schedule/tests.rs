@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use super::*;
 use crate::schedule::{SchedulingStrategy, verify_schedule};
 use crate::signal_fir::pv_slice::{build_pv_plan, build_pv_signals};
-use crate::signal_fir::vector_verify::{
+use crate::signal_fir::vector::verify::{
     FusedSerialGroupRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord,
     LockstepLaneRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord, ValueType,
     VecSafeWitness, Vectorability, WitnessKind,
@@ -33,7 +33,7 @@ fn plan_with_epochs(
     }
 
     VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 16,
         signals: (0..loop_count)

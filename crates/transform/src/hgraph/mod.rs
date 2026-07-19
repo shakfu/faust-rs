@@ -312,10 +312,10 @@ pub fn is_external(
 /// Returns the dependency targets of `sig` in deterministic child order. The
 /// opaque clock-env child of `Clocked` is never a dependency.
 pub fn get_signal_dependencies(
-    analysis: &crate::signal_fir::vector_analysis::SignalAnalysisContext<'_>,
+    analysis: &crate::signal_fir::vector::analysis::SignalAnalysisContext<'_>,
     sig: SigId,
 ) -> Result<Vec<Edge>, HgraphError> {
-    crate::signal_fir::vector_analysis::signal_dependencies(analysis, sig)
+    crate::signal_fir::vector::analysis::signal_dependencies(analysis, sig)
         .map_err(analysis_error_to_hgraph)
         .map(|dependencies| {
             dependencies
@@ -325,7 +325,7 @@ pub fn get_signal_dependencies(
                     to: dependency.to,
                     delayed: matches!(
                         dependency.kind,
-                        crate::signal_fir::vector_analysis::DepKind::Delayed { .. }
+                        crate::signal_fir::vector::analysis::DepKind::Delayed { .. }
                     ),
                 })
                 .collect()
@@ -333,25 +333,25 @@ pub fn get_signal_dependencies(
 }
 
 fn analysis_error_to_hgraph(
-    error: crate::signal_fir::vector_analysis::AnalysisError,
+    error: crate::signal_fir::vector::analysis::AnalysisError,
 ) -> HgraphError {
     match error {
-        crate::signal_fir::vector_analysis::AnalysisError::Malformed { sig, detail } => {
+        crate::signal_fir::vector::analysis::AnalysisError::Malformed { sig, detail } => {
             HgraphError::Malformed { sig, detail }
         }
         other => HgraphError::Malformed {
             sig: match &other {
-                crate::signal_fir::vector_analysis::AnalysisError::MissingType { sig }
-                | crate::signal_fir::vector_analysis::AnalysisError::MissingClock { sig }
-                | crate::signal_fir::vector_analysis::AnalysisError::InvalidRecursiveProjection {
+                crate::signal_fir::vector::analysis::AnalysisError::MissingType { sig }
+                | crate::signal_fir::vector::analysis::AnalysisError::MissingClock { sig }
+                | crate::signal_fir::vector::analysis::AnalysisError::InvalidRecursiveProjection {
                     sig,
                     ..
                 }
-                | crate::signal_fir::vector_analysis::AnalysisError::InvalidDelayInterval {
+                | crate::signal_fir::vector::analysis::AnalysisError::InvalidDelayInterval {
                     sig,
                     ..
                 } => *sig,
-                crate::signal_fir::vector_analysis::AnalysisError::Malformed { .. } => {
+                crate::signal_fir::vector::analysis::AnalysisError::Malformed { .. } => {
                     unreachable!("handled above")
                 }
             },
@@ -362,7 +362,7 @@ fn analysis_error_to_hgraph(
 
 struct Builder<'a> {
     arena: &'a TreeArena,
-    analysis: crate::signal_fir::vector_analysis::SignalAnalysisContext<'a>,
+    analysis: crate::signal_fir::vector::analysis::SignalAnalysisContext<'a>,
     domains: &'a ClockDomainTable,
     envs: &'a ClkEnvMap,
     /// Variability source for the `Control` redirect (plan §4.6). A signal
@@ -425,12 +425,12 @@ impl<'a> Builder<'a> {
             self.domain_key.insert(inner_env, sub_key);
 
             let projection =
-                crate::signal_fir::vector_analysis::signal_dependencies(&self.analysis, sig)
+                crate::signal_fir::vector::analysis::signal_dependencies(&self.analysis, sig)
                     .map_err(analysis_error_to_hgraph)?;
             let Some(clock_edge) = projection.scheduling().iter().find(|edge| {
                 matches!(
                     edge.kind,
-                    crate::signal_fir::vector_analysis::DepKind::ClockBoundary
+                    crate::signal_fir::vector::analysis::DepKind::ClockBoundary
                 )
             }) else {
                 return Ok(());
@@ -443,7 +443,7 @@ impl<'a> Builder<'a> {
             for edge in projection.scheduling().iter().filter(|edge| {
                 !matches!(
                     edge.kind,
-                    crate::signal_fir::vector_analysis::DepKind::ClockBoundary
+                    crate::signal_fir::vector::analysis::DepKind::ClockBoundary
                 )
             }) {
                 self.visit(edge.to)?;
@@ -528,7 +528,7 @@ pub fn build_hgraph(
     sig_types: &HashMap<SigId, SigType>,
 ) -> Result<Hgraph, HgraphError> {
     let analysis =
-        crate::signal_fir::vector_analysis::SignalAnalysisContext::new(arena, sig_types, outputs)
+        crate::signal_fir::vector::analysis::SignalAnalysisContext::new(arena, sig_types, outputs)
             .map_err(analysis_error_to_hgraph)?;
     let mut builder = Builder {
         arena,
@@ -669,13 +669,13 @@ pub fn schedule(hgraph: &Hgraph, strategy: SchedulingStrategy) -> Result<Hsched,
 /// from generated FIR statements.
 pub fn orient_effect_conflicts(
     hgraph: &mut Hgraph,
-    effects: &crate::signal_fir::vector_analysis::ScalarSchedulingEffects,
+    effects: &crate::signal_fir::vector::analysis::ScalarSchedulingEffects,
 ) -> Result<(), HgraphError> {
-    use crate::signal_fir::vector_analysis::{EffectAtom, ForeignPurity};
+    use crate::signal_fir::vector::analysis::{EffectAtom, ForeignPurity};
 
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     enum EffectOrderKey {
-        State(crate::signal_fir::vector_analysis::StateResource),
+        State(crate::signal_fir::vector::analysis::StateResource),
         Table(u32),
         Ui(u32),
         Output(u32),

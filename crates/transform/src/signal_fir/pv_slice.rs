@@ -87,13 +87,13 @@ fn compute_pv_facts(arena: &TreeArena, roots: &[SigId]) -> PvFacts {
     let sig_types = sigtype::TypeAnnotator::new(arena, &ui::UiProgram::empty())
         .annotate(roots)
         .expect("PV signals have valid types");
-    let analysis = super::vector_analysis::SignalAnalysisContext::new(arena, &sig_types, roots)
+    let analysis = super::vector::analysis::SignalAnalysisContext::new(arena, &sig_types, roots)
         .expect("PV symbolic recursion index is valid");
     let mut reachable: HashSet<SigId> = HashSet::new();
     let mut stack: Vec<SigId> = roots.to_vec();
     while let Some(sig) = stack.pop() {
         if reachable.insert(sig) {
-            let dependencies = super::vector_analysis::signal_dependencies(&analysis, sig)
+            let dependencies = super::vector::analysis::signal_dependencies(&analysis, sig)
                 .expect("PV signals are canonical");
             for occurrence in dependencies.occurrences() {
                 stack.push(occurrence.to);
@@ -107,7 +107,7 @@ fn compute_pv_facts(arena: &TreeArena, roots: &[SigId]) -> PvFacts {
         *occurrences.entry(r).or_insert(0) += 1;
     }
     for &sig in &reachable {
-        for occurrence in super::vector_analysis::signal_dependencies(&analysis, sig)
+        for occurrence in super::vector::analysis::signal_dependencies(&analysis, sig)
             .expect("PV signals are canonical")
             .occurrences()
         {
@@ -167,8 +167,8 @@ pub struct PvPlan {
 
 impl PvPlan {
     /// Projects this slice's plan into the strategy-independent
-    /// [`crate::signal_fir::vector_verify::VectorPlan`] DTO and — by
-    /// construction — a plan that [`crate::signal_fir::vector_verify::verify_vector_plan`]
+    /// [`crate::signal_fir::vector::verify::VectorPlan`] DTO and — by
+    /// construction — a plan that [`crate::signal_fir::vector::verify::verify_vector_plan`]
     /// accepts. This closes the loop between the executed PV slice and the P5
     /// vector-plan verifier: the same two-loop, one-transport shape the PV
     /// test runs bit-exactly is here shown to be a *valid* vector plan, so the
@@ -179,8 +179,8 @@ impl PvPlan {
     /// (`ConsumesTransport`) materializes `z` and reads `x` through the
     /// transport. Both are `Vectorizable` and share the single forward epoch.
     #[must_use]
-    pub fn to_vector_plan(&self) -> crate::signal_fir::vector_verify::VectorPlan {
-        use crate::signal_fir::vector_verify as vv;
+    pub fn to_vector_plan(&self) -> crate::signal_fir::vector::verify::VectorPlan {
+        use crate::signal_fir::vector::verify as vv;
 
         let id = |s: SigId| u64::from(s.as_u32());
         let elem = value_type_of(self.transport.elem_type.clone());
@@ -203,7 +203,7 @@ impl PvPlan {
         signals.sort_by_key(|s| s.signal_id);
 
         vv::VectorPlan {
-            schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+            schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
             lockstep_bundles: Vec::new(),
             vec_size,
             signals,
@@ -236,7 +236,7 @@ impl PvPlan {
                 consumer_loop: 1,
                 element_type: elem,
                 length: vec_size,
-                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+                layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
             }],
             data_edges: vec![vv::LoopEdge {
                 consumer: 1,
@@ -262,8 +262,8 @@ impl PvPlan {
 /// vocabulary (`int`/`real`/`tuple`). The PV slice only produces real chunk
 /// transports, but the mapping is spelled out so the bridge does not silently
 /// mislabel an integer carrier if the slice grows.
-fn value_type_of(ty: FirType) -> crate::signal_fir::vector_verify::ValueType {
-    use crate::signal_fir::vector_verify::ValueType;
+fn value_type_of(ty: FirType) -> crate::signal_fir::vector::verify::ValueType {
+    use crate::signal_fir::vector::verify::ValueType;
     match ty {
         FirType::Int32 | FirType::Int64 => ValueType::Int,
         _ => ValueType::Real,
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn pv_plan_projects_to_a_valid_vector_plan() {
-        use crate::signal_fir::vector_verify::verify_vector_plan;
+        use crate::signal_fir::vector::verify::verify_vector_plan;
 
         let (arena, y, z) = build_pv_signals(20);
         let plan = build_pv_plan(&arena, y, z, 16);

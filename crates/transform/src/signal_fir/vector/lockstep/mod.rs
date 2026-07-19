@@ -16,9 +16,9 @@ use tlib::match_sym_ref;
 
 use crate::signal_prepare::VerifiedPreparedSignals;
 
+use super::analysis::effect_sets_conflict;
 use super::recursion::decode_symbolic_group_bodies;
-use super::vector_analysis::effect_sets_conflict;
-use super::vector_verify::{
+use super::verify::{
     IsoLeafMapping, IsoRootWitness, LockstepBundleRecord, LockstepLaneRecord, LoopKind,
     SignalRecord, VectorPlan, VectorPlanError, verify_vector_plan,
 };
@@ -305,7 +305,7 @@ fn loop_effects<'a>(
     plan: &'a VectorPlan,
     signal_by_id: &BTreeMap<u64, &'a SignalRecord>,
     loop_id: u64,
-) -> Vec<super::vector_analysis::EffectAtom> {
+) -> Vec<super::analysis::EffectAtom> {
     let mut effects = BTreeSet::new();
     let loop_record = plan
         .loops

@@ -9,8 +9,8 @@ use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
 use crate::signal_fir::pv_slice::build_pv_signals;
-use crate::signal_fir::vector_clock_ad::build_vector_clock_ad_plan;
-use crate::signal_fir::vector_plan::{build_vector_plan, build_vector_plan_with_lockstep};
+use crate::signal_fir::vector::clock_ad::build_vector_clock_ad_plan;
+use crate::signal_fir::vector::plan::{build_vector_plan, build_vector_plan_with_lockstep};
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 fn certify(arena: &TreeArena, roots: &[signals::SigId]) -> VerifiedDecorationCertificate {

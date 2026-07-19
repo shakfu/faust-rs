@@ -38,8 +38,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 pub use super::analysis::EffectAtom;
+use super::analysis::{DepKind, ForeignPurity, StateResource, effects_conflict};
 use super::decoration_verify::VerifiedDecorationCertificate;
-use super::vector_analysis::{DepKind, ForeignPurity, StateResource, effects_conflict};
 
 /// Current in-memory vector-plan schema. Version 4 records, per signal, the
 /// effects the signal performs itself alongside its transitive closure, so the

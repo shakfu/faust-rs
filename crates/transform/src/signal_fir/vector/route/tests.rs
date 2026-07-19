@@ -8,12 +8,12 @@ use tlib::TreeArena;
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
-use crate::signal_fir::vector_clock_ad::{
+use crate::signal_fir::vector::clock_ad::{
     ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION, VectorClockAdPlan,
     verified_vector_clock_ad_plan_for_test,
 };
-use crate::signal_fir::vector_plan::{build_vector_plan, verified_vector_plan_for_test};
-use crate::signal_fir::vector_verify::{
+use crate::signal_fir::vector::plan::{build_vector_plan, verified_vector_plan_for_test};
+use crate::signal_fir::vector::verify::{
     EpochRecord, LoopEdge, LoopRecord, Rate, SignalRecord, VecSafeWitness, Vectorability,
     WitnessKind,
 };
@@ -21,7 +21,7 @@ use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 fn pure_shared_plan() -> VerifiedVectorPlan {
     verified_vector_plan_for_test(VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 16,
         signals: vec![
@@ -103,7 +103,7 @@ fn pure_shared_plan() -> VerifiedVectorPlan {
             consumer_loop: 1,
             element_type: ValueType::Real,
             length: 16,
-            layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+            layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
         }],
         data_edges: vec![LoopEdge {
             consumer: 1,
@@ -218,7 +218,7 @@ fn value_for_type(value_type: &ValueType, store: &mut FirStore) -> FirId {
     }
 }
 
-fn value_for(signal: &super::super::vector_verify::SignalRecord, store: &mut FirStore) -> FirId {
+fn value_for(signal: &super::super::verify::SignalRecord, store: &mut FirStore) -> FirId {
     value_for_type(&signal.value_type, store)
 }
 

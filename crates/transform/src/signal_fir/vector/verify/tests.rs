@@ -8,7 +8,7 @@ use tlib::TreeArena;
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
-use crate::signal_fir::vector_analysis::{
+use crate::signal_fir::vector::analysis::{
     ForeignResource, ForeignTypeCode, StateCell, StateResource, effect_sets_conflict,
 };
 use crate::signal_prepare::prepare_signals_for_fir_verified;
@@ -90,7 +90,7 @@ fn test_effect_loop(loop_id: u64, root: u64) -> LoopRecord {
 /// typed transport, both in the single forward epoch.
 fn valid_plan() -> VectorPlan {
     VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 16,
         signals: vec![
@@ -148,7 +148,7 @@ fn valid_plan() -> VectorPlan {
             consumer_loop: 1,
             element_type: ValueType::Real,
             length: 16,
-            layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+            layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
         }],
         data_edges: vec![LoopEdge {
             consumer: 1,
@@ -321,7 +321,7 @@ fn fused_decoration_fixture() -> (VectorPlan, VerifiedDecorationCertificate) {
     ];
     signals.sort_by_key(|signal| signal.signal_id);
     let plan = VectorPlan {
-        schema_version: crate::signal_fir::vector_verify::VECTOR_PLAN_SCHEMA_VERSION,
+        schema_version: crate::signal_fir::vector::verify::VECTOR_PLAN_SCHEMA_VERSION,
         lockstep_bundles: Vec::new(),
         vec_size: 16,
         signals,
@@ -362,7 +362,7 @@ fn fused_decoration_fixture() -> (VectorPlan, VerifiedDecorationCertificate) {
                 consumer_loop: 2,
                 element_type: ValueType::Real,
                 length: 16,
-                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+                layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
             },
             TransportRecord {
                 transport_id: 1,
@@ -372,7 +372,7 @@ fn fused_decoration_fixture() -> (VectorPlan, VerifiedDecorationCertificate) {
                 consumer_loop: 0,
                 element_type: ValueType::Real,
                 length: 16,
-                layout: crate::signal_fir::vector_verify::TransportLayout::Planar,
+                layout: crate::signal_fir::vector::verify::TransportLayout::Planar,
             },
         ],
         data_edges: vec![

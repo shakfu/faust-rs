@@ -5,10 +5,10 @@ use propagate::ClockDomainTable;
 use signals::{SigMatch, match_sig};
 use transform::clk_env::annotate;
 use transform::signal_fir::decoration_verify::certify_decorations;
-use transform::signal_fir::vector_clock_ad::{
+use transform::signal_fir::vector::clock_ad::{
     ClockGuard, ForwardAdPolicy, build_vector_clock_ad_plan,
 };
-use transform::signal_fir::vector_plan::build_vector_plan;
+use transform::signal_fir::vector::plan::build_vector_plan;
 use transform::signal_prepare::prepare_signals_for_fir_verified;
 
 #[test]

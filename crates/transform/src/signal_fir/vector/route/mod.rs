@@ -33,10 +33,10 @@ use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType, 
 
 use crate::schedule::SchedulingStrategy;
 
-use super::vector_clock_ad::{ClockTransportMode, ClockTransportPolicy, VerifiedVectorClockAdPlan};
-use super::vector_plan::VerifiedVectorPlan;
-use super::vector_schedule::{VectorScheduleError, schedule_verified_vector_plan};
-use super::vector_verify::{
+use super::clock_ad::{ClockTransportMode, ClockTransportPolicy, VerifiedVectorClockAdPlan};
+use super::plan::VerifiedVectorPlan;
+use super::schedule::{VectorScheduleError, schedule_verified_vector_plan};
+use super::verify::{
     LoopKind, Placement, TransportRecord, ValueType, VectorPlan, VectorPlanError,
     verify_vector_plan,
 };
@@ -758,10 +758,7 @@ impl<'a> VectorRouteSession<'a> {
         })
     }
 
-    fn signal(
-        &self,
-        signal_id: u64,
-    ) -> Result<&super::vector_verify::SignalRecord, VectorRouteError> {
+    fn signal(&self, signal_id: u64) -> Result<&super::verify::SignalRecord, VectorRouteError> {
         self.plan
             .signals
             .iter()
