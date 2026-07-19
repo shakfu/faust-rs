@@ -82,7 +82,6 @@ tests/impulse-tests/dsp/tester2.dsp
 tests/impulse-tests/dsp/tf_exp.dsp
 tests/impulse-tests/dsp/thru_zero_flanger.dsp
 tests/impulse-tests/dsp/upsampling_01_accumulator.dsp
-tests/impulse-tests/dsp/upsampling_02_feedback.dsp
 tests/impulse-tests/dsp/upsampling_05_parallel_state.dsp
 tests/impulse-tests/dsp/vcf_wah_pedals.dsp
 tests/impulse-tests/dsp/virtual_analog_oscillators.dsp

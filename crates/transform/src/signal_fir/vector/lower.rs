@@ -13,7 +13,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
-use fir::{AccessType, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
+use fir::{
+    AccessType, FirBinOp, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir,
+};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{match_sym_ref, tree_to_int, tree_to_str};
 
@@ -25,7 +27,7 @@ use super::cse::materialize_shared_values;
 use super::recursion::{decode_group_projection, decode_symbolic_group_bodies};
 use super::siggen::interpret_generator;
 use super::vector_analysis::{EffectAtom, wrtbl_is_readonly};
-use super::vector_clock_ad::VerifiedVectorClockAdPlan;
+use super::vector_clock_ad::{ClockGuard, VerifiedVectorClockAdPlan};
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_route::{
     RouteResolution, RoutedUseSource, VectorRegion, VectorRouteError, VectorRouteSession,
@@ -311,6 +313,7 @@ struct PureVectorLowerer<'a> {
     int_helpers: BTreeSet<&'static str>,
     state_plan: Option<&'a VerifiedVectorStatePlan>,
     ui_stores: BTreeMap<LowerScope, Vec<FirId>>,
+    upsampling_domains: BTreeMap<u64, u64>,
 }
 
 /// Lowers actual effect-free prepared signals into P4.4 vector regions.
@@ -428,6 +431,24 @@ fn lower_vector_program_impl<'a>(
         )?
     };
     trace_stage("route-session");
+    // Signals whose inferred clock environment is a counted upsampling
+    // domain; ZeroPad gating needs that domain's fire index.
+    let upsampling_domains = clock_plan
+        .map(|clock_plan| {
+            clock_plan
+                .plan()
+                .clock_islands
+                .iter()
+                .filter(|island| island.guard == ClockGuard::CountedUpsampling)
+                .flat_map(|island| {
+                    island
+                        .signal_ids
+                        .iter()
+                        .map(|&signal_id| (signal_id, island.domain_id))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let mut lowerer = PureVectorLowerer {
         prepared,
         ui: context.ui,
@@ -449,6 +470,7 @@ fn lower_vector_program_impl<'a>(
         int_helpers: BTreeSet::new(),
         state_plan,
         ui_stores: BTreeMap::new(),
+        upsampling_domains,
     };
 
     let mut control_cache = BTreeMap::new();
@@ -1021,10 +1043,12 @@ impl PureVectorLowerer<'_> {
                 let _ = self.lower_dep(scope, block, cache, active)?;
                 self.lower_dep(scope, held, cache, active)?
             }
-            SigMatch::Clocked(_, inner)
-            | SigMatch::TempVar(inner)
-            | SigMatch::PermVar(inner)
-            | SigMatch::ZeroPad(inner, _) => self.lower_dep(scope, inner, cache, active)?,
+            SigMatch::Clocked(_, inner) | SigMatch::TempVar(inner) | SigMatch::PermVar(inner) => {
+                self.lower_dep(scope, inner, cache, active)?
+            }
+            SigMatch::ZeroPad(value, amount) => {
+                self.lower_zero_pad(scope, signal_id, value, amount, cache, active)?
+            }
             SigMatch::OnDemand(children)
             | SigMatch::Upsampling(children)
             | SigMatch::Downsampling(children) => {
@@ -1819,6 +1843,44 @@ impl PureVectorLowerer<'_> {
                 signal_id,
                 expression: "symbolic recursion reference has no reachable binder".to_owned(),
             })
+    }
+
+    /// Lowers `ZeroPad(x, h)` under its counted upsampling island as
+    /// `((vclock_d<N>_fire == h - 1) ? x : 0)`, the scalar `generateZeroPad`
+    /// gating: the outer-rate input enters on the last fire only. Passing `x`
+    /// through unguarded feeds it on every fire and, e.g., accumulates an
+    /// impulse `h` times.
+    fn lower_zero_pad(
+        &mut self,
+        scope: LowerScope,
+        signal_id: u64,
+        value: SigId,
+        amount: SigId,
+        cache: &mut BTreeMap<u64, FirId>,
+        active: &mut BTreeSet<(LowerScope, u64)>,
+    ) -> Result<FirId, PureVectorLowerError> {
+        let Some(&domain_id) = self.upsampling_domains.get(&signal_id) else {
+            return Err(PureVectorLowerError::UnsupportedSignal {
+                signal_id,
+                expression: "ZeroPad outside a counted upsampling island (zero-stuffed \
+                             inputs are only legal under an upsampling fire loop)"
+                    .to_owned(),
+            });
+        };
+        let value = self.lower_dep(scope, value, cache, active)?;
+        let amount = self.lower_dep(scope, amount, cache, active)?;
+        let typ = self.fir_type(signal_id)?;
+        let zero = self.zero_value(&typ)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        let idx = b.load_var(
+            format!("vclock_d{domain_id}_fire"),
+            AccessType::Loop,
+            FirType::Int32,
+        );
+        let one = b.int32(1);
+        let last = b.binop(FirBinOp::Sub, amount, one, FirType::Int32);
+        let is_last = b.binop(FirBinOp::Eq, idx, last, FirType::Int32);
+        Ok(b.select2(is_last, value, zero, typ))
     }
 
     fn zero_value(&mut self, typ: &FirType) -> Result<FirId, PureVectorLowerError> {

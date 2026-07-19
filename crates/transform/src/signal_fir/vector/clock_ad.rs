@@ -29,12 +29,13 @@ use std::fmt;
 use propagate::{ClockDomainKind, ClockDomainTable};
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::Nature;
+use tlib::{match_sym_rec, match_sym_ref};
 
 use crate::clk_env::{ClkEnvError, annotate};
 use crate::signal_prepare::VerifiedPreparedSignals;
 
 use super::decoration_verify::{CanonicalSigType, VerifiedDecorationCertificate};
-use super::vector_analysis::{EffectAtom, StateCell, StateResource};
+use super::vector_analysis::{DepKind, EffectAtom, StateCell, StateResource};
 use super::vector_plan::VerifiedVectorPlan;
 use super::vector_verify::{LoopKind, Placement, VectorPlan, VectorPlanError, verify_vector_plan};
 
@@ -289,6 +290,11 @@ pub enum VectorClockAdError {
     InvalidDownsampleFactor {
         factor: i64,
     },
+    UnadoptedStatefulRead {
+        domain_id: u64,
+        consumer: u64,
+        producer: u64,
+    },
 }
 
 impl fmt::Display for VectorClockAdError {
@@ -376,6 +382,19 @@ impl fmt::Display for VectorClockAdError {
             }
             Self::InvalidDownsampleFactor { factor } => {
                 write!(f, "downsampling factor must be positive, got {factor}")
+            }
+            Self::UnadoptedStatefulRead {
+                domain_id,
+                consumer,
+                producer,
+            } => {
+                write!(
+                    f,
+                    "clock domain {domain_id}: signal {consumer} reads audio-rate stateful \
+                     signal {producer} from fire time; rate-polymorphic state under a clock \
+                     wrapper is not adopted into the domain yet and would advance at the \
+                     wrong rate"
+                )
             }
         }
     }
@@ -477,6 +496,7 @@ fn verify_vector_clock_ad_plan_after_vector_plan(
     if clock_ad_plan.clock_islands != expected_islands {
         return Err(VectorClockAdError::IslandCoverageMismatch);
     }
+    reject_unadopted_stateful_reads(prepared, decorations, vector_plan, &expected_islands)?;
     let expected_transports = derive_transport_policies(prepared, vector_plan)?;
     if clock_ad_plan.transports != expected_transports {
         return Err(VectorClockAdError::TransportCoverageMismatch);
@@ -489,6 +509,91 @@ fn verify_vector_clock_ad_plan_after_vector_plan(
         return Err(VectorClockAdError::ReverseAdCoverageMismatch);
     }
     Ok(())
+}
+
+/// Rejects fire-time reads of audio-rate stateful values.
+///
+/// Clock inference is rate-polymorphic: a recursion or delay whose inputs are
+/// all constants infers the bottom environment, so the plan hoists it into an
+/// outer-rate loop even when it is written under a clock wrapper (e.g.
+/// `upsampling(1 : (+ ~ *(0.5)))`). Its state then advances once per outer
+/// sample instead of once per fire — a miscompile the reference semantics
+/// reject. Until such groups are adopted into their wrapper's domain, any
+/// value dependency from an in-domain consumer to an audio-rate stateful
+/// producer fails closed. The one legal crossing is the `ZeroPad` value
+/// operand: propagation inserts it exactly where an outer-rate producer is
+/// zero-stuffed into an upsampled domain.
+fn reject_unadopted_stateful_reads(
+    prepared: &VerifiedPreparedSignals,
+    decorations: &VerifiedDecorationCertificate,
+    plan: &VectorPlan,
+    islands: &[ClockIsland],
+) -> Result<(), VectorClockAdError> {
+    let ids = signal_ids(prepared);
+    let signals = plan
+        .signals
+        .iter()
+        .map(|signal| (signal.signal_id, signal))
+        .collect::<BTreeMap<_, _>>();
+    let domain_by_clock = islands
+        .iter()
+        .map(|island| (island.domain_id + 1, island.domain_id))
+        .collect::<BTreeMap<_, _>>();
+    for dependency in &decorations.certificate().dependencies {
+        if !matches!(
+            dependency.kind,
+            DepKind::Immediate | DepKind::Delayed { .. }
+        ) {
+            continue;
+        }
+        let Some(consumer) = signals.get(&u64::from(dependency.from)) else {
+            continue;
+        };
+        let Some(producer) = signals.get(&u64::from(dependency.to)) else {
+            continue;
+        };
+        if producer.clock_id != 0 {
+            continue;
+        }
+        let Some(&domain_id) = domain_by_clock.get(&consumer.clock_id) else {
+            continue;
+        };
+        let Some(&producer_sig) = ids.get(&dependency.to) else {
+            continue;
+        };
+        if !is_stateful_producer(prepared, producer_sig) {
+            continue;
+        }
+        let consumer_sig = ids.get(&dependency.from).copied();
+        if consumer_sig
+            .is_some_and(|sig| matches!(match_sig(prepared.arena(), sig), SigMatch::ZeroPad(_, _)))
+        {
+            continue;
+        }
+        return Err(VectorClockAdError::UnadoptedStatefulRead {
+            domain_id,
+            consumer: u64::from(dependency.from),
+            producer: u64::from(dependency.to),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the signal carries per-sample state whose advance rate is
+/// observable: symbolic recursion (group, reference, or projection) and
+/// explicit delays.
+fn is_stateful_producer(prepared: &VerifiedPreparedSignals, sig: SigId) -> bool {
+    let arena = prepared.arena();
+    if match_sym_rec(arena, sig).is_some() || match_sym_ref(arena, sig).is_some() {
+        return true;
+    }
+    match match_sig(arena, sig) {
+        SigMatch::Delay1(_) | SigMatch::Delay(_, _) | SigMatch::Prefix(_, _) => true,
+        SigMatch::Proj(_, group) => {
+            match_sym_rec(arena, group).is_some() || match_sym_ref(arena, group).is_some()
+        }
+        _ => false,
+    }
 }
 
 fn signal_ids(prepared: &VerifiedPreparedSignals) -> BTreeMap<u32, SigId> {

@@ -58,6 +58,16 @@ const ATTACH_CROSS_LOOP_SOURCE: &str = concat!(
     "aOut = gA : _,!;\n",
     "process = attach(_, aOut);"
 );
+// Zero-stuffed upsampling input driving an in-domain accumulator. The vector
+// lowerer used to pass `ZeroPad` through unguarded, feeding the outer-rate
+// input on every fire: an impulse was accumulated `factor` times. Scalar
+// bit-exactness discriminates the missing fire gating.
+const UPSAMPLING_ZEROPAD_SOURCE: &str = "process = (2, _) : upsampling(+ ~ _);";
+// A rate-polymorphic recursion (all-constant inputs infer the bottom clock
+// environment) written under an upsampling wrapper. The plan hoists it into
+// an outer-rate loop, so its state would advance once per outer sample
+// instead of once per fire. Until domain adoption exists this fails closed.
+const UNADOPTED_STATEFUL_SOURCE: &str = "process = (3, (_ : !)) : upsampling(1 : (+ ~ *(0.5)));";
 // `pm.ks` contains a pass-through symbolic recursion projection whose
 // cross-loop back-edge denotes the previous sample even though the selected
 // body has no explicit delay occurrence. Before X2b the vector lowerer tried
@@ -457,6 +467,35 @@ fn attach_of_a_cross_loop_symbolic_projection_is_certified() {
     assert_vector_pipeline_certified("attach_cross_loop", ATTACH_CROSS_LOOP_SOURCE, 32);
     assert_scalar_vector_bit_exact("attach_cross_loop", ATTACH_CROSS_LOOP_SOURCE, 32);
     assert_scalar_vector_bit_exact("attach_cross_loop_tail", ATTACH_CROSS_LOOP_SOURCE, 24);
+}
+
+#[test]
+fn upsampling_zero_pad_gating_is_certified_and_bit_exact() {
+    assert_vector_pipeline_certified("upsampling_zero_pad", UPSAMPLING_ZEROPAD_SOURCE, 32);
+    assert_scalar_vector_bit_exact("upsampling_zero_pad", UPSAMPLING_ZEROPAD_SOURCE, 32);
+    assert_scalar_vector_bit_exact("upsampling_zero_pad_tail", UPSAMPLING_ZEROPAD_SOURCE, 24);
+}
+
+#[test]
+fn unadopted_stateful_recursion_under_upsampling_falls_back() {
+    let compiler = Compiler::new().with_compute_mode(ComputeMode::Vector {
+        vec_size: 8,
+        loop_variant: 0,
+    });
+    let output = compiler
+        .compile_source_to_fir_with_lane(
+            "unadopted.dsp",
+            UNADOPTED_STATEFUL_SOURCE,
+            SignalFirLane::TransformFastLane,
+        )
+        .expect("unadopted stateful vector FIR");
+    assert_eq!(
+        output.vector_pipeline_status,
+        VectorPipelineStatus::Fallback(VectorFallbackReason::ClockAdPlan),
+        "rate-polymorphic state under a clock wrapper must fail closed: {:?}",
+        output.vector_pipeline_detail
+    );
+    assert_eq!(output.vector_effective_mode, VectorEffectiveMode::Scalar);
 }
 
 #[test]
