@@ -142,6 +142,31 @@ fn canonical_fir_fingerprint_ignores_arena_allocation_history() {
 }
 
 #[test]
+fn dump_and_fingerprint_survive_deep_trees_on_small_stacks() {
+    // Hosts embedding libfaust call the factory from ordinary threads, so the
+    // walkers must not recurse proportionally to tree depth (large DSPs such as
+    // reverbTank overflowed an 8 MiB stack through the factory fingerprint).
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| {
+            let mut store = FirStore::new();
+            let root = {
+                let mut b = FirBuilder::new(&mut store);
+                let mut value = b.int32(1);
+                for _ in 0..100_000 {
+                    value = b.neg(value, FirType::Int32);
+                }
+                value
+            };
+            assert!(!canonical_fir_fingerprint(&store, root).is_empty());
+            assert!(!dump_fir(&store, root).is_empty());
+        })
+        .expect("spawn small-stack worker")
+        .join()
+        .expect("deep-tree walkers must not overflow the stack");
+}
+
+#[test]
 fn dump_fir_expands_for_loop_body() {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);

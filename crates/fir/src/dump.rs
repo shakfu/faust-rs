@@ -38,43 +38,47 @@ pub fn canonical_fir_fingerprint(store: &FirStore, root: FirId) -> String {
     out
 }
 
+// Iterative: recursion depth would scale with the raw tree depth (Cons list
+// spines make it linear in program size) and overflows the stack on large DSPs.
 fn fingerprint_node(
     store: &FirStore,
-    id: FirId,
+    root: FirId,
     labels: &mut HashMap<FirId, u32>,
     emitted: &mut HashSet<FirId>,
     out: &mut String,
 ) {
-    if !emitted.insert(id) {
-        return;
-    }
-    let node = store
-        .arena
-        .node(id)
-        .expect("FIR fingerprint root and children must belong to the store");
-    let children = node.children.as_slice();
-    let child_labels: Vec<u32> = children
-        .iter()
-        .map(|child| {
-            let next = u32::try_from(labels.len()).expect("FIR fingerprint exceeds u32::MAX nodes");
-            *labels.entry(*child).or_insert(next)
-        })
-        .collect();
-    let label = labels[&id];
-
-    let _ = write!(out, "@{label}=");
-    write_canonical_kind(store, &node.kind, out);
-    out.push('[');
-    for (index, child_label) in child_labels.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !emitted.insert(id) {
+            continue;
         }
-        let _ = write!(out, "@{child_label}");
-    }
-    out.push_str("]\n");
+        let node = store
+            .arena
+            .node(id)
+            .expect("FIR fingerprint root and children must belong to the store");
+        let children = node.children.as_slice();
+        let child_labels: Vec<u32> = children
+            .iter()
+            .map(|child| {
+                let next =
+                    u32::try_from(labels.len()).expect("FIR fingerprint exceeds u32::MAX nodes");
+                *labels.entry(*child).or_insert(next)
+            })
+            .collect();
+        let label = labels[&id];
 
-    for child in children {
-        fingerprint_node(store, *child, labels, emitted, out);
+        let _ = write!(out, "@{label}=");
+        write_canonical_kind(store, &node.kind, out);
+        out.push('[');
+        for (index, child_label) in child_labels.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "@{child_label}");
+        }
+        out.push_str("]\n");
+
+        stack.extend(children.iter().rev().copied());
     }
 }
 
@@ -104,21 +108,23 @@ fn write_canonical_kind(store: &FirStore, kind: &NodeKind, out: &mut String) {
     }
 }
 
+// Iterative for the same stack-depth reason as `fingerprint_node`.
 fn dump_node(
     store: &FirStore,
-    id: FirId,
+    root: FirId,
     depth: usize,
     out: &mut String,
     seen: &mut HashSet<FirId>,
 ) {
-    let indent = "  ".repeat(depth);
-    let node = match_fir(store, id);
-    let _ = writeln!(out, "{indent}#{} {:?}", id.as_u32(), node);
-    if !seen.insert(id) {
-        return;
-    }
-    for child in child_ids(&node) {
-        dump_node(store, child, depth + 1, out, seen);
+    let mut stack = vec![(root, depth)];
+    while let Some((id, depth)) = stack.pop() {
+        let indent = "  ".repeat(depth);
+        let node = match_fir(store, id);
+        let _ = writeln!(out, "{indent}#{} {:?}", id.as_u32(), node);
+        if !seen.insert(id) {
+            continue;
+        }
+        stack.extend(child_ids(&node).into_iter().rev().map(|c| (c, depth + 1)));
     }
 }
 
