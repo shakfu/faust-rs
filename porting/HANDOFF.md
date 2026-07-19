@@ -19,7 +19,8 @@ Date: 2026-07-19
 | R1 docs rewrite | done (2 parts), full battery green | `0c53de09`, `deebe3d7` |
 | R2 test splits | done (3 parts), full battery green | `6c49e1c5`, `559a79cd`, `c1fd79f3` |
 | R3 namespace | done, gates green (see note below) | `b643fdd7`, `0c829798` |
-| R4–R9 | not started | — |
+| R4.4 walker | done, arbiter net 0 defects | `7d527c96` |
+| R4 rest, R5–R9 | not started | — |
 
 ## Byte-identity arbiter (R0.5)
 
@@ -31,7 +32,7 @@ Date: 2026-07-19
   difference by *three* working-tree emissions before declaring a defect.
 - **Pre-existing defect (recorded in the R0 journal entry, do not fix inside
   the cleanup):** scalar emission is nondeterministic run-to-run on
-  delay-heavy DSPs (intermittently!). 76 of 396 cases are frozen in
+  delay-heavy DSPs (intermittently!). 77 of 396 cases are frozen in
   `nondeterministic-frozen.txt`; zero certified-vec cases affected.
   Reproducer: compile `zita_rev1.dsp` twice, diff. Suspect: `HashMap`
   iteration in `signal_fir/delay/manager.rs` (`delay_lines`).
@@ -59,12 +60,7 @@ Date: 2026-07-19
 
 ## Next steps (R4)
 
-1. Exhaustive FIR child-traversal primitive (plan §4.6/R4.4): replace the
-   silently-skipping `fir_children` (`vector/lower/mod.rs`) and
-   `fir_reachable` (`vector/assemble/mod.rs`) with a shared total walker
-   (prefer `crates/fir`), exhaustive `match` (no wildcard arm) so new
-   `FirMatch` variants fail at compile time; checkers keep their own
-   reachability logic.
+1. (done, `7d527c96`) Exhaustive FIR walker shared from `crates/fir`.
 2. Prepared-ID indexing extraction; canonical `ValueType`→FIR conversion.
 3. DTO model modules (prep for R5–R7), re-exported from old paths.
 4. Then R5–R9 per plan; §4.8 guard rule applies to the R6/R7 splits
