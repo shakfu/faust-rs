@@ -2615,31 +2615,14 @@ fn body_contains_equivalent_scalar_load(
     false
 }
 
+/// Complete child listing for the routed-body name search.
+///
+/// Delegates to the exhaustive [`fir::fir_match_children`] primitive so an
+/// unclassified `FirMatch` variant fails at compile time in `fir` instead of
+/// silently truncating this verifier's search (the failure mode that once hid
+/// a transport during E2).
 fn fir_children(store: &FirStore, value: FirId) -> Vec<FirId> {
-    match match_fir(store, value) {
-        FirMatch::BinOp { lhs, rhs, .. } => vec![lhs, rhs],
-        FirMatch::Neg { value, .. }
-        | FirMatch::Cast { value, .. }
-        | FirMatch::Bitcast { value, .. }
-        | FirMatch::Drop(value) => vec![value],
-        FirMatch::Select2 {
-            cond,
-            then_value,
-            else_value,
-            ..
-        } => vec![cond, then_value, else_value],
-        FirMatch::FunCall { args, .. } => args,
-        FirMatch::LoadTable { index, .. } => vec![index],
-        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
-            vec![part]
-        }
-        FirMatch::LoadSoundfileBuffer {
-            chan, part, idx, ..
-        } => vec![chan, part, idx],
-        FirMatch::DeclareVar { init, .. } => init.into_iter().collect(),
-        FirMatch::StoreTable { index, value, .. } => vec![index, value],
-        _ => Vec::new(),
-    }
+    fir::fir_match_children(store, value)
 }
 
 #[cfg(test)]

@@ -925,3 +925,112 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
         _ => FirMatch::Unknown,
     }
 }
+
+/// Lists every child [`FirId`] of one decoded FIR node.
+///
+/// This is the canonical **total** traversal primitive: the match is
+/// deliberately exhaustive with no wildcard arm, so adding a new
+/// [`FirMatch`] variant fails compilation here instead of letting a
+/// traversal silently skip the new node kind (the failure mode that once
+/// hid a transport from a vector body verifier). Callers that need a
+/// narrower policy must still enumerate variants explicitly rather than
+/// falling back to this function's complement.
+#[must_use]
+pub fn fir_match_children(store: &FirStore, id: FirId) -> Vec<FirId> {
+    match match_fir(store, id) {
+        FirMatch::Unknown
+        | FirMatch::Int32 { .. }
+        | FirMatch::Int64 { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Quad { .. }
+        | FirMatch::FixedPoint { .. }
+        | FirMatch::Int32Array { .. }
+        | FirMatch::Float32Array { .. }
+        | FirMatch::Float64Array { .. }
+        | FirMatch::QuadArray { .. }
+        | FirMatch::FixedPointArray { .. }
+        | FirMatch::LoadVar { .. }
+        | FirMatch::LoadVarAddress { .. }
+        | FirMatch::NullValue { .. }
+        | FirMatch::NewDsp { .. }
+        | FirMatch::DeclareStructType { .. }
+        | FirMatch::DeclareBufferIterators { .. }
+        | FirMatch::ShiftArrayVar { .. }
+        | FirMatch::NullStatement
+        | FirMatch::OpenBox { .. }
+        | FirMatch::CloseBox
+        | FirMatch::AddButton { .. }
+        | FirMatch::AddSlider { .. }
+        | FirMatch::AddBargraph { .. }
+        | FirMatch::AddSoundfile { .. }
+        | FirMatch::AddMetaDeclare { .. }
+        | FirMatch::Label(_) => Vec::new(),
+        FirMatch::ValueArray { values, .. } => values,
+        FirMatch::LoadTable { index, .. } => vec![index],
+        FirMatch::TeeVar { value, .. } => vec![value],
+        FirMatch::BinOp { lhs, rhs, .. } => vec![lhs, rhs],
+        FirMatch::Neg { value, .. }
+        | FirMatch::Cast { value, .. }
+        | FirMatch::Bitcast { value, .. } => vec![value],
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => vec![cond, then_value, else_value],
+        FirMatch::FunCall { args, .. } => args,
+        FirMatch::DeclareVar { init, .. } => init.into_iter().collect(),
+        FirMatch::DeclareTable { values, .. } => values,
+        FirMatch::DeclareFun { body, .. } => body.into_iter().collect(),
+        FirMatch::StoreVar { value, .. } => vec![value],
+        FirMatch::StoreTable { index, value, .. } => vec![index, value],
+        FirMatch::Drop(value) => vec![value],
+        FirMatch::Return(value) => value.into_iter().collect(),
+        FirMatch::Block(items) => items,
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            let mut out = vec![cond, then_block];
+            out.extend(else_block);
+            out
+        }
+        FirMatch::Control { cond, stmt } => vec![cond, stmt],
+        FirMatch::ForLoop {
+            init,
+            end,
+            step,
+            body,
+            ..
+        } => vec![init, end, step, body],
+        FirMatch::SimpleForLoop { upper, body, .. } => vec![upper, body],
+        FirMatch::IteratorForLoop { body, .. } => vec![body],
+        FirMatch::WhileLoop { cond, body } => vec![cond, body],
+        FirMatch::Switch {
+            cond,
+            cases,
+            default,
+        } => {
+            let mut out = vec![cond];
+            out.extend(cases.iter().map(|(_, block)| *block));
+            out.extend(default);
+            out
+        }
+        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
+            vec![part]
+        }
+        FirMatch::LoadSoundfileBuffer {
+            chan, part, idx, ..
+        } => vec![chan, part, idx],
+        FirMatch::Module {
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            ..
+        } => vec![dsp_struct, globals, functions, static_decls],
+    }
+}

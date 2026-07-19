@@ -669,3 +669,40 @@ fn match_unknown_on_non_fir_node() {
     assert_eq!(match_fir(&store, raw), FirMatch::Unknown);
     assert_eq!(store.value_type(raw), None);
 }
+
+#[test]
+fn fir_match_children_is_total_over_a_composite_module() {
+    // Builds a module touching value, statement, control-flow, and UI nodes,
+    // then checks the exhaustive child walker reaches every constructed node.
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let one = b.int32(1);
+    let two = b.int32(2);
+    let sum = b.binop(FirBinOp::Add, one, two, FirType::Int32);
+    let tee = b.tee_var("t", AccessType::Stack, sum, FirType::Int32);
+    let arr = b.value_array(&[tee], FirType::Int32);
+    let drop_arr = b.drop_(arr);
+    let case_block = b.block(&[drop_arr]);
+    let switch = b.switch(one, &[(0, case_block)], None);
+    let body = b.block(&[switch]);
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let functions = b.block(&[body]);
+    let static_decls = b.block(&[]);
+    let module = b.module(0, 0, "m", dsp_struct, globals, functions, static_decls);
+
+    let mut pending = vec![module];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        pending.extend(fir_match_children(&store, node));
+    }
+    for expected in [one, two, sum, tee, arr, drop_arr, case_block, switch, body] {
+        assert!(
+            seen.contains(&expected),
+            "exhaustive walker must reach node {expected:?}"
+        );
+    }
+}

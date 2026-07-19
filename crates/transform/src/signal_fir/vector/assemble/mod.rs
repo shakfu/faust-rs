@@ -2079,6 +2079,11 @@ fn verify_assembled_lockstep_bundles(
 ///
 /// Callers checking several targets against one body must reuse this set: a
 /// per-target traversal walks the whole body once per question.
+/// Complete reachable-node set from `root`.
+///
+/// Iterates the exhaustive [`fir::fir_match_children`] primitive so an
+/// unclassified `FirMatch` variant fails at compile time in `fir` instead of
+/// silently truncating this checker's coverage inspection.
 pub(super) fn fir_reachable(store: &FirStore, root: FirId) -> BTreeSet<FirId> {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
@@ -2086,49 +2091,7 @@ pub(super) fn fir_reachable(store: &FirStore, root: FirId) -> BTreeSet<FirId> {
         if !seen.insert(node) {
             continue;
         }
-        match match_fir(store, node) {
-            FirMatch::Block(words) | FirMatch::FunCall { args: words, .. } => pending.extend(words),
-            FirMatch::BinOp { lhs, rhs, .. } => pending.extend([lhs, rhs]),
-            FirMatch::Neg { value, .. }
-            | FirMatch::Cast { value, .. }
-            | FirMatch::Bitcast { value, .. }
-            | FirMatch::Drop(value) => pending.push(value),
-            FirMatch::Select2 {
-                cond,
-                then_value,
-                else_value,
-                ..
-            } => pending.extend([cond, then_value, else_value]),
-            FirMatch::DeclareVar { init, .. } => pending.extend(init),
-            FirMatch::StoreVar { value, .. } => pending.push(value),
-            FirMatch::LoadTable { index, .. } => pending.push(index),
-            FirMatch::LoadSoundfileLength { part, .. }
-            | FirMatch::LoadSoundfileRate { part, .. } => pending.push(part),
-            FirMatch::LoadSoundfileBuffer {
-                chan, part, idx, ..
-            } => pending.extend([chan, part, idx]),
-            FirMatch::StoreTable { index, value, .. } => pending.extend([index, value]),
-            FirMatch::If {
-                cond,
-                then_block,
-                else_block,
-            } => {
-                pending.extend([cond, then_block]);
-                pending.extend(else_block);
-            }
-            FirMatch::Control { cond, stmt } => pending.extend([cond, stmt]),
-            FirMatch::ForLoop {
-                init,
-                end,
-                step,
-                body,
-                ..
-            } => pending.extend([init, end, step, body]),
-            FirMatch::SimpleForLoop { upper, body, .. } => pending.extend([upper, body]),
-            FirMatch::IteratorForLoop { body, .. } => pending.push(body),
-            FirMatch::WhileLoop { cond, body } => pending.extend([cond, body]),
-            _ => {}
-        }
+        pending.extend(fir::fir_match_children(store, node));
     }
     seen
 }
