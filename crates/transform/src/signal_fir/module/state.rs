@@ -441,28 +441,80 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Registers one per-instance table initialization block for
     /// `instanceConstants`.
+    ///
+    /// Large tables (e.g. `rwtable`/`SIGGEN`-seeded delay/looper buffers) are
+    /// copied in with a real loop from a `Static` companion table instead of
+    /// being fully unrolled into one store per element: an unrolled
+    /// `instanceConstants` body for a table with tens of thousands of
+    /// elements can exceed the Cranelift backend's per-function code-size
+    /// limit (`CodeTooLarge`). This mirrors what the C++ compiler always
+    /// does for array initialization (`generateInitArray`), so the threshold
+    /// only exists to keep small tables (the common case) as cheap,
+    /// loop-free straight-line code.
     pub(super) fn register_constant_table_init(
         &mut self,
         name: String,
         access: AccessType,
+        elem_ty: FirType,
         values: &[FirId],
     ) {
         if values.is_empty() {
             return;
         }
-        let mut stores = Vec::with_capacity(values.len());
-        for (index, value) in values.iter().enumerate() {
-            let idx = {
+        const UNROLLED_TABLE_INIT_THRESHOLD: usize = 256;
+        if values.len() <= UNROLLED_TABLE_INIT_THRESHOLD {
+            let mut stores = Vec::with_capacity(values.len());
+            for (index, value) in values.iter().enumerate() {
+                let idx = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.int32(i32::try_from(index).unwrap_or(i32::MAX))
+                };
+                let store = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.store_table(name.clone(), access, idx, *value)
+                };
+                stores.push(store);
+            }
+            let mut b = FirBuilder::new(&mut self.store);
+            self.sections.constants_statements.push(b.block(&stores));
+            return;
+        }
+
+        let init_name = format!("{name}Init");
+        let init_decl = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.declare_table(init_name.clone(), AccessType::Static, elem_ty.clone(), values)
+        };
+        self.sections.static_declarations.push(init_decl);
+
+        let loop_var = self.fresh_loop_var("lTblInit");
+        let upper = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(values.len()).unwrap_or(i32::MAX))
+        };
+        let body = {
+            let index = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let loaded = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_table(init_name, AccessType::Static, index, elem_ty)
+            };
+            let index2 = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
             };
             let store = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.store_table(name.clone(), access, idx, *value)
+                b.store_table(name, access, index2, loaded)
             };
-            stores.push(store);
-        }
+            let mut b = FirBuilder::new(&mut self.store);
+            b.block(&[store])
+        };
         let mut b = FirBuilder::new(&mut self.store);
-        self.sections.constants_statements.push(b.block(&stores));
+        self.sections
+            .constants_statements
+            .push(b.simple_for_loop(loop_var, upper, body, false));
     }
 }
