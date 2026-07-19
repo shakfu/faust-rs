@@ -1356,9 +1356,9 @@ mod tests {
             .expect("core statement/value slice should generate");
 
         assert!(out.contains("int helper(int x)"));
-        assert!(out.contains("if ((acc < 16))"));
+        assert!(out.contains("if (acc < 16)"));
         assert!(out.contains("for (int i = 0; i < 4; ++i)"));
-        assert!(out.contains("while ((acc < 16))"));
+        assert!(out.contains("while (acc < 16)"));
         assert!(out.contains("switch (acc)"));
         assert!(out.contains("return acc;"));
     }

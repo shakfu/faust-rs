@@ -297,6 +297,36 @@ pub(crate) fn emit_binop(op: FirBinOp) -> &'static str {
 /// logical shift; every other operator renders as a plain infix expression
 /// via [`emit_binop`].
 #[must_use]
+/// Drops one redundant outer parenthesis layer from a rendered `if`/`while`
+/// head condition: the statement syntax supplies its own parentheses, and
+/// `if ((a == b))` trips clang's `-Wparentheses-equality`. Strips only when
+/// the leading parenthesis closes at the final character, i.e. actually
+/// wraps the whole expression.
+pub(crate) fn unwrap_condition(cond: &str) -> &str {
+    let bytes = cond.as_bytes();
+    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return cond;
+    }
+    let mut depth = 0_usize;
+    for (index, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return if index == bytes.len() - 1 {
+                        &cond[1..bytes.len() - 1]
+                    } else {
+                        cond
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    cond
+}
+
 pub(crate) fn emit_binop_expr(op: FirBinOp, lhs: &str, rhs: &str) -> String {
     match op {
         FirBinOp::LRsh => format!("((int32_t)(((uint32_t)({lhs})) >> ({rhs})))"),
@@ -742,6 +772,7 @@ pub(crate) fn emit_stmt_common<E>(
             else_block,
         } => match (ctx.render_value)(cond) {
             Ok(cond) => {
+                let cond = unwrap_condition(&cond);
                 let _ = writeln!(out, "{tab}if ({cond}) {{");
                 if let Err(err) = (ctx.emit_block)(out, then_block, indent + 1, mode) {
                     return Some(Err(err));
@@ -760,6 +791,7 @@ pub(crate) fn emit_stmt_common<E>(
         },
         FirMatch::Control { cond, stmt } => match (ctx.render_value)(cond) {
             Ok(cond) => {
+                let cond = unwrap_condition(&cond);
                 let _ = writeln!(out, "{tab}if ({cond}) {{");
                 if let Err(err) = (ctx.emit_stmt)(out, stmt, indent + 1, mode) {
                     return Some(Err(err));
@@ -840,6 +872,7 @@ pub(crate) fn emit_stmt_common<E>(
         },
         FirMatch::WhileLoop { cond, body } => match (ctx.render_value)(cond) {
             Ok(cond) => {
+                let cond = unwrap_condition(&cond);
                 let _ = writeln!(out, "{tab}while ({cond}) {{");
                 if let Err(err) = (ctx.emit_block)(out, body, indent + 1, mode) {
                     return Some(Err(err));
@@ -988,7 +1021,7 @@ pub(crate) fn emit_stmt_common<E>(
 mod tests {
     use super::{
         CFamilySyntax, emit_binop, emit_binop_expr, emit_type, format_float32, string_literal,
-        trim_float,
+        trim_float, unwrap_condition,
     };
     use fir::{FirBinOp, FirType};
 
@@ -1035,6 +1068,16 @@ mod tests {
     fn emit_binop_expr_renders_plain_infix() {
         assert_eq!(emit_binop_expr(FirBinOp::Add, "a", "b"), "(a + b)");
         assert_eq!(emit_binop_expr(FirBinOp::Lt, "x", "1"), "(x < 1)");
+    }
+
+    #[test]
+    fn unwrap_condition_strips_only_a_whole_expression_wrapper() {
+        assert_eq!(unwrap_condition("(a == b)"), "a == b");
+        assert_eq!(unwrap_condition("((a == b) && c)"), "(a == b) && c");
+        assert_eq!(unwrap_condition("(a) == (b)"), "(a) == (b)");
+        assert_eq!(unwrap_condition("a == b"), "a == b");
+        assert_eq!(unwrap_condition("iSlow0"), "iSlow0");
+        assert_eq!(unwrap_condition(""), "");
     }
 
     #[test]
