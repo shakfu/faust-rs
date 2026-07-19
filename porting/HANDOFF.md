@@ -19,7 +19,7 @@ Date: 2026-07-19
 | R1 docs rewrite | done (2 parts), full battery green | `0c53de09`, `deebe3d7` |
 | R2 test splits | done (3 parts), full battery green | `6c49e1c5`, `559a79cd`, `c1fd79f3` |
 | R3 namespace | done, gates green (see note below) | `b643fdd7`, `0c829798` |
-| R4.4 walker | done, arbiter net 0 defects | `7d527c96` |
+| R4.4 walker | done, arbiter net 0 defects, coverage 1,536 unchanged | `7d527c96` |
 | R4 rest, R5–R9 | not started | — |
 
 ## Byte-identity arbiter (R0.5)
@@ -61,7 +61,12 @@ Date: 2026-07-19
 ## Next steps (R4)
 
 1. (done, `7d527c96`) Exhaustive FIR walker shared from `crates/fir`.
-2. Prepared-ID indexing extraction; canonical `ValueType`→FIR conversion.
+2. Prepared-ID indexing extraction (R4.2): the repeated shape is the
+   `(signal_id -> record)` map plus `u64::from(record.signal_id)` checked
+   conversions — see `vector/clock_ad/mod.rs` ~620-720 for the densest
+   instance; `state` and `analysis` repeat it. Review each caller's
+   admission semantics before sharing (plan R4.3 rule: same policy only;
+   otherwise separate wrappers around a shared total conversion).
 3. DTO model modules (prep for R5–R7), re-exported from old paths.
 4. Then R5–R9 per plan; §4.8 guard rule applies to the R6/R7 splits
    (`reject_unadopted_stateful_reads` must stay on both producer and checker
