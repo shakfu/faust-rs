@@ -1,7 +1,17 @@
 # Vector Plan Contexts Divergence Plan
 
 Date: 2026-07-18
-Status: X1 complete (all three mechanisms traced; diagnostic corrected); X2 pending
+Status: X1 complete (all three mechanisms traced; diagnostic corrected);
+X2 complete (classes A and C fixed and qualified: 16-mode corpus sweep
+unchanged at 97/34/1, byte-identity 180/182 with the two `echo_bug` drifts
+characterized as common-subexpression sharing and oracle-verified 8/8, real
+world directory 159 -> 165 vectorized); X2b pending (class B: serve
+cross-group SYMREF back-edges — a transport would carry current-sample values
+where the back-edge needs previous-sample semantics, so a naive transport is
+a miscompile; candidate designs are RecursionTransition coverage for
+pass-through alias slots, or preparation-phase normalization of non-cyclic
+back-edges to an explicit one-sample delay, the latter rejected for X2
+because it changes scalar codegen globally)
 Scope: agreement between the vector plan's execution-context model and what the
 lowering materializes
 

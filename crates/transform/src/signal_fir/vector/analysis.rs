@@ -879,6 +879,20 @@ pub fn signal_dependencies(
             push_occurrence(&mut result, sig, gate, 0);
             push_condition(&mut result, gate);
         }
+        SigMatch::Attach(x, h) => {
+            push_both(&mut result, sig, x);
+            // `attach(x, h)` returns `x` and only forces `h`'s computation.
+            // The `h` schedule edge is pure ordering (`Effect`), never a value
+            // use: the `SIGATTACH` lowering does not load the attached value,
+            // so planning a transport for it produces an orphan the body
+            // checker rejects. The delay-0 occurrence stays: record coverage
+            // and the scalar occurrence facts derive from occurrences, and the
+            // plan suppresses occurrence-driven transports for pairs whose
+            // schedule edge is `Effect`.
+            push_schedule(&mut result, sig, h, DepKind::Effect);
+            push_occurrence(&mut result, sig, h, 0);
+            push_condition(&mut result, h);
+        }
         SigMatch::ZeroPad(x, h)
         | SigMatch::Pow(x, h)
         | SigMatch::Min(x, h)
@@ -886,7 +900,6 @@ pub fn signal_dependencies(
         | SigMatch::Atan2(x, h)
         | SigMatch::Fmod(x, h)
         | SigMatch::Remainder(x, h)
-        | SigMatch::Attach(x, h)
         | SigMatch::Enable(x, h)
         | SigMatch::SoundfileLength(x, h)
         | SigMatch::SoundfileRate(x, h)

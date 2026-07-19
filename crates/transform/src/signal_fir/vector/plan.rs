@@ -155,7 +155,21 @@ impl<'a> PlacementState<'a> {
             .copied()
             .ok_or(VectorPlanBuildError::MissingRecord { signal_id })?;
         if self.structural_carriers.contains(&signal_id) {
+            // The carrier itself is structural, but its executable children
+            // enter the sample closure in the caller's context - the module
+            // contract this traversal previously broke by stopping here, which
+            // left every signal reachable only through a carrier without an
+            // execution context. Carrier chains are cyclic (`SYMREC` bodies
+            // reference `SYMREF` of their own group), so the visited guard
+            // applies to carriers too.
             self.placement.insert(signal_id, Placement::Inline);
+            if !self.visited.insert((signal_id, current_loop)) {
+                return Ok(());
+            }
+            let children = self.children.get(&signal_id).cloned().unwrap_or_default();
+            for child in children {
+                self.visit(child, current_loop)?;
+            }
             return Ok(());
         }
         if !self.sample_required.contains(&signal_id) {
@@ -488,6 +502,24 @@ pub fn build_vector_plan(
             break;
         }
     }
+    // Pre-seeded `owner` placements bypass the traversal entirely: a signal
+    // owning a separate loop that no root path reaches would keep a placement
+    // with no execution context, and every later stage that reads `contexts`
+    // for it would fail. Visit each one rooted at its own loop; the visited
+    // guard makes this a no-op for signals the traversal already covered.
+    let preseeded = state
+        .placement
+        .iter()
+        .filter_map(|(&signal, &placement)| match placement {
+            Placement::Owned(loop_id) if !state.contexts.contains_key(&signal) => {
+                Some((signal, loop_id))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (signal, loop_id) in preseeded {
+        state.visit(signal, loop_id)?;
+    }
     trace_stage("placement");
     for record in &certificate.records {
         if sample_required.contains(&record.signal_id)
@@ -547,10 +579,20 @@ pub fn build_vector_plan(
             &mut effect_edges,
         )?;
     }
+    // Pairs whose schedule edge is `Effect` are pure ordering: `attach`'s
+    // forcing edge keeps its delay-0 occurrence for record coverage and scalar
+    // occurrence facts, but must not plan a value transport nobody loads.
+    let ordering_only_pairs = certificate
+        .dependencies
+        .iter()
+        .filter(|dependency| matches!(dependency.kind, DepKind::Effect))
+        .map(|dependency| (dependency.from, dependency.to))
+        .collect::<BTreeSet<_>>();
     for occurrence in certificate
         .occurrence_dependencies
         .iter()
         .filter(|occurrence| occurrence.delay == 0)
+        .filter(|occurrence| !ordering_only_pairs.contains(&(occurrence.from, occurrence.to)))
     {
         let Some(Placement::Owned(producer)) = state.placement.get(&occurrence.to).copied() else {
             continue;

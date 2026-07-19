@@ -48,6 +48,16 @@ const SOUNDFILE_READ_SOURCE: &str = concat!(
     "sf = soundfile(\"son[url:{'sound1';'sound2'}]\", 2);\n",
     "process = 0, _~+(1) : sf : _,!,_,_;"
 );
+// `attach` of a multi-projection symbolic recursion group's value from
+// another loop. `attach` only forces the computation; before the ordering-only
+// edge kind existed the plan transported the value, the `SIGATTACH` lowering
+// discarded it, and the body checker rejected the orphan transport.
+const ATTACH_CROSS_LOOP_SOURCE: &str = concat!(
+    "fA(x,y) = y + 0.125, x * 0.5;\n",
+    "gA = fA ~ (_,_);\n",
+    "aOut = gA : _,!;\n",
+    "process = attach(_, aOut);"
+);
 const PULSE_COUNTUP_LOOP_SOURCE: &str = r#"
     pulse_countup_loop(n, trig) = + ~ cond(n) * trig with { cond(n, x) = x * (x <= n); };
     process = pulse_countup_loop(4, 1) + 0.001;
@@ -433,6 +443,13 @@ fn recursive_short_delay_cpp_has_one_fused_read_compute_write_loop() {
         .find("output0[i0] =")
         .expect("safe pure tail in fused loop");
     assert!(write < tail, "the state write must precede the pure tail");
+}
+
+#[test]
+fn attach_of_a_cross_loop_symbolic_projection_is_certified() {
+    assert_vector_pipeline_certified("attach_cross_loop", ATTACH_CROSS_LOOP_SOURCE, 32);
+    assert_scalar_vector_bit_exact("attach_cross_loop", ATTACH_CROSS_LOOP_SOURCE, 32);
+    assert_scalar_vector_bit_exact("attach_cross_loop_tail", ATTACH_CROSS_LOOP_SOURCE, 24);
 }
 
 #[test]

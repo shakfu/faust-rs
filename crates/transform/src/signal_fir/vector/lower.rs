@@ -971,7 +971,14 @@ impl PureVectorLowerer<'_> {
                 self.lower_dep(scope, value, cache, active)?
             }
             SigMatch::Attach(value, attached) => {
-                let _ = self.lower_dep(scope, attached, cache, active)?;
+                // `attach` only forces the attached computation; its value is
+                // never part of this expression. Lowering it here would
+                // register a routing use - and demand a transport - for a
+                // value the emitted body then discards. The attached branch
+                // executes through its own placement: effectful branches are
+                // rooted in their own loops by the plan's component sweep, and
+                // a pure attach-only branch is semantically dead.
+                let _ = attached;
                 self.lower_dep(scope, value, cache, active)?
             }
             SigMatch::Enable(value, gate) => {
