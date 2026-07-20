@@ -56,6 +56,17 @@ unsupported shape fails **closed** to scalar lowering, reported through
 code and `VectorEffectiveMode::Scalar`. A fallback is never silently counted
 as vector coverage.
 
+Since the 2026-07 cleanup (plan R5–R7), each vector stage is a directory
+whose producer and checker are physically separated files with a common
+vocabulary module — e.g. `clock_ad/{model,build,check,simulation}.rs`,
+`events/{model,produce,check}.rs`, `assemble/{model,materialize,check}.rs`.
+Admission guards live in the shared terminal verify function of each
+stage's `check.rs`, reachable from **both** the producer's last step and
+the standalone checker entry (plan §4.8); the producer/checker
+re-derivation pairs (`producer_*` vs `independently_*`/`checker_*`) are
+intentional duplication — they are the assurance boundary and must not be
+merged (plan §3.2; module headers repeat the prohibition in place).
+
 Lifecycle ownership follows the C++ Faust contract: persistent fields belong
 to the DSP struct, compiled constants to `instanceConstants`, resettable
 signal state to `instanceClear`, and UI zone resets to
@@ -96,6 +107,8 @@ cargo run -p xtask -- golden-check                             # generated-outpu
 cargo run -p xtask -- vector-coverage-check                    # certified vector retention
 cargo run --release -p xtask -- vector-compile-budget-check    # compile-cost budget
 cargo test -p compiler --test vector_mode                      # scalar/vector bit-exactness oracle
+cargo run -p xtask -- structure-check                          # layout contract (thresholds, checker isolation)
+cargo rustdoc -p transform --lib -- -D missing-docs            # documentation completeness
 ```
 
 ## Active plans

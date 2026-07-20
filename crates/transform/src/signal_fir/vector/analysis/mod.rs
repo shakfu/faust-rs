@@ -41,7 +41,9 @@ use std::fmt;
 /// signal-use facts from the same prepared forest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorSignalAnalysis {
+    /// Real execution conditions per reachable signal.
     pub conditions: ExecutionConditionTable,
+    /// Decorated signal-use facts from the same prepared forest.
     pub uses: SignalUseTable,
 }
 /// Typed P4.2 analysis errors.
@@ -49,21 +51,38 @@ pub struct VectorSignalAnalysis {
 pub enum AnalysisError {
     /// A required list-shaped signal payload was malformed, or legacy `SIGREC`
     /// reached the symbolic-recursion-only analysis boundary.
-    Malformed { sig: SigId, detail: String },
+    Malformed {
+        /// The structurally malformed signal.
+        sig: SigId,
+        /// Human-readable description of the structural problem.
+        detail: String,
+    },
     /// The verified preparation map unexpectedly lacks a reachable signal type.
-    MissingType { sig: SigId },
+    MissingType {
+        /// The reachable signal without a prepared type.
+        sig: SigId,
+    },
     /// Clock inference did not annotate a reachable signal.
-    MissingClock { sig: SigId },
+    MissingClock {
+        /// The reachable signal without a clock environment.
+        sig: SigId,
+    },
     /// A projection index was negative.
     InvalidRecursiveProjection {
+        /// The offending projection signal.
         sig: SigId,
+        /// The negative projection index.
         index: i32,
+        /// The recursion group being projected.
         group: SigId,
     },
     /// A delay amount type violates the bounded nonnegative C++ contract.
     InvalidDelayInterval {
+        /// The delayed signal.
         sig: SigId,
+        /// The delay-amount signal with the invalid interval.
         amount: SigId,
+        /// Human-readable description of the violated bound.
         detail: String,
     },
 }

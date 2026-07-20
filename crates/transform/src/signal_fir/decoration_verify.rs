@@ -50,8 +50,11 @@ pub enum DecorationScope {
 /// Exact floating interval snapshot, including precision and IEEE bit pattern.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalInterval {
+    /// IEEE bit pattern of the interval lower bound.
     pub lo_bits: u64,
+    /// IEEE bit pattern of the interval upper bound.
     pub hi_bits: u64,
+    /// Least-significant-bit position recording fixed-point precision.
     pub lsb: i32,
 }
 
@@ -62,31 +65,55 @@ pub enum CanonicalSigType {
     /// prepared boundary derives `SimpleSigType::Sound`: the sig-type nature
     /// says nothing about the handle.
     Sound,
+    /// Scalar signal type with every inference dimension snapshotted exactly.
     Simple {
+        /// Whether the signal carries integer or real samples.
         nature: Nature,
+        /// How often the value changes: constant, per block, or per sample.
         variability: Variability,
+        /// When the value becomes computable during execution.
         computability: Computability,
+        /// Whether the signal may be computed in vectorized form.
         vectorability: Vectorability,
+        /// Whether the signal is a boolean predicate result.
         boolean: Boolean,
+        /// Exact value-range snapshot, including precision bits.
         interval: CanonicalInterval,
+        /// Fixed-point resolution snapshot ignored by `SigType::PartialEq`.
         resolution: Res,
     },
+    /// Table type wrapping the element type it stores.
     Table {
+        /// Canonical type of the stored table content.
         content: Box<CanonicalSigType>,
+        /// Whether the table access yields integer or real samples.
         nature: Nature,
+        /// How often the table access result changes.
         variability: Variability,
+        /// When the table access becomes computable during execution.
         computability: Computability,
+        /// Whether the table access may be computed in vectorized form.
         vectorability: Vectorability,
+        /// Whether the table access is a boolean predicate result.
         boolean: Boolean,
+        /// Exact value-range snapshot of the table access result.
         interval: CanonicalInterval,
     },
+    /// Product type of parallel component signal types.
     Tuplet {
+        /// Canonical types of the tuple components in order.
         components: Vec<CanonicalSigType>,
+        /// Combined nature of the tuple components.
         nature: Nature,
+        /// Combined variability of the tuple components.
         variability: Variability,
+        /// Combined computability of the tuple components.
         computability: Computability,
+        /// Combined vectorability of the tuple components.
         vectorability: Vectorability,
+        /// Combined boolean status of the tuple components.
         boolean: Boolean,
+        /// Exact combined value-range snapshot of the tuple.
         interval: CanonicalInterval,
     },
 }
@@ -94,35 +121,55 @@ pub enum CanonicalSigType {
 /// Canonical condition table entry. `condition_id` is the table index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConditionFact {
+    /// Identity of this condition; must equal its position in the table.
     pub condition_id: u64,
+    /// Canonical DNF clauses of prepared-signal identities, sorted and nonempty.
     pub clauses: Vec<Vec<u32>>,
 }
 
 /// Stable recursive-projection boundary fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecursiveProjectionFact {
+    /// Nonnegative projection index within the recursion group.
     pub index: u64,
+    /// Symbolic recursion group signal read by the projection.
     pub group: u32,
 }
 
 /// One complete compute-time decoration record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecorationRecord {
+    /// Prepared-signal identity this record describes.
     pub signal_id: u32,
+    /// Exact canonical type snapshot from the verified preparation boundary.
     pub sig_type: CanonicalSigType,
+    /// Update rate of the signal: constant, per block, or per sample.
     pub variability: Variability,
+    /// Whether the signal may be computed in vectorized form.
     pub vectorability: Vectorability,
+    /// Inferred clock domain, or `None` in the base domain.
     pub clock_domain: Option<u32>,
+    /// Recursive depth used by C++ extended variability.
     pub recursiveness: u32,
+    /// Execution condition indexing into the certificate condition table.
     pub execution_condition: CondId,
+    /// Deterministic use counts grouped by context.
     pub occurrences: OccInfo,
+    /// Largest fixed delay amount among delayed readers of this signal.
     pub max_delay: u32,
+    /// Number of delayed reads of this signal.
     pub delay_reads: u32,
+    /// Whether at least one use of this signal is outside a delay.
     pub has_out_delay_occurrence: bool,
+    /// Whether this node is itself a general `sigDelay` read.
     pub is_delay_read: bool,
+    /// Whether this node is a structural symbolic-recursion tuple carrier.
     pub is_symbolic_recursion_carrier: bool,
+    /// Projection facts when this signal reads a symbolic recursion group.
     pub recursive_projection: Option<RecursiveProjectionFact>,
+    /// Whether the node is exactly an int, real, input, or foreign constant.
     pub very_simple: bool,
+    /// Sorted conservative transitive compute-time effects of this subtree.
     pub effects: Vec<EffectAtom>,
     /// Effects this signal performs itself, always a sorted subset of
     /// `effects`. Consumers that model actual effect operations must read this
@@ -134,25 +181,35 @@ pub struct DecorationRecord {
 /// Labelled scheduling dependency with source-local edge identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DependencyFact {
+    /// Signal whose decoded shape owns this edge.
     pub from: u32,
+    /// Signal the source depends on.
     pub to: u32,
+    /// Temporal class of the dependency.
     pub kind: DepKind,
+    /// Stable source-local edge key from decoded child order.
     pub edge_key: u64,
 }
 
 /// Labelled occurrence dependency. Delay is kept separate from scheduling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OccurrenceDependencyFact {
+    /// Signal whose decoded shape owns this use.
     pub from: u32,
+    /// Signal being used.
     pub to: u32,
+    /// Maximum fixed delay attached to this use; `0` means outside a delay.
     pub delay: u32,
+    /// Stable source-local use key from decoded child order.
     pub edge_key: u64,
 }
 
 /// Canonical projection of the real P4.3a prepared-signal analysis.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecorationCertificate {
+    /// Schema this certificate was exported under; must match the current one.
     pub schema_version: u32,
+    /// Semantic coverage the certificate claims.
     pub scope: DecorationScope,
     /// Prepared roots in semantic output order.
     pub roots: Vec<u32>,
@@ -191,60 +248,101 @@ impl VerifiedDecorationCertificate {
 /// A record field checked independently against authoritative analysis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecorationField {
+    /// Cached update rate of the signal.
     Variability,
+    /// Cached vectorization eligibility of the signal.
     Vectorability,
+    /// Recursive depth used by extended variability.
     Recursiveness,
+    /// Execution-condition table reference.
     ExecutionCondition,
+    /// Per-context use counts.
     Occurrences,
+    /// The combined max-delay, delay-read, and delay-occurrence facts.
     DelayFacts,
+    /// Symbolic-recursion tuple-carrier marker.
     SymbolicRecursionCarrier,
+    /// Recursive-projection identity facts.
     RecursiveProjection,
+    /// Trivial-node classification.
     VerySimple,
+    /// Transitive compute-time effect set.
     Effects,
+    /// Effects performed by the node itself.
     DirectEffects,
 }
 
 /// Why [`verify_decorations`] rejected a certificate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecorationError {
+    /// The fresh canonical analysis itself failed on the prepared forest.
     Analysis(AnalysisError),
+    /// The certificate schema version is not the one this verifier checks.
     UnsupportedSchema {
+        /// Schema version the certificate claimed.
         found: u32,
     },
+    /// The certificate claims a scope other than compute coverage.
     UnsupportedScope {
+        /// Scope the certificate claimed.
         found: DecorationScope,
     },
+    /// The certificate roots differ from the prepared outputs in order or content.
     RootsMismatch,
+    /// A certificate collection violates its canonical ordering or shape rule.
     NotCanonical {
+        /// Which collection broke its canonical rule.
         what: &'static str,
+        /// Index of the offending element within that collection.
         at: usize,
     },
+    /// Record ids do not exactly cover the compute-reachable signals.
     SignalCoverageMismatch,
+    /// The claimed `Gen` boundaries differ from those in the prepared forest.
     LifecycleBoundariesMismatch,
+    /// The condition table differs from the freshly derived one.
     ConditionTableMismatch,
+    /// A record references a condition id outside the certificate table.
     UnknownCondition {
+        /// Signal whose record holds the dangling reference.
         signal_id: u32,
+        /// Condition id that has no table entry.
         condition_id: u64,
     },
+    /// A record's canonical type differs from the authoritative type map.
     TypeMismatch {
+        /// Signal whose type snapshot is wrong.
         signal_id: u32,
     },
+    /// A record's clock domain differs from the authoritative clock map.
     ClockMismatch {
+        /// Signal whose clock domain is wrong.
         signal_id: u32,
     },
+    /// One decoration fact differs from the freshly derived analysis.
     SignalFactMismatch {
+        /// Signal whose record disagrees.
         signal_id: u32,
+        /// Which fact disagreed.
         field: DecorationField,
     },
+    /// A scheduling edge references a signal without a decoration record.
     DependencyEndpointUnknown {
+        /// Source signal of the offending edge.
         from: u32,
+        /// Target signal of the offending edge.
         to: u32,
     },
+    /// The scheduling edges differ from the freshly derived ones.
     DependenciesMismatch,
+    /// An occurrence edge references a signal without a decoration record.
     OccurrenceDependencyEndpointUnknown {
+        /// Source signal of the offending edge.
         from: u32,
+        /// Target signal of the offending edge.
         to: u32,
     },
+    /// The occurrence edges differ from the freshly derived ones.
     OccurrenceDependenciesMismatch,
 }
 

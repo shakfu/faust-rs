@@ -36,12 +36,15 @@
 //! - `clk_env`/`hgraph`/`schedule` internals are `adapted` analysis stages
 //!   exposed for diagnostics and workspace tests.
 
+#![warn(missing_docs)]
+
 pub mod clk_env;
 pub mod hgraph;
 pub mod schedule;
 pub mod signal_fir;
 pub mod signal_prepare;
 
+/// Stable crate identifier.
 pub const CRATE_NAME: &str = "transform";
 
 #[must_use]

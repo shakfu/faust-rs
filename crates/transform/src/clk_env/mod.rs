@@ -74,42 +74,69 @@ pub enum ClkEnvError {
     /// the domain tree — sibling domains may not exchange un-annotated
     /// signals (plan §4.1 scoping rule).
     Incomparable {
+        /// The signal at which the incomparable join was attempted.
         sig: SigId,
+        /// The left operand of the failed `max_clk_env` join.
         left: ClkEnv,
+        /// The right operand of the failed `max_clk_env` join.
         right: ClkEnv,
     },
     /// `R_CLOCKED`: the wrapped signal lives deeper than its annotation.
     ClockedViolation {
+        /// The offending `Clocked` signal.
         sig: SigId,
+        /// The domain declared by the `Clocked` annotation.
         annotation: ClkEnv,
+        /// The (deeper) domain inferred for the wrapped signal.
         inner: ClkEnv,
     },
     /// `R_SEQ`: the sequenced block does not dominate the read value.
     SeqViolation {
+        /// The offending `seq` signal.
         sig: SigId,
+        /// The domain of the sequenced (first) operand.
         left: ClkEnv,
+        /// The domain of the read (second) operand.
         right: ClkEnv,
     },
     /// `R_CD`: the wrapper clock must be computed in the parent domain.
     ClockComputedInside {
+        /// The offending wrapper signal.
         sig: SigId,
+        /// The parent domain the clock was expected to live in.
         expected: ClkEnv,
+        /// The domain the clock was actually inferred in.
         got: ClkEnv,
     },
     /// `R_CD`: a wrapper output child must live exactly in the inner domain.
     WrapperChildOutsideDomain {
+        /// The offending wrapper signal.
         sig: SigId,
+        /// The output child that escapes the inner domain.
         child: SigId,
+        /// The inner domain the child was required to live in.
         expected: ClkEnv,
+        /// The domain the child was actually inferred in.
         got: ClkEnv,
     },
     /// A `Clocked` env child or `SIGCLOCKENV` token is malformed, or a token
     /// id has no entry in the domain table.
-    MalformedClockEnv { sig: SigId },
+    MalformedClockEnv {
+        /// The signal carrying the malformed clock environment.
+        sig: SigId,
+    },
     /// Structural error (malformed list, de Bruijn recursion, unknown node).
-    Malformed { sig: SigId, detail: String },
+    Malformed {
+        /// The structurally malformed signal.
+        sig: SigId,
+        /// Human-readable description of the structural problem.
+        detail: String,
+    },
     /// The Kleene iteration did not stabilize within `MAX_ITERATIONS`.
-    FixpointDiverged { iterations: usize },
+    FixpointDiverged {
+        /// Number of iterations run before giving up.
+        iterations: usize,
+    },
 }
 
 fn env_name(env: ClkEnv) -> String {

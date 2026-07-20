@@ -14,7 +14,9 @@ pub const VECTOR_FIR_ASSEMBLY_VERSION: u32 = 3;
 /// Already-lowered non-state statements owned by one checked P4 loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorLoopFirInput {
+    /// Stable loop id from the vector plan.
     pub loop_id: u64,
+    /// Lowered loop-body statements in emission order.
     pub statements: Vec<FirId>,
 }
 /// One top-rate output store whose value is produced by a held clock island.
@@ -23,13 +25,17 @@ pub struct VectorLoopFirInput {
 /// ownership is explicit rather than inferred from a mutable `CodeLoop` tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorClockOutputStore {
+    /// Loop that owns the top-rate output store.
     pub owner_loop_id: u64,
+    /// FIR store writing the held island value to the output.
     pub statement: FirId,
 }
 /// Concrete statement implementing one accepted P6.1 action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorStateFirAction {
+    /// Accepted P6.1 state action being implemented.
     pub action: VectorStateAction,
+    /// FIR statement implementing the action.
     pub statement: FirId,
     /// Statements inserted into the enclosing sample scope. Recursion-step
     /// declarations are flattened so subsequent delay writes can read them.
@@ -38,10 +44,15 @@ pub struct VectorStateFirAction {
 /// One loop body after state-phase materialization.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssembledVectorLoop {
+    /// Stable loop id from the vector plan.
     pub loop_id: u64,
+    /// State actions executed once before the sample loop.
     pub pre: Vec<VectorStateFirAction>,
+    /// Loop-body statements executed on every sample iteration.
     pub exec: Vec<FirId>,
+    /// State actions whose execution statements run inside the sample loop.
     pub exec_actions: Vec<VectorStateFirAction>,
+    /// State actions executed once after the sample loop.
     pub post: Vec<VectorStateFirAction>,
     /// Complete outer-chunk execution: `pre; for i0; post`.
     pub chunk_statement: FirId,
@@ -51,26 +62,39 @@ pub struct AssembledVectorLoop {
 /// One nested serial clock domain after guard construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssembledClockIsland {
+    /// Stable clock-domain id from the P6.2 plan.
     pub domain_id: u64,
+    /// Enclosing clock domain, if this island is nested.
     pub parent_domain: Option<u64>,
+    /// Clock guard controlling when the island body executes.
     pub guard: ClockGuard,
+    /// Scheduled loops executed serially inside this island.
     pub nested_loop_ids: Vec<u64>,
     /// P6.2 `IslandScalar` declarations whose lifetime begins below this guard.
     pub local_declarations: Vec<FirId>,
     /// Optional shared P6.6 state-cursor advance inside this domain guard.
     pub state_cursor_advance: Option<FirId>,
+    /// Complete guarded FIR statement for the island.
     pub statement: FirId,
 }
 /// Finite FIR assembly accepted before final module placement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorFirAssembly {
+    /// Schema version, always [`VECTOR_FIR_ASSEMBLY_VERSION`].
     pub schema_version: u32,
+    /// Stack-scoped declarations emitted before the loops.
     pub local_declarations: Vec<FirId>,
+    /// Persistent struct-state declarations.
     pub state_declarations: Vec<FirId>,
+    /// Statements resetting persistent state in the clear path.
     pub clear_statements: Vec<FirId>,
+    /// Assembled loops in scheduled execution order.
     pub loops: Vec<AssembledVectorLoop>,
+    /// Assembled clock islands in scheduled execution order.
     pub islands: Vec<AssembledClockIsland>,
+    /// Top-rate output stores fed by held clock islands.
     pub clock_output_stores: Vec<VectorClockOutputStore>,
+    /// Root FIR block containing the whole assembly.
     pub top_level_statement: FirId,
 }
 /// Opaque evidence that the P6.3b checker accepted an assembly.
@@ -80,16 +104,19 @@ pub struct VerifiedVectorFirAssembly {
     pub(super) vector_plan: VectorPlan,
 }
 impl VerifiedVectorFirAssembly {
+    /// Returns the accepted assembly.
     #[must_use]
     pub fn assembly(&self) -> &VectorFirAssembly {
         &self.assembly
     }
 
+    /// Returns the verified plan the assembly was checked against.
     #[must_use]
     pub fn vector_plan(&self) -> &VectorPlan {
         &self.vector_plan
     }
 
+    /// Consumes the evidence and returns the accepted assembly.
     #[must_use]
     pub fn into_assembly(self) -> VectorFirAssembly {
         self.assembly
@@ -98,64 +125,104 @@ impl VerifiedVectorFirAssembly {
 /// Typed producer/checker failure at the P6.3b boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VectorFirAssemblyError {
+    /// An input artifact does not belong to the routed vector plan.
     PlanMismatch {
+        /// Name of the mismatched artifact.
         artifact: &'static str,
     },
+    /// A signal requires the certified scalar reverse-AD window.
     ReverseAdRequiresScalar {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// Loop FIR inputs do not cover the planned loops exactly.
     LoopInputCoverage {
+        /// Stable loop id.
         loop_id: u64,
     },
+    /// The same loop was provided as a FIR input more than once.
     DuplicateLoopInput {
+        /// Stable loop id.
         loop_id: u64,
     },
+    /// A stateful signal has no routed definition in its owning loop.
     MissingDefinition {
+        /// Stable signal id.
         signal_id: u64,
+        /// Stable loop id.
         loop_id: u64,
     },
+    /// A recursion-group projection has no routed definition.
     MissingRecursionProjection {
+        /// Recursion group id.
         group: u64,
+        /// Projection index within the group.
         index: u64,
     },
+    /// Assembled state actions disagree with the accepted P6.1 phases.
     LoopStateCoverage {
+        /// Stable loop id.
         loop_id: u64,
     },
+    /// A loop is claimed by more than one clock island.
     ClockLoopOwnership {
+        /// Stable loop id.
         loop_id: u64,
     },
+    /// A clock island cannot resolve one of its clock signals.
     MissingClockValue {
+        /// Stable clock-domain id.
         domain_id: u64,
+        /// Unresolved clock signal id.
         signal_id: u64,
     },
+    /// A clock island references a parent domain that does not exist.
     MissingClockParent {
+        /// Stable clock-domain id.
         domain_id: u64,
+        /// Missing parent domain id.
         parent_id: u64,
     },
+    /// A value does not fit FIR i32 arithmetic.
     ArithmeticOverflow {
+        /// Name of the overflowing quantity.
         what: &'static str,
+        /// Offending value.
         value: u64,
     },
+    /// A signal has tuple-valued state storage.
     UnsupportedValueType {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// An assembled declaration has an invalid FIR shape.
     DeclarationShape {
+        /// Declaration name.
         name: String,
     },
+    /// A loop state action produced invalid FIR.
     ActionShape {
+        /// Stable loop id.
         loop_id: u64,
+        /// Offending state action.
         action: VectorStateAction,
     },
+    /// A clock island has an invalid FIR guard.
     IslandShape {
+        /// Stable clock-domain id.
         domain_id: u64,
     },
+    /// A fused serial group has an invalid FIR shape.
     FusedGroupShape {
+        /// Stable fused group id.
         group_id: u64,
     },
     /// A verified lockstep bundle was not emitted as one physical sample loop.
     LockstepBundleShape {
+        /// Stable lockstep bundle id.
         bundle_id: u64,
     },
+    /// The assembled top-level FIR is not a block.
     TopLevelShape,
 }
 impl fmt::Display for VectorFirAssemblyError {

@@ -16,8 +16,11 @@ pub const VECTOR_STATE_PLAN_VERSION: u32 = 4;
 /// One `CodeLoop` execution phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorStatePhase {
+    /// Runs once before the loop body: state is staged into working storage.
     Pre,
+    /// Runs inside the per-sample loop body: state is read and written.
     Exec,
+    /// Runs once after the loop body: state is persisted for the next chunk.
     Post,
 }
 /// Exact vector-mode storage selected for one delayed carrier.
@@ -27,48 +30,106 @@ pub enum VectorDelayStorage {
     /// lane. Eligibility is bound by [`LockstepRegisterBundle`] rather than
     /// inferred from these generated names.
     Register {
+        /// Scalar local carrying the lane value inside the loop body.
         local_name: String,
+        /// Persistent struct field the local is loaded from and stored to.
         persistent_name: String,
+        /// Identifier of the owning [`LockstepRegisterBundle`].
         bundle_id: u64,
+        /// Ordered lane position within the owning bundle.
         lane: u64,
     },
     /// C++ `_tmp`/`_perm` dual-buffer representation.
     Copy {
+        /// Working `_tmp` buffer written during the chunk.
         temporary_name: String,
+        /// Persistent `_perm` buffer holding history across chunks.
         permanent_name: String,
+        /// Number of history samples copied in before and out after a chunk.
         history_length: u64,
+        /// Total working-buffer length (`vec_size + history_length`).
         temporary_length: u64,
     },
     /// C++ power-of-two ring representation.
     Ring {
+        /// Persistent power-of-two circular buffer.
         buffer_name: String,
+        /// Working write index advanced inside the loop body.
         index_name: String,
+        /// Persistent saved index restored before and stored after a chunk.
         index_save_name: String,
+        /// Power-of-two buffer length.
         capacity: u64,
+        /// Wrap mask, always `capacity - 1`.
         mask: u64,
     },
     /// Persistent ring indexed by one shared clock-domain fire-time cursor.
     ClockRing {
+        /// Persistent power-of-two circular buffer.
         buffer_name: String,
+        /// Shared fire-time cursor owned by the clock domain.
         cursor_name: String,
+        /// Clock domain whose cursor indexes this ring.
         domain_id: u64,
+        /// Power-of-two buffer length.
         capacity: u64,
+        /// Wrap mask, always `capacity - 1`.
         mask: u64,
     },
 }
 /// Canonical phase operation. Enum order is also canonical operation order.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorStateAction {
-    DelayRegisterLoad { signal_id: u64 },
-    DelayCopyIn { signal_id: u64 },
-    DelayRingAdvance { signal_id: u64 },
-    RecursionStep { group: u64 },
-    DelayWrite { signal_id: u64 },
-    PrefixWrite { signal_id: u64 },
-    WaveformAdvance { signal_id: u64 },
-    DelayRegisterStore { signal_id: u64 },
-    DelayCopyOut { signal_id: u64 },
-    DelayRingSaveAdvance { signal_id: u64 },
+    /// Load register-carried delay-one state from its persistent field.
+    DelayRegisterLoad {
+        /// Delayed signal whose register state is loaded.
+        signal_id: u64,
+    },
+    /// Copy persistent history into the working `_tmp` buffer.
+    DelayCopyIn {
+        /// Delayed signal whose history is staged.
+        signal_id: u64,
+    },
+    /// Restore the ring write index from its persistent saved copy.
+    DelayRingAdvance {
+        /// Delayed signal whose ring index is restored.
+        signal_id: u64,
+    },
+    /// Execute one simultaneous step of a symbolic recursion group.
+    RecursionStep {
+        /// Recursion group advanced by this step.
+        group: u64,
+    },
+    /// Write the current sample into the signal's delay storage.
+    DelayWrite {
+        /// Delayed signal whose current value is written.
+        signal_id: u64,
+    },
+    /// Update the `prefix` previous-sample cell with the current value.
+    PrefixWrite {
+        /// Prefix signal whose state cell is updated.
+        signal_id: u64,
+    },
+    /// Advance the cycling waveform read index, wrapping at the length.
+    WaveformAdvance {
+        /// Waveform signal whose index is advanced.
+        signal_id: u64,
+    },
+    /// Store register-carried delay-one state back to its persistent field.
+    DelayRegisterStore {
+        /// Delayed signal whose register state is stored.
+        signal_id: u64,
+    },
+    /// Copy the working `_tmp` tail back into persistent history.
+    DelayCopyOut {
+        /// Delayed signal whose history is persisted.
+        signal_id: u64,
+    },
+    /// Persist the advanced ring write index into its saved copy.
+    DelayRingSaveAdvance {
+        /// Delayed signal whose ring index is saved.
+        signal_id: u64,
+    },
 }
 impl VectorStateAction {
     /// Phase in which this action must execute.
@@ -91,43 +152,63 @@ impl VectorStateAction {
 /// Storage transition for one signal whose certified `max_delay` is nonzero.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DelayTransition {
+    /// Delayed signal this transition manages state for.
     pub signal_id: u64,
+    /// Vector-plan loop that owns the signal's computation.
     pub loop_id: u64,
+    /// Scalar element type stored in the delay line.
     pub value_type: ValueType,
+    /// Certified maximum delay in samples read from this signal.
     pub max_delay: u64,
     /// `None` for top-rate chunk time, `Some(d)` for domain fire time.
     pub clock_domain: Option<u64>,
+    /// Exact storage representation selected for this delay line.
     pub storage: VectorDelayStorage,
 }
 /// Canonical lifecycle initializer for one scalar state cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorStateInitialValue {
+    /// Exact integer initializer.
     Int(i32),
+    /// Real initializer carried as raw bits for exact equality and hashing.
     RealBits(u64),
+    /// Type-appropriate zero initializer.
     Zero,
 }
 /// One `prefix(init, value)` previous-sample state cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefixTransition {
+    /// Prefix signal this transition manages state for.
     pub signal_id: u64,
+    /// Vector-plan loop that owns the signal's computation.
     pub loop_id: u64,
+    /// Signal producing the value stored for the next sample.
     pub value_signal_id: u64,
+    /// Persistent scalar cell holding the previous-sample value.
     pub state_name: String,
+    /// Scalar type of the state cell.
     pub value_type: ValueType,
+    /// Value the cell holds before the first sample is produced.
     pub initial: VectorStateInitialValue,
 }
 /// One cycling direct waveform read index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WaveformTransition {
+    /// Waveform signal this transition manages state for.
     pub signal_id: u64,
+    /// Vector-plan loop that owns the signal's computation.
     pub loop_id: u64,
+    /// Persistent cycling read-index cell.
     pub index_name: String,
+    /// Waveform table length the index wraps at.
     pub length: u64,
+    /// Scalar element type of the waveform samples.
     pub value_type: ValueType,
 }
 /// One projection participating in a simultaneous recursion step.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecursionProjectionTransition {
+    /// Projection position within the recursion group.
     pub index: u64,
     /// Prepared signal aliases that read this one symbolic projection.
     pub signal_ids: Vec<u64>,
@@ -138,18 +219,27 @@ pub struct RecursionProjectionTransition {
 /// One symbolic recursion group and its serial owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecursionTransition {
+    /// Symbolic recursion group this transition steps.
     pub group: u64,
+    /// Recursive vector-plan loop that serially owns the group.
     pub loop_id: u64,
+    /// Projections advanced simultaneously, in canonical index order.
     pub projections: Vec<RecursionProjectionTransition>,
 }
 /// One ordered register-carried lane in a certified lockstep bundle.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LockstepRegisterLane {
+    /// Ordered lane position within the bundle.
     pub lane: u64,
+    /// Vector-plan loop that owns the lane's signal.
     pub loop_id: u64,
+    /// Recursion group whose lockstep certification admits this lane.
     pub recursion_group: u64,
+    /// Delayed signal carried in this lane.
     pub signal_id: u64,
+    /// Scalar local carrying the lane value inside the loop body.
     pub local_name: String,
+    /// Persistent struct field the local is loaded from and stored to.
     pub persistent_name: String,
 }
 /// Checked bundle-level identity for register-carried delay-one state.
@@ -160,28 +250,43 @@ pub struct LockstepRegisterLane {
 /// persistent boundaries co-located.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LockstepRegisterBundle {
+    /// Stable identifier referenced by [`VectorDelayStorage::Register`].
     pub bundle_id: u64,
+    /// Certified lanes in canonical lane order.
     pub lanes: Vec<LockstepRegisterLane>,
 }
 /// Complete phase bodies for one stateful vector-plan loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoopStatePhases {
+    /// Vector-plan loop these phase bodies belong to.
     pub loop_id: u64,
+    /// Actions executed once before the loop body, in canonical order.
     pub pre: Vec<VectorStateAction>,
+    /// Actions executed inside the loop body, in canonical order.
     pub exec: Vec<VectorStateAction>,
+    /// Actions executed once after the loop body, in canonical order.
     pub post: Vec<VectorStateAction>,
 }
 /// Canonical finite P6.1 transition artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorStatePlan {
+    /// Schema stamp; must equal [`VECTOR_STATE_PLAN_VERSION`].
     pub schema_version: u32,
+    /// Vector chunk size the plan was built for.
     pub vec_size: u64,
+    /// Threshold at or below which copy storage is selected over a ring.
     pub max_copy_delay: u64,
+    /// Phase bodies for every stateful loop, in canonical loop order.
     pub loops: Vec<LoopStatePhases>,
+    /// Delay-line transitions, in canonical signal order.
     pub delays: Vec<DelayTransition>,
+    /// Recursion-group transitions, in canonical group order.
     pub recursions: Vec<RecursionTransition>,
+    /// Certified register bundles referenced by register delay storage.
     pub lockstep_register_bundles: Vec<LockstepRegisterBundle>,
+    /// Prefix previous-sample transitions, in canonical signal order.
     pub prefixes: Vec<PrefixTransition>,
+    /// Cycling waveform-index transitions, in canonical signal order.
     pub waveforms: Vec<WaveformTransition>,
     /// Conservative delay effects proven to have no positive-delay use.
     /// They require no storage or runtime action (`x @ 0 == x`).
@@ -195,16 +300,19 @@ pub struct VerifiedVectorStatePlan {
     pub(super) delegated_resources: BTreeSet<StateResource>,
 }
 impl VerifiedVectorStatePlan {
+    /// Checked state plan carried by this evidence.
     #[must_use]
     pub fn plan(&self) -> &VectorStatePlan {
         &self.plan
     }
 
+    /// Vector plan the state plan was verified against.
     #[must_use]
     pub fn vector_plan(&self) -> &VectorPlan {
         &self.vector_plan
     }
 
+    /// Consumes the evidence, yielding the checked state plan.
     #[must_use]
     pub fn into_plan(self) -> VectorStatePlan {
         self.plan
@@ -233,70 +341,119 @@ pub(crate) fn verified_vector_state_plan_for_test(
 /// Typed producer/checker failure at the P6.1 boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorStateError {
+    /// Verification of the underlying vector plan itself failed.
     Plan(VectorPlanError),
+    /// The plan's schema stamp is not [`VECTOR_STATE_PLAN_VERSION`].
     UnsupportedSchema {
+        /// Schema version found in the plan.
         found: u32,
     },
+    /// The plan's declared vector size disagrees with the vector plan.
     VecSizeMismatch {
+        /// Vector size declared by the state plan.
         declared: u64,
+        /// Vector size carried by the verified vector plan.
         actual: u64,
     },
+    /// Source facts (signals, types, loops) do not cover a referenced signal.
     SignalCoverageMismatch {
+        /// Signal missing from the source facts.
         signal_id: u64,
     },
+    /// Independently derived source facts disagree for one signal.
     SignalFactMismatch {
+        /// Signal whose facts disagree.
         signal_id: u64,
     },
+    /// A stateful signal is not owned by any vector-plan loop.
     MissingLoopOwner {
+        /// Stateful signal without an owning loop.
         signal_id: u64,
     },
+    /// A delayed signal is owned by a loop that is not a vector loop.
     DelayOwnerNotVectorLoop {
+        /// Delayed signal with the invalid owner.
         signal_id: u64,
+        /// Non-vector loop claiming ownership.
         loop_id: u64,
     },
+    /// A recursion group is not owned by the expected recursive loop.
     RecursionLoopMismatch {
+        /// Recursion group with the invalid owner.
         group: u64,
+        /// Loop that fails to serially own the group.
         loop_id: u64,
     },
+    /// Clocked state was encountered without P6.2 support in scope.
     UnsupportedClockState {
+        /// Signal carrying the clocked state.
         signal_id: u64,
+        /// Clock domain the state belongs to.
         clock_id: u32,
     },
+    /// Clocked state was encountered without a checked P6.2 clock plan.
     ClockPlanRequired {
+        /// Signal carrying the clocked state.
         signal_id: u64,
+        /// Clock domain lacking a checked plan.
         clock_id: u32,
     },
+    /// A clocked state signal is owned by a loop outside its clock domain.
     ClockLoopMismatch {
+        /// Clocked state signal with the invalid owner.
         signal_id: u64,
+        /// Clock domain the signal belongs to.
         clock_id: u64,
+        /// Owning loop that lies outside the domain.
         loop_id: u64,
     },
+    /// A state resource has no transition model in this P6 stage.
     UnsupportedStateResource {
+        /// Resource requiring a later transition model.
         resource: StateResource,
     },
+    /// Delay geometry arithmetic overflowed while sizing storage.
     ArithmeticOverflow {
+        /// Signal whose geometry overflowed.
         signal_id: u64,
     },
+    /// A plan sequence is not sorted, deduplicated, and canonically ordered.
     NotCanonical {
+        /// Name of the sequence that violates canonical order.
         what: &'static str,
+        /// Index of the first element that violates canonical order.
         at: usize,
     },
+    /// Delay transitions do not match the certified delay facts one-to-one.
     DelayCoverageMismatch,
+    /// Recursion transitions do not match the recursion facts one-to-one.
     RecursionCoverageMismatch,
+    /// A loop's pre/exec/post bodies disagree with the required actions.
     LoopPhaseMismatch {
+        /// Loop whose phase bodies are invalid.
         loop_id: u64,
     },
+    /// Simulated delay storage geometry disagrees with the transition.
     SimulationGeometryMismatch,
+    /// Simulation read a delay beyond the certified maximum.
     SimulationDelayOutOfRange {
+        /// Delay requested by the simulation.
         delay: usize,
+        /// Certified maximum delay.
         max_delay: usize,
     },
+    /// Simulation was driven with a chunk longer than the vector size.
     SimulationChunkTooLarge {
+        /// Chunk length requested.
         count: usize,
+        /// Configured vector size.
         vec_size: usize,
     },
+    /// A recursion step produced a tuple whose arity differs from the state.
     RecursionArityMismatch {
+        /// Arity of the current state tuple.
         state: usize,
+        /// Arity produced by the step.
         next: usize,
     },
 }

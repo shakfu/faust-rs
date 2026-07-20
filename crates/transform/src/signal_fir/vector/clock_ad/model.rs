@@ -14,9 +14,13 @@ pub const VECTOR_CLOCK_AD_PLAN_VERSION: u32 = 1;
 /// Concrete guard shape used to implement `fires(c, i)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ClockGuard {
+    /// On-demand domain gated by a boolean clock: fires once when the clock is true.
     BooleanOnDemand,
+    /// On-demand domain gated by an integer clock: fires `count` times per outer sample.
     CountedOnDemand,
+    /// Upsampling domain gated by an integer clock: fires `count` times per outer sample.
     CountedUpsampling,
+    /// Downsampling domain: fires when the running counter modulo the factor is zero.
     DownsampleModulo,
 }
 /// Whether a pre-planned P5 transport may use the outer chunk index.
@@ -28,27 +32,45 @@ pub enum ClockTransportMode {
     /// The route is a scalar stack temporary inside the group's sole sample
     /// envelope, either a top-rate loop or one exact guarded clock island,
     /// never a chunk array filled by a preceding loop.
-    FusedScalar { group_id: u64 },
+    FusedScalar {
+        /// Identifier of the certified fused group that owns the scalar route.
+        group_id: u64,
+    },
     /// Domain-rate value: route below the serial guard, one fire at a time.
-    IslandScalar { domain_id: u64 },
+    IslandScalar {
+        /// Identifier of the clock domain whose guard encloses the route.
+        domain_id: u64,
+    },
     /// Persistent `PermVar` value exported from a domain to an ancestor.
-    HeldOutput { domain_id: u64 },
+    HeldOutput {
+        /// Identifier of the clock domain that produces the held value.
+        domain_id: u64,
+    },
 }
 /// Complete policy for one existing P5 transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClockTransportPolicy {
+    /// Identifier of the P5 transport this policy applies to.
     pub transport_id: u64,
+    /// Route mode chosen for the transport under clock/AD planning.
     pub mode: ClockTransportMode,
 }
 /// One serial OD/US/DS region and the P4 loops nested below it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockIsland {
+    /// Stable identifier of this clock domain.
     pub domain_id: u64,
+    /// Enclosing clock domain, or `None` for a top-level island.
     pub parent_domain: Option<u64>,
+    /// Domain kind (on-demand, upsampling, or downsampling).
     pub kind: ClockDomainKind,
+    /// Signal computing the clock value that drives `fires(c, i)`.
     pub clock_signal_id: u64,
+    /// Clock wrapper signal marking the domain boundary in Signal IR.
     pub wrapper_signal_id: u64,
+    /// Serial P4 loop that owns the domain boundary.
     pub boundary_loop_id: u64,
+    /// Concrete guard shape implementing the domain's fire condition.
     pub guard: ClockGuard,
     /// Exact signals whose inferred clock environment is this domain.
     pub signal_ids: Vec<u64>,
@@ -66,18 +88,23 @@ pub enum ForwardAdPolicy {
 /// Reverse-mode carrier requiring a block-local reverse window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReverseAdKind {
+    /// Reverse-time recursion carrier iterating samples backwards.
     ReverseTimeRec,
+    /// Block-level reverse-mode AD carrier over a forward/tape/reverse window.
     BlockReverseAd,
 }
 /// Semantically fixed reverse-mode epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AdEpoch {
+    /// Forward pass computing primal values and recording the tape.
     Forward,
+    /// Reverse pass consuming the tape to accumulate adjoints.
     Reverse,
 }
 /// Stable reason why reverse-mode execution is not admitted to vector mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReverseAdDiagnostic {
+    /// The carrier needs a scalar forward/tape/reverse window; vector chunk semantics are refused.
     ScalarReverseWindowRequired,
 }
 impl ReverseAdDiagnostic {
@@ -102,20 +129,31 @@ impl ReverseAdDiagnostic {
 /// One explicit scalar fallback for a reverse-time Signal-IR carrier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReverseAdFallback {
+    /// Signal-IR identifier of the reverse-mode carrier.
     pub signal_id: u64,
+    /// Scalar loop that owns the carrier's execution.
     pub owner_loop_id: u64,
+    /// Which reverse-mode carrier shape triggered the fallback.
     pub kind: ReverseAdKind,
+    /// Ordered execution epochs the scalar window must run.
     pub epochs: Vec<AdEpoch>,
+    /// Stable reason the carrier is excluded from vector mode.
     pub diagnostic: ReverseAdDiagnostic,
 }
 /// Canonical finite P6.2 artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorClockAdPlan {
+    /// Schema version; must equal [`VECTOR_CLOCK_AD_PLAN_VERSION`].
     pub schema_version: u32,
+    /// Vector chunk size; must match the underlying vector plan.
     pub vec_size: u64,
+    /// Exact set of serial clock islands, one per clock domain.
     pub clock_islands: Vec<ClockIsland>,
+    /// One routing policy per existing P5 transport, in transport order.
     pub transports: Vec<ClockTransportPolicy>,
+    /// Forward-mode AD policy at the prepared-signal boundary.
     pub forward_ad: ForwardAdPolicy,
+    /// Exact set of scalar fallbacks for reverse-mode carriers.
     pub reverse_ad_fallbacks: Vec<ReverseAdFallback>,
 }
 /// Opaque evidence that P6.2 construction passed its checker.
@@ -125,16 +163,19 @@ pub struct VerifiedVectorClockAdPlan {
     pub(super) vector_plan: VectorPlan,
 }
 impl VerifiedVectorClockAdPlan {
+    /// Returns the checked clock/AD plan.
     #[must_use]
     pub fn plan(&self) -> &VectorClockAdPlan {
         &self.plan
     }
 
+    /// Returns the underlying vector plan the clock/AD plan was checked against.
     #[must_use]
     pub fn vector_plan(&self) -> &VectorPlan {
         &self.vector_plan
     }
 
+    /// Consumes the evidence and returns the checked clock/AD plan.
     #[must_use]
     pub fn into_plan(self) -> VectorClockAdPlan {
         self.plan
@@ -184,70 +225,120 @@ pub(crate) fn verified_vector_clock_ad_plan_for_test(
 /// Typed producer/checker failure at the P6.2 boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorClockAdError {
+    /// The underlying P5 vector plan failed verification.
     Plan(VectorPlanError),
+    /// Clock-environment inference over the Signal IR failed.
     ClockInference(ClkEnvError),
+    /// The plan declares a schema version other than the canonical one.
     UnsupportedSchema {
+        /// Schema version found in the plan.
         found: u32,
     },
+    /// The plan's vector size differs from the vector plan's.
     VecSizeMismatch {
+        /// Vector size declared by the clock/AD plan.
         declared: u64,
+        /// Vector size of the underlying vector plan.
         actual: u64,
     },
+    /// A vector-plan signal is not covered by the clock/AD source facts.
     SignalCoverageMismatch {
+        /// Signal missing from the source facts.
         signal_id: u64,
     },
+    /// Independently derived clock facts disagree for a signal.
     ClockFactMismatch {
+        /// Signal with conflicting clock facts.
         signal_id: u64,
     },
+    /// A clock domain names a parent that is not itself a known domain.
     DomainParentUnknown {
+        /// Domain naming the unknown parent.
         domain_id: u64,
+        /// Parent identifier that does not exist.
         parent_id: u64,
     },
+    /// The clock-domain parent hierarchy contains a cycle.
     DomainCycle {
+        /// Domain on the detected cycle.
         domain_id: u64,
     },
+    /// A clock domain names a clock signal absent from the plan.
     ClockSignalUnknown {
+        /// Domain naming the unknown clock signal.
         domain_id: u64,
+        /// Clock signal identifier that does not exist.
         signal_id: u64,
     },
+    /// A domain's clock signal admits no supported boolean/integer guard.
     UnsupportedClockType {
+        /// Domain whose clock type is unsupported.
         domain_id: u64,
+        /// Kind of the offending clock domain.
         kind: ClockDomainKind,
     },
+    /// A clock domain does not have exactly one matching wrapper signal.
     WrapperCoverageMismatch {
+        /// Domain with zero or multiple wrappers.
         domain_id: u64,
     },
+    /// The domain table and Signal IR disagree on a wrapper's domain kind.
     WrapperKindMismatch {
+        /// Domain whose kinds disagree.
         domain_id: u64,
+        /// Kind recorded in the domain table.
         table: ClockDomainKind,
+        /// Kind carried by the Signal-IR wrapper.
         signal: ClockDomainKind,
     },
+    /// A clock-state signal carries no decodable domain token.
     ClockStateDomainUnknown {
+        /// Clock-state signal without a domain token.
         signal_id: u64,
     },
+    /// A domain boundary signal has no owned loop in the vector plan.
     BoundaryNotOwned {
+        /// Domain whose boundary is unowned.
         domain_id: u64,
+        /// Boundary signal without an owned loop.
         signal_id: u64,
     },
+    /// A domain boundary is owned by a loop that is not serial.
     BoundaryNotSerial {
+        /// Domain whose boundary loop is not serial.
         domain_id: u64,
+        /// Non-serial loop owning the boundary.
         loop_id: u64,
     },
+    /// Declared clock islands do not exactly match the derived island facts.
     IslandCoverageMismatch,
+    /// Declared transport policies do not exactly match the P5 transports.
     TransportCoverageMismatch,
+    /// A reverse-mode carrier has no owned scalar loop.
     ReverseCarrierNotOwned {
+        /// Reverse-mode carrier signal without an owned scalar loop.
         signal_id: u64,
     },
+    /// Declared reverse-AD fallbacks do not exactly match the derived carrier facts.
     ReverseAdCoverageMismatch,
+    /// A runtime clock value has the wrong shape for the domain's guard.
     ClockValueKindMismatch {
+        /// Guard the clock value failed to match.
         guard: ClockGuard,
     },
+    /// A downsampling guard received a non-positive factor.
     InvalidDownsampleFactor {
+        /// Offending downsampling factor.
         factor: i64,
     },
+    /// A domain signal reads audio-rate stateful data from fire time; such state
+    /// is not adopted into the domain and would advance at the wrong rate.
     UnadoptedStatefulRead {
+        /// Domain in which the read occurs.
         domain_id: u64,
+        /// Domain signal performing the read.
         consumer: u64,
+        /// Audio-rate stateful signal being read.
         producer: u64,
     },
 }

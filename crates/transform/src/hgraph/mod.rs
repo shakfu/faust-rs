@@ -209,18 +209,37 @@ impl Hgraph {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HgraphError {
     /// A reachable signal carries no inferred clock environment.
-    MissingEnv { sig: SigId },
+    MissingEnv {
+        /// The reachable signal without a clock environment.
+        sig: SigId,
+    },
     /// The partition property is violated (a signal owned by two graphs).
-    PartitionViolated { sig: SigId },
+    PartitionViolated {
+        /// The signal claimed by more than one graph.
+        sig: SigId,
+    },
     /// An instantaneous (immediate-edge) cycle inside one domain: a
     /// causality error, exactly as in classic Faust.
-    InstantaneousCycle { key: GraphKey, sig: SigId },
+    InstantaneousCycle {
+        /// The graph in which the cycle was found.
+        key: GraphKey,
+        /// A signal on the instantaneous cycle.
+        sig: SigId,
+    },
     /// Structural error while walking the prepared forest.
-    Malformed { sig: SigId, detail: String },
+    Malformed {
+        /// The structurally malformed signal.
+        sig: SigId,
+        /// Human-readable description of the structural problem.
+        detail: String,
+    },
     /// [`audit_control_variability`]: a `Samp`-variability signal is owned by
     /// [`GraphKey::Control`] (a per-sample value can never be part of the
     /// unconditional, once-per-lifecycle control precondition).
-    ControlVariabilityViolated { sig: SigId },
+    ControlVariabilityViolated {
+        /// The `Samp`-variability signal owned by the control graph.
+        sig: SigId,
+    },
 }
 
 impl fmt::Display for HgraphError {

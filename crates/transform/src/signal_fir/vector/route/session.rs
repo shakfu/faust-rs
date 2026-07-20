@@ -149,6 +149,7 @@ impl<'a> VectorRouteSession<'a> {
         ))
     }
 
+    /// Returns the scheduled region layout.
     #[must_use]
     pub fn layout(&self) -> &VectorRegionLayout {
         &self.layout

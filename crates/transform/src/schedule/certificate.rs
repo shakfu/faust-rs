@@ -73,12 +73,19 @@ impl SchedulingStrategy {
 /// §4.3) without a separate ordinal table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EdgeKind {
+    /// A value dependency: the consumer reads the dependency's output.
     Data,
+    /// An effect dependency: the consumer must observe the dependency's
+    /// side effect (e.g. a state write) without reading a value.
     Effect,
+    /// A control dependency: ordering imposed by control flow rather than
+    /// data or effects.
     Control,
 }
 
 impl EdgeKind {
+    /// Canonical JSON Schema string for this edge kind
+    /// (`$defs/dependencyEdge`'s `kind` enum values).
     #[must_use]
     pub fn canonical_name(self) -> &'static str {
         match self {
@@ -93,8 +100,11 @@ impl EdgeKind {
 /// scheduled before `consumer` (the same convention as [`ScheduleDag`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DependencyEdge {
+    /// The node that depends on `dependency` and must be scheduled after it.
     pub consumer: u64,
+    /// The node that must be scheduled before `consumer`.
     pub dependency: u64,
+    /// Which kind of ordering constraint this edge encodes.
     pub kind: EdgeKind,
 }
 
@@ -107,7 +117,10 @@ pub struct DependencyEdge {
 /// canonical form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphSnapshot {
+    /// All node ids of the graph, strictly ascending in canonical form.
     pub nodes: Vec<u64>,
+    /// All dependency edges, strictly ascending by
+    /// `(consumer, dependency, kind)` in canonical form.
     pub edges: Vec<DependencyEdge>,
 }
 
@@ -183,37 +196,64 @@ impl ScheduleDag for GraphSnapshot {
 /// `$defs/scheduleScope`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScheduleScope {
+    /// The scalar control block (the once-per-buffer control computation).
     ScalarControl,
-    ScalarRegion { region_id: u64 },
-    VectorEpoch { epoch_id: u64 },
+    /// One scalar sample-rate region.
+    ScalarRegion {
+        /// Numeric id of the scalar region this schedule covers.
+        region_id: u64,
+    },
+    /// One vector epoch.
+    VectorEpoch {
+        /// Numeric id of the vector epoch this schedule covers.
+        epoch_id: u64,
+    },
 }
 
 /// `$defs/producer`. See the module docs: format is not re-validated here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Producer {
+    /// Name of the tool that produced the certificate.
     pub name: String,
+    /// Version string of the producing tool.
     pub version: String,
+    /// Git commit hash of the producing tool's sources.
     pub git_commit: String,
 }
 
 /// `$defs/program`. See the module docs: format is not re-validated here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
+    /// Identifier of the DSP test case or program the schedule belongs to.
     pub case_id: String,
+    /// SHA-256 of the program's source text, lowercase hex.
     pub source_sha256: String,
 }
 
 /// `$defs/scheduleCertificate`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduleCertificate {
+    /// Certificate schema version; only version 1 is accepted.
     pub schema_version: u32,
+    /// Which tool produced the certificate (not re-validated here).
     pub producer: Producer,
+    /// Which program the certified schedule belongs to (not re-validated
+    /// here).
     pub program: Program,
+    /// The canonical graph snapshot the schedule was computed from.
     pub graph: GraphSnapshot,
+    /// Declared SHA-256 of the canonical graph encoding, lowercase hex.
     pub graph_hash: String,
+    /// Which scalar region / vector epoch / control block the schedule
+    /// covers.
     pub scope: ScheduleScope,
+    /// The scheduling strategy that produced `ordered_nodes`.
     pub strategy: SchedulingStrategy,
+    /// Declared number of nodes; must match both `graph.nodes.len()` and
+    /// `ordered_nodes.len()`.
     pub node_count: u64,
+    /// The certified schedule: every graph node exactly once, dependencies
+    /// before consumers.
     pub ordered_nodes: Vec<u64>,
 }
 
@@ -222,21 +262,48 @@ pub struct ScheduleCertificate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CertificateError {
     /// `schema_version` is not the one version this module accepts.
-    UnsupportedSchemaVersion { found: u32 },
+    UnsupportedSchemaVersion {
+        /// The rejected `schema_version` value.
+        found: u32,
+    },
     /// A node, region id, epoch id, or count exceeds [`MAX_UINT53`].
-    OutOfRange { value: u64 },
+    OutOfRange {
+        /// The offending value that exceeds the uint53 bound.
+        value: u64,
+    },
     /// `graph.nodes` is not strictly ascending (this also catches
     /// duplicates: a strictly ascending sequence cannot repeat a value).
-    NodesNotCanonical { at: usize },
+    NodesNotCanonical {
+        /// Index of the first node that breaks the strict ascent.
+        at: usize,
+    },
     /// `graph.edges` is not strictly ascending by
     /// `(consumer, dependency, kind)`.
-    EdgesNotCanonical { at: usize },
+    EdgesNotCanonical {
+        /// Index of the first edge that breaks the strict ascent.
+        at: usize,
+    },
     /// An edge references a node absent from `graph.nodes`.
-    EdgeEndpointMissing { edge: DependencyEdge, missing: u64 },
+    EdgeEndpointMissing {
+        /// The edge with the dangling endpoint.
+        edge: DependencyEdge,
+        /// The endpoint node id missing from `graph.nodes`.
+        missing: u64,
+    },
     /// `node_count` does not match `graph.nodes.len()`.
-    NodeCountMismatchGraph { declared: u64, actual: usize },
+    NodeCountMismatchGraph {
+        /// The certificate's declared `node_count`.
+        declared: u64,
+        /// The actual `graph.nodes.len()`.
+        actual: usize,
+    },
     /// `node_count` does not match `ordered_nodes.len()`.
-    NodeCountMismatchOrder { declared: u64, actual: usize },
+    NodeCountMismatchOrder {
+        /// The certificate's declared `node_count`.
+        declared: u64,
+        /// The actual `ordered_nodes.len()`.
+        actual: usize,
+    },
     /// `ordered_nodes` is not a valid schedule of `graph` (not a
     /// duplicate-free permutation, or a dependency does not precede its
     /// consumer) — wraps the independent [`VerifyError`] from
@@ -245,7 +312,9 @@ pub enum CertificateError {
     /// The declared `graph_hash` does not match the hash recomputed from
     /// `graph`.
     GraphHashMismatch {
+        /// The hash stored in the certificate's `graph_hash` field.
         declared: String,
+        /// The hash recomputed from the certificate's own `graph`.
         recomputed: String,
     },
 }

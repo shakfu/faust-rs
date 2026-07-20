@@ -143,7 +143,9 @@ pub enum PvLoopId {
 /// [`PvLoopId::ConsumesTransport`].
 #[derive(Debug, Clone)]
 pub struct PvTransport {
+    /// The transported signal (`x`).
     pub signal: SigId,
+    /// FIR element type of the transported values.
     pub elem_type: FirType,
     /// Chunk capacity in elements. [`route_pv_vector_fir`] allocates the
     /// transport as a struct-level table (see that function's docs for why
@@ -158,10 +160,15 @@ pub struct PvTransport {
 /// scope) — see the module docs.
 #[derive(Debug, Clone)]
 pub struct PvPlan {
+    /// The shared signal owned by the first loop.
     pub x: SigId,
+    /// The delay read of `x`, inlined in the first loop.
     pub y: SigId,
+    /// The pure tail computed by the second loop.
     pub z: SigId,
+    /// The fixed delay amount of `y` in samples.
     pub delay_amount: i32,
+    /// The one typed cross-loop transport carrying `x`.
     pub transport: PvTransport,
 }
 

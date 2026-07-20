@@ -109,7 +109,7 @@ impl SignalUseTable {
     }
 }
 /// Builds deterministic occurrence/effect facts with an injected condition
-/// provider. Production clients should prefer [`analyze_vector_signals`]; this
+/// provider. Production clients should prefer [`analyze_vector_signals`](super::analyze_vector_signals); this
 /// lower-level entry point remains useful for rule tests and formal mutations.
 pub fn analyze_signal_uses(
     prepared: &VerifiedPreparedSignals,

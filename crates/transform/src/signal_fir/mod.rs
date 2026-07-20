@@ -177,17 +177,30 @@ impl ComputeMode {
 /// of the independently checked signal-level pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorFallbackReason {
+    /// Building the vector UI lifecycle FIR failed.
     UiProgram,
+    /// Clock-environment inference failed.
     ClockAnalysis,
+    /// Building or verifying the analysis decorations failed.
     Decorations,
+    /// Building or verifying the P4.4 vector plan failed.
     VectorPlan,
+    /// Building or verifying the P6.1 state plan failed.
     StatePlan,
+    /// Building or verifying the clocked-audio-domain plan failed.
     ClockAdPlan,
+    /// A reverse-audio-domain signal requires fixed epochs, so the program
+    /// is lowered as scalar.
     ReverseAd,
+    /// Pure P5.2 lowering failed.
     PureLowering,
+    /// Building or verifying the P5.3 event-order certificate failed.
     EventCertificate,
+    /// Assembling the vector FIR bodies failed.
     FirAssembly,
+    /// Assembling the output stage failed.
     OutputAssembly,
+    /// Final module verification rejected the emitted module.
     ModuleVerification,
 }
 
@@ -215,6 +228,7 @@ impl VectorFallbackReason {
 /// Which vector-module path produced a [`SignalFirOutput`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VectorPipelineStatus {
+    /// Vector-mode codegen was not requested; the scalar path was used.
     #[default]
     NotRequested,
     /// The P4/P5/P6 producer/checker chain accepted the emitted module.

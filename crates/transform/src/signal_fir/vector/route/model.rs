@@ -37,11 +37,13 @@ pub struct VectorRegionLayout {
     pub(super) loops: Vec<VectorLoopRegion>,
 }
 impl VectorRegionLayout {
+    /// Returns the scheduling strategy that ordered the loop regions.
     #[must_use]
     pub fn strategy(&self) -> SchedulingStrategy {
         self.strategy
     }
 
+    /// Returns the loop regions in scheduled execution order.
     #[must_use]
     pub fn loops(&self) -> &[VectorLoopRegion] {
         &self.loops
@@ -53,13 +55,16 @@ pub enum RouteResolution {
     /// A visible FIR value, direct or loaded from a planned transport.
     Value(FirId),
     /// An `Inline` signal has no value in this exact loop yet and must be
-    /// lowered locally before being recorded with [`VectorRouteSession::define_in_loop`].
+    /// lowered locally before being recorded with
+    /// [`VectorRouteSession::define_in_loop`](super::session::VectorRouteSession::define_in_loop).
     NeedsInlineLowering,
 }
 /// Source selected for one recorded signal use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoutedUseSource {
+    /// Value read directly from a visible region.
     Direct(VectorRegion),
+    /// Value loaded from the planned transport with this id.
     Transport(u64),
 }
 /// One FIR definition recorded at its legal visibility scope.
@@ -108,22 +113,25 @@ pub struct RoutedFirTrace {
     pub(super) transports: Vec<RoutedTransport>,
 }
 impl RoutedFirTrace {
+    /// Returns every recorded definition.
     #[must_use]
     pub fn definitions(&self) -> &[RoutedDefinition] {
         &self.definitions
     }
 
+    /// Returns every recorded use resolution.
     #[must_use]
     pub fn uses(&self) -> &[RoutedUse] {
         &self.uses
     }
 
+    /// Returns the FIR evidence for every planned transport.
     #[must_use]
     pub fn transports(&self) -> &[RoutedTransport] {
         &self.transports
     }
 }
-/// Opaque evidence that [`verify_routed_fir`] accepted the routing trace.
+/// Opaque evidence that [`verify_routed_fir`](super::check::verify_routed_fir) accepted the routing trace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedRoutedFir {
     pub(super) plan: VectorPlan,
@@ -137,16 +145,19 @@ impl VerifiedRoutedFir {
         &self.plan
     }
 
+    /// Returns the scheduled region layout.
     #[must_use]
     pub fn layout(&self) -> &VectorRegionLayout {
         &self.layout
     }
 
+    /// Returns the accepted routed-FIR trace.
     #[must_use]
     pub fn trace(&self) -> &RoutedFirTrace {
         &self.trace
     }
 
+    /// Consumes the evidence and returns the accepted trace.
     #[must_use]
     pub fn into_trace(self) -> RoutedFirTrace {
         self.trace
@@ -155,67 +166,113 @@ impl VerifiedRoutedFir {
 /// Typed P5 routing or routed-FIR verification failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VectorRouteError {
+    /// Underlying vector plan verification failed.
     Plan(VectorPlanError),
+    /// Vector scheduling failed.
     Schedule(VectorScheduleError),
+    /// A signal id is not part of the vector plan.
     UnknownSignal {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// A loop id is not part of the vector plan.
     UnknownLoop {
+        /// Stable loop id.
         loop_id: u64,
     },
+    /// A definition was recorded in a region that contradicts its placement.
     WrongRegion {
+        /// Stable signal id.
         signal_id: u64,
+        /// Placement required by the plan.
         expected: Placement,
+        /// Region the definition was recorded in.
         actual: VectorRegion,
     },
+    /// A signal was defined twice in the same region.
     DuplicateDefinition {
+        /// Stable signal id.
         signal_id: u64,
+        /// Region holding the duplicate definition.
         region: VectorRegion,
     },
+    /// A signal has no definition in its required region.
     MissingDefinition {
+        /// Stable signal id.
         signal_id: u64,
+        /// Region missing the definition.
         region: VectorRegion,
     },
+    /// An inline signal was resolved but never lowered.
     MissingInlineDefinition {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// No planned transport exists for a cross-loop read.
     MissingTransport {
+        /// Stable signal id.
         signal_id: u64,
+        /// Loop owning the value.
         producer_loop: u64,
+        /// Loop reading the value.
         consumer_loop: u64,
     },
+    /// A tuple signal must be routed through its scalar projections.
     UnsupportedTupleTransport {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// A tuple value is not a canonical typed component array.
     TupleValueShape {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// A recorded FIR value does not have the planned type.
     ValueTypeMismatch {
+        /// Stable signal id.
         signal_id: u64,
+        /// FIR type required by the plan.
         expected: FirType,
+        /// FIR type of the recorded value, if any.
         actual: Option<FirType>,
     },
+    /// Routed definitions do not cover a planned signal exactly.
     DefinitionCoverage {
+        /// Stable signal id.
         signal_id: u64,
     },
+    /// The routed trace does not exactly cover a planned transport.
     TransportCoverage {
+        /// Stable transport id.
         transport_id: u64,
     },
+    /// A transport declaration has an invalid FIR shape.
     TransportDeclaration {
+        /// Stable transport id.
         transport_id: u64,
     },
+    /// A transport producer store is invalid or missing.
     TransportStore {
+        /// Stable transport id.
         transport_id: u64,
     },
+    /// A transport consumer load is invalid or missing.
     TransportLoad {
+        /// Stable transport id.
         transport_id: u64,
     },
+    /// A recorded use is not visible from its consumer loop.
     InvalidUse {
+        /// Stable signal id.
         signal_id: u64,
+        /// Loop that recorded the use.
         consumer_loop: u64,
     },
+    /// The clock/AD plan does not belong to the routed vector plan.
     ClockPlanMismatch,
+    /// Clock transport policies do not exactly cover a planned transport.
     TransportPolicyCoverage {
+        /// Stable transport id.
         transport_id: u64,
     },
 }

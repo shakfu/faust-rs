@@ -9,7 +9,7 @@
 //! modulo counter. Domain-owned state advances in fire time and `PermVar`
 //! outputs hold their last value when a domain does not fire.
 //!
-//! Rust composes the already verified signal-level [`VectorPlan`] with the
+//! Rust composes the already verified signal-level [`VectorPlan`](crate::signal_fir::vector::verify::VectorPlan) with the
 //! propagation-owned [`propagate::ClockDomainTable`] and a freshly recomputed
 //! [`crate::clk_env::ClkEnvMap`]. Every wrapper becomes one serial island with
 //! explicit parentage, member signals, nested loops, and transport policy.

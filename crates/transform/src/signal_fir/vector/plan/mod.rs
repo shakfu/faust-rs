@@ -7,8 +7,8 @@
 //! `compiler/generator/dag_instructions_compiler.cpp`. Unlike the C++ pass,
 //! this builder never rediscovers occurrence, delay, clock, recursion, type,
 //! or effect facts while lowering. It accepts only an independently checked
-//! [`VerifiedDecorationCertificate`], allocates stable loop/transport ids, and
-//! then calls the independent [`verify_vector_plan`] trust boundary.
+//! [`VerifiedDecorationCertificate`](crate::signal_fir::decoration_verify::VerifiedDecorationCertificate), allocates stable loop/transport ids, and
+//! then calls the independent [`verify_vector_plan`](crate::signal_fir::vector::verify::verify_vector_plan) trust boundary.
 //!
 //! The result deliberately contains no scheduling order and this API has no
 //! `SchedulingStrategy` parameter. `-ss` is applied later, independently in
@@ -71,17 +71,31 @@ pub enum VectorPlanBuildError {
     /// Chunk size must be positive.
     VecSizeZero,
     /// A certified dependency unexpectedly names no certified record.
-    MissingRecord { signal_id: u32 },
+    MissingRecord {
+        /// The dependency endpoint without a certified record.
+        signal_id: u32,
+    },
     /// A certificate dependency endpoint carries a record and possibly a
     /// placement, but the placement traversal never reached it, so it has no
     /// execution context. Distinct from [`Self::MissingRecord`]: the record
     /// exists, the plan's context model is incomplete.
-    MissingContext { signal_id: u32 },
+    MissingContext {
+        /// The signal with a record but no execution context.
+        signal_id: u32,
+    },
     /// A compute-visible sample signal was not reached by occurrence facts.
-    SampleSignalUnplaced { signal_id: u32 },
+    SampleSignalUnplaced {
+        /// The unplaced sample signal.
+        signal_id: u32,
+    },
     /// A possible zero-delay state read crosses loops without one serial
     /// execution envelope.
-    UnfusedImmediateDelayCrossing { producer: u64, consumer: u64 },
+    UnfusedImmediateDelayCrossing {
+        /// The loop writing the state.
+        producer: u64,
+        /// The loop reading the state at a possibly zero delay.
+        consumer: u64,
+    },
     /// The independent plan verifier rejected the constructed DTO.
     Verification(VectorPlanError),
 }

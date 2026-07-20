@@ -12,23 +12,42 @@ use tlib::{NodeKind, TreeArena, list_to_vec, match_sym_rec, tree_to_int, tree_to
 /// Stable cell discriminator for signal-owned persistent state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateCell {
+    /// Delay-line memory of a delayed signal.
     Delay,
+    /// One-sample memory of a `prefix` signal.
     Prefix,
+    /// Tap history of an FIR filter signal.
     Fir,
+    /// Feedback history of an IIR filter signal.
     Iir,
+    /// Read-position index of a waveform signal.
     WaveformIndex,
+    /// Held value of a sequenced (`Seq`) block.
     Hold,
+    /// Clock counter of an on-demand/up-/down-sampling wrapper.
     Clock,
+    /// Buffered history of a reverse-time recursion.
     ReverseTime,
+    /// Block buffer of a block-reverse audio-domain signal.
     ReverseAd,
 }
 /// Stable abstract identity of one persistent state resource.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateResource {
     /// State owned by one prepared signal plus a semantic cell discriminator.
-    Signal { owner: u32, cell: StateCell },
+    Signal {
+        /// Prepared signal id that owns the state.
+        owner: u32,
+        /// Which semantic state cell of the owner is meant.
+        cell: StateCell,
+    },
     /// State owned by one symbolic recursion projection.
-    Recursion { group: u32, projection: u32 },
+    Recursion {
+        /// Symbolic recursion group id.
+        group: u32,
+        /// Projection index within the recursion group.
+        projection: u32,
+    },
 }
 /// Raw Faust foreign type code preserved independently from backend precision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,16 +55,23 @@ pub struct ForeignTypeCode(pub i64);
 /// Stable identity of one declared foreign function signature.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ForeignSignature {
+    /// Declared function names (per-precision name list).
     pub names: Vec<String>,
+    /// Declared return type code.
     pub return_type: ForeignTypeCode,
+    /// Declared argument type codes, in order.
     pub arguments: Vec<ForeignTypeCode>,
 }
 /// Stable foreign resource identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ForeignResource {
+    /// A declared foreign function, identified by its full signature.
     Function(ForeignSignature),
+    /// A declared foreign variable.
     Variable {
+        /// Declared variable name.
         name: String,
+        /// Declared variable type code.
         value_type: ForeignTypeCode,
     },
 }
@@ -53,21 +79,33 @@ pub enum ForeignResource {
 /// analysis-produced foreign effects use [`ForeignPurity::Unknown`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ForeignPurity {
+    /// Declared side-effect free; reads and calls may be reordered.
     Pure,
+    /// Declared side-effecting; must keep program order.
     Impure,
+    /// No purity declaration available; treated conservatively as impure.
     Unknown,
 }
 /// Conservative signal-level effect atom with stable resource identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EffectAtom {
+    /// Reads one persistent state resource.
     ReadState(StateResource),
+    /// Writes one persistent state resource.
     WriteState(StateResource),
+    /// Reads the table owned by the given signal id.
     ReadTable(u32),
+    /// Writes the table owned by the given signal id.
     WriteTable(u32),
+    /// Writes the UI element owned by the given signal id.
     WriteUi(u32),
+    /// Writes the output channel with the given index.
     WriteOutput(u32),
+    /// Calls or reads a foreign resource.
     Foreign {
+        /// Which foreign function or variable is touched.
         resource: ForeignResource,
+        /// Declared purity of the foreign access.
         purity: ForeignPurity,
     },
 }
@@ -369,7 +407,7 @@ pub(super) fn propagate_effect_sets(
 }
 /// Direct effect facts needed by scalar scheduling, keyed by prepared signal.
 ///
-/// Unlike [`VectorSignalAnalysis`], this intentionally contains neither
+/// Unlike [`VectorSignalAnalysis`](super::VectorSignalAnalysis), this intentionally contains neither
 /// occurrence facts nor execution conditions: scalar conflict orientation only
 /// needs the effects performed by each node itself.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -6,14 +6,19 @@ use super::model::*;
 /// Runtime clock value used by the executable `ClockStep` reference model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockValue {
+    /// Boolean clock driving a `BooleanOnDemand` guard.
     Boolean(bool),
+    /// Integer clock driving counted or downsample-modulo guards.
     Integer(i64),
 }
 /// Minimal concrete state needed to test fire-time and held-output semantics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockRuntime<S, O> {
+    /// Domain state advanced only by inner transitions.
     pub state: S,
+    /// Last output produced by a fire; preserved across zero-fire samples.
     pub held_output: O,
+    /// Running modulo counter for `DownsampleModulo` guards.
     pub downsample_counter: u64,
 }
 /// Applies `Step_c` exactly `fires(c,i)` times for one outer sample.

@@ -3,135 +3,340 @@
 use super::model::*;
 use std::fmt;
 
-/// Why [`verify_vector_plan`] rejected a plan. One variant per checked
+/// Why [`verify_vector_plan`](super::check::verify_vector_plan) rejected a
+/// plan. One variant per checked
 /// obligation, so each has a demonstrated rejecting mutation (plan §8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VectorPlanError {
     /// The verifier accepts only the exact v2 schema.
-    UnsupportedSchema { found: u32 },
+    UnsupportedSchema {
+        /// The schema version the plan actually declared.
+        found: u32,
+    },
     /// `vec_size` must be positive.
     VecSizeZero,
     /// A set-like array is not in its required canonical order (also catches
     /// duplicates, since canonical order is *strictly* ascending).
-    NotCanonical { what: &'static str, at: usize },
+    NotCanonical {
+        /// Which set-like array broke canonical order.
+        what: &'static str,
+        /// Index of the first element that is not strictly greater than its
+        /// predecessor.
+        at: usize,
+    },
     /// A loop appears in more than one epoch, or a plan loop is in none.
-    EpochCoverageMismatch { loop_id: u64 },
+    EpochCoverageMismatch {
+        /// The loop that is not owned by exactly one epoch.
+        loop_id: u64,
+    },
     /// An epoch lists a loop id that is not a plan loop.
-    EpochLoopUnknown { epoch_id: u64, loop_id: u64 },
+    EpochLoopUnknown {
+        /// The epoch listing the unknown loop.
+        epoch_id: u64,
+        /// The listed loop id absent from the plan.
+        loop_id: u64,
+    },
     /// A signal placed `Owned(l)` is absent from `l`'s roots.
-    OwnedSignalNotRoot { signal_id: u64, loop_id: u64 },
+    OwnedSignalNotRoot {
+        /// The owned signal missing from the loop's roots.
+        signal_id: u64,
+        /// The loop the signal's placement names as owner.
+        loop_id: u64,
+    },
     /// A root of loop `l` is not placed `Owned(l)`.
-    RootWithoutOwnership { signal_id: u64, loop_id: u64 },
+    RootWithoutOwnership {
+        /// The root signal whose placement is not `Owned` of its loop.
+        signal_id: u64,
+        /// The loop that lists the signal as a root.
+        loop_id: u64,
+    },
     /// A root references a signal id that is not a plan signal.
-    RootUnknownSignal { loop_id: u64, signal_id: u64 },
+    RootUnknownSignal {
+        /// The loop whose root list holds the dangling id.
+        loop_id: u64,
+        /// The referenced signal id absent from the plan.
+        signal_id: u64,
+    },
     /// An `Inline`-placed signal is not `duplicable`.
-    InlineNotDuplicable { signal_id: u64 },
+    InlineNotDuplicable {
+        /// The inline-placed signal that is not duplicable.
+        signal_id: u64,
+    },
     /// The producer-supplied `duplicable` bit disagrees with the effect facts.
-    DuplicabilityMismatch { signal_id: u64 },
+    DuplicabilityMismatch {
+        /// The signal whose `duplicable` bit contradicts its effects.
+        signal_id: u64,
+    },
     /// A loop's redundant `epoch_id` disagrees with canonical epoch membership.
     LoopEpochMismatch {
+        /// The loop with the inconsistent epoch declaration.
         loop_id: u64,
+        /// The epoch id the loop record declares.
         declared: u64,
+        /// The epoch that actually lists the loop as a member.
         actual: u64,
     },
     /// A data/effect edge references a loop id that is not a plan loop.
-    EdgeEndpointUnknown { edge: LoopEdge, missing: u64 },
+    EdgeEndpointUnknown {
+        /// The edge with the dangling endpoint.
+        edge: LoopEdge,
+        /// The endpoint loop id absent from the plan.
+        missing: u64,
+    },
     /// A loop depends on itself (an instantaneous self-edge).
-    LoopSelfEdge { loop_id: u64 },
+    LoopSelfEdge {
+        /// The loop that is both consumer and dependency of one edge.
+        loop_id: u64,
+    },
     /// The induced graph of one epoch contains a cycle.
-    EpochNotAcyclic { epoch_id: u64, remaining: Vec<u64> },
+    EpochNotAcyclic {
+        /// The epoch whose induced dependency graph is cyclic.
+        epoch_id: u64,
+        /// The loops left unscheduled after the topological sort stalled.
+        remaining: Vec<u64>,
+    },
     /// Two loops have conflicting effects but neither is ordered before the
     /// other by the combined data/effect relation.
-    UnorderedEffectConflict { left: u64, right: u64 },
+    UnorderedEffectConflict {
+        /// One of the two mutually unordered conflicting loops.
+        left: u64,
+        /// The other mutually unordered conflicting loop.
+        right: u64,
+    },
     /// A transport's producer and consumer loops are the same.
-    TransportSelfLoop { transport_id: u64 },
+    TransportSelfLoop {
+        /// The transport whose producer equals its consumer.
+        transport_id: u64,
+    },
     /// A transport's element type does not equal its signal's value type.
-    TransportTypeMismatch { transport_id: u64 },
+    TransportTypeMismatch {
+        /// The transport with the mismatched element type.
+        transport_id: u64,
+    },
     /// A transport's array length does not equal `vec_size`.
-    TransportLengthMismatch { transport_id: u64 },
+    TransportLengthMismatch {
+        /// The transport with the mismatched length.
+        transport_id: u64,
+    },
     /// An interleaved transport has no matching lockstep width.
-    TransportLayoutMismatch { transport_id: u64 },
+    TransportLayoutMismatch {
+        /// The transport whose interleaved layout has no matching bundle.
+        transport_id: u64,
+    },
     /// A lockstep bundle has fewer than two lanes or inconsistent width.
-    LockstepWidthMismatch { bundle_id: u64 },
+    LockstepWidthMismatch {
+        /// The bundle whose declared width disagrees with its lanes.
+        bundle_id: u64,
+    },
     /// A lockstep bundle references a missing loop or repeats a member.
-    LockstepMemberMismatch { bundle_id: u64, loop_id: u64 },
+    LockstepMemberMismatch {
+        /// The bundle with the invalid member list.
+        bundle_id: u64,
+        /// The offending member loop id.
+        loop_id: u64,
+    },
     /// A lane record does not correspond exactly to one bundle member.
-    LockstepLaneMismatch { bundle_id: u64, loop_id: u64 },
+    LockstepLaneMismatch {
+        /// The bundle whose lane list disagrees with its members.
+        bundle_id: u64,
+        /// The lane loop without a matching member (or vice versa).
+        loop_id: u64,
+    },
     /// Two candidate lanes are connected in the epoch dependence graph.
     LockstepDependentLanes {
+        /// The bundle holding the dependent lanes.
         bundle_id: u64,
+        /// One of the two dependency-connected lanes.
         left: u64,
+        /// The other dependency-connected lane.
         right: u64,
     },
     /// Two candidate lanes do not share the same epoch and clock.
     LockstepDomainMismatch {
+        /// The bundle holding the mismatched lanes.
         bundle_id: u64,
+        /// One of the two lanes disagreeing on epoch or clock.
         left: u64,
+        /// The other lane of the disagreeing pair.
         right: u64,
     },
     /// Two candidate lanes have non-commuting effects.
     LockstepEffectConflict {
+        /// The bundle holding the conflicting lanes.
         bundle_id: u64,
+        /// One of the two lanes with conflicting effects.
         left: u64,
+        /// The other lane of the conflicting pair.
         right: u64,
     },
     /// A root/leaf witness is not canonical or references signals outside its
     /// declared lane roots. Prepared-tree shape is checked by the second gate.
-    LockstepIsoWitnessMismatch { bundle_id: u64, loop_id: u64 },
+    LockstepIsoWitnessMismatch {
+        /// The bundle whose lane carries the invalid witness.
+        bundle_id: u64,
+        /// The lane loop with the invalid isomorphism witness.
+        loop_id: u64,
+    },
     /// A cross-epoch edge whose dependency epoch has a strictly greater rank
     /// than its consumer epoch (a barrier run backwards).
-    BarrierViolation { edge: LoopEdge },
+    BarrierViolation {
+        /// The cross-epoch edge that runs against barrier order.
+        edge: LoopEdge,
+    },
     /// A `Recursive`/`Island` loop carries a `pointwise` witness, or is
     /// otherwise asserted vector-safe in a way that contradicts its serial
     /// kind.
-    SerialLoopNotSerial { loop_id: u64 },
+    SerialLoopNotSerial {
+        /// The serial loop asserted vector-safe.
+        loop_id: u64,
+    },
     /// A `Vectorizable` loop has no `VecSafe` witness.
-    VectorizableWithoutWitness { loop_id: u64 },
+    VectorizableWithoutWitness {
+        /// The vectorizable loop missing a witness.
+        loop_id: u64,
+    },
     /// A vectorizable loop's roots do not satisfy the concrete `VecSafe` rule.
-    VectorizableNotSafe { loop_id: u64 },
+    VectorizableNotSafe {
+        /// The vectorizable loop that fails the `VecSafe` check.
+        loop_id: u64,
+    },
     /// A `VecSafe` witness references a loop id that is not a plan loop.
-    WitnessUnknownLoop { loop_id: u64 },
+    WitnessUnknownLoop {
+        /// The referenced loop id absent from the plan.
+        loop_id: u64,
+    },
     /// A transport references a signal or loop id that is not in the plan.
-    TransportUnknownRef { transport_id: u64, missing: u64 },
+    TransportUnknownRef {
+        /// The transport holding the dangling reference.
+        transport_id: u64,
+        /// The referenced signal or loop id absent from the plan.
+        missing: u64,
+    },
     /// A required set-like fused-group field is empty.
-    FusedGroupEmpty { group_id: u64, what: &'static str },
+    FusedGroupEmpty {
+        /// The group with the empty required field.
+        group_id: u64,
+        /// Which required field is empty.
+        what: &'static str,
+    },
     /// A fused group references a loop absent from the plan.
-    FusedGroupUnknownLoop { group_id: u64, loop_id: u64 },
+    FusedGroupUnknownLoop {
+        /// The group holding the dangling loop reference.
+        group_id: u64,
+        /// The referenced loop id absent from the plan.
+        loop_id: u64,
+    },
     /// The owner is not included in the group's members.
-    FusedGroupOwnerNotMember { group_id: u64, owner_loop_id: u64 },
+    FusedGroupOwnerNotMember {
+        /// The group whose owner is outside its member list.
+        group_id: u64,
+        /// The declared owner loop missing from the members.
+        owner_loop_id: u64,
+    },
     /// One loop belongs to two fused serial groups.
-    FusedGroupLoopOverlap { loop_id: u64 },
+    FusedGroupLoopOverlap {
+        /// The loop claimed by more than one group.
+        loop_id: u64,
+    },
     /// A fused group references a signal absent from the plan.
-    FusedGroupUnknownSignal { group_id: u64, signal_id: u64 },
+    FusedGroupUnknownSignal {
+        /// The group holding the dangling signal reference.
+        group_id: u64,
+        /// The referenced signal id absent from the plan.
+        signal_id: u64,
+    },
     /// A grouped signal is not owned by one of the group's member loops.
-    FusedGroupSignalOutside { group_id: u64, signal_id: u64 },
+    FusedGroupSignalOutside {
+        /// The group listing the outside signal.
+        group_id: u64,
+        /// The signal not owned by any member loop.
+        signal_id: u64,
+    },
     /// A rematerialized transport id is absent from the plan.
-    FusedGroupUnknownTransport { group_id: u64, transport_id: u64 },
+    FusedGroupUnknownTransport {
+        /// The group holding the dangling transport reference.
+        group_id: u64,
+        /// The referenced transport id absent from the plan.
+        transport_id: u64,
+    },
     /// A rematerialized transport does not stay within its group.
-    FusedGroupTransportOutside { group_id: u64, transport_id: u64 },
+    FusedGroupTransportOutside {
+        /// The group whose internal transport crosses its boundary.
+        group_id: u64,
+        /// The transport with an endpoint outside the member loops.
+        transport_id: u64,
+    },
     /// A rematerialized transport does not carry one of the certified delayed
     /// reads.
-    FusedGroupTransportNotDelayedRead { group_id: u64, transport_id: u64 },
+    FusedGroupTransportNotDelayedRead {
+        /// The group listing the non-delayed-read transport.
+        group_id: u64,
+        /// The transport whose signal is not a certified delayed read.
+        transport_id: u64,
+    },
     /// The selected owner is not the canonical owner of a certified carrier.
-    FusedGroupOwnerNotStateCarrier { group_id: u64, owner_loop_id: u64 },
+    FusedGroupOwnerNotStateCarrier {
+        /// The group with the non-canonical owner.
+        group_id: u64,
+        /// The declared owner loop that owns no certified carrier.
+        owner_loop_id: u64,
+    },
     /// The decoration facts do not identify the declared carrier as delayed
     /// state.
-    FusedGroupCarrierNotDelayedState { group_id: u64, signal_id: u64 },
+    FusedGroupCarrierNotDelayedState {
+        /// The group declaring the uncertified carrier.
+        group_id: u64,
+        /// The declared carrier signal not certified as delayed state.
+        signal_id: u64,
+    },
     /// A delayed read lacks the declared `DepKind::Delayed` carrier edge.
-    FusedGroupDelayedDependencyMissing { group_id: u64, signal_id: u64 },
+    FusedGroupDelayedDependencyMissing {
+        /// The group declaring the delayed read.
+        group_id: u64,
+        /// The delayed-read signal missing its delayed carrier edge.
+        signal_id: u64,
+    },
     /// A same-sample path from a delayed read to its recursive writer leaves
     /// the fused serial group.
-    FusedGroupPathIncomplete { group_id: u64, loop_id: u64 },
+    FusedGroupPathIncomplete {
+        /// The group whose member set misses a data-path loop.
+        group_id: u64,
+        /// The on-path loop absent from the group's members.
+        loop_id: u64,
+    },
     /// A declared state writer does not match its recursive member loop.
-    FusedGroupStateWriterMismatch { group_id: u64, signal_id: u64 },
+    FusedGroupStateWriterMismatch {
+        /// The group declaring the mismatched writer.
+        group_id: u64,
+        /// The writer signal that matches no recursive member loop.
+        signal_id: u64,
+    },
     /// A recursive member loop has no matching projection writer in the group.
-    FusedGroupRecursiveMemberMissingWriter { group_id: u64, loop_id: u64 },
+    FusedGroupRecursiveMemberMissingWriter {
+        /// The group whose writer set is incomplete.
+        group_id: u64,
+        /// The recursive member loop without a state writer.
+        loop_id: u64,
+    },
     /// Grouped signals or loops cross incompatible clock domains.
-    FusedGroupClockMismatch { group_id: u64 },
+    FusedGroupClockMismatch {
+        /// The group spanning more than one clock domain.
+        group_id: u64,
+    },
     /// An active chunk transport still materializes a delayed read internally.
-    FusedGroupDangerousTransportPresent { group_id: u64, transport_id: u64 },
+    FusedGroupDangerousTransportPresent {
+        /// The group in which the delayed read is still materialized.
+        group_id: u64,
+        /// The chunk transport that should have been rematerialized.
+        transport_id: u64,
+    },
     /// An independently reconstructed immediate-delay crossing is uncovered.
-    FusedGroupDangerousCrossingMissing { producer: u64, consumer: u64 },
+    FusedGroupDangerousCrossingMissing {
+        /// The loop producing the delayed state.
+        producer: u64,
+        /// The loop consuming it in the same sample.
+        consumer: u64,
+    },
 }
 impl fmt::Display for VectorPlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

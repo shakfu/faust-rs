@@ -31,6 +31,8 @@ pub struct CopyDelayState<T> {
 }
 
 impl<T: Clone> CopyDelayState<T> {
+    /// Builds the concrete copy-delay state from planned `Copy` storage,
+    /// rejecting geometry that disagrees with `max_delay`.
     pub fn new(
         storage: &VectorDelayStorage,
         max_delay: usize,
@@ -61,6 +63,8 @@ impl<T: Clone> CopyDelayState<T> {
         })
     }
 
+    /// Runs one chunk through the copy-delay scheme, returning the values
+    /// read at each requested delay for every input sample.
     pub fn process_chunk(
         &mut self,
         input: &[T],
@@ -112,6 +116,8 @@ pub struct RingDelayState<T> {
 }
 
 impl<T: Clone> RingDelayState<T> {
+    /// Builds the concrete ring-delay state from planned `Ring` storage,
+    /// rejecting geometry that disagrees with `max_delay` and `vec_size`.
     pub fn new(
         storage: &VectorDelayStorage,
         max_delay: usize,
@@ -139,6 +145,8 @@ impl<T: Clone> RingDelayState<T> {
         })
     }
 
+    /// Runs one chunk through the ring-buffer scheme, returning the values
+    /// read at each requested delay for every input sample.
     pub fn process_chunk(
         &mut self,
         input: &[T],

@@ -14,7 +14,10 @@ pub enum DepKind {
     /// Same-tick value dependency.
     Immediate,
     /// State read with a known positive delay amount.
-    Delayed { amount: u32 },
+    Delayed {
+        /// The known positive delay amount in samples.
+        amount: u32,
+    },
     /// Reserved for the P4.3 control-dependency distinction.
     Control,
     /// Boundary between a wrapper and its outer-domain clock.

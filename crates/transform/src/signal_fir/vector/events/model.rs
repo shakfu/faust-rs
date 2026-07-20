@@ -72,29 +72,53 @@ pub enum EventUseSource {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorEventKind {
     /// A routed signal definition.
-    Definition { signal_id: u64 },
+    Definition {
+        /// Routed signal being defined.
+        signal_id: u64,
+    },
     /// One exact signal-level effect atom attached to a definition.
     Effect {
+        /// Routed signal whose definition carries the effect.
         signal_id: u64,
+        /// Position of the atom in the definition's effect list.
         effect_index: u64,
+        /// The exact effect atom.
         effect: EffectAtom,
     },
     /// Producer-side write into a named chunk transport.
-    TransportStore { transport_id: u64 },
+    TransportStore {
+        /// Named chunk transport being written.
+        transport_id: u64,
+    },
     /// Consumer-side read from a named chunk transport.
-    TransportLoad { transport_id: u64 },
+    TransportLoad {
+        /// Named chunk transport being read.
+        transport_id: u64,
+    },
     /// One routed signal use. `occurrence` distinguishes repeated equal uses.
     Use {
+        /// Routed signal being used.
         signal_id: u64,
+        /// Where the used definition comes from.
         source: EventUseSource,
+        /// Index distinguishing repeated equal uses of the same source.
         occurrence: u64,
     },
     /// Fixed entry barrier for one epoch.
-    EpochEnter { epoch_id: u64 },
+    EpochEnter {
+        /// Epoch being entered.
+        epoch_id: u64,
+    },
     /// Fixed exit barrier for one epoch.
-    EpochExit { epoch_id: u64 },
+    EpochExit {
+        /// Epoch being exited.
+        epoch_id: u64,
+    },
     /// One checked P6.1 delay or recursion transition.
-    StateTransition { action: VectorStateAction },
+    StateTransition {
+        /// The exact checked state transition.
+        action: VectorStateAction,
+    },
 }
 /// One canonical static or sample-indexed event.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -174,7 +198,7 @@ impl EventOrderCertificate {
         &self.dependencies
     }
 }
-/// Opaque evidence that [`verify_event_order_certificate`] accepted P5.3.
+/// Opaque evidence that [`verify_event_order_certificate`](super::check::verify_event_order_certificate) accepted P5.3.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedEventOrderCertificate {
     pub(super) certificate: EventOrderCertificate,
@@ -202,11 +226,26 @@ pub enum VectorEventError {
     /// The P6.1 state artifact was produced from a different vector plan.
     StatePlanMismatch,
     /// The route layout does not exactly and topologically cover the plan.
-    InvalidLayout { detail: &'static str, loop_id: u64 },
+    InvalidLayout {
+        /// Which layout invariant was violated.
+        detail: &'static str,
+        /// The scheduled loop at which the violation was found.
+        loop_id: u64,
+    },
     /// The selected complete or compact finite table is larger than its bound.
-    EventBoundExceeded { needed: usize, limit: usize },
+    EventBoundExceeded {
+        /// Number of events the table would need.
+        needed: usize,
+        /// The applicable event-count bound.
+        limit: usize,
+    },
     /// A route-independent lower bound already exceeds both applicable bounds.
-    EventLowerBoundExceeded { minimum: usize, limit: usize },
+    EventLowerBoundExceeded {
+        /// The route-independent lower bound on the event count.
+        minimum: usize,
+        /// The larger of the two applicable bounds.
+        limit: usize,
+    },
     /// Event-count arithmetic exceeded the host representation.
     EventCountOverflow,
     /// The event table differs from independent reconstruction.
@@ -221,11 +260,24 @@ pub enum VectorEventError {
     /// The dependence relation differs from independent reconstruction.
     DependencyMismatch,
     /// An order is not a permutation of the event table.
-    InvalidOrder { which: &'static str },
+    InvalidOrder {
+        /// Which order (`"scalar"` or `"vector"`) is invalid.
+        which: &'static str,
+    },
     /// A reconstructed dependence contradicts scalar execution.
-    ScalarDependenceViolation { before: u64, after: u64 },
+    ScalarDependenceViolation {
+        /// Event required to execute first.
+        before: u64,
+        /// Event required to execute second.
+        after: u64,
+    },
     /// A scalar-ordered dependence is reversed by vector execution.
-    FissionSafeViolation { before: u64, after: u64 },
+    FissionSafeViolation {
+        /// Event required to execute first.
+        before: u64,
+        /// Event required to execute second.
+        after: u64,
+    },
 }
 impl fmt::Display for VectorEventError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

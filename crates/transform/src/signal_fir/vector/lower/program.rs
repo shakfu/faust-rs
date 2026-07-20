@@ -132,40 +132,73 @@ pub enum PureVectorLowerError {
     /// Internal real precision is outside the active fast-lane contract.
     InvalidRealType(FirType),
     /// A P4.4 signal id is absent from the verified prepared forest.
-    MissingPreparedSignal { signal_id: u64 },
+    MissingPreparedSignal {
+        /// The planned signal id with no prepared counterpart.
+        signal_id: u64,
+    },
     /// Prepared and planned scalar types disagree.
     PlannedTypeMismatch {
+        /// The signal whose types disagree.
         signal_id: u64,
+        /// Scalar type recorded by the vector plan.
         planned: ValueType,
+        /// Scalar type recorded by the prepared forest, if any.
         prepared: Option<SimpleSigType>,
     },
     /// The pure P5.2 slice cannot execute an effect-bearing signal.
     EffectfulSignal {
+        /// The effect-bearing signal.
         signal_id: u64,
+        /// Rendered signal expression for the diagnostic.
         expression: String,
+        /// The effect atoms that make the signal impure.
         effects: Vec<EffectAtom>,
     },
     /// The pure P5.2 slice has no state/effect semantics for this node.
-    UnsupportedSignal { signal_id: u64, expression: String },
+    UnsupportedSignal {
+        /// The unsupported signal.
+        signal_id: u64,
+        /// Rendered signal expression for the diagnostic.
+        expression: String,
+    },
     /// A control expression depended on a sample-region value.
-    InvalidControlDependency { signal_id: u64 },
+    InvalidControlDependency {
+        /// The control signal with the sample-region dependency.
+        signal_id: u64,
+    },
     /// A pure signal cycle escaped the P4/P6 recursion boundary.
     PureCycle {
+        /// A signal on the escaped cycle.
         signal_id: u64,
+        /// The region in which the cycle was found.
         region: VectorRegion,
     },
     /// Audio input index is invalid for the declared module arity.
-    InputIndexOutOfRange { index: i32, num_inputs: usize },
+    InputIndexOutOfRange {
+        /// The out-of-range input index.
+        index: i32,
+        /// The module's declared number of audio inputs.
+        num_inputs: usize,
+    },
     /// FIR operands or result violate the prepared typing contract.
     FirTypeMismatch {
+        /// The signal whose FIR typing is inconsistent.
         signal_id: u64,
+        /// The FIR type required by the contract.
         expected: FirType,
+        /// The FIR type actually found, if any.
         actual: Option<FirType>,
     },
     /// Region-local CSE did not preserve one sink per requested root.
-    CseRootCoverage { region: VectorRegion },
+    CseRootCoverage {
+        /// The region whose root coverage is broken.
+        region: VectorRegion,
+    },
     /// Final bodies do not contain the evidence accepted by P5.1.
-    BodyEvidence { detail: String },
+    BodyEvidence {
+        /// Which piece of evidence is missing or different.
+        detail: String,
+    },
 }
 impl fmt::Display for PureVectorLowerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
