@@ -36,6 +36,33 @@
 //! `compile_vect.cpp`): C++ discovers facts while lowering; this port freezes
 //! each fact family into a checked artifact first, then lowers. Per-stage
 //! provenance lives in each module header.
+//!
+//! # Plan-codename glossary
+//! Stage headers cite phases of the porting plans; the leaf docs are
+//! readable without opening them given this key:
+//!
+//! - **P4.x** — signal-level analysis and the strategy-independent plan:
+//!   P4.3a effect identities, P4.3b checked decorations ([`analysis`],
+//!   [`super::decoration_verify`]), P4.4 the vector plan ([`plan`],
+//!   [`verify`]).
+//! - **P5.x** — region-aware FIR routing and lowering: P5.1 routing
+//!   evidence ([`route`]), P5.2 signal-closure lowering ([`lower`]).
+//! - **P6.x** — state and clock composition: P6.1 delay/recursion state
+//!   plans ([`state`]), P6.2 clock-island/AD policy ([`clock_ad`]),
+//!   P6.5/P6.6 their consumption by lowering and state.
+//!   (P4–P6 are phases of
+//!   `porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md`.)
+//! - **R0–R9** — the 2026-07 cleanup/documentation refactor
+//!   (`porting/transform-cleanup-documentation-factorization-plan-2026-07-19-en.md`):
+//!   R5–R7 split each stage into `model`/`build`(`produce`,`materialize`)/
+//!   `check`/`tests`, R9 added the docs/layout quality gates.
+//! - **§3.2 / §4.6 / §4.8** — sections of that cleanup plan: §3.2
+//!   producer/checker code must not be merged; §4.6 producer and checker
+//!   reachability stay disjoint; §4.8 the shared terminal verify keeps every
+//!   admission guard on both the producer and the standalone checker path.
+//! - **`-ss` / `-vec` / `-vs` / `-lv`** — user-facing scheduling-strategy,
+//!   vector-mode, vector-size, and chunk-driver options (Faust C++
+//!   spellings).
 
 use super::{cse, decoration_verify, recursion, siggen};
 
