@@ -7,7 +7,9 @@ the R0–R9 cleanup battery. This plan is the first follow-up the cleanup plan
 explicitly deferred ("Fixing the nondeterminism … belongs to a separate change
 with its own validation", journal 2026-07-19).
 
-**Status:** proposed
+**Status:** executed 2026-07-20 — D0–D4 complete (see the 2026-07-20 journal:
+gate landed red→green, fix qualified 393/393 stable over 5 passes, allowlist
+dissolved, 0 out-of-allowlist byte diffs vs the pre-fix baseline)
 
 **Scope:** make scalar FIR emission byte-deterministic run-to-run by fixing the
 hash-order-driven delay-line allocation and maintenance order, then dissolve

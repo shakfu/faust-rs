@@ -1,7 +1,7 @@
 //! [`DelayManager`]: owns all delay-line exclusive state and provides
 //! scan + allocation entry points for the FIR fast-lane delay subsystem.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use fir::{FirId, FirStore};
 use signals::SigId;
@@ -23,9 +23,15 @@ use super::{SignalFirError, SignalFirErrorCode};
 /// | Field | Type | Role |
 /// |-------|------|------|
 /// | `options` | [`DelayOptions`] | `-mcd` / `-dlt` strategy thresholds |
-/// | `delay_lines` | `HashMap<(SigId, Option<u32>), DelayLineInfo>` | Allocated buffers, keyed by carried signal and clock occurrence |
-/// | `rec_output_analysis` | `HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>` | Accumulated delay metadata per recursion output and clock occurrence |
-/// | `scheduled_delay_writes` | `HashSet<(SigId, Option<u32>)>` | Per-occurrence dedup guard for delay writes |
+/// | `delay_lines` | `BTreeMap<(SigId, Option<u32>), DelayLineInfo>` | Allocated buffers, keyed by carried signal and clock occurrence |
+/// | `rec_output_analysis` | `BTreeMap<(u32, usize, Option<u32>), DelayAnalysisEntry>` | Accumulated delay metadata per recursion output and clock occurrence |
+/// | `scheduled_delay_writes` | `BTreeSet<(SigId, Option<u32>)>` | Per-occurrence dedup guard for delay writes |
+///
+/// The maps are ordered on purpose: `delay_lines` iteration order is emission
+/// order (`lines()`, `emit_sample_end_updates`), so it must stay canonical or
+/// generated struct fields and maintenance statements become run-to-run
+/// nondeterministic (see
+/// `porting/scalar-emission-determinism-plan-2026-07-20-en.md`).
 ///
 /// # Planning / allocation flow
 ///
@@ -47,14 +53,14 @@ pub(crate) struct DelayManager {
     /// Strategy selection thresholds (`-mcd` / `-dlt` options).
     options: DelayOptions,
     /// Allocated delay buffers, keyed by carried signal and clock occurrence.
-    delay_lines: HashMap<(SigId, Option<u32>), DelayLineInfo>,
+    delay_lines: BTreeMap<(SigId, Option<u32>), DelayLineInfo>,
     /// Read-only accumulated delay metadata keyed by recursion output and clock
     /// occurrence.
-    rec_output_analysis: HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
+    rec_output_analysis: BTreeMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
     /// Dedup guard: ensures the delay-write store for one carried-signal
     /// occurrence is emitted at most once per sample, even when it feeds
     /// multiple `SIGDELAY` reads in the same region.
-    scheduled_delay_writes: HashSet<(SigId, Option<u32>)>,
+    scheduled_delay_writes: BTreeSet<(SigId, Option<u32>)>,
 }
 
 impl DelayManager {
@@ -62,9 +68,9 @@ impl DelayManager {
     pub(crate) fn new(options: DelayOptions) -> Self {
         Self {
             options,
-            delay_lines: HashMap::new(),
-            rec_output_analysis: HashMap::new(),
-            scheduled_delay_writes: HashSet::new(),
+            delay_lines: BTreeMap::new(),
+            rec_output_analysis: BTreeMap::new(),
+            scheduled_delay_writes: BTreeSet::new(),
         }
     }
 
@@ -317,7 +323,7 @@ impl DelayManager {
     /// [`plan_delays`]: super::plan::plan_delays
     pub(crate) fn set_rec_output_analysis(
         &mut self,
-        rec_outputs: HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
+        rec_outputs: BTreeMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
     ) {
         self.rec_output_analysis = rec_outputs;
     }

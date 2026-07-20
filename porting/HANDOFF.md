@@ -65,14 +65,20 @@ architecture, preserved as-is).
   (commit `86be9426`, release compiler built).
 - Script: `/Users/peter/git/faust-rs-baseline-worktrees/compare-emissions.sh`
   (outside the repo; 3-emission recheck for new diffs).
-- **Pre-existing defect (recorded R0, do not fix inside the cleanup):**
-  scalar emission is intermittently nondeterministic run-to-run on
-  delay-heavy DSPs. 77 of 396 cases frozen in
-  `nondeterministic-frozen.txt`; zero certified-vec cases affected.
-  Reproducer: compile `zita_rev1.dsp` twice, diff. Suspect: `HashMap`
-  iteration in `signal_fir/delay/manager.rs` (`delay_lines`).
+- **Defect FIXED (2026-07-20, post-cleanup follow-up):** the intermittent
+  run-to-run nondeterminism of scalar emission on delay-heavy DSPs was
+  root-caused to `HashMap` iteration order in the delay subsystem
+  (`DelayPlan.lines` driving struct-field/clear-loop allocation order,
+  `DelayManager.delay_lines` driving maintenance emission) and fixed by
+  converting those collections to `BTreeMap`/`BTreeSet`
+  (`porting/scalar-emission-determinism-plan-2026-07-20-en.md`). The
+  determinism invariant is now enforced in-repo by
+  `cargo run -p xtask -- emission-determinism` (396-case matrix, empty
+  allowlist `tests/impulse-tests/emission-determinism-allowlist.txt`);
+  the external frozen-list workflow is obsolete for determinism checking.
 - Environment: Faust libs via gitignored symlink
-  `target/share/faust -> /opt/homebrew/share/faust` in both trees.
+  `target/share/faust -> <faust install>/share/faust` in both trees
+  (`/opt/homebrew/...` on ARM, `/usr/local/...` on Intel).
 - The baseline worktree is still in place; remove it only after the final
   battery is accepted (`git worktree remove`).
 

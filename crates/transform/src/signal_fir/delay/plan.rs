@@ -4,7 +4,7 @@
 //! Provides [`DelayPlan`], [`DelayAnalysisEntry`], [`plan_delays`], the
 //! [`DelayPlanner`] visitor, and the `is_recursion_delay_chain_static` helper.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::SigType;
@@ -58,12 +58,16 @@ pub(crate) struct DelayPlan {
     /// The context is part of the identity because one hash-consed signal can
     /// occur in sibling `ondemand` bodies. C++ allocates independent state for
     /// those occurrences; sharing one line would couple their fire-time state.
-    pub(crate) lines: HashMap<(SigId, Option<u32>), i32>,
+    ///
+    /// Iteration order is allocation order (`prepare_delay_lines`) and hence
+    /// struct-field and clear-loop emission order: it must stay canonical
+    /// (ordered map), or emission becomes run-to-run nondeterministic.
+    pub(crate) lines: BTreeMap<(SigId, Option<u32>), i32>,
     /// Recursion-output sizing metadata:
     /// `(rec_var_id, proj_index, clock-domain instance)` → entry.
     ///
     /// Stored into `DelayManager::rec_output_analysis` by `prepare_delay_lines`.
-    pub(crate) rec_outputs: HashMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
+    pub(crate) rec_outputs: BTreeMap<(u32, usize, Option<u32>), DelayAnalysisEntry>,
 }
 
 // ─── plan_delays ──────────────────────────────────────────────────────────────
@@ -123,8 +127,8 @@ struct DelayPlanner<'a> {
     options: &'a DelayOptions,
     clock_domains: Option<&'a propagate::ClockDomainTable>,
     plan: DelayPlan,
-    best_seen_delay: HashMap<(SigId, Option<u32>), i32>,
-    scanned: HashSet<(SigId, Option<u32>)>,
+    best_seen_delay: BTreeMap<(SigId, Option<u32>), i32>,
+    scanned: BTreeSet<(SigId, Option<u32>)>,
 }
 
 impl<'a> DelayPlanner<'a> {
@@ -140,8 +144,8 @@ impl<'a> DelayPlanner<'a> {
             options,
             clock_domains,
             plan: DelayPlan::default(),
-            best_seen_delay: HashMap::new(),
-            scanned: HashSet::new(),
+            best_seen_delay: BTreeMap::new(),
+            scanned: BTreeSet::new(),
         }
     }
 
