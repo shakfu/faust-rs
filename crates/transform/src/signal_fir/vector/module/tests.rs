@@ -1,9 +1,23 @@
 //! Tests for `vector::module` (relocated from the former inline
 //! `mod tests` block; test names unchanged).
 
+use fir::{AccessType, FirBuilder, FirStore, FirType};
+
+use super::check::{
+    FinalModuleExpectations, verify_final_module, verify_mutable_table_attribution,
+    verify_readonly_table_stores, verify_sound_field_immutability, verify_ui_write_attribution,
+};
 use super::*;
+use crate::schedule::SchedulingStrategy;
+use crate::signal_fir::vector::analysis::EffectAtom;
+use crate::signal_fir::vector::ui::build_vector_ui_fir;
+use crate::signal_fir::vector::verify::VectorPlan;
+use crate::signal_fir::{ComputeMode, VectorFallbackReason, VectorPipelineStatus};
+use crate::signal_prepare::VerifiedPreparedSignals;
 use fir::checker::verify_fir_module;
+use propagate::ClockDomainTable;
 use signals::SigBuilder;
+use signals::SigId;
 use tlib::TreeArena;
 
 use crate::signal_prepare::prepare_signals_for_fir_verified;
