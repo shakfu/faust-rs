@@ -86,6 +86,7 @@ Usage:
   cargo run -p xtask -- vector-interp-opt-check
   cargo run --release -p xtask -- vector-compile-budget-check [--baseline tests/vector-compile-budget/release-baseline.json]
   cargo run -p xtask -- lockstep-simd-check
+  cargo run -p xtask -- structure-check
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -174,6 +175,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "p7-matrix-report" => p7_matrix_report(args)?,
         "vector-coverage-merge" => vector_coverage_merge(args)?,
         "vector-coverage-check" => vector_coverage_check(args)?,
+        "structure-check" => structure_check()?,
         "vector-interp-opt-check" => vector_interp_opt_check(args)?,
         "vector-compile-budget-check" => vector_compile_budget_check(args)?,
         "lockstep-simd-check" => lockstep_simd_check(args)?,
@@ -196,6 +198,7 @@ mod p7_matrix;
 mod reports;
 mod runtime_trace;
 mod shared;
+mod structure_check;
 mod vector_compile_budget;
 mod vector_coverage;
 mod wasm;
@@ -211,6 +214,7 @@ pub(crate) use p7_matrix::*;
 pub(crate) use reports::*;
 pub(crate) use runtime_trace::*;
 pub(crate) use shared::*;
+pub(crate) use structure_check::*;
 pub(crate) use vector_compile_budget::*;
 pub(crate) use vector_coverage::*;
 pub(crate) use wasm::*;
