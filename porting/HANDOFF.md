@@ -1,13 +1,14 @@
 # Session Handoff
 
-Date: 2026-07-19
+Date: 2026-07-20
 
 ## Repo State
 
 - Branch: `transform-cleanup` (linear on top of `main` @ `86be9426`).
-- HEAD: `246b9702` — R0 through R3 of
+- HEAD: see `git log` — R0 through R9 of
   `porting/transform-cleanup-documentation-factorization-plan-2026-07-19-en.md`
-  are complete and committed; R4 is next.
+  are complete and committed (one milestone per commit, §4.8 guards listed
+  in the R6/R7 commit messages).
 - Working tree: clean (plus untracked local `tests/impulse-tests/node_modules`
   etc. for the asc gate).
 
@@ -15,72 +16,101 @@ Date: 2026-07-19
 
 | Phase | State | Commits |
 |---|---|---|
-| R0 freeze | done, all gates green | `ab14a1ed` |
-| R1 docs rewrite | done (2 parts), full battery green | `0c53de09`, `deebe3d7` |
-| R2 test splits | done (3 parts), full battery green | `6c49e1c5`, `559a79cd`, `c1fd79f3` |
-| R3 namespace | done, gates green (see note below) | `b643fdd7`, `0c829798` |
-| R4.4 walker | done, arbiter net 0 defects, coverage 1,536 unchanged | `7d527c96` |
-| R4.2 part 1 (common/ids) | done | `37271bce` |
-| R5.2 verify split | done, arbiter 319/319, 0 defects | `a1a98c79` |
-| R5.1 analysis split | done, arbiter 319/319, 0 defects | `f51e0068` |
-| R5.3 plan split — **R5 complete** | done, arbiter 319/319, 0 defects | `246b9702` |
-| R4 rest, R6–R9 | not started | — |
+| R0 freeze | done | `ab14a1ed` |
+| R1 docs rewrite | done (2 parts) | `0c53de09`, `deebe3d7` |
+| R2 test splits | done (3 parts) | `6c49e1c5`, `559a79cd`, `c1fd79f3` |
+| R3 namespace | done | `b643fdd7`, `0c829798` |
+| R4.4 walker + R4.2p1 | done | `7d527c96`, `37271bce` |
+| R5 analysis/verify/plan splits | done | `a1a98c79`, `f51e0068`, `246b9702` |
+| R6 state/clock_ad/route/lower splits | done | `35ca7be2`, `5168eec6`, `1c4dd3ad`, `4632db74` |
+| R7 events/assemble/module splits | done | `3fac3536`, `c489c3b2`, `55629619` |
+| R8 explicit scalar imports | done | `51eadfd9` |
+| R9 structure-check, 798→0 docs, warn(missing_docs) | done | `81c6689d`, `a62b2509` |
+
+Every split milestone: transform lib tests green, clippy (+1.97.0, = CI
+stable) clean, byte-identity arbiter 319/319 identical / 0 defects.
+Coverage gate (1,536 certified mode/DSP pairs) green at R5.3, R6.2 and the
+R6.3–R7.3 batch (see journal). §4.8: `reject_unadopted_stateful_reads`
+now has rejection tests through BOTH the producer path and the standalone
+checker entry (`clock_ad/tests.rs`).
+
+## Architecture after the cleanup
+
+Each vector stage is a directory with physically separated producer and
+checker files plus a shared vocabulary module:
+
+- `analysis/{conditions,dependencies,effects,uses}.rs`
+- `verify/{model,error,check,fused_groups,checker_reachability}.rs`
+- `plan/{model? (in mod), build,fusion,producer_reachability}.rs`
+- `state/{model,build,check,simulation}.rs`
+- `clock_ad/{model,build,check,simulation}.rs`
+- `route/{model,session,check}.rs`
+- `lower/{program,signal,tables,check}.rs`
+- `events/{model,produce,check}.rs`   ← assurance boundary
+- `assemble/{model,materialize,check}.rs`
+- `module/{build,outputs,lifecycle,check}.rs`
+
+Intentionally retained duplication (plan §3.2 — do NOT merge; module
+headers repeat this in place): events `producer_*` vs
+`independently_*`/`checker_required_*`/`independent_checked_sample_count`;
+assemble materializers vs `independently_expected_clock_cursor` /
+`state_cursor_advance_matches` / shape matchers; plan
+`producer_reachability` vs verify `checker_reachability`. clock_ad/state
+checkers re-derive through the same derivation functions (pre-existing
+architecture, preserved as-is).
 
 ## Byte-identity arbiter (R0.5)
 
 - Frozen worktree: `/Users/peter/git/faust-rs-baseline-worktrees/r0-freeze`
   (commit `86be9426`, release compiler built).
 - Script: `/Users/peter/git/faust-rs-baseline-worktrees/compare-emissions.sh`
-  (outside the repo). Emits `-lang cpp -double` × {scalar, vec0, vec1} for the
-  132 impulse-corpus DSPs from both trees, byte-compares, and rechecks any new
-  difference by *three* working-tree emissions before declaring a defect.
-- **Pre-existing defect (recorded in the R0 journal entry, do not fix inside
-  the cleanup):** scalar emission is nondeterministic run-to-run on
-  delay-heavy DSPs (intermittently!). 77 of 396 cases are frozen in
+  (outside the repo; 3-emission recheck for new diffs).
+- **Pre-existing defect (recorded R0, do not fix inside the cleanup):**
+  scalar emission is intermittently nondeterministic run-to-run on
+  delay-heavy DSPs. 77 of 396 cases frozen in
   `nondeterministic-frozen.txt`; zero certified-vec cases affected.
   Reproducer: compile `zita_rev1.dsp` twice, diff. Suspect: `HashMap`
   iteration in `signal_fir/delay/manager.rs` (`delay_lines`).
-- Environment: Faust libs resolved via gitignored symlink
+- Environment: Faust libs via gitignored symlink
   `target/share/faust -> /opt/homebrew/share/faust` in both trees.
+- The baseline worktree is still in place; remove it only after the final
+  battery is accepted (`git worktree remove`).
 
-## Decisions taken
-
-- R0 alias policy (plan default): workspace migrated to
-  `signal_fir::vector::{...}`; `pub use vector_*` facade re-exports retained.
-- R2 layout: `signal_fir/tests/` and `signal_prepare/tests/` grouped by
-  contract with `pub(super)` fixtures; the 12 vector stages are now
-  `X/mod.rs` + `X/tests.rs` directories, ready for the R5–R7 splits.
-- Upstream test failures on `main` (if any reappear): verify against a clean
-  worktree before attributing to this branch.
-
-## Validations run (latest per milestone)
-
-- `cargo test -p transform --lib`: 385 (R0-recorded count, unchanged).
-- Workspace clippy (`+1.97.0`) and tests: green.
-- `golden-check`: 196 OK. `vector-coverage-check`: 1,536 pairs, 16 modes.
-- Arbiter: 0 defects at every milestone (R2: 323/325 + 2 ND; R3: 320/323 +
-  3 ND reclassified after 4×4 manual re-emission — journal entry
-  "R3 milestone gates" has the details).
-
-## Next steps (R4)
-
-1. (done, `7d527c96`) Exhaustive FIR walker shared from `crates/fir`.
-2. Prepared-ID indexing extraction (R4.2): the repeated shape is the
-   `(signal_id -> record)` map plus `u64::from(record.signal_id)` checked
-   conversions — see `vector/clock_ad/mod.rs` ~620-720 for the densest
-   instance; `state` and `analysis` repeat it. Review each caller's
-   admission semantics before sharing (plan R4.3 rule: same policy only;
-   otherwise separate wrappers around a shared total conversion).
-3. DTO model modules (prep for R5–R7), re-exported from old paths.
-4. Then R5–R9 per plan; §4.8 guard rule applies to the R6/R7 splits
-   (`reject_unadopted_stateful_reads` must stay on both producer and checker
-   paths, each with a rejection test through the checker entry point).
-
-## Useful commands
+## New quality gates (R9)
 
 ```bash
-cargo test -p transform --lib                       # quick loop
-/Users/peter/git/faust-rs-baseline-worktrees/compare-emissions.sh   # byte gate
-cargo run -q -p xtask -- golden-check
-cargo run -q -p xtask -- vector-coverage-check      # ~1-2 h
+cargo run -p xtask -- structure-check                 # layout contract
+cargo rustdoc -p transform --lib -- -D missing-docs   # docs completeness
 ```
+
+`#![warn(missing_docs)]` is active in `crates/transform/src/lib.rs`;
+rustdoc is fully silent (0 warnings, all categories).
+
+## Deferred / not done (recorded, intentional)
+
+- R4 remainder: `index_unique_by` extraction (55 sites use the
+  `(x.id, x) → BTreeMap` idiom with differing admission semantics — plan
+  R4.3 same-policy rule not met); `ValueType→FIR` conversion stayed
+  per-stage (route/lower/assemble each own a variant with different
+  admission).
+- R8.2: no extra split of `bra.rs`/`build.rs`/`core_lowering.rs`
+  (explicit imports revealed no independent responsibility).
+- R8.4: 63 scalar panic/expect sites surveyed — all documented local
+  invariant assertions, none cross-phase, none converted.
+- pv_slice retained (its retirement gate was not run).
+
+## Validation commands
+
+```bash
+cargo test -p transform --lib                       # quick loop (387)
+/Users/peter/git/faust-rs-baseline-worktrees/compare-emissions.sh
+cargo run -q -p xtask -- golden-check               # 196 OK
+cargo run -q -p xtask -- vector-coverage-check      # 1,536 pairs, ~1.5-2 h
+cargo run --release -p xtask -- vector-compile-budget-check
+make -C tests/impulse-tests backend-matrix-smoke    # delete ir/ first!
+cargo test -p compiler --test vector_mode           # 35 oracle tests
+```
+
+Impulse-harness traps: delete `tests/impulse-tests/ir/<mode>/` before runs
+(cached `.ir` reports green), and check the `filesCompare` invocation count
+matches the DSP count.

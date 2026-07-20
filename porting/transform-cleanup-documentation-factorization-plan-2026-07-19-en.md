@@ -6,7 +6,7 @@
 measured at `e8c49891`, re-measured after the X2b/X3 qualification, the
 clocked-vector ZeroPad/guard fixes, and the C-family condition cleanup landed)
 
-**Status:** proposed
+**Status:** executed 2026-07-19/20 — R0–R9 complete (see porting/journal/2026-07-19.md, 2026-07-20.md and porting/HANDOFF.md for the milestone log, gate results, and the recorded pre-existing scalar-nondeterminism defect)
 
 **Scope:** structural cleanup and documentation of `crates/transform`; no
 intentional change to signal semantics, scheduling semantics, vector admission,
