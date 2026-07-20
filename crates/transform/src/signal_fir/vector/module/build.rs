@@ -7,6 +7,7 @@
 
 use super::check::{FinalModuleExpectations, module_shape, verify_final_module};
 use super::lifecycle::{FinalModuleContext, assemble_module};
+use super::model::VectorModuleFailure;
 use super::outputs::{OutputMaterialization, materialize_outputs};
 use crate::schedule::SchedulingStrategy;
 use crate::signal_fir::vector::analysis::DepKind;
@@ -31,27 +32,7 @@ use crate::signal_fir::{
 use crate::signal_prepare::VerifiedPreparedSignals;
 use fir::{FirId, FirType};
 use propagate::ClockDomainTable;
-use std::fmt;
 
-/// Failure stage retained by the production selector as an observable fallback.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VectorModuleFailure {
-    pub reason: VectorFallbackReason,
-    pub detail: String,
-}
-impl VectorModuleFailure {
-    pub(super) fn new(reason: VectorFallbackReason, detail: impl Into<String>) -> Self {
-        Self {
-            reason,
-            detail: detail.into(),
-        }
-    }
-}
-impl fmt::Display for VectorModuleFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.reason.code(), self.detail)
-    }
-}
 /// Runs the complete checked vector path for the supported P6.5 subset and
 /// returns a final FIR module.
 pub(crate) struct VectorModuleContext<'a> {

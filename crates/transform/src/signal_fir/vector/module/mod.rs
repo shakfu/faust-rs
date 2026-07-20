@@ -17,6 +17,7 @@
 pub mod build;
 pub mod check;
 pub mod lifecycle;
+pub mod model;
 pub mod outputs;
 
 pub(crate) use build::*;

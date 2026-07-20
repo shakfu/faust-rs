@@ -1,7 +1,12 @@
 //! Producer derivations for the clock/AD plan: islands, transport
-//! policies, and reverse-AD fallbacks. The independent checker re-derives
-//! these obligations through the shared verify path in `check.rs` (plan
-//! §4.8: admission guards stay on both the producer and checker paths).
+//! policies, and reverse-AD fallbacks. `check.rs` never calls into this
+//! module: it independently re-derives every island, transport, and
+//! reverse-fallback obligation from the same sources (arena, domain table,
+//! decoration certificate, vector plan) using its own checker-owned
+//! helpers. The shared terminal verify
+//! (`verify_vector_clock_ad_plan_after_vector_plan`) then runs on both this
+//! producer path and the standalone checker path (plan §4.8), so it is now
+//! a genuine producer-vs-checker cross-check rather than a replay.
 
 use super::check::{verify_source_alignment, verify_vector_clock_ad_plan_after_vector_plan};
 use super::model::*;

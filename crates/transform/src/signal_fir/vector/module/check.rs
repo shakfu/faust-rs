@@ -2,7 +2,7 @@
 //! and UI-write attribution, read-only table stores, and final shape.
 //! Called from the producer's terminal step in `build.rs` (plan §4.8).
 
-use super::build::VectorModuleFailure;
+use super::model::VectorModuleFailure;
 use crate::signal_fir::VectorFallbackReason;
 use crate::signal_fir::vector::analysis::EffectAtom;
 use crate::signal_fir::vector::assemble::{VectorFirAssembly, fir_reachable};

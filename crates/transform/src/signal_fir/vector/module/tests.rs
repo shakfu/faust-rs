@@ -7,6 +7,7 @@ use super::check::{
     FinalModuleExpectations, verify_final_module, verify_mutable_table_attribution,
     verify_readonly_table_stores, verify_sound_field_immutability, verify_ui_write_attribution,
 };
+use super::model::VectorModuleFailure;
 use super::*;
 use crate::schedule::SchedulingStrategy;
 use crate::signal_fir::vector::analysis::EffectAtom;

@@ -1,6 +1,6 @@
 //! Output materialization for the final vector module.
 
-use super::build::VectorModuleFailure;
+use super::model::VectorModuleFailure;
 use crate::signal_fir::VectorFallbackReason;
 use crate::signal_fir::vector::assemble::{VectorClockOutputStore, VectorLoopFirInput};
 use crate::signal_fir::vector::route::{VectorRegion, VerifiedRoutedFir};

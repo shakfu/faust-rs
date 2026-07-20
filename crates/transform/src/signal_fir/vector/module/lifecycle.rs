@@ -1,7 +1,7 @@
 //! Final module assembly: lifecycle functions, prototypes, and compute
 //! drivers.
 
-use super::build::VectorModuleFailure;
+use super::model::VectorModuleFailure;
 use crate::signal_fir::VectorFallbackReason;
 use crate::signal_fir::module::{INT_FUN_PROTO_ORDER, MATH_PROTO_ORDER};
 use crate::signal_fir::vector::assemble::VectorFirAssembly;

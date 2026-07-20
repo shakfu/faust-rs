@@ -23,6 +23,10 @@
 //! scalar fallbacks with immutable `Forward < Reverse` epochs. This module
 //! does not claim vector reverse-window semantics and cannot activate a
 //! backend path by itself.
+//!
+//! `check.rs` never calls `build.rs`: every island, transport, and
+//! reverse-fallback obligation is re-derived independently from the sources
+//! before the shared terminal verify cross-checks the producer's plan.
 
 pub mod build;
 pub mod check;
