@@ -1,18 +1,22 @@
 //! Tests for `vector::assemble` (relocated from the former inline
 //! `mod tests` block; test names unchanged).
 
+use fir::{AccessType, FirBuilder, FirMatch, FirStore, FirType, match_fir};
+
 use super::*;
 use crate::schedule::SchedulingStrategy;
 use crate::signal_fir::vector::clock_ad::{
-    ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION, VectorClockAdPlan,
-    verified_vector_clock_ad_plan_for_test,
+    ClockGuard, ClockIsland, ClockTransportMode, ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION,
+    VectorClockAdPlan, verified_vector_clock_ad_plan_for_test,
 };
 use crate::signal_fir::vector::plan::verified_vector_plan_for_test;
 use crate::signal_fir::vector::route::{RouteResolution, VectorRouteSession};
 use crate::signal_fir::vector::state::{
     DelayTransition, LoopStatePhases, RecursionProjectionTransition, RecursionTransition,
-    VECTOR_STATE_PLAN_VERSION, VectorStatePlan, verified_vector_state_plan_for_test,
+    VECTOR_STATE_PLAN_VERSION, VectorDelayStorage, VectorStateAction, VectorStatePlan,
+    VerifiedVectorStatePlan, verified_vector_state_plan_for_test,
 };
+use crate::signal_fir::vector::verify::ValueType;
 use crate::signal_fir::vector::verify::{
     EpochRecord, FusedSerialGroupRecord, IsoLeafMapping, IsoRootWitness, LockstepBundleRecord,
     LockstepLaneRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord,
