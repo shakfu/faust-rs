@@ -5,13 +5,19 @@ use propagate::ClockDomainTable;
 use signals::SigBuilder;
 use tlib::TreeArena;
 
+use super::build::EffectConflictSummary;
 use super::*;
 use crate::clk_env::annotate;
 use crate::schedule::SchedulingStrategy;
+use crate::signal_fir::decoration_verify::CanonicalSigType;
+use crate::signal_fir::decoration_verify::VerifiedDecorationCertificate;
 use crate::signal_fir::decoration_verify::certify_decorations;
 use crate::signal_fir::pv_slice::build_pv_signals;
+use crate::signal_fir::vector::analysis::{DepKind, EffectAtom, ForeignPurity, StateResource};
 use crate::signal_fir::vector::schedule::schedule_vector_plan;
+use crate::signal_fir::vector::verify::{LoopEdge, LoopKind, Placement, ValueType};
 use crate::signal_prepare::prepare_signals_for_fir_verified;
+use std::collections::BTreeSet;
 
 fn certify(arena: &TreeArena, roots: &[signals::SigId]) -> VerifiedDecorationCertificate {
     let prepared = prepare_signals_for_fir_verified(arena, roots, &ui::UiProgram::empty()).unwrap();
