@@ -14,8 +14,34 @@
 //!
 //! Relies on the promoter invariant that all operands already carry explicit
 //! cast wrappers; no implicit coercion is performed here.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::BTreeMap;
+use crate::signal_fir::module::BinOp;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::FirMathOp;
+use crate::signal_fir::module::ForeignFunProto;
+use crate::signal_fir::module::HashSet;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::dump_sig_readable;
+use crate::signal_fir::module::list_to_vec;
+use crate::signal_fir::module::match_sig;
+use crate::signal_fir::module::match_sym_ref;
+use crate::signal_fir::recursion::RecArrayInfo;
+use crate::signal_fir::recursion::RecursionAllocCtx;
+use crate::signal_fir::recursion::RecursionCarrierRef;
+use crate::signal_fir::recursion::RecursionGroupProjection;
+use crate::signal_fir::recursion::RecursionLoweringCtx;
+use crate::signal_fir::recursion::RecursionStorageStrategy;
+use crate::signal_fir::recursion::decode_group_projection;
+use crate::signal_fir::recursion::decode_symbolic_group_bodies;
+use crate::signal_fir::recursion::resolve_active_recursion_carrier;
 
 /// Prototype registration state — tracks which math helpers and extern symbols
 /// have been referenced, so the module assembler can emit exactly the needed

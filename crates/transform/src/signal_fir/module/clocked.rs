@@ -49,8 +49,23 @@
 //! - `PermVar(Clocked(env, v))` → persistent struct field `fPerm<i>` cleared
 //!   to 0, assigned inside the block, read as a plain field load;
 //! - `OnDemand([Clocked(env, h), holds…])` → guarded `If` region.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::DelayFirCtx;
+use crate::signal_fir::module::DelayLineInfo;
+use crate::signal_fir::module::DomainCounters;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::HashMap;
+use crate::signal_fir::module::HashSet;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::match_sig;
+use crate::signal_prepare::SimpleSigType;
 
 /// Per-compilation clocked-lowering state (present only when the program
 /// actually contains clocked wrappers).

@@ -15,9 +15,36 @@
 
 use ahash::AHashMap;
 
-use super::*;
+use super::region;
+use super::setup;
 use crate::signal_fir::ComputeMode;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirStore;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirOutput;
+use crate::signal_fir::TreeArena;
+use crate::signal_fir::UiProgram;
 use crate::signal_fir::loop_graph::LoopKind;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::DelayOptions;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::FirMathOp;
+use crate::signal_fir::module::HashMap;
+use crate::signal_fir::module::INT_FUN_PROTO_ORDER;
+use crate::signal_fir::module::MATH_PROTO_ORDER;
+use crate::signal_fir::module::NamedType;
+use crate::signal_fir::module::SigType;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::classify_reverse_time_outputs;
+use crate::signal_fir::module::clocked;
+use crate::signal_fir::module::dump_sig_readable;
+use crate::signal_fir::module::fixed_ad_internal_signals;
+use crate::signal_fir::placement::analyze_signal_sharing;
+use crate::signal_fir::planner::SignalFirPlan;
+use crate::signal_prepare::SimpleSigType;
 
 /// RAD reverse-time scheduling state, populated post-construction in `build_module`.
 #[derive(Default)]

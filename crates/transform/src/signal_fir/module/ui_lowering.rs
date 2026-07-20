@@ -12,8 +12,24 @@
 //!
 //! All methods operate on the shared [`SignalToFirLower`] state and write
 //! directly into `self.ui.ui_statements` for final assembly by `build_module`.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::BargraphType;
+use crate::signal_fir::module::ButtonType;
+use crate::signal_fir::module::ControlId;
+use crate::signal_fir::module::ControlKind;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::HashMap;
+use crate::signal_fir::module::NodeKind;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::SliderType;
+use crate::signal_fir::module::dump_sig_readable;
+use crate::signal_fir::module::match_sig;
 
 /// UI and table lowering accumulators.
 #[derive(Default)]

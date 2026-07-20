@@ -791,11 +791,11 @@ pub fn certify_decorations(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use propagate::ClockDomainTable;
     use signals::SigBuilder;
     use tlib::TreeArena;
 
-    use super::*;
     use crate::clk_env::annotate;
     use crate::signal_prepare::prepare_signals_for_fir_verified;
 

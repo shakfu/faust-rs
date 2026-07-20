@@ -172,11 +172,10 @@ fn declare_cleared_int_field(name: &str, ctx: &mut DelayFirCtx<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::{HashMap, HashSet};
 
     use fir::{FirMatch, FirStore, match_fir};
-
-    use super::*;
 
     fn with_ctx<R>(f: impl FnOnce(&mut DomainCounters, &mut DelayFirCtx<'_>) -> R) -> (R, Ctx) {
         let mut store = FirStore::default();

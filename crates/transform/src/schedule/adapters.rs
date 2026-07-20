@@ -46,13 +46,13 @@ impl ScheduleDag for Digraph {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::HashMap;
 
     use propagate::ClockDomainTable;
     use signals::{BinOp, SigBuilder};
     use tlib::TreeArena;
 
-    use super::*;
     use crate::clk_env::annotate;
     use crate::hgraph::{GraphKey, build_hgraph};
     use crate::schedule::{SchedulingStrategy, schedule, verify_schedule};

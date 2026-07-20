@@ -12,8 +12,35 @@
 //! Note: as of 2026-05-10 the primary RAD dispatcher uses the forward-mode
 //! algebraic RAD path; the BRA lowering here is preserved for the LTI
 //! adjoint fast-path revival.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirStore;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::FirRadFormulaBuilder;
+use crate::signal_fir::module::HashMap;
+use crate::signal_fir::module::HashSet;
+use crate::signal_fir::module::MAX_BRA_TAPE_BLOCK_SIZE;
+use crate::signal_fir::module::RadBinOpRule;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::TreeId;
+use crate::signal_fir::module::collect_bra_postorder;
+use crate::signal_fir::module::collect_tape_needed_values;
+use crate::signal_fir::module::dump_sig_readable;
+use crate::signal_fir::module::list_to_vec;
+use crate::signal_fir::module::match_sig;
+use crate::signal_fir::module::match_sym_rec;
+use crate::signal_fir::module::match_sym_ref;
+use crate::signal_fir::module::rad_binary_math_rule;
+use crate::signal_fir::module::rad_binop_contributions;
+use crate::signal_fir::module::rad_binop_rule;
+use crate::signal_fir::module::rad_unary_math_rule;
+use crate::signal_fir::module::tree_to_int;
 
 /// Grouped state for Block Reverse AD lowering.
 #[derive(Default)]

@@ -11,8 +11,26 @@
 //! lowering (shift strategy and ring-buffer strategy), and the helpers that
 //! register state variables in `instanceClear` and `instanceConstants`
 //! through the named-struct / register-init mechanism.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::DelayFirCtx;
+use crate::signal_fir::module::DelayLineInfo;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::GlobalCircularCursor;
+use crate::signal_fir::module::HashSet;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::cursor_current_index;
+use crate::signal_fir::module::cursor_delayed_index;
+use crate::signal_fir::module::match_sym_rec;
+use crate::signal_fir::recursion::RecArrayInfo;
+use crate::signal_fir::recursion::RecursionCarrierRef;
+use crate::signal_fir::recursion::RecursionCurrentValueBinding;
+use crate::signal_fir::recursion::RecursionDelayRef;
+use crate::signal_fir::recursion::match_recursion_delay_key;
 
 /// The FIR statement buckets for each Faust lifecycle section.
 #[derive(Default)]

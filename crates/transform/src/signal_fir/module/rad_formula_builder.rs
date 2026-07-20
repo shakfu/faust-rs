@@ -5,8 +5,13 @@
 //! by [`SignalToFirLower`].  It maps arithmetic operations and math calls to
 //! typed FIR instructions while registering required math helpers through
 //! `used_protos.math_ops`, and preserves the active internal real type.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::FirMathOp;
+use crate::signal_fir::module::RadFormulaBuilder;
+use crate::signal_fir::module::SignalToFirLower;
 
 /// FIR adapter for backend-neutral local RAD formulas.
 ///

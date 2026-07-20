@@ -7,8 +7,36 @@
 //! functions, FFI calls, and recursion projections.
 //!
 //! Results are memoized in [`SignalToFirLower::cache`] for DAG sharing.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::BargraphType;
+use crate::signal_fir::module::ButtonType;
+use crate::signal_fir::module::DelayLoweringCtx;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::FirMathOp;
+use crate::signal_fir::module::ForeignFunProto;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::SliderType;
+use crate::signal_fir::module::Variability;
+use crate::signal_fir::module::delay_size_for_amount;
+use crate::signal_fir::module::dump_sig_readable;
+use crate::signal_fir::module::emit_delay1_for_line;
+use crate::signal_fir::module::emit_fixed_delay_for_line;
+use crate::signal_fir::module::list_to_vec;
+use crate::signal_fir::module::match_ffunction_node;
+use crate::signal_fir::module::match_sig;
+use crate::signal_fir::module::region;
+use crate::signal_fir::module::tree_to_int;
+use crate::signal_fir::module::tree_to_str;
+use crate::signal_fir::placement::Bucket;
+use crate::signal_fir::placement::is_trivial_fir;
+use crate::signal_fir::recursion::RecursionStorageStrategy;
 
 impl<'a> SignalToFirLower<'a> {
     /// Lowers every node owned by one hierarchical graph in the accepted

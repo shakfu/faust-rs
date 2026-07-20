@@ -1060,9 +1060,8 @@ pub(crate) fn rewrite_var_loads(
 
 #[cfg(test)]
 mod tests {
-    use tlib::TreeArena;
-
     use super::*;
+    use tlib::TreeArena;
 
     /// A sample-rate, non-shared, non-delayed, non-recursive, non-trivial signal
     /// (the "otherwise" row) — the base other rows tweak one field from.

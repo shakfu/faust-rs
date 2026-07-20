@@ -8,8 +8,18 @@
 //!
 //! Also owns table sizing helpers (`table_size_for_signal`) and the index
 //! expression normalisation that enforces integer-domain access.
-
-use super::*;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::FirBinOp;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::match_sig;
+use crate::signal_fir::siggen::interpret_generator;
 
 impl<'a> SignalToFirLower<'a> {
     /// Lowers a `SIGWAVEFORM` node used as a direct signal output.

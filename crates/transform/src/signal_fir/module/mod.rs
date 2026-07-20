@@ -123,7 +123,6 @@ use sigtype::{SigType, Variability};
 
 use crate::signal_prepare::SimpleSigType;
 
-use super::SignalFirOutput;
 use super::block_reverse_ad::{collect_bra_postorder, collect_tape_needed_values};
 use super::delay::{
     DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, DomainCounters,
@@ -131,15 +130,7 @@ use super::delay::{
     emit_delay1_for_line, emit_fixed_delay_for_line, plan_delays,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
-use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
-use super::planner::SignalFirPlan;
-use super::recursion::{
-    RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionCurrentValueBinding,
-    RecursionDelayRef, RecursionGroupProjection, RecursionLoweringCtx, RecursionState,
-    RecursionStorageStrategy, decode_group_projection, decode_symbolic_group_bodies,
-    match_recursion_delay_key, resolve_active_recursion_carrier,
-};
-use super::siggen::interpret_generator;
+use super::recursion::RecursionState;
 
 mod arithmetic;
 pub(in crate::signal_fir) use arithmetic::map_binop;

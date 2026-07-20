@@ -8,8 +8,43 @@
 //! used across multiple lowering concerns: sample-rate variable creation,
 //! delay-line preparation, type resolution, signal variability analysis,
 //! bucket materialization, and FIR-type mapping.
-
-use super::*;
+use super::arithmetic;
+use super::bra;
+use super::build;
+use super::region;
+use super::state;
+use super::ui_lowering;
+use crate::signal_fir::FirId;
+use crate::signal_fir::FirStore;
+use crate::signal_fir::FirType;
+use crate::signal_fir::SigId;
+use crate::signal_fir::SignalFirError;
+use crate::signal_fir::SignalFirErrorCode;
+use crate::signal_fir::TreeArena;
+use crate::signal_fir::UiProgram;
+use crate::signal_fir::module::AccessType;
+use crate::signal_fir::module::DelayManager;
+use crate::signal_fir::module::DelayOptions;
+use crate::signal_fir::module::DomainCounters;
+use crate::signal_fir::module::FirBuilder;
+use crate::signal_fir::module::FirRadFormulaBuilder;
+use crate::signal_fir::module::HashMap;
+use crate::signal_fir::module::HashSet;
+use crate::signal_fir::module::RadBinaryMathRule;
+use crate::signal_fir::module::RadUnaryMathRule;
+use crate::signal_fir::module::SigMatch;
+use crate::signal_fir::module::SigType;
+use crate::signal_fir::module::SignalToFirLower;
+use crate::signal_fir::module::Variability;
+use crate::signal_fir::module::match_sig;
+use crate::signal_fir::module::match_sym_rec;
+use crate::signal_fir::module::match_sym_ref;
+use crate::signal_fir::module::plan_delays;
+use crate::signal_fir::module::rad_binary_contributions;
+use crate::signal_fir::module::rad_unary_contribution;
+use crate::signal_fir::placement::Bucket;
+use crate::signal_fir::recursion::RecursionState;
+use crate::signal_prepare::SimpleSigType;
 
 /// Monotonic counters for all generated variable names.
 #[derive(Default)]
