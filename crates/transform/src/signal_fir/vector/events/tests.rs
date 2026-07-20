@@ -1,6 +1,8 @@
 //! Tests for `vector::events` (relocated from the former inline
 //! `mod tests` block; test names unchanged).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use fir::{FirBuilder, FirStore, FirType};
 use propagate::ClockDomainTable;
 use tlib::TreeArena;
@@ -11,13 +13,15 @@ use crate::schedule::SchedulingStrategy;
 use crate::signal_fir::decoration_verify::{VerifiedDecorationCertificate, certify_decorations};
 use crate::signal_fir::pv_slice::build_pv_signals;
 use crate::signal_fir::vector::analysis::{
-    ForeignResource, ForeignTypeCode, StateCell, StateResource,
+    EffectAtom, ForeignPurity, ForeignResource, ForeignTypeCode, StateCell, StateResource,
+    effects_conflict,
 };
+use crate::signal_fir::vector::plan::VerifiedVectorPlan;
 use crate::signal_fir::vector::plan::{build_vector_plan, verified_vector_plan_for_test};
-use crate::signal_fir::vector::route::{RouteResolution, VectorRouteSession};
+use crate::signal_fir::vector::route::{RouteResolution, VectorRouteSession, VerifiedRoutedFir};
 use crate::signal_fir::vector::state::{
     LoopStatePhases, RecursionProjectionTransition, RecursionTransition, VECTOR_STATE_PLAN_VERSION,
-    VectorStateAction, VectorStatePlan, build_vector_state_plan,
+    VectorStateAction, VectorStatePlan, VerifiedVectorStatePlan, build_vector_state_plan,
     verified_vector_state_plan_for_test,
 };
 use crate::signal_fir::vector::verify::{
@@ -25,6 +29,7 @@ use crate::signal_fir::vector::verify::{
     LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord, ValueType,
     VecSafeWitness, Vectorability, WitnessKind,
 };
+use crate::signal_fir::vector::verify::{LoopEdge, VectorPlan};
 
 const ALL_STRATEGIES: [SchedulingStrategy; 4] = [
     SchedulingStrategy::DepthFirst,
