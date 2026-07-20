@@ -87,6 +87,7 @@ Usage:
   cargo run --release -p xtask -- vector-compile-budget-check [--baseline tests/vector-compile-budget/release-baseline.json]
   cargo run -p xtask -- lockstep-simd-check
   cargo run -p xtask -- structure-check
+  cargo run -p xtask -- emission-determinism [--passes N] [--allowlist FILE] [--write-unstable FILE] [--case STEM]...
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -179,6 +180,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "vector-interp-opt-check" => vector_interp_opt_check(args)?,
         "vector-compile-budget-check" => vector_compile_budget_check(args)?,
         "lockstep-simd-check" => lockstep_simd_check(args)?,
+        "emission-determinism" => emission_determinism(args)?,
         _ => {
             print!("{USAGE}");
         }
@@ -189,6 +191,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 mod backend_align;
 mod code_graphs;
+mod emission_determinism;
 mod fir_dump;
 mod golden;
 mod libfaust_api_matrix;
@@ -205,6 +208,7 @@ mod wasm;
 
 pub(crate) use backend_align::*;
 pub(crate) use code_graphs::*;
+pub(crate) use emission_determinism::*;
 pub(crate) use fir_dump::*;
 pub(crate) use golden::*;
 pub(crate) use libfaust_api_matrix::*;
