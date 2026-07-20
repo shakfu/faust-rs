@@ -5,7 +5,7 @@ Date: 2026-07-19
 ## Repo State
 
 - Branch: `transform-cleanup` (linear on top of `main` @ `86be9426`).
-- HEAD: `f51e0068` — R0 through R3 of
+- HEAD: `246b9702` — R0 through R3 of
   `porting/transform-cleanup-documentation-factorization-plan-2026-07-19-en.md`
   are complete and committed; R4 is next.
 - Working tree: clean (plus untracked local `tests/impulse-tests/node_modules`
@@ -23,7 +23,8 @@ Date: 2026-07-19
 | R4.2 part 1 (common/ids) | done | `37271bce` |
 | R5.2 verify split | done, arbiter 319/319, 0 defects | `a1a98c79` |
 | R5.1 analysis split | done, arbiter 319/319, 0 defects | `f51e0068` |
-| R4 rest, R5.3 (plan), R6–R9 | not started | — |
+| R5.3 plan split — **R5 complete** | done, arbiter 319/319, 0 defects | `246b9702` |
+| R4 rest, R6–R9 | not started | — |
 
 ## Byte-identity arbiter (R0.5)
 
