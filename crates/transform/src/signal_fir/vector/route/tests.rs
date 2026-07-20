@@ -1,6 +1,10 @@
 //! Tests for `vector::route` (relocated from the former inline
 //! `mod tests` block; test names unchanged).
 
+use std::collections::BTreeSet;
+
+use crate::schedule::SchedulingStrategy;
+use fir::{AccessType, FirBuilder, FirId, FirMatch, FirStore, FirType, match_fir};
 use propagate::ClockDomainTable;
 use signals::SigBuilder;
 use tlib::TreeArena;
@@ -9,13 +13,14 @@ use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::certify_decorations;
 use crate::signal_fir::vector::clock_ad::{
-    ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION, VectorClockAdPlan,
-    verified_vector_clock_ad_plan_for_test,
+    ClockTransportMode, ClockTransportPolicy, ForwardAdPolicy, VECTOR_CLOCK_AD_PLAN_VERSION,
+    VectorClockAdPlan, VerifiedVectorClockAdPlan, verified_vector_clock_ad_plan_for_test,
 };
+use crate::signal_fir::vector::plan::VerifiedVectorPlan;
 use crate::signal_fir::vector::plan::{build_vector_plan, verified_vector_plan_for_test};
 use crate::signal_fir::vector::verify::{
-    EpochRecord, LoopEdge, LoopRecord, Rate, SignalRecord, VecSafeWitness, Vectorability,
-    WitnessKind,
+    EpochRecord, LoopEdge, LoopKind, LoopRecord, Placement, Rate, SignalRecord, TransportRecord,
+    ValueType, VecSafeWitness, VectorPlan, Vectorability, WitnessKind,
 };
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
