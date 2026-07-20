@@ -4,14 +4,18 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use propagate::{ClockDomain, ClockDomainTable};
+use propagate::{ClockDomain, ClockDomainKind, ClockDomainTable};
 use signals::{BlockRevPolicy, SigBuilder};
 use tlib::TreeArena;
 
 use super::*;
 use crate::clk_env::annotate;
+use crate::signal_fir::decoration_verify::VerifiedDecorationCertificate;
 use crate::signal_fir::decoration_verify::certify_decorations;
+use crate::signal_fir::vector::plan::VerifiedVectorPlan;
 use crate::signal_fir::vector::plan::build_vector_plan;
+use crate::signal_fir::vector::verify::LoopKind;
+use crate::signal_prepare::VerifiedPreparedSignals;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 fn clock_fixture(
@@ -336,4 +340,81 @@ fn reverse_window_cannot_interleave_fixed_epochs() {
     );
     assert_eq!(&*trace.borrow(), &["forward", "reverse"]);
     assert_eq!((state, primal, adjoint), (10, 4, 5));
+}
+
+/// Like `clock_fixture`, but the in-domain value reads a *top-rate stateful*
+/// producer (`delay1(input)`) at fire time — the exact shape the §4.8
+/// admission guard `reject_unadopted_stateful_reads` must refuse (corpus
+/// analogue: the `downsampling_02_domain_free_counter` fallback).
+fn unadopted_stateful_read_fixture() -> (
+    VerifiedPreparedSignals,
+    ClockDomainTable,
+    VerifiedDecorationCertificate,
+    VerifiedVectorPlan,
+) {
+    let mut arena = TreeArena::new();
+    let wrapper_box = arena.nil();
+    let (clock, delayed) = {
+        let mut builder = SigBuilder::new(&mut arena);
+        let input = builder.input(0);
+        (builder.int(2), builder.delay1(input))
+    };
+    let mut domains = ClockDomainTable::new();
+    let domain = domains.alloc(ClockDomain {
+        parent: None,
+        kind: ClockDomainKind::Downsampling,
+        clock,
+        wrapper_box,
+        inputs: vec![delayed],
+    });
+    let root = {
+        let mut builder = SigBuilder::new(&mut arena);
+        let token = builder.clock_env_token(domain.as_u32());
+        let guarded_clock = builder.clocked(token, clock);
+        let guarded_value = builder.clocked(token, delayed);
+        let hold = builder.perm_var(guarded_value);
+        let wrapper = builder.downsampling(&[guarded_clock, hold]);
+        builder.seq(wrapper, hold)
+    };
+    let prepared =
+        prepare_signals_for_fir_verified(&arena, &[root], &ui::UiProgram::empty()).unwrap();
+    let clocks = annotate(prepared.arena(), &domains, prepared.outputs()).unwrap();
+    let decorations = certify_decorations(&prepared, &clocks).unwrap();
+    let vector_plan = build_vector_plan(&decorations, 8).unwrap();
+    (prepared, domains, decorations, vector_plan)
+}
+
+#[test]
+fn unadopted_stateful_read_rejected_on_producer_path() {
+    let (prepared, domains, decorations, vector_plan) = unadopted_stateful_read_fixture();
+    let err = build_vector_clock_ad_plan(&prepared, &domains, &decorations, &vector_plan)
+        .expect_err("producer terminal verification must refuse the unadopted stateful read");
+    assert!(
+        matches!(err, VectorClockAdError::UnadoptedStatefulRead { .. }),
+        "expected UnadoptedStatefulRead, got {err:?}"
+    );
+}
+
+#[test]
+fn unadopted_stateful_read_rejected_through_checker_entry_alone() {
+    let (prepared, domains, decorations, vector_plan) = unadopted_stateful_read_fixture();
+    let plan = vector_plan.plan();
+    // Assemble the candidate plan from the derivations directly, bypassing the
+    // producer's terminal verification, so only the standalone checker judges it.
+    let clock_ad_plan = VectorClockAdPlan {
+        schema_version: VECTOR_CLOCK_AD_PLAN_VERSION,
+        vec_size: plan.vec_size,
+        clock_islands: super::build::derive_clock_islands(&prepared, &domains, &decorations, plan)
+            .unwrap(),
+        transports: super::build::derive_transport_policies(&prepared, plan).unwrap(),
+        forward_ad: ForwardAdPolicy::ExpandedSignalGraph,
+        reverse_ad_fallbacks: super::build::derive_reverse_fallbacks(&prepared, &decorations, plan)
+            .unwrap(),
+    };
+    let err = verify_vector_clock_ad_plan(&prepared, &domains, &decorations, plan, &clock_ad_plan)
+        .expect_err("standalone checker must refuse the unadopted stateful read");
+    assert!(
+        matches!(err, VectorClockAdError::UnadoptedStatefulRead { .. }),
+        "expected UnadoptedStatefulRead, got {err:?}"
+    );
 }
