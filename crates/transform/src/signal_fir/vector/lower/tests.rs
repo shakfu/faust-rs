@@ -9,12 +9,22 @@ use tlib::TreeArena;
 use super::*;
 use crate::clk_env::annotate;
 use crate::signal_fir::decoration_verify::{CanonicalSigType, certify_decorations};
+use crate::signal_fir::vector::plan::VerifiedVectorPlan;
 use crate::signal_fir::vector::plan::verified_vector_plan_for_test;
 use crate::signal_fir::vector::verify::{
     EpochRecord, LoopEdge, LoopKind, LoopRecord, Rate, TransportRecord, VecSafeWitness, VectorPlan,
     Vectorability, WitnessKind,
 };
+use crate::signal_prepare::VerifiedPreparedSignals;
 use crate::signal_prepare::prepare_signals_for_fir_verified;
+use signals::BinOp;
+use std::collections::BTreeSet;
+
+use crate::schedule::SchedulingStrategy;
+use crate::signal_fir::vector::verify::{Placement, SignalRecord, ValueType};
+use fir::{AccessType, FirBuilder, FirMatch, FirStore, FirType, match_fir};
+use signals::dump_sig_readable;
+use signals::{SigId, SigMatch, match_sig};
 
 fn pure_fixture() -> (VerifiedPreparedSignals, VerifiedVectorPlan) {
     let mut arena = TreeArena::new();
