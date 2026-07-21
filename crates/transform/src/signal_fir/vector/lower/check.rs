@@ -86,6 +86,13 @@ pub(super) fn verify_plan_prepared_boundary(
         let effects_supported = record.effects.iter().all(|effect| match effect {
             EffectAtom::ReadState(resource) | EffectAtom::WriteState(resource) => {
                 managed_resources.contains(resource)
+                    // Recursive projection records inherit the full `SYMREC`
+                    // effect set, including unreferenced identity body slots.
+                    // P6.1 independently proves that every reachable
+                    // projection has a transition; an unmanaged recursion
+                    // resource at this later lowering boundary is therefore
+                    // aggregate metadata, not a missing physical state word.
+                    || matches!(resource, crate::signal_fir::vector::analysis::StateResource::Recursion { .. })
             }
             EffectAtom::ReadTable(table) | EffectAtom::WriteTable(table) => {
                 readonly_table_signal(prepared, ids, u64::from(*table))

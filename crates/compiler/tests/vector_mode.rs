@@ -83,6 +83,10 @@ const PULSE_COUNTDOWN_LOOP_SOURCE: &str = r#"
     pulse_countdown_loop(n, trig) = - ~ cond(n) * trig with { cond(n, x) = x * (x >= n); };
     process = pulse_countdown_loop(4, 1) + 0.001;
 "#;
+// C++ `-vec` emits recursive storage only for the first two bodies. The final
+// two bodies are identity pass-throughs and remain direct input/output loops;
+// P6.1 must not manufacture recursion state for their aggregate SYMREC effects.
+const RECURSIVE_IDENTITY_PASSTHROUGH_SOURCE: &str = "process = (_*0.5,_*0.5,_,_)~(_,_);";
 const INDIRECT_RECURSIVE_DELAY_SOURCE: &str = r#"
     SR = min(192000.0, max(1.0, fconstant(int fSamplingFreq, <math.h>)));
     decimal(x) = x - floor(x);
@@ -401,6 +405,28 @@ fn recursive_short_delay_transport_reads_after_copy_in() {
 #[test]
 fn recursive_short_delay_transport_uses_certified_vector_pipeline() {
     assert_vector_pipeline_certified("pulse_countup_loop", PULSE_COUNTUP_LOOP_SOURCE, 32);
+}
+
+#[test]
+fn recursive_identity_passthrough_is_certified_and_bit_exact() {
+    assert_vector_pipeline_certified(
+        "recursive_identity_passthrough",
+        RECURSIVE_IDENTITY_PASSTHROUGH_SOURCE,
+        32,
+    );
+    let inputs = [ramp(67), ramp(67).into_iter().rev().collect()];
+    assert_channels_bit_exact(
+        "recursive_identity_passthrough",
+        RECURSIVE_IDENTITY_PASSTHROUGH_SOURCE,
+        &inputs,
+        32,
+    );
+    assert_channels_bit_exact(
+        "recursive_identity_passthrough_tail",
+        RECURSIVE_IDENTITY_PASSTHROUGH_SOURCE,
+        &inputs,
+        24,
+    );
 }
 
 #[test]

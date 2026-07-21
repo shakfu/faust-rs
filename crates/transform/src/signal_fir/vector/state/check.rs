@@ -147,6 +147,17 @@ pub(super) fn verify_supported_state(
     clock_plan: Option<&VerifiedVectorClockAdPlan>,
 ) -> Result<(), VectorStateError> {
     let resources = managed_resources(state_plan);
+    let reachable_recursions = records
+        .iter()
+        .filter_map(|record| {
+            record
+                .recursive_projection
+                .map(|projection| StateResource::Recursion {
+                    group: projection.group,
+                    projection: u32::try_from(projection.index).expect("projection index fits u32"),
+                })
+        })
+        .collect::<BTreeSet<_>>();
     let external_resources = clock_plan
         .map(VerifiedVectorClockAdPlan::managed_state_resources)
         .unwrap_or_default();
@@ -166,6 +177,16 @@ pub(super) fn verify_supported_state(
             let Some(resource) = state_resource(effect) else {
                 continue;
             };
+            // Projection records inherit the enclosing `SYMREC` aggregate
+            // effects. An unreferenced identity body slot therefore appears
+            // here even though it has no reachable `SIGPROJ` and C++ emits no
+            // recursion storage for it. It is descriptive group metadata, not
+            // a resource the P6.1 transition plan must materialize.
+            if matches!(resource, StateResource::Recursion { .. })
+                && !reachable_recursions.contains(resource)
+            {
+                continue;
+            }
             if resources.contains(resource) {
                 if let Some(clock_id) = record.clock_domain {
                     let signal_id = u64::from(record.signal_id);
@@ -371,19 +392,10 @@ pub(super) fn verify_recursions(
                 .push(u64::from(record.signal_id));
         }
     }
-    for resource in records
-        .iter()
-        .flat_map(|record| record.effects.iter())
-        .filter_map(state_resource)
-    {
-        if let StateResource::Recursion { group, projection } = resource {
-            expected
-                .entry(u64::from(*group))
-                .or_default()
-                .entry(u64::from(*projection))
-                .or_default();
-        }
-    }
+    // Mirror the producer's reachable-projection rule independently. Effects
+    // on a structural `SYMREC` aggregate every body slot, including identity
+    // slots with no reachable `SIGPROJ`; treating those as state would forge
+    // phantom recursion words that C++ does not emit.
     let prepared_ids = prepared.map(collect_prepared_ids);
     let expected = expected
         .into_iter()

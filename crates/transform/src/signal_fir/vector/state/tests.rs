@@ -303,6 +303,58 @@ fn recursive_projections_share_one_simultaneous_serial_step() {
 }
 
 #[test]
+fn identity_recursion_slots_do_not_create_state_transitions() {
+    let mut arena = TreeArena::new();
+    let self_ref = tlib::de_bruijn_ref(&mut arena, 1);
+    let (body0, body1, passthrough0, passthrough1) = {
+        let mut builder = SigBuilder::new(&mut arena);
+        let feedback0 = builder.proj(0, self_ref);
+        let feedback1 = builder.proj(1, self_ref);
+        (
+            builder.delay1(feedback0),
+            builder.delay1(feedback1),
+            builder.input(0),
+            builder.input(1),
+        )
+    };
+    let nil = arena.nil();
+    let tail3 = arena.cons(passthrough1, nil);
+    let tail2 = arena.cons(passthrough0, tail3);
+    let tail1 = arena.cons(body1, tail2);
+    let bodies = arena.cons(body0, tail1);
+    let group = tlib::de_bruijn_rec(&mut arena, bodies);
+    let (out0, out1) = {
+        let mut builder = SigBuilder::new(&mut arena);
+        (builder.proj(0, group), builder.proj(1, group))
+    };
+    let decorations = certify(&arena, &[out0, out1]);
+    let vector_plan = build_vector_plan(&decorations, 8).unwrap();
+    let state = build_vector_state_plan(&decorations, &vector_plan, 16).unwrap();
+    let recursion = &state.plan().recursions[0];
+    assert_eq!(
+        recursion
+            .projections
+            .iter()
+            .map(|projection| projection.index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+
+    let mut forged = state.into_plan();
+    forged.recursions[0]
+        .projections
+        .push(RecursionProjectionTransition {
+            index: 2,
+            signal_ids: Vec::new(),
+            value_signal_id: u64::from(passthrough0.as_u32()),
+        });
+    assert_eq!(
+        verify_vector_state_plan(&decorations, vector_plan.plan(), &forged),
+        Err(VectorStateError::RecursionCoverageMismatch)
+    );
+}
+
+#[test]
 fn independent_checker_rejects_geometry_and_phase_mutations() {
     let (arena, y, z) = build_pv_signals(20);
     let decorations = certify(&arena, &[y, z]);

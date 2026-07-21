@@ -4,7 +4,7 @@
 
 use super::check::*;
 use super::model::*;
-use crate::signal_fir::vector::analysis::{DepKind, StateResource};
+use crate::signal_fir::vector::analysis::DepKind;
 use crate::signal_fir::vector::clock_ad::VerifiedVectorClockAdPlan;
 use crate::signal_fir::vector::decoration_verify::{
     DecorationCertificate, DecorationRecord, VerifiedDecorationCertificate,
@@ -146,20 +146,12 @@ pub(super) fn build_vector_state_plan_with_resources(
             .or_default()
             .push(u64::from(record.0.signal_id));
     }
-    for resource in source
-        .records
-        .iter()
-        .flat_map(|record| record.effects.iter())
-        .filter_map(state_resource)
-    {
-        if let StateResource::Recursion { group, projection } = resource {
-            recursion_groups
-                .entry(u64::from(*group))
-                .or_default()
-                .entry(u64::from(*projection))
-                .or_default();
-        }
-    }
+    // A symbolic-recursion carrier aggregates a read/write effect for every
+    // body slot, including identity/pass-through slots which have no reachable
+    // `SIGPROJ`. Those aggregate effects describe the group, not physical
+    // state. Only a reachable projection needs a P6.1 recursion transition;
+    // otherwise C++ emits the body as an ordinary direct value (for example
+    // `(_*0.5,_*0.5,_,_)~(_,_)` emits only two `fRec` lines).
     let prepared_ids = prepared.map(collect_prepared_ids);
     let mut recursions = Vec::new();
     for (group, projections) in recursion_groups {
