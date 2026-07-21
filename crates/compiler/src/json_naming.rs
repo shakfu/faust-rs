@@ -57,11 +57,15 @@ pub(crate) fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
         SignalFirErrorCode::ClockedNotLowered => errors::codes::SFIR_CLOCKED_NOT_LOWERED,
         SignalFirErrorCode::ClockAnalysis => errors::codes::SFIR_CLOCK_ANALYSIS,
     };
+    // `error.to_string()` renders as "[<the SFIR code>] <message>", and the
+    // `Diagnostic` already carries the code, so using Display here printed it
+    // twice: "error [FRS-SFIR-0004] [FRS-SFIR-0004] signal preparation
+    // failed: ...". Take the bare message and let the diagnostic own the code.
     Diagnostic::new(
         errors::Severity::Error,
         errors::Stage::Transform,
         code,
-        error.to_string(),
+        error.message(),
     )
 }
 

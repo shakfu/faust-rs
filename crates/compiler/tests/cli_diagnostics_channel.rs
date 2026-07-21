@@ -228,6 +228,15 @@ fn check_json_sfir_family_failure_is_clean() {
         "expected a FRS-SFIR-* code, got {}",
         first_code(&result)
     );
+
+    // The diagnostic already carries the code, so the message must not repeat
+    // it. Using the error's Display here used to render
+    // "error [FRS-SFIR-0004] [FRS-SFIR-0004] signal preparation failed: ...".
+    let message = first_message(&result);
+    assert!(
+        !message.contains(first_code(&result)),
+        "the message must not repeat the code the diagnostic already carries, got: {message}"
+    );
 }
 
 #[test]
