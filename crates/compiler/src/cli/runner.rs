@@ -969,7 +969,12 @@ pub fn run_main() {
 
         if matches!(cli.lang, Some(CliLang::Asc)) {
             let options = AscOptions {
-                class_name: selected_class_name(&cli),
+                // Default to `mydsp` like every other backend. Passing `None`
+                // here made the generator fall back to the FIR module name,
+                // which on this path carries the source file stem — so
+                // `-lang asc foo.dsp` emitted `class foo` while `-lang cpp`,
+                // `-lang julia` and `-lang rust` all emitted `mydsp`.
+                class_name: selected_class_name(&cli).or_else(|| Some("mydsp".to_owned())),
                 double_precision: cli.double,
                 ..AscOptions::default()
             };
@@ -1621,43 +1626,39 @@ pub fn run_main() {
     if matches!(cli.lang, Some(CliLang::Asc)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        // Route through the facade helper, exactly like the Julia branch below.
+        // The previous code lowered to FIR generically and called
+        // `generate_asc_module` directly, which named the FIR module after the
+        // source file — so `-lang asc foo.dsp` emitted `class foo` and a
+        // `// name: foo` header while every other backend emitted `mydsp`.
+        // Sharing one route makes CLI and facade output identical by
+        // construction rather than by convention.
+        let options = AscOptions {
+            class_name: selected_class_name(&cli).or_else(|| Some("mydsp".to_owned())),
+            double_precision: cli.double,
+            ..AscOptions::default()
+        };
         let result = if cli.import_dir.is_empty() {
-            compiler.compile_file_default_to_fir_with_lane(
+            compiler.compile_file_default_to_asc_with_lane(
                 input_path,
+                &options,
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         } else {
-            compiler.compile_file_to_fir_with_lane(
+            compiler.compile_file_to_asc_with_lane(
                 input_path,
                 &cli.import_dir,
+                &options,
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
         timer.phase("asc-codegen");
 
         match result {
-            Ok(out) => {
-                let options = AscOptions {
-                    class_name: selected_class_name(&cli),
-                    double_precision: cli.double,
-                    ..AscOptions::default()
-                };
-                match generate_asc_module(&out.store, out.module, &options) {
-                    Ok(asc) => {
-                        emit_output(&asc, cli.output.as_ref());
-                        if cli.dump_json {
-                            emit_cli_json_companion_for_backend(
-                                &compiler,
-                                &cli,
-                                input_path,
-                                CliLang::Asc,
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("AssemblyScript codegen failed: {err}");
-                        std::process::exit(1);
-                    }
+            Ok(asc) => {
+                emit_output(&asc, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Asc);
                 }
             }
             Err(err) => report_pipeline_failure("AssemblyScript pipeline failed", &err, &cli),

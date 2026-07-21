@@ -50,15 +50,6 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_source_to_json_with_lane_and_compile_options` / `compile_file_to_json_with_compile_options` | JSON string + explicit `compile_options` provenance |
 | `compile_file_default_to_c[_with_lane]` / `compile_file_default_to_cpp[_with_lane]` | File-backed convenience wrappers without explicit search paths |
 
-### CLI class-name asymmetry
-
-Worth knowing when comparing facade output against the CLI: `-lang asc` derives
-the generated class name from the source file stem, while `-lang rust` keeps the
-backend default (`mydsp`). The facade uses whatever the caller passes in
-`options.class_name`, so reproducing CLI output means matching that choice per
-backend. Covered by the two `*_matches_cli_output` tests in
-`crates/compiler/tests/signal_pipeline.rs`.
-
 ### Lane defaults to know
 
 - C / C++ file/source helpers now default to `SignalFirLane::TransformFastLane`.

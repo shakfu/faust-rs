@@ -1709,15 +1709,10 @@ fn compile_source_to_asc_matches_cli_output() {
     assert!(cli.status.success(), "CLI asc emission must succeed");
     let cli_out = String::from_utf8(cli.stdout).expect("CLI output must be UTF-8");
 
-    // Asymmetry worth knowing: for `-lang asc` the CLI derives the class name
-    // from the file stem, while for `-lang rust` it keeps the backend default
-    // (`mydsp`). The facade takes whatever the caller passes, so the test has
-    // to mirror the CLI's choice per backend.
+    // Every backend's CLI path defaults to the `mydsp` class name unless
+    // `--class-name` is given, so the facade default matches.
     let compiler = compiler::Compiler::default();
-    let options = codegen::backends::asc::AscOptions {
-        class_name: Some("facade".to_owned()),
-        ..codegen::backends::asc::AscOptions::default()
-    };
+    let options = codegen::backends::asc::AscOptions::default();
     let api_out = compiler
         .compile_file_default_to_asc(&dsp, &options)
         .expect("asc facade compile must succeed");
