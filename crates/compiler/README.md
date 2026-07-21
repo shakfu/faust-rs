@@ -30,6 +30,9 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_source_to_interp[_with_lane]` | `.fbc` bytecode string |
 | `compile_file_to_interp[_with_lane]` | `.fbc` bytecode string |
 | `compile_file_default_to_interp[_with_lane]` | `.fbc` bytecode string |
+| `compile_source_to_asc[_with_lane]` | AssemblyScript source string |
+| `compile_file_to_asc[_with_lane]` | AssemblyScript source string |
+| `compile_file_default_to_asc[_with_lane]` | AssemblyScript source string |
 | `compile_source_to_rust[_with_lane]` | Rust source string |
 | `compile_file_to_rust[_with_lane]` | Rust source string |
 | `compile_file_default_to_rust[_with_lane]` | Rust source string |
@@ -47,16 +50,14 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_source_to_json_with_lane_and_compile_options` / `compile_file_to_json_with_compile_options` | JSON string + explicit `compile_options` provenance |
 | `compile_file_default_to_c[_with_lane]` / `compile_file_default_to_cpp[_with_lane]` | File-backed convenience wrappers without explicit search paths |
 
-### Backends without a facade helper
+### CLI class-name asymmetry
 
-One backend still has no `compile_*` wrapper; callers reach its generator
-directly:
-
-| Backend | Reachable via | Generator |
-|---|---|---|
-| AssemblyScript | CLI `-lang asc`, and the faustwasm aux-file service (`generate_asc_aux_file`) | `codegen::backends::asc::generate_asc_module` |
-
-See `crates/codegen/README.md` for per-backend status.
+Worth knowing when comparing facade output against the CLI: `-lang asc` derives
+the generated class name from the source file stem, while `-lang rust` keeps the
+backend default (`mydsp`). The facade uses whatever the caller passes in
+`options.class_name`, so reproducing CLI output means matching that choice per
+backend. Covered by the two `*_matches_cli_output` tests in
+`crates/compiler/tests/signal_pipeline.rs`.
 
 ### Lane defaults to know
 
@@ -64,6 +65,7 @@ See `crates/codegen/README.md` for per-backend status.
 - WASM / strict JSON source helpers default to `SignalFirLane::TransformFastLane`.
 - Julia helpers default to `SignalFirLane::TransformFastLane`.
 - Rust helpers default to `SignalFirLane::TransformFastLane`.
+- AssemblyScript helpers default to `SignalFirLane::TransformFastLane`.
 - Interpreter helpers now default to `SignalFirLane::TransformFastLane`.
 - `WasmArtifactRequest::new(...)` defaults to `SignalFirLane::TransformFastLane`.
 - `compile_file_default_to_wasm_artifact(...)` also defaults to
@@ -72,7 +74,7 @@ See `crates/codegen/README.md` for per-backend status.
 ## Pipeline
 
 ```
-parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / Rust / .fbc / WASM / Julia / JSON)
+parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / Rust / AssemblyScript / .fbc / WASM / Julia / JSON)
 ```
 
 The public signal->FIR route is:
@@ -86,6 +88,7 @@ The public signal->FIR route is:
 - Provide one orchestrator type (`Compiler`) for file-based compilation.
 - Aggregate typed stage errors into one top-level `CompilerError`.
 - Provide test/golden-oriented helper outputs (box dump, signal dump, FIR dump).
-- Route backend generation to C, C++, Rust, Julia, interpreter bytecode,
-  WASM/JSON artifacts, and strict JSON emitters with consistent options.
+- Route backend generation to C, C++, Rust, AssemblyScript, Julia,
+  interpreter bytecode, WASM/JSON artifacts, and strict JSON emitters with
+  consistent options.
 - Apply architecture wrapping for C, C++, and Julia output when `-a` is used.

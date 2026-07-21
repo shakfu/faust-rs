@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
-use codegen::backends::asc::{AscOptions, generate_asc_module};
+use codegen::backends::asc::{AscOptions, CodegenError as AscCodegenError, generate_asc_module};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
 use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use codegen::backends::interp::{
@@ -884,6 +884,36 @@ impl Compiler {
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
 
+    /// Parses + evaluates + propagates one source, then emits AssemblyScript.
+    pub fn compile_source_to_asc(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &AscOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_source_to_asc_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
+    /// Parses + evaluates + propagates one source, then emits AssemblyScript
+    /// using the selected signal->FIR lowering lane.
+    pub fn compile_source_to_asc_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &AscOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        let ctx = self.lowering_ctx(lane);
+        lower_signals_to_asc(source_name, &signals, options, ctx)
+            .map_err(|e| lower_asc_error_to_compiler(source_name, e))
+    }
+
     /// Parses + evaluates + propagates one source, then emits Rust text.
     pub fn compile_source_to_rust(
         &self,
@@ -1145,6 +1175,37 @@ impl Compiler {
         )
     }
 
+    /// Parses + evaluates + propagates one file, then emits AssemblyScript.
+    pub fn compile_file_to_asc(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &AscOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_asc_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
+    /// Parses + evaluates + propagates one file, then emits AssemblyScript using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_file_to_asc_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &AscOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        let ctx = self.lowering_ctx(lane);
+        lower_signals_to_asc(&source, &signals, options, ctx)
+            .map_err(|e| lower_asc_error_to_compiler(&source, e))
+    }
+
     /// Parses + evaluates + propagates one file, then emits Rust text.
     pub fn compile_file_to_rust(
         &self,
@@ -1395,6 +1456,27 @@ impl Compiler {
             options,
             SignalFirLane::TransformFastLane,
         )
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits AssemblyScript.
+    pub fn compile_file_default_to_asc(
+        &self,
+        path: &Path,
+        options: &AscOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_default_to_asc_with_lane(path, options, SignalFirLane::TransformFastLane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits AssemblyScript using the selected signal->FIR lowering lane.
+    pub fn compile_file_default_to_asc_with_lane(
+        &self,
+        path: &Path,
+        options: &AscOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_asc_with_lane(path, &[], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -2127,6 +2209,12 @@ pub enum CompilerError {
         error: JuliaCodegenError,
         diagnostics: DiagnosticBundle,
     },
+    /// AssemblyScript backend emission failed from FIR.
+    CodegenAsc {
+        source: Box<str>,
+        error: AscCodegenError,
+        diagnostics: DiagnosticBundle,
+    },
     /// Rust backend emission failed from FIR.
     CodegenRust {
         source: Box<str>,
@@ -2191,6 +2279,9 @@ impl std::fmt::Display for CompilerError {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenJulia { source, error, .. } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
+            Self::CodegenAsc { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenRust { source, error, .. } => {
@@ -2308,6 +2399,7 @@ impl CompilerError {
             Self::Codegen { diagnostics, .. } => Some(diagnostics),
             Self::CodegenC { diagnostics, .. } => Some(diagnostics),
             Self::CodegenJulia { diagnostics, .. } => Some(diagnostics),
+            Self::CodegenAsc { diagnostics, .. } => Some(diagnostics),
             Self::CodegenRust { diagnostics, .. } => Some(diagnostics),
             Self::CodegenInterp { diagnostics, .. } => Some(diagnostics),
             Self::CodegenWasm { diagnostics, .. } => Some(diagnostics),

@@ -105,6 +105,12 @@ impl CodegenError {
     pub fn code(&self) -> CodegenErrorCode {
         self.code
     }
+
+    /// Returns the backend-specific message without the bracketed code.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl std::fmt::Display for CodegenError {

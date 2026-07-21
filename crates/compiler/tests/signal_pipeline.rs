@@ -1672,3 +1672,59 @@ fn compile_source_to_rust_matches_cli_output() {
         "facade and CLI Rust emission drifted"
     );
 }
+
+/// AssemblyScript must be reachable through the facade too.
+///
+/// It was the last backend with a real implementation but no `compile_*`
+/// wrapper, which made the facade table read as if it did not exist.
+#[test]
+fn compile_source_to_asc_emits_assemblyscript() {
+    let compiler = compiler::Compiler::default();
+    let options = codegen::backends::asc::AscOptions::default();
+    let out = compiler
+        .compile_source_to_asc("facade.dsp", "process = _ * 0.5;", &options)
+        .expect("asc facade compile must succeed");
+    assert!(
+        out.contains("class") && out.contains("compute"),
+        "expected an AssemblyScript class with a compute method, got: {}",
+        &out[..out.len().min(200)]
+    );
+}
+
+/// Facade and CLI must agree byte-for-byte for AssemblyScript.
+///
+/// Same reasoning as the Rust parity test: the two routes are independent.
+#[test]
+fn compile_source_to_asc_matches_cli_output() {
+    let dir = std::env::temp_dir().join("frs_asc_facade_parity");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dsp = dir.join("facade.dsp");
+    std::fs::write(&dsp, "process = _ * 0.5;\n").expect("write dsp");
+
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_faust-rs"))
+        .arg(&dsp)
+        .args(["-lang", "asc"])
+        .output()
+        .expect("spawn faust-rs");
+    assert!(cli.status.success(), "CLI asc emission must succeed");
+    let cli_out = String::from_utf8(cli.stdout).expect("CLI output must be UTF-8");
+
+    // Asymmetry worth knowing: for `-lang asc` the CLI derives the class name
+    // from the file stem, while for `-lang rust` it keeps the backend default
+    // (`mydsp`). The facade takes whatever the caller passes, so the test has
+    // to mirror the CLI's choice per backend.
+    let compiler = compiler::Compiler::default();
+    let options = codegen::backends::asc::AscOptions {
+        class_name: Some("facade".to_owned()),
+        ..codegen::backends::asc::AscOptions::default()
+    };
+    let api_out = compiler
+        .compile_file_default_to_asc(&dsp, &options)
+        .expect("asc facade compile must succeed");
+
+    assert_eq!(
+        api_out.trim(),
+        cli_out.trim(),
+        "facade and CLI AssemblyScript emission drifted"
+    );
+}
