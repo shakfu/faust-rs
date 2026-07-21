@@ -47,6 +47,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `cranelift` | 🔧 Bring-up | `generate_cranelift_module` |
 | `interp` | ✅ Implemented | `generate_interp_module` |
 | `julia` | 🔧 Bring-up | `generate_julia_module` |
+| `rust` | ✅ Implemented | `generate_rust_module` |
 | `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
 | `wasm` | 🔧 Bring-up | `generate_wasm_module` |
 | `cmajor` | 🗂 Scaffolded | — |
@@ -56,7 +57,6 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `jax` | 🗂 Scaffolded | — |
 | `jsfx` | 🗂 Scaffolded | — |
 | `llvm` | 🗂 Scaffolded | — |
-| `rust` | 🗂 Scaffolded | — |
 | `sdf3` | 🗂 Scaffolded | — |
 | `vhdl` | 🗂 Scaffolded | — |
 
@@ -478,5 +478,5 @@ The following backends expose a stable `backend_id()` identifier and are
 otherwise empty. They reserve a place in the roadmap and prevent accidental
 namespace collisions as parity work proceeds.
 
-`cmajor` · `codebox` · `csharp` · `dlang` · `jax` · `jsfx` · `llvm` · `rust`
-· `sdf3` · `vhdl`
+`cmajor` · `codebox` · `csharp` · `dlang` · `jax` · `jsfx` · `llvm` · `sdf3`
+· `vhdl`

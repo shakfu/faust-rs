@@ -86,6 +86,9 @@ faust-rs -lang fir foo.dsp
 # Generate Julia source
 faust-rs -lang julia foo.dsp -o foo.jl
 
+# Generate Rust source
+faust-rs -lang rust foo.dsp -o foo.rs
+
 # Generate WebAssembly plus companion JSON
 faust-rs -lang wasm foo.dsp -o foo.wasm
 

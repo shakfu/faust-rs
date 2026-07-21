@@ -44,6 +44,21 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_source_to_json_with_lane_and_compile_options` / `compile_file_to_json_with_compile_options` | JSON string + explicit `compile_options` provenance |
 | `compile_file_default_to_c[_with_lane]` / `compile_file_default_to_cpp[_with_lane]` | File-backed convenience wrappers without explicit search paths |
 
+### Backends without a facade helper
+
+The table above is the facade API surface, not the list of supported backends.
+Two backends have no `compile_*` wrapper; callers reach their generator
+directly:
+
+| Backend | Reachable via | Generator |
+|---|---|---|
+| Rust | CLI `-lang rust` only | `codegen::backends::rust::generate_rust_module` |
+| AssemblyScript | CLI `-lang asc`, and the faustwasm aux-file service (`generate_asc_aux_file`) | `codegen::backends::asc::generate_asc_module` |
+
+Both emit real code; the absence of a `compile_source_to_rust` helper is a gap
+in this crate's facade, not a gap in the backend. See
+`crates/codegen/README.md` for per-backend status.
+
 ### Lane defaults to know
 
 - C / C++ file/source helpers now default to `SignalFirLane::TransformFastLane`.
