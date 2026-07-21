@@ -1,10 +1,10 @@
 # faust-rs
 
+Rust workspace for the Faust compiler port.
+
 > ⚠️ **Experimental — work in progress.** faust-rs is a research port of the
 > Faust compiler to Rust. It is not ready for production use, and its APIs and
 > behavior may change at any time.
-
-Rust workspace for the Faust compiler port.
 
 [![CI](https://github.com/sletz/faust-rs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sletz/faust-rs/actions/workflows/ci.yml)
 
@@ -76,9 +76,7 @@ faust-rs -lang cpp foo.dsp
 faust-rs -lang cranelift foo.dsp
 
 # Generate interpreter bytecode (.fbc)
-faust-rs -lang interp foo.dsp
-# alias: -lang interp-fbc
-# shorthand flag: --dump-interp
+faust-rs -lang interp foo.dsp -o foo.fbc
 
 # Dump FIR text IR
 faust-rs -lang fir foo.dsp
@@ -100,9 +98,6 @@ faust-rs --json foo.dsp
 
 # Emit a backend artifact plus companion JSON next to the output path
 faust-rs -lang cpp --json foo.dsp -o foo.cpp
-
-# Convert interpreter bytecode (.fbc) to self-contained native C++
-faust-rs --dump-cpp-from-fbc foo.fbc --cpp-class-name MyInterpDsp
 
 # Generate block-diagram SVG files
 faust-rs -svg foo.dsp
@@ -151,9 +146,9 @@ faust-rs --fir-fixture sine_phasor -lang fir
 faust-rs --fir-fixture control_flow -lang c
 faust-rs --fir-fixture gain_bias_ui_meta -lang cpp
 faust-rs --fir-fixture sine_phasor -lang interp
-faust-rs --fir-fixture sine_phasor -lang cranelift
+faust-rs --fir-fixture gain_bias_ui_meta -lang cranelift
 faust-rs --fir-fixture sine_phasor -lang julia
-faust-rs --fir-fixture sine_phasor -lang wasm
+faust-rs --fir-fixture gain_bias_ui_meta -lang wasm
 ```
 
 Notes:
@@ -174,6 +169,7 @@ faust -lang cranelift foo.dsp
 faust -lang fir foo.dsp
 faust -lang interp foo.dsp
 faust -lang julia foo.dsp
+faust -lang rust foo.dsp
 faust -lang wasm foo.dsp
 faust -lang wast foo.dsp
 ```
@@ -188,6 +184,7 @@ cargo run -p compiler -- -lang cranelift foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
 cargo run -p compiler -- -lang interp foo.dsp
 cargo run -p compiler -- -lang julia foo.dsp
+cargo run -p compiler -- -lang rust foo.dsp
 cargo run -p compiler -- -lang wasm foo.dsp
 cargo run -p compiler -- -lang wast foo.dsp
 
