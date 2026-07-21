@@ -74,6 +74,7 @@ Usage:
   cargo run -p xtask -- code-graphs [--out-dir <dir>]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
+  cargo run -p xtask -- corpus-status-query (--case <tests/corpus/foo.dsp> ... | --all) [--format json|human]
   cargo run -p xtask -- cpp-backend-diff-report
   cargo run -p xtask -- c-fastlane-diff-report
   cargo run -p xtask -- backend-full-corpus-diff-report
@@ -167,6 +168,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "code-graphs" => code_graphs(args)?,
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
+        "corpus-status-query" => corpus_status_query(args)?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
         "c-fastlane-diff-report" => c_fastlane_diff_report()?,
         "backend-full-corpus-diff-report" => backend_full_corpus_diff_report()?,
@@ -191,6 +193,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 mod backend_align;
 mod code_graphs;
+mod corpus_status_query;
 mod emission_determinism;
 mod fir_dump;
 mod golden;
@@ -208,6 +211,7 @@ mod wasm;
 
 pub(crate) use backend_align::*;
 pub(crate) use code_graphs::*;
+pub(crate) use corpus_status_query::*;
 pub(crate) use emission_determinism::*;
 pub(crate) use fir_dump::*;
 pub(crate) use golden::*;

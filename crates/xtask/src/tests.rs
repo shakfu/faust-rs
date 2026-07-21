@@ -268,3 +268,268 @@ fn verify_wasm_ffi_exports_rejects_missing_exports() {
     assert!(error.contains("faust_wasm_compile_dsp"));
     assert!(error.contains("faust_wasm_text_result_free"));
 }
+
+// ---------------------------------------------------------------------------
+// corpus-status-query (C3): option parsing, pure classification, and full
+// end-to-end checks against the real C++ reference binary.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn corpus_status_query_options_require_case_or_all() {
+    let mut args = std::iter::empty::<String>();
+    let error = parse_corpus_status_query_options(&mut args)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("--case") && error.contains("--all"));
+}
+
+#[test]
+fn corpus_status_query_options_reject_case_and_all_together() {
+    let mut args = vec![
+        "--case".to_string(),
+        "tests/corpus/fad_basic.dsp".to_string(),
+        "--all".to_string(),
+    ]
+    .into_iter();
+    let error = parse_corpus_status_query_options(&mut args)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("mutually exclusive"));
+}
+
+#[test]
+fn corpus_status_query_options_accept_repeated_case_and_format() {
+    let mut args = vec![
+        "--case".to_string(),
+        "tests/corpus/fad_basic.dsp".to_string(),
+        "--case".to_string(),
+        "tests/corpus/rep_01_passthrough.dsp".to_string(),
+        "--format".to_string(),
+        "human".to_string(),
+    ]
+    .into_iter();
+    let options = parse_corpus_status_query_options(&mut args).unwrap();
+    assert_eq!(options.cases.len(), 2);
+    assert!(!options.all);
+    assert_eq!(options.format, QueryFormat::Human);
+}
+
+#[test]
+fn corpus_status_query_options_reject_unknown_format() {
+    let mut args = vec![
+        "--all".to_string(),
+        "--format".to_string(),
+        "yaml".to_string(),
+    ]
+    .into_iter();
+    let error = parse_corpus_status_query_options(&mut args)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("yaml"));
+}
+
+/// The exact C++ reference wording for an unresolved `fad`/`rad` symbol,
+/// confirmed against `porting/phases/phase-4-corpus-status-diff-report-en.md`
+/// (e.g. the `fad_basic` row: `tests/corpus/fad_basic.dsp:1 : ERROR :
+/// undefined symbol : fad`).
+#[test]
+fn is_expected_divergence_detects_fad_and_rad_undefined_symbol() {
+    assert!(is_expected_divergence(
+        "tests/corpus/fad_basic.dsp:1 : ERROR : undefined symbol : fad"
+    ));
+    assert!(is_expected_divergence(
+        "tests/corpus/err_rad_delay_temporal_unsupported.dsp:5 : ERROR : undefined symbol : rad"
+    ));
+}
+
+#[test]
+fn is_expected_divergence_detects_ondemand_undefined_symbol() {
+    // Found by measurement: every one of the 21 `real_divergence` cases in
+    // the full 218-file corpus run was `undefined symbol : ondemand`, not a
+    // genuine regression. See the doc comment on `EXPECTED_DIVERGENCE_SYMBOLS`.
+    assert!(is_expected_divergence(
+        "interleave.lib:90 : ERROR : undefined symbol : ondemand"
+    ));
+    assert!(is_expected_divergence(
+        "tests/corpus/rep_18_stream_wrappers.dsp:1 : ERROR : undefined symbol : ondemand"
+    ));
+}
+
+#[test]
+fn is_expected_divergence_rejects_unrelated_undefined_symbols() {
+    // A hypothetical symbol that merely starts with the same letters must not
+    // match: the check stops at the first non-identifier character.
+    assert!(!is_expected_divergence(
+        "some.dsp:1 : ERROR : undefined symbol : radius"
+    ));
+    assert!(!is_expected_divergence(
+        "some.dsp:1 : ERROR : undefined symbol : fadeout"
+    ));
+    assert!(!is_expected_divergence(
+        "some.dsp:1 : ERROR : undefined symbol : ondemandish"
+    ));
+    assert!(!is_expected_divergence("some.dsp:1 : ERROR : syntax error"));
+}
+
+#[test]
+fn classify_divergence_covers_all_four_buckets() {
+    assert_eq!(classify_divergence(true, true, "ok"), DivergenceClass::OkOk);
+    assert_eq!(
+        classify_divergence(false, false, "some other error"),
+        DivergenceClass::ErrErr
+    );
+    assert_eq!(
+        classify_divergence(false, true, "undefined symbol : fad"),
+        DivergenceClass::ExpectedDivergence
+    );
+    assert_eq!(
+        classify_divergence(false, true, "undefined symbol : somethingelse"),
+        DivergenceClass::RealDivergence
+    );
+    // C++ ok, Rust fails: always a real (Rust) regression, never "expected",
+    // even if the C++ reason string happens to mention fad/rad incidentally.
+    assert_eq!(
+        classify_divergence(true, false, "undefined symbol : fad"),
+        DivergenceClass::RealDivergence
+    );
+}
+
+/// Best-effort guard for the end-to-end tests below: they need a working C++
+/// reference binary (either `FAUST_CPP_BIN` or the checked-out build tree
+/// `resolve_cpp_faust_bin` falls back to). If neither resolves to something
+/// runnable, the tests are skipped rather than failed, mirroring how the
+/// existing `xtask` report generators depend on an external checkout without
+/// a bundled fixture binary.
+fn cpp_reference_binary_available() -> bool {
+    let (bin, is_fallback) = resolve_cpp_faust_bin();
+    if is_fallback {
+        return false;
+    }
+    bin.exists()
+}
+
+#[test]
+fn corpus_status_query_json_response_carries_staleness_metadata() {
+    if !cpp_reference_binary_available() {
+        eprintln!("skipping: no C++ reference binary available (set FAUST_CPP_BIN)");
+        return;
+    }
+    let mut args = vec![
+        "--case".to_string(),
+        "tests/corpus/fad_basic.dsp".to_string(),
+    ]
+    .into_iter();
+    let options = parse_corpus_status_query_options(&mut args).unwrap();
+    let response = run_corpus_status_query(&options).unwrap();
+
+    // Round-trip through JSON: the schema must actually parse, not merely
+    // serialize.
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed["schema_version"], CORPUS_STATUS_QUERY_SCHEMA_VERSION);
+    assert!(parsed["generated_at_unix"].as_u64().unwrap() > 0);
+    assert!(parsed["corpus_file_count_seen"].as_u64().unwrap() > 0);
+    assert!(!parsed["cpp_binary"]["path"].as_str().unwrap().is_empty());
+    assert!(
+        !parsed["cpp_binary"]["resolved_via"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    // The corpus is much larger than the one requested case: proves the
+    // staleness signal (corpus size actually seen) is independent of, and
+    // does not collapse into, the query scope.
+    assert!(response.corpus_file_count_seen > response.cases.len());
+}
+
+#[test]
+fn corpus_status_query_classifies_fad_basic_as_expected_divergence() {
+    if !cpp_reference_binary_available() {
+        eprintln!("skipping: no C++ reference binary available (set FAUST_CPP_BIN)");
+        return;
+    }
+    let mut args = vec![
+        "--case".to_string(),
+        "tests/corpus/fad_basic.dsp".to_string(),
+    ]
+    .into_iter();
+    let options = parse_corpus_status_query_options(&mut args).unwrap();
+    let response = run_corpus_status_query(&options).unwrap();
+
+    assert_eq!(response.cases.len(), 1);
+    let case = &response.cases[0];
+    assert_eq!(case.case, "fad_basic");
+    assert_eq!(case.cpp_status, "ERR");
+    assert_eq!(case.rust_status, "OK");
+    assert_eq!(case.classification, DivergenceClass::ExpectedDivergence);
+    assert_eq!(response.counts.expected_divergence, 1);
+    assert_eq!(response.counts.real_divergence, 0);
+}
+
+#[test]
+fn corpus_status_query_case_list_compiles_only_requested_cases() {
+    if !cpp_reference_binary_available() {
+        eprintln!("skipping: no C++ reference binary available (set FAUST_CPP_BIN)");
+        return;
+    }
+    let requested = [
+        "tests/corpus/fad_basic.dsp",
+        "tests/corpus/rep_01_passthrough.dsp",
+        "tests/corpus/rep_05_one_pole_lowpass.dsp",
+    ];
+    let mut args = Vec::new();
+    for case in requested {
+        args.push("--case".to_string());
+        args.push(case.to_string());
+    }
+    let options = parse_corpus_status_query_options(&mut args.into_iter()).unwrap();
+    let response = run_corpus_status_query(&options).unwrap();
+
+    assert_eq!(response.query_scope, QueryScope::Cases);
+    assert_eq!(response.requested_cases.len(), requested.len());
+    assert_eq!(response.cases.len(), requested.len());
+    assert_eq!(response.counts.total, requested.len());
+    // The corpus holds far more than 3 files; a query for 3 cases must not
+    // silently expand to the whole corpus.
+    assert!(response.corpus_file_count_seen > requested.len());
+    let names: Vec<&str> = response.cases.iter().map(|c| c.case.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["fad_basic", "rep_01_passthrough", "rep_05_one_pole_lowpass"]
+    );
+}
+
+#[test]
+fn corpus_status_query_counts_are_internally_consistent() {
+    if !cpp_reference_binary_available() {
+        eprintln!("skipping: no C++ reference binary available (set FAUST_CPP_BIN)");
+        return;
+    }
+    let requested = [
+        "tests/corpus/fad_basic.dsp",
+        "tests/corpus/rep_01_passthrough.dsp",
+        "tests/corpus/rep_05_one_pole_lowpass.dsp",
+        "tests/corpus/err_rad_delay_temporal_unsupported.dsp",
+    ];
+    let mut args = Vec::new();
+    for case in requested {
+        args.push("--case".to_string());
+        args.push(case.to_string());
+    }
+    let options = parse_corpus_status_query_options(&mut args.into_iter()).unwrap();
+    let response = run_corpus_status_query(&options).unwrap();
+
+    let c = &response.counts;
+    assert_eq!(
+        c.total,
+        c.ok_ok + c.err_err + c.expected_divergence + c.real_divergence
+    );
+    assert_eq!(c.total, response.cases.len());
+
+    // The staleness field must reflect what this run actually observed, not
+    // a cached or hardcoded figure: recompute the corpus size independently
+    // (a fresh directory listing) and require the response to agree.
+    let actual_corpus_file_count = corpus_files().unwrap().len();
+    assert_eq!(response.corpus_file_count_seen, actual_corpus_file_count);
+}
