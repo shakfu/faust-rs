@@ -1159,3 +1159,168 @@ fn diagnostics_human_renderer_compound_case_fixture_now_compiles() {
         SigMatch::Int(1)
     );
 }
+
+// ─── D3: frozen FRS-* code table (porting/mcp-server-analysis-and-plan-2026-07-21-en.md, P0) ───
+
+#[test]
+fn diagnostics_json_renderer_handles_lex_family_code_shape() {
+    // FRS-LEX-0001's call site (crates/parser/src/lib.rs:1926) is live code,
+    // but it is not reachable from any DSP text: the lexer's catch-all
+    // `. 'EXTRA'` rule (crates/parser/src/grammar/faustlexer.l) matches
+    // every byte, so a genuine `lrpar::LexParseError::LexError` never
+    // occurs in practice -- the failure surfaces one layer up as
+    // FRS-PARSE-0001 instead (see docs/diagnostics-codes-en.md for the full
+    // writeup). There is therefore no `.dsp` fixture that can drive this
+    // code through the CLI end to end (unlike the other seven families,
+    // covered by `crates/compiler/tests/cli_diagnostics_channel.rs`). This
+    // test substitutes a synthetic diagnostic and proves the JSON renderer
+    // -- the actual "clean machine channel" contract under test -- handles
+    // the LEX code shape identically to every other family: valid JSON,
+    // stable field names, no special-casing by code prefix.
+    let mut bundle = DiagnosticBundle::new();
+    bundle.push(Diagnostic::new(
+        Severity::Error,
+        Stage::Parser,
+        DiagnosticCode("FRS-LEX-0001"),
+        "lexer encountered an invalid token sequence",
+    ));
+    let rendered = format_diagnostics_json(&bundle);
+    let value: Value =
+        serde_json::from_str(&rendered).expect("LEX-family diagnostics must render as valid JSON");
+    assert_eq!(value["diagnostics"][0]["code"], "FRS-LEX-0001");
+    assert_eq!(value["diagnostics"][0]["stage"], "parser");
+    assert_eq!(value["diagnostics"][0]["severity"], "error");
+}
+
+/// Recursively collects every `FRS-[A-Z]+-[0-9]+` code literal from `.rs`
+/// files under `dir`, mirroring
+/// `grep -rhoE 'FRS-[A-Z]+-[0-9]+' --include=*.rs crates/` without shelling
+/// out (portable across the GNU/BSD/ugrep differences observed across dev
+/// machines and CI).
+fn collect_frs_codes(dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if path.is_dir() {
+            if name == "target" {
+                continue;
+            }
+            collect_frs_codes(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && let Ok(text) = fs::read_to_string(&path)
+        {
+            extract_frs_codes_into(&text, out);
+        }
+    }
+}
+
+/// Extracts every substring matching `FRS-[A-Z]+-[0-9]+` from `text` into
+/// `out`. Manual scan equivalent to the extended regex, greedy on both the
+/// family-letters run and the digit run, matching `grep -oE` semantics.
+fn extract_frs_codes_into(text: &str, out: &mut std::collections::BTreeSet<String>) {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while let Some(rel) = text[i..].find("FRS-") {
+        let start = i + rel;
+        let mut j = start + 4;
+        let fam_start = j;
+        while j < bytes.len() && bytes[j].is_ascii_uppercase() {
+            j += 1;
+        }
+        if j == fam_start || j >= bytes.len() || bytes[j] != b'-' {
+            i = start + 4;
+            continue;
+        }
+        j += 1;
+        let num_start = j;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == num_start {
+            i = start + 4;
+            continue;
+        }
+        out.insert(text[start..j].to_owned());
+        i = j;
+    }
+}
+
+/// The frozen set documented in `docs/diagnostics-codes-en.md`.
+///
+/// Keep this list and that document's tables in sync by construction: any
+/// change here must be mirrored there in the same commit, and vice versa.
+fn documented_frs_codes() -> std::collections::BTreeSet<String> {
+    [
+        "FRS-COMP-0001",
+        "FRS-COMP-0002",
+        "FRS-COMP-0003",
+        "FRS-COMP-0004",
+        "FRS-EVAL-0001",
+        "FRS-EVAL-0002",
+        "FRS-EVAL-0003",
+        "FRS-EVAL-0004",
+        "FRS-EVAL-0005",
+        "FRS-EVAL-0006",
+        "FRS-EVAL-0099",
+        "FRS-EVAL-0100",
+        "FRS-FIR-0001",
+        "FRS-FIR-0002",
+        "FRS-LEX-0001",
+        "FRS-PARSE-0001",
+        "FRS-PARSE-0002",
+        "FRS-PARSE-0003",
+        "FRS-PROP-0001",
+        "FRS-PROP-0002",
+        "FRS-PROP-0003",
+        "FRS-PROP-0004",
+        "FRS-PROP-0099",
+        "FRS-SFIR-0001",
+        "FRS-SFIR-0002",
+        "FRS-SFIR-0003",
+        "FRS-SFIR-0004",
+        "FRS-SFIR-0005",
+        "FRS-SFIR-0006",
+        "FRS-SFIR-0007",
+        "FRS-SFIR-0008",
+        "FRS-SRC-0001",
+        "FRS-SRC-0002",
+        "FRS-SRC-0003",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn frozen_frs_code_table_matches_source() {
+    // The freeze rule (D3): adding a code is fine, renumbering one is not.
+    // This test is the enforcement point -- it re-derives the code set
+    // straight from source (the same extraction
+    // `porting/mcp-server-analysis-and-plan-2026-07-21-en.md` §1.4.5 and the
+    // task itself specify: `grep -rhoE 'FRS-[A-Z]+-[0-9]+' --include=*.rs
+    // crates/ | sort -u`) and diffs it against the frozen table documented
+    // in docs/diagnostics-codes-en.md. Both adding an undocumented code and
+    // renumbering a documented one make this fail.
+    let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("crates");
+    let mut found = std::collections::BTreeSet::new();
+    collect_frs_codes(&crates_dir, &mut found);
+
+    let documented = documented_frs_codes();
+
+    let missing_from_docs = found.difference(&documented).collect::<Vec<_>>();
+    let stale_in_docs = documented.difference(&found).collect::<Vec<_>>();
+    assert!(
+        missing_from_docs.is_empty() && stale_in_docs.is_empty(),
+        "FRS-* code set drifted from docs/diagnostics-codes-en.md \
+         (present in source but undocumented: {missing_from_docs:?}; \
+         documented but no longer present in source -- e.g. a renumbering: \
+         {stale_in_docs:?}). Update docs/diagnostics-codes-en.md and this \
+         test's `documented_frs_codes` in the same change."
+    );
+}

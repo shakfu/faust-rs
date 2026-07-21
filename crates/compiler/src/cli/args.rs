@@ -101,6 +101,16 @@ pub struct CliArgs {
     /// Run FIR verifier and dump the verification report (no codegen).
     #[arg(long = "dump-fir-verify", action = ArgAction::SetTrue)]
     pub dump_fir_verify: bool,
+    /// Run the full front-end (parse → eval → propagate → type) plus FIR
+    /// verification, with no codegen; exit 0 with no errors, 1 otherwise.
+    ///
+    /// Unlike `--dump-fir-verify`, this mode prints no dump text: under
+    /// `--error-format json` it always emits a diagnostics payload, with an
+    /// empty `diagnostics` array on success, so success and failure share one
+    /// schema (part of the P0 "clean machine channel" plan, see
+    /// `porting/mcp-server-analysis-and-plan-2026-07-21-en.md`).
+    #[arg(long = "check", action = ArgAction::SetTrue)]
+    pub check: bool,
     /// Compile to interpreter bytecode and print `.fbc` text.
     #[arg(long = "dump-interp", action = ArgAction::SetTrue)]
     pub dump_interp: bool,

@@ -28,16 +28,21 @@ use codegen::backends::rust::{RustOptions, RustRealType, generate_rust_module};
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
-    Compiler, ComputeMode, FaustInstallPaths, FirVerifyOptions, RealType, SchedulingStrategy,
-    compile_options_json_string,
+    Compiler, CompilerError, ComputeMode, FaustInstallPaths, FirVerifyOptions, RealType,
+    SchedulingStrategy, compile_options_json_string,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
     golden_snapshot_from_file,
 };
+use errors::DiagnosticBundle;
 use fir::{checker::verify_fir_module, dump_fir};
 use signals::dump_sig_readable;
 
-use super::args::{CliArgs, CliLang, CliSignalFirLane, normalize_legacy_args};
-use super::diagnostics::print_structured_diagnostics;
+use super::args::{
+    CliArgs, CliLang, CliSignalFirLane, ErrorFormat, ErrorVerbosity, normalize_legacy_args,
+};
+use super::diagnostics::{
+    format_diagnostics_json, format_diagnostics_json_with_verbosity, print_structured_diagnostics,
+};
 use super::timer::CompilationTimer;
 
 /// Prints top-level usage and exits the process.
@@ -65,6 +70,9 @@ pub fn print_global_usage_and_exit() -> ! {
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane fast] [--fir-verify-strict]"
+    );
+    eprintln!(
+        "  cargo run -p compiler -- --check <input.dsp> [-I <dir> ...] [--signal-fir-lane fast] [--fir-verify-strict] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
@@ -518,10 +526,56 @@ pub fn emit_cli_json_companion_for_backend(
 
     match result {
         Ok(json) => emit_json_companion_output(&json, require_companion_output_path(cli)),
-        Err(err) => {
-            eprintln!("JSON companion pipeline failed: {err}");
-            print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-            std::process::exit(1);
+        Err(err) => report_pipeline_failure("JSON companion pipeline failed", &err, cli),
+    }
+}
+
+/// Reports one compiler-pipeline failure honoring the CLI-selected diagnostic
+/// format (D1: "make the machine channel clean"), then exits the process
+/// with status 1.
+///
+/// `--error-format human` preserves the pre-D1 behavior byte for byte: a
+/// short `"<prefix>: <err>"` line goes to stderr, immediately followed by the
+/// human-rendered diagnostic bundle (also stderr; see
+/// [`print_structured_diagnostics`]).
+///
+/// `--error-format json` suppresses the human prefix line entirely --
+/// [`print_structured_diagnostics`] is the sole writer of stdout content in
+/// that mode, and it writes exactly one well-formed JSON document with no
+/// leading or trailing non-JSON bytes, which is the contract the P0 phase of
+/// `porting/mcp-server-analysis-and-plan-2026-07-21-en.md` (§1.4.2, Part 4)
+/// exists to guarantee. All pipeline dispatch sites in this module funnel
+/// their `Err` arm through this one function so the human/json split is
+/// enforced in one place instead of once per backend.
+fn report_pipeline_failure(prefix: &str, err: &CompilerError, cli: &CliArgs) -> ! {
+    if matches!(cli.error_format, ErrorFormat::Human) {
+        eprintln!("{prefix}: {err}");
+    }
+    print_structured_diagnostics(err, cli.error_format, cli.error_verbosity);
+    std::process::exit(1);
+}
+
+/// Prints the `--check` (D2) success payload.
+///
+/// Human mode prints a one-line `"Check OK: 0 diagnostics"` summary. JSON
+/// mode prints an envelope with an empty `diagnostics` array, deliberately
+/// reusing the exact same renderer as the failure path
+/// ([`print_structured_diagnostics`]) so success and failure share one
+/// schema -- a consumer never needs a second parser for `--check`.
+fn emit_check_success(format: ErrorFormat, verbosity: ErrorVerbosity) {
+    match format {
+        ErrorFormat::Human => println!("Check OK: 0 diagnostics"),
+        ErrorFormat::Json => {
+            let empty = DiagnosticBundle::new();
+            match verbosity {
+                ErrorVerbosity::Standard => println!("{}", format_diagnostics_json(&empty)),
+                ErrorVerbosity::Debug => {
+                    println!(
+                        "{}",
+                        format_diagnostics_json_with_verbosity(&empty, verbosity)
+                    )
+                }
+            }
         }
     }
 }
@@ -619,6 +673,7 @@ pub fn run_main() {
         cli.dump_c,
         cli.dump_fir,
         cli.dump_fir_verify,
+        cli.check,
         cli.dump_interp,
         cli.dump_cranelift,
         cli.dump_json,
@@ -700,6 +755,7 @@ pub fn run_main() {
     if (cli.dump_fir
         || cli.dump_json
         || cli.dump_fir_verify
+        || cli.check
         || matches!(
             cli.lang,
             Some(
@@ -717,8 +773,8 @@ pub fn run_main() {
         eprintln!("--architecture is currently supported only for C/C++/Julia output");
         std::process::exit(2);
     }
-    if cli.no_fir_verify && cli.dump_fir_verify {
-        eprintln!("--no-fir-verify is incompatible with --dump-fir-verify");
+    if cli.no_fir_verify && (cli.dump_fir_verify || cli.check) {
+        eprintln!("--no-fir-verify is incompatible with --dump-fir-verify/--check");
         std::process::exit(2);
     }
     if let Some(path) = cli.architecture_dir.iter().find(|path| path.is_file()) {
@@ -736,7 +792,7 @@ pub fn run_main() {
     }
 
     if cli.fir_fixture.is_some() {
-        if cli.golden || cli.parse || cli.dump_box || cli.dump_sig {
+        if cli.golden || cli.parse || cli.dump_box || cli.dump_sig || cli.check {
             eprintln!(
                 "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm/wast/json)"
             );
@@ -1221,11 +1277,7 @@ pub fn run_main() {
                     out.state.ctx.recovery_count()
                 );
             }
-            Err(err) => {
-                eprintln!("Parse failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Parse failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1251,11 +1303,7 @@ pub fn run_main() {
                 timer.phase("dump-box");
                 emit_output(&rendered, cli.output.as_ref());
             }
-            Err(err) => {
-                eprintln!("Parse failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Parse failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1308,11 +1356,7 @@ pub fn run_main() {
                 timer.phase("svg-render");
                 eprintln!("SVG written to {}", dir.display());
             }
-            Err(err) => {
-                eprintln!("SVG: compile failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("SVG: compile failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1344,11 +1388,7 @@ pub fn run_main() {
                 rendered.push('\n');
                 emit_output(&rendered, cli.output.as_ref());
             }
-            Err(err) => {
-                eprintln!("Signal pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Signal pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1391,11 +1431,38 @@ pub fn run_main() {
                     std::process::exit(1);
                 }
             }
-            Err(err) => {
-                eprintln!("FIR pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("FIR pipeline failed", &err, &cli),
+        }
+        timer.total();
+        return;
+    }
+
+    if cli.check {
+        // D2: full front-end (parse → eval → propagate → type) plus FIR
+        // verification, no codegen. `compiler_from_cli` wires FIR-verify
+        // from `--no-fir-verify`/`--fir-verify-strict`, and the validation
+        // block above rejects `--check --no-fir-verify`, so verification
+        // always actually runs here -- unlike `--dump-fir-verify`, which
+        // disables the built-in verify to report it manually.
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_fir_with_lane(
+                input_path,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_fir_with_lane(
+                input_path,
+                &cli.import_dir,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+        timer.phase("check");
+
+        match result {
+            Ok(_) => emit_check_success(cli.error_format, cli.error_verbosity),
+            Err(err) => report_pipeline_failure("Check failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1429,11 +1496,7 @@ pub fn run_main() {
                     emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Fir);
                 }
             }
-            Err(err) => {
-                eprintln!("FIR pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("FIR pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1460,11 +1523,7 @@ pub fn run_main() {
 
         match result {
             Ok(json) => emit_output(&json, cli.output.as_ref()),
-            Err(err) => {
-                eprintln!("JSON pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("JSON pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1502,11 +1561,7 @@ pub fn run_main() {
                     );
                 }
             }
-            Err(err) => {
-                eprintln!("Interp pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Interp pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1557,11 +1612,7 @@ pub fn run_main() {
                     );
                 }
             }
-            Err(err) => {
-                eprintln!("Cranelift FIR pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Cranelift FIR pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1609,11 +1660,7 @@ pub fn run_main() {
                     }
                 }
             }
-            Err(err) => {
-                eprintln!("AssemblyScript pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("AssemblyScript pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1655,11 +1702,7 @@ pub fn run_main() {
                     );
                 }
             }
-            Err(err) => {
-                eprintln!("Julia pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Julia pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1706,11 +1749,7 @@ pub fn run_main() {
                     }
                 }
             }
-            Err(err) => {
-                eprintln!("Rust pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("Rust pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1748,11 +1787,7 @@ pub fn run_main() {
                     emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, cli.output.as_ref());
                 }
             }
-            Err(err) => {
-                eprintln!("WASM pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("WASM pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1789,11 +1824,7 @@ pub fn run_main() {
                     emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Wast);
                 }
             }
-            Err(err) => {
-                eprintln!("WAST pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("WAST pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1855,11 +1886,7 @@ pub fn run_main() {
                     emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Cpp);
                 }
             }
-            Err(err) => {
-                eprintln!("C++ pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("C++ pipeline failed", &err, &cli),
         }
         timer.total();
         return;
@@ -1917,11 +1944,7 @@ pub fn run_main() {
                     emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::C);
                 }
             }
-            Err(err) => {
-                eprintln!("C pipeline failed: {err}");
-                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
-                std::process::exit(1);
-            }
+            Err(err) => report_pipeline_failure("C pipeline failed", &err, &cli),
         }
         timer.total();
         return;

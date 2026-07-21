@@ -65,9 +65,10 @@ server, and Section 1.2.1 quantifies it.
 `--error-format json` already produces, for a single error, a payload
 containing:
 
-- a **stable code** — 34 codes exist today, namespaced by pipeline stage:
+- a **stable code** — 34 by textual extraction, namespaced by pipeline stage:
   `FRS-LEX-*` (1), `FRS-PARSE-*` (3), `FRS-SRC-*` (3), `FRS-EVAL-*` (8),
   `FRS-PROP-*` (5), `FRS-COMP-*` (4), `FRS-FIR-*` (2), `FRS-SFIR-*` (8);
+  of which 27 are actually constructible — see the correction in §1.4.5;
 - **labels with semantic roles** — not just line/col but `definition_site` vs
   `call_site`, primary vs secondary style, with end positions;
 - **computed facts** — e.g. `provided=3, expected_max=2, overflow=1`;
@@ -222,12 +223,24 @@ public API on. **P0 of the plan must fix this in the CLI**, not in the
 wrapper: a clean JSON-only stream, ideally on stdout, with the human prefix
 suppressed under `--error-format json`.
 
-#### 1.4.3 Compilation can be slow, and `timeout(1)` is unavailable
+#### 1.4.3 `timeout(1)` is unavailable; the slow-compile claim was wrong
 
-`tests/corpus/ondemand_fft_roundtrip_id_016.dsp` exceeded 120 s of wall clock
-during this analysis. The CLI has `--timeout` (default 120 s), but the macOS
-environment has **no `timeout` binary** — a shell-based wrapper cannot rely on
-coreutils for the outer bound and must kill the child process itself.
+The CLI has `--timeout` (default 120 s), but the macOS environment has **no
+`timeout` binary** — a shell-based wrapper cannot rely on coreutils for the
+outer bound and must kill the child process itself. That part stands.
+
+**Correction (2026-07-21, during P0).** This section originally claimed that
+`tests/corpus/ondemand_fft_roundtrip_id_016.dsp` exceeded 120 s of wall clock.
+That measurement was wrong: the file compiles in ~0.2 s. The original timing
+was taken while that corpus file carried an uncommitted working-tree
+modification predating this analysis, and it conflated the compile with a
+shell loop that also invoked a non-existent `timeout` binary. The full 218-file
+corpus sweep run during P0 completed quickly with no outlier.
+
+No slow-compile outlier has therefore been demonstrated. The wall-clock
+ceiling of §2.0/§P1 is still worth having as a defensive measure — an
+agent-facing tool must not block indefinitely — but it must not be justified by
+this (retracted) measurement, and R4 below is downgraded accordingly.
 
 The MCP server must impose its own wall-clock ceiling, well below the CLI
 default. 15–20 s is the right order: an agent-facing tool that blocks for two
@@ -243,9 +256,31 @@ for the local case. This also makes the tools trivially testable.
 
 #### 1.4.5 Stable codes become a public contract
 
-The moment `FRS-EVAL-0003` is returned over MCP, it is an API. The 34-code
-table should be frozen and documented before exposure; adding codes is fine,
+The moment `FRS-EVAL-0003` is returned over MCP, it is an API. The code table
+should be frozen and documented before exposure; adding codes is fine,
 renumbering is not.
+
+**Correction (2026-07-21, during P0).** The "34 codes" figure used throughout
+this document is the output of `grep -rhoE 'FRS-[A-Z]+-[0-9]+'`, which
+overcounts. Documenting each code in `docs/diagnostics-codes-en.md` established
+that:
+
+- `FRS-SRC-0001..0003` and `FRS-COMP-0001..0003` (6 codes) are declared as
+  constants in `crates/errors/src/codes.rs` but **never constructed anywhere** —
+  dead declarations;
+- `FRS-EVAL-0100` is not an emitted code at all: it is a literal inside a unit
+  test in `crates/errors/src/lib.rs:310` (`bundle_counts_error_severity_only`),
+  captured only because the grep is textual;
+- `FRS-LEX-0001` has a live call site but is unreachable from the CLI: the
+  lexer's catch-all rule in `faustlexer.l` matches every byte, so lexical
+  failures surface as `FRS-PARSE-0001` or via the no-bundle fallback instead.
+
+So the real surface is **27 constructible codes, of which 26 are reachable
+through the CLI** — not 34. The frozen table currently pins all 34 (matching
+the extraction grep, so the test is self-consistent), but pinning dead and
+test-only codes into a *public* contract is a mistake. Before any MCP exposure,
+decide per code: delete the dead ones, or implement their raise sites.
+Recorded as open question O4.
 
 #### 1.4.6 Determinism
 
@@ -540,7 +575,7 @@ Not MCP work; the server cannot be built on the current stderr contract.
 - Add `--check` (or `--emit check`): run the full front-end + FIR verify, no
   codegen, exit 0/1, always emit a diagnostics payload (empty array on
   success) so success and failure share one schema.
-- Freeze and document the 34-code `FRS-*` table (§1.4.5) in
+- Freeze and document the `FRS-*` table (§1.4.5) in
   `docs/diagnostics-codes-en.md`.
 
 *Checker:* a test asserting stdout parses as JSON with no leading bytes, for
@@ -552,6 +587,26 @@ checker must fail; (b) route the payload back to stderr → must fail;
 
 *Gate:* stdout is byte-exactly a JSON document for every corpus file, success
 and failure alike.
+
+**Status: DONE, 2026-07-21.** Implemented in `crates/compiler/src/cli/`
+(`args.rs`, `diagnostics.rs`, `runner.rs`, `tests.rs`), with
+`docs/diagnostics-codes-en.md` and `crates/compiler/tests/
+cli_diagnostics_channel.rs` (11 subprocess tests). Gate met: 218/218 corpus
+files emit a parseable JSON document on stdout under
+`--check --error-format json`. All three rejecting mutations observed to fail
+the checker (7/11 tests fall for mutation (b), independently re-verified).
+Two design points settled during implementation:
+
+- *stdout conflict rule* — on a successful dump-mode compile, generated output
+  stays on stdout and no diagnostics payload is added; the CLI never emitted
+  one on success outside `--check`, so there is nothing to interleave.
+- *no-bundle fallback* — `CompilerError` variants that carry no
+  `DiagnosticBundle` (backend codegen, import failures) now emit a
+  `code: null` envelope of the same shape rather than nothing, so the schema
+  is uniform across every failure path.
+
+Two corrections to this document came out of the work: §1.4.3 (retracted
+slow-compile measurement) and §1.4.5 (27 constructible codes, not 34).
 
 ### P1 — Minimum viable server: `check`, `compile`, `autodiff`
 
@@ -670,10 +725,12 @@ diverge. Open question: is the current parity level good enough to expose to
 non-expert users, or should the server be positioned as a
 `faust-rs`-development aid until parity is certified?
 
-**R4 — Wall-clock outliers.** Some corpus DSPs exceed 120 s (§1.4.3). A
-timeout is a bad user experience and an agent cannot distinguish it from a
-hang. Mitigation: return a structured `timeout` diagnostic naming the stage
-reached, so the agent learns something rather than nothing.
+**R4 — Wall-clock outliers (downgraded 2026-07-21).** This risk originally
+rested on a corpus DSP said to exceed 120 s; that measurement was wrong and has
+been retracted (§1.4.3). No outlier is currently demonstrated, so the risk is
+speculative rather than observed. The mitigation is still cheap and worth
+keeping: return a structured `timeout` diagnostic naming the stage reached, so
+that if an outlier does appear the agent learns something rather than nothing.
 
 **R5 — Panic safety.** In-process linking (P2+) means a compiler panic can
 take down the server. Mitigation: run compilation on a supervised thread with
@@ -685,6 +742,13 @@ requires a local build) versus a hosted one (requires sandboxing untrusted DSP
 source, since `-I` and imports touch the filesystem). This document assumes
 local stdio; a hosted deployment needs its own security analysis and would
 change §1.4.4 from a convenience into a requirement.
+
+**Open question O4 — what to do with the 7 non-emitted codes (§1.4.5).**
+Delete `FRS-SRC-0001..3` / `FRS-COMP-0001..3` as dead declarations, or
+implement their raise sites? And should `FRS-EVAL-0100` (a test literal) be
+excluded from the frozen table, which would mean the table is no longer the
+output of a simple grep? Must be settled before the code table is published,
+not after.
 
 **Open question O2 — should `faust_compile` expose `wasm`?** It overlaps
 `faustnode.compile` directly. Arguably yes for parity checking, arguably no
@@ -885,7 +949,8 @@ Environment: macOS (Darwin 21.6.0), `faust-rs` release build at `6f56dfbe`,
 
 - Backends available: `asc, c, cpp, cranelift, fir, interp, julia, rust, wasm,
   wast` (10 values; `cranelift` experimental).
-- Diagnostic codes: 34, across 8 stage namespaces.
+- Diagnostic codes: 34 by textual extraction, across 8 stage namespaces — but
+  only **27 constructible / 26 CLI-reachable**; see the correction in §1.4.5.
 - Built-in FIR fixtures: 8.
 - Corpus size: 218 `.dsp` files under `tests/corpus/`.
 - `--timeout` default: 120 s. `timeout(1)` unavailable on this platform.
