@@ -22,9 +22,19 @@ enumerate every code actually present in source is:
 grep -rhoE 'FRS-[A-Z]+-[0-9]+' --include=*.rs crates/ | sort -u
 ```
 
-This currently returns **30 codes** across **8 stage-family namespaces**:
+This currently returns **32 codes** across **9 stage-family namespaces**:
 `FRS-LEX-*` (1), `FRS-PARSE-*` (3), `FRS-SRC-*` (3), `FRS-EVAL-*` (8),
-`FRS-PROP-*` (5), `FRS-COMP-*` (1), `FRS-FIR-*` (2), `FRS-SFIR-*` (8).
+`FRS-PROP-*` (5), `FRS-COMP-*` (2), `FRS-FIR-*` (2), `FRS-SFIR-*` (8),
+`FRS-CODEGEN-*` (1).
+
+Backend emitters additionally own a **separate, finer taxonomy** of 27 codes
+shaped `FRS-CGEN-<LANG>-NNNN` (ASC, C, CLIF, CPP, INTERP, JULIA, RUST, WASM).
+Those are *not* part of this table and do not appear in `errors::codes`: they
+travel inside `FRS-CODEGEN-0001` diagnostics as a `codegen_code=...` note, the
+same way FIR verifier codes travel inside `FRS-FIR-000{1,2}` as `fir_code=...`.
+Note they do not match the extraction regex either (the extra `-<LANG>` segment
+means `FRS-[A-Z]+-[0-9]+` never matches), so they cannot silently leak into the
+frozen set.
 
 Note the family prefix (`LEX`, `PARSE`, ...) is a naming convention only; the
 JSON payload's `"stage"` field comes from the independent `errors::Stage`
@@ -143,11 +153,22 @@ observable in practice today.
 | `FRS-PROP-0004` | `propagate` | Automatic differentiation (`fad`/`rad`) reached a clock-domain boundary it cannot cross. | `crates/propagate/src/error.rs:548` |
 | `FRS-PROP-0099` | `propagate` | Generic propagate failure fallback code. | `crates/propagate/src/error.rs:372,380,390,422` |
 
-### `FRS-COMP-*` — Top-level compiler pipeline (1 code)
+### `FRS-COMP-*` — Top-level compiler pipeline (2 codes)
 
 | Code | Stage | Meaning | Raised at |
 |---|---|---|---|
 | `FRS-COMP-0004` | `compiler` | Signal type validation failed. | `crates/compiler/src/error_mapping.rs:142` |
+| `FRS-COMP-0005` | `compiler` | Parse reported no errors yet exposed no root node. Internal invariant guard — reaching it means a compiler bug, not a DSP mistake (an empty file fails later with `FRS-EVAL-0001`). | `CompilerError::missing_root` |
+
+### `FRS-CODEGEN-*` — Backend emission (1 code)
+
+| Code | Stage | Meaning | Raised at |
+|---|---|---|---|
+| `FRS-CODEGEN-0001` | `codegen` | Backend code generation failed while emitting from FIR. Carries `backend=<lang>` and `codegen_code=FRS-CGEN-<LANG>-NNNN` notes. | `CompilerError::codegen_diagnostics`, via all five backend variants |
+
+One code covers every backend deliberately: the failure class is identical and
+the backend is a parameter, so the discriminating detail rides in notes rather
+than multiplying near-identical `FRS-*` codes.
 
 `FRS-COMP-0001`..`0003` are retired; the numbering gap is deliberate (see
 below).

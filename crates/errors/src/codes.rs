@@ -103,6 +103,17 @@ pub const FIR_VERIFY_WARNING: DiagnosticCode = DiagnosticCode("FRS-FIR-0002");
 /// Unlike the retired codes above, this one has no family of its own to defer
 /// to — there is no `FRS-TYPE-*` namespace — so it is the type stage's code.
 pub const COMP_TYPE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0004");
+/// Parse succeeded but exposed no root node — an internal invariant guard.
+pub const COMP_MISSING_ROOT: DiagnosticCode = DiagnosticCode("FRS-COMP-0005");
+
+/// Backend code generation failed while emitting from FIR.
+///
+/// One code for every backend on purpose. The failing backend and its own
+/// stable code travel as notes (`backend=...`, `codegen_code=FRS-CGEN-...`),
+/// mirroring how `FRS-FIR-0002` carries `fir_code=...`: the backends already
+/// own a 27-code taxonomy (`FRS-CGEN-<LANG>-NNNN`) and duplicating it at this
+/// level would create two competing schemes for the same events.
+pub const CODEGEN_EMISSION_FAILED: DiagnosticCode = DiagnosticCode("FRS-CODEGEN-0001");
 
 /// Returns all built-in stable diagnostic codes.
 #[must_use]
@@ -139,6 +150,8 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         FIR_VERIFY_ERROR,
         FIR_VERIFY_WARNING,
         COMP_TYPE_FAILED,
+        COMP_MISSING_ROOT,
+        CODEGEN_EMISSION_FAILED,
     ]
 }
 

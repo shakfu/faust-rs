@@ -247,6 +247,47 @@ fn check_json_fir_family_failure_is_clean() {
     );
 }
 
+/// A backend emission failure must carry `FRS-CODEGEN-0001` plus the backend
+/// and its own `FRS-CGEN-*` code as notes.
+///
+/// Until 2026-07-21 all five codegen variants returned `None` from
+/// `CompilerError::diagnostics()`, so a backend failure reached the user
+/// through the `code: null` envelope. One `FRS-CODEGEN-*` code covers every
+/// backend on purpose: the backends already own a 27-code
+/// `FRS-CGEN-<LANG>-NNNN` taxonomy, carried here as a note exactly as
+/// `FRS-FIR-0002` carries `fir_code=...`.
+#[test]
+fn codegen_backend_failure_is_structured() {
+    let output = Command::new(bin_path())
+        .arg(corpus_path("err_rad_delay_temporal_unsupported.dsp"))
+        .args(["-lang", "wasm", "--error-format", "json"])
+        .output()
+        .expect("failed to spawn faust-rs");
+    assert!(!output.status.success(), "expected exit 1");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one clean JSON document: {e}\n{stdout}"));
+    let diag = &parsed["diagnostics"][0];
+
+    assert_eq!(diag["code"], "FRS-CODEGEN-0001");
+    assert_eq!(diag["stage"], "codegen");
+    let notes: Vec<&str> = diag["notes"]
+        .as_array()
+        .expect("notes must be an array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        notes.iter().any(|n| n.contains("backend: wasm")),
+        "the failing backend must be named, got {notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("codegen_code=FRS-CGEN-")),
+        "the backend's own stable code must travel as a note, got {notes:?}"
+    );
+}
+
 /// Division by a constant zero must be a structured diagnostic, not a panic.
 ///
 /// Parity: the reference C++ compiler rejects `process = _ / (0 : *(0));`

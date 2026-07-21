@@ -960,10 +960,7 @@ impl Compiler {
             compile_options_json_string(Some("wasm"), options.double_precision),
         );
         generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
-            .map_err(|error| CompilerError::CodegenWasm {
-                source: source_name.into(),
-                error,
-            })
+            .map_err(|error| CompilerError::codegen_wasm(source_name, error))
     }
 
     /// Compiles one in-memory DSP source into an owned artifact bundle
@@ -1007,10 +1004,7 @@ impl Compiler {
             &request.wasm_options,
             &json_context,
         )
-        .map_err(|error| CompilerError::CodegenWasm {
-            source: request.source_name.clone().into(),
-            error,
-        })?;
+        .map_err(|error| CompilerError::codegen_wasm(&request.source_name, error))?;
         Ok(WasmArtifactBundle::from_wasm_module(
             module,
             compile_options,
@@ -1069,10 +1063,7 @@ impl Compiler {
                 double_precision: self.real_type == RealType::Float64,
             },
         )
-        .map_err(|error| CompilerError::CodegenWasm {
-            source: source_name.into(),
-            error,
-        })?;
+        .map_err(|error| CompilerError::codegen_wasm(source_name, error))?;
         Ok(json.render())
     }
 
@@ -1217,10 +1208,7 @@ impl Compiler {
             compile_options_json_string(Some("wasm"), options.double_precision),
         );
         generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
-            .map_err(|error| CompilerError::CodegenWasm {
-                source: source.into(),
-                error,
-            })
+            .map_err(|error| CompilerError::codegen_wasm(&source, error))
     }
 
     /// Compiles one file-backed DSP source into an owned artifact bundle.
@@ -1307,10 +1295,7 @@ impl Compiler {
                 double_precision: self.real_type == RealType::Float64,
             },
         )
-        .map_err(|error| CompilerError::CodegenWasm {
-            source: source.into(),
-            error,
-        })?;
+        .map_err(|error| CompilerError::codegen_wasm(&source, error))?;
         Ok(json.render())
     }
 
@@ -1810,9 +1795,9 @@ impl Compiler {
         mut output: ParseOutput,
         eval_source_context: Option<eval::EvalSourceContext>,
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let root = output.root.ok_or_else(|| CompilerError::MissingRoot {
-            source: source.into(),
-        })?;
+        let root = output
+            .root
+            .ok_or_else(|| CompilerError::missing_root(source))?;
 
         let eval_result = self.time_phase("evaluation", || {
             match (&eval_source_context, &self.cancel) {
@@ -1996,7 +1981,12 @@ pub enum CompilerError {
     /// so the bundle and the error can never disagree.
     Import(SourceReaderError, DiagnosticBundle),
     /// Parse output did not expose a root node.
-    MissingRoot { source: Box<str> },
+    ///
+    /// Build with [`CompilerError::missing_root`] so the bundle is attached.
+    MissingRoot {
+        source: Box<str>,
+        diagnostics: DiagnosticBundle,
+    },
     /// Parse failed (`errors` or `recoveries` present).
     Parse {
         source: Box<str>,
@@ -2038,26 +2028,31 @@ pub enum CompilerError {
     Codegen {
         source: Box<str>,
         error: CodegenError,
+        diagnostics: DiagnosticBundle,
     },
     /// C backend emission failed from FIR.
     CodegenC {
         source: Box<str>,
         error: CCodegenError,
+        diagnostics: DiagnosticBundle,
     },
     /// Julia backend emission failed from FIR.
     CodegenJulia {
         source: Box<str>,
         error: JuliaCodegenError,
+        diagnostics: DiagnosticBundle,
     },
     /// Interpreter backend emission failed from FIR.
     CodegenInterp {
         source: Box<str>,
         error: InterpCodegenError,
+        diagnostics: DiagnosticBundle,
     },
     /// WASM backend emission failed from FIR.
     CodegenWasm {
         source: Box<str>,
         error: WasmBackendError,
+        diagnostics: DiagnosticBundle,
     },
 }
 
@@ -2065,7 +2060,7 @@ impl std::fmt::Display for CompilerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Import(err, _) => write!(f, "{err}"),
-            Self::MissingRoot { source } => write!(f, "parse returned no root for {source}"),
+            Self::MissingRoot { source, .. } => write!(f, "parse returned no root for {source}"),
             Self::Parse {
                 source,
                 parse_errors,
@@ -2098,19 +2093,19 @@ impl std::fmt::Display for CompilerError {
                 if *strict { " (strict mode)" } else { "" },
                 diagnostics.len()
             ),
-            Self::Codegen { source, error } => {
+            Self::Codegen { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
-            Self::CodegenC { source, error } => {
+            Self::CodegenC { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
-            Self::CodegenJulia { source, error } => {
+            Self::CodegenJulia { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
-            Self::CodegenInterp { source, error } => {
+            Self::CodegenInterp { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
-            Self::CodegenWasm { source, error } => {
+            Self::CodegenWasm { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
         }
@@ -2128,7 +2123,84 @@ impl CompilerError {
         Self::Import(err, diagnostics)
     }
 
-    /// Returns structured diagnostics when this error variant carries them.
+    /// Builds the `FRS-CODEGEN-0001` bundle for one backend emission failure.
+    ///
+    /// `backend` is the `-lang` name (`cpp`, `c`, `julia`, `interp`, `wasm`),
+    /// `backend_code` the backend's own stable `FRS-CGEN-<LANG>-NNNN` code, and
+    /// `message` its text without the bracketed code prefix.
+    ///
+    /// The backend code travels as a note rather than becoming its own `FRS-*`
+    /// code, mirroring `FRS-FIR-0002` + `fir_code=...`: the backends already
+    /// own that taxonomy and duplicating it here would create two competing
+    /// schemes for the same events.
+    fn codegen_diagnostics(
+        source: &str,
+        backend: &str,
+        backend_code: &str,
+        message: &str,
+    ) -> DiagnosticBundle {
+        let mut bundle = DiagnosticBundle::new();
+        bundle.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Codegen,
+                errors::codes::CODEGEN_EMISSION_FAILED,
+                format!("{backend} backend code generation failed: {message}"),
+            )
+            .with_note(format!("backend: {backend}"))
+            .with_note(format!("codegen_code={backend_code}"))
+            .with_note(format!("source: {source}"))
+            .with_help("this is a backend limitation or a compiler bug, not a DSP syntax error")
+            .with_help("try another `-lang` backend to confirm the front-end result is sound"),
+        );
+        bundle
+    }
+
+    /// Builds a [`CompilerError::CodegenWasm`] with its `FRS-CODEGEN-0001`
+    /// bundle attached.
+    #[must_use]
+    pub fn codegen_wasm(source: &str, error: WasmBackendError) -> Self {
+        let diagnostics =
+            Self::codegen_diagnostics(source, "wasm", error.code().as_str(), error.message());
+        Self::CodegenWasm {
+            source: source.into(),
+            error,
+            diagnostics,
+        }
+    }
+
+    /// Builds a [`CompilerError::MissingRoot`] with its bundle attached.
+    ///
+    /// Internal invariant guard: a parse that reports no errors always exposes
+    /// a root, so reaching this means a compiler bug rather than bad DSP input
+    /// (an empty file, for instance, fails later with `FRS-EVAL-0001`).
+    #[must_use]
+    pub fn missing_root(source: &str) -> Self {
+        let mut diagnostics = DiagnosticBundle::new();
+        diagnostics.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Compiler,
+                errors::codes::COMP_MISSING_ROOT,
+                format!("parse returned no root for {source}"),
+            )
+            .with_note("the parser reported no errors yet exposed no root node")
+            .with_note("this indicates a compiler bug, not a DSP mistake")
+            .with_help("please report this with the input DSP"),
+        );
+        Self::MissingRoot {
+            source: source.into(),
+            diagnostics,
+        }
+    }
+
+    /// Returns the structured diagnostics carried by this error.
+    ///
+    /// Every variant now carries a bundle, so this never returns `None` — the
+    /// `Option` is kept for source compatibility with existing callers. The
+    /// exhaustive match below is deliberate: it makes the compiler reject a new
+    /// variant that forgets its bundle, which is how the `code: null` fallback
+    /// crept in for import and backend failures in the first place.
     #[must_use]
     pub fn diagnostics(&self) -> Option<&DiagnosticBundle> {
         match self {
@@ -2139,11 +2211,12 @@ impl CompilerError {
             Self::Transform { diagnostics, .. } => Some(diagnostics),
             Self::FirVerify { diagnostics, .. } => Some(diagnostics),
             Self::Import(_, diagnostics) => Some(diagnostics),
-            Self::Codegen { .. } => None,
-            Self::CodegenC { .. } => None,
-            Self::CodegenJulia { .. } => None,
-            Self::CodegenWasm { .. } => None,
-            _ => None,
+            Self::Codegen { diagnostics, .. } => Some(diagnostics),
+            Self::CodegenC { diagnostics, .. } => Some(diagnostics),
+            Self::CodegenJulia { diagnostics, .. } => Some(diagnostics),
+            Self::CodegenInterp { diagnostics, .. } => Some(diagnostics),
+            Self::CodegenWasm { diagnostics, .. } => Some(diagnostics),
+            Self::MissingRoot { diagnostics, .. } => Some(diagnostics),
         }
     }
 }

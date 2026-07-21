@@ -24,6 +24,12 @@ pub(crate) fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) 
         LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerError::Codegen(error) => CompilerError::Codegen {
             source: source.into(),
+            diagnostics: CompilerError::codegen_diagnostics(
+                source,
+                "cpp",
+                error.code().as_str(),
+                error.message(),
+            ),
             error,
         },
     }
@@ -39,6 +45,12 @@ pub(crate) fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> C
         LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerError::Codegen(error) => CompilerError::CodegenC {
             source: source.into(),
+            diagnostics: CompilerError::codegen_diagnostics(
+                source,
+                "c",
+                error.code().as_str(),
+                error.message(),
+            ),
             error,
         },
     }
@@ -54,6 +66,12 @@ pub(crate) fn lower_julia_error_to_compiler(
         LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerError::Codegen(error) => CompilerError::CodegenJulia {
             source: source.into(),
+            diagnostics: CompilerError::codegen_diagnostics(
+                source,
+                "julia",
+                error.code().as_str(),
+                error.message(),
+            ),
             error,
         },
     }
@@ -73,10 +91,22 @@ pub(crate) fn lower_interp_error_to_compiler(
         LowerToInterpError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerToInterpError::Codegen(error) => CompilerError::CodegenInterp {
             source: source.into(),
+            diagnostics: CompilerError::codegen_diagnostics(
+                source,
+                "interp",
+                error.code.as_str(),
+                &error.message,
+            ),
             error,
         },
         LowerToInterpError::Serialize(message) => CompilerError::CodegenInterp {
             source: source.into(),
+            diagnostics: CompilerError::codegen_diagnostics(
+                source,
+                "interp",
+                InterpCodegenErrorCode::CompilationFailed.as_str(),
+                &message,
+            ),
             error: InterpCodegenError {
                 code: InterpCodegenErrorCode::CompilationFailed,
                 message,

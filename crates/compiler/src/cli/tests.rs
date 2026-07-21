@@ -1255,6 +1255,8 @@ fn extract_frs_codes_into(text: &str, out: &mut std::collections::BTreeSet<Strin
 fn documented_frs_codes() -> std::collections::BTreeSet<String> {
     [
         "FRS-COMP-0004",
+        "FRS-COMP-0005",
+        "FRS-CODEGEN-0001",
         "FRS-EVAL-0001",
         "FRS-EVAL-0002",
         "FRS-EVAL-0003",

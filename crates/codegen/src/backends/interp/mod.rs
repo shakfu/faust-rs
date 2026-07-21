@@ -99,7 +99,7 @@ pub enum CodegenErrorCode {
 
 impl CodegenErrorCode {
     /// Returns the stable machine-readable error code string.
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::RootNotModule => "FRS-CGEN-INTERP-0001",
             Self::InvalidModuleSection => "FRS-CGEN-INTERP-0002",
