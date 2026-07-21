@@ -304,10 +304,14 @@ mod tests {
     #[test]
     fn bundle_counts_error_severity_only() {
         let mut bundle = DiagnosticBundle::new();
+        // Use a real registered code: a made-up literal here would be picked
+        // up by the textual extraction behind
+        // `compiler::cli::tests::frozen_frs_code_table_matches_source` and
+        // would look like a public diagnostic code that nothing ever emits.
         bundle.push(Diagnostic::new(
             Severity::Warning,
             Stage::Eval,
-            DiagnosticCode("FRS-EVAL-0100"),
+            crate::codes::EVAL_GENERIC_FAILURE,
             "non-fatal warning",
         ));
         bundle.push(Diagnostic::new(

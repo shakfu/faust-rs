@@ -1254,9 +1254,6 @@ fn extract_frs_codes_into(text: &str, out: &mut std::collections::BTreeSet<Strin
 /// change here must be mirrored there in the same commit, and vice versa.
 fn documented_frs_codes() -> std::collections::BTreeSet<String> {
     [
-        "FRS-COMP-0001",
-        "FRS-COMP-0002",
-        "FRS-COMP-0003",
         "FRS-COMP-0004",
         "FRS-EVAL-0001",
         "FRS-EVAL-0002",
@@ -1265,7 +1262,6 @@ fn documented_frs_codes() -> std::collections::BTreeSet<String> {
         "FRS-EVAL-0005",
         "FRS-EVAL-0006",
         "FRS-EVAL-0099",
-        "FRS-EVAL-0100",
         "FRS-FIR-0001",
         "FRS-FIR-0002",
         "FRS-LEX-0001",
@@ -1322,5 +1318,35 @@ fn frozen_frs_code_table_matches_source() {
          documented but no longer present in source -- e.g. a renumbering: \
          {stale_in_docs:?}). Update docs/diagnostics-codes-en.md and this \
          test's `documented_frs_codes` in the same change."
+    );
+}
+
+/// The runtime registry `errors::codes::all_codes()` must list exactly the
+/// frozen set.
+///
+/// Nothing compared the two before, and they had silently diverged:
+/// `FRS-EVAL-0006` (`EVAL_SLIDER_INIT_OUT_OF_RANGE`) was declared and really
+/// emitted from `crates/eval/src/error.rs`, yet was missing from
+/// `all_codes()` — so any consumer enumerating codes through the registry
+/// would never have seen it. That is precisely the drift these two structures
+/// exist to prevent, so it is now checked rather than assumed.
+///
+/// Retired codes are deliberately absent from both sides: they are recorded
+/// only in the "Retired codes" table of `docs/diagnostics-codes-en.md`.
+#[test]
+fn code_registry_matches_frozen_table() {
+    let registry: std::collections::BTreeSet<String> = errors::codes::all_codes()
+        .iter()
+        .map(|code| code.0.to_owned())
+        .collect();
+    let documented = documented_frs_codes();
+
+    let missing_from_registry = documented.difference(&registry).collect::<Vec<_>>();
+    let extra_in_registry = registry.difference(&documented).collect::<Vec<_>>();
+    assert!(
+        missing_from_registry.is_empty() && extra_in_registry.is_empty(),
+        "errors::codes::all_codes() drifted from the frozen table \
+         (documented but absent from the registry: {missing_from_registry:?}; \
+         in the registry but undocumented: {extra_in_registry:?})."
     );
 }

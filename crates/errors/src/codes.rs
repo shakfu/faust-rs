@@ -77,13 +77,31 @@ pub const FIR_VERIFY_ERROR: DiagnosticCode = DiagnosticCode("FRS-FIR-0001");
 /// FIR verifier warning diagnostic (details in notes: `fir_code=...`).
 pub const FIR_VERIFY_WARNING: DiagnosticCode = DiagnosticCode("FRS-FIR-0002");
 
-/// Parse stage failed in top-level compiler pipeline.
-pub const COMP_PARSE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0001");
-/// Eval stage failed in top-level compiler pipeline.
-pub const COMP_EVAL_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0002");
-/// Propagate stage failed in top-level compiler pipeline.
-pub const COMP_PROPAGATE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0003");
+// Retired 2026-07-21 — **never reassign these numbers**:
+//   COMP-0001 (parse stage failed)
+//   COMP-0002 (eval stage failed)
+//   COMP-0003 (propagate stage failed)
+//
+// Written without the `FRS-` prefix on purpose: the frozen-table checker
+// extracts codes textually from `.rs` source, so spelling them in full here
+// would resurrect them as live codes. The authoritative retirement record is
+// the "Retired codes" table in `docs/diagnostics-codes-en.md`.
+//
+// They were declared but never constructed. Parse, eval and propagate each
+// have their own code family (`FRS-PARSE-*`, `FRS-EVAL-*`, `FRS-PROP-*`, with
+// `FRS-EVAL-0099` / `FRS-PROP-0099` as generic fallbacks), so a `FRS-COMP-*`
+// wrapper would have added a second, less precise code — without the spans,
+// binding traces and computed facts the family codes carry — for an event
+// already named. Reusing these numbers for a different meaning is exactly the
+// silent break the freeze rule exists to prevent, so they stay burned.
+//
+// `FRS-COMP-0004` below is deliberately *not* renumbered to fill the gap:
+// renumbering a live code is the one thing the freeze rule forbids.
+
 /// Signal type validation failed in top-level compiler pipeline.
+///
+/// Unlike the retired codes above, this one has no family of its own to defer
+/// to — there is no `FRS-TYPE-*` namespace — so it is the type stage's code.
 pub const COMP_TYPE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0004");
 
 /// Returns all built-in stable diagnostic codes.
@@ -103,6 +121,7 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         EVAL_ARITY_MISMATCH,
         EVAL_ITERATION_INVALID,
         EVAL_REDEFINED_SYMBOL,
+        EVAL_SLIDER_INIT_OUT_OF_RANGE,
         EVAL_GENERIC_FAILURE,
         PROP_UNSUPPORTED_BOX,
         PROP_ARITY_MISMATCH,
@@ -119,9 +138,6 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         SFIR_CLOCK_ANALYSIS,
         FIR_VERIFY_ERROR,
         FIR_VERIFY_WARNING,
-        COMP_PARSE_FAILED,
-        COMP_EVAL_FAILED,
-        COMP_PROPAGATE_FAILED,
         COMP_TYPE_FAILED,
     ]
 }

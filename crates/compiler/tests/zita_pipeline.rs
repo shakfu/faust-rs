@@ -44,7 +44,7 @@ fn compile_zita_signals() -> Option<SignalCompileOutput> {
 
     match compiler.compile_file_default_to_signals(&path) {
         Ok(output) => Some(output),
-        Err(CompilerError::Import(SourceReaderError::UnresolvedImport { name, .. }))
+        Err(CompilerError::Import(SourceReaderError::UnresolvedImport { name, .. }, _))
             if name.as_ref() == "stdfaust.lib" =>
         {
             eprintln!(

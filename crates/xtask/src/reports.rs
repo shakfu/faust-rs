@@ -1389,7 +1389,7 @@ pub(crate) fn rust_case_status(compiler: &compiler::Compiler, input: &Path) -> C
         },
         Err(err) => {
             let (stage, reason) = match &err {
-                compiler::CompilerError::Import(_) => ("import", err.to_string()),
+                compiler::CompilerError::Import(..) => ("import", err.to_string()),
                 compiler::CompilerError::Parse { .. } => ("parse", err.to_string()),
                 compiler::CompilerError::Eval { .. } => ("eval", err.to_string()),
                 compiler::CompilerError::Propagate { .. } => ("propagate", err.to_string()),

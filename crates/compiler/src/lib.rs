@@ -645,7 +645,7 @@ impl Compiler {
                     parser_float_size(self.real_type),
                 )
             })
-            .map_err(CompilerError::Import)?;
+            .map_err(CompilerError::import)?;
         ensure_parse_success(&path.display().to_string(), output)
     }
 
@@ -729,7 +729,7 @@ impl Compiler {
                         parser_float_size(self.real_type),
                     )
                 })
-                .map_err(CompilerError::Import)?,
+                .map_err(CompilerError::import)?,
             )?
         };
         let mut eval_source_context = if search_paths.is_empty() && virtual_sources.is_empty() {
@@ -776,7 +776,7 @@ impl Compiler {
                     parser_float_size(self.real_type),
                 )
             })
-            .map_err(CompilerError::Import)?,
+            .map_err(CompilerError::import)?,
         )?;
         let mut eval_source_context = eval::EvalSourceContext::for_file_with_metadata(
             path,
@@ -1989,7 +1989,12 @@ fn collect_library_list(signals: &SignalCompileOutput) -> Vec<String> {
 #[derive(Debug)]
 pub enum CompilerError {
     /// Import resolution/read failure before parse completion.
-    Import(SourceReaderError),
+    ///
+    /// Carries the structured `FRS-SRC-*` bundle built by
+    /// [`SourceReaderError::to_diagnostics`]; build it with
+    /// [`CompilerError::import`] rather than constructing the variant directly,
+    /// so the bundle and the error can never disagree.
+    Import(SourceReaderError, DiagnosticBundle),
     /// Parse output did not expose a root node.
     MissingRoot { source: Box<str> },
     /// Parse failed (`errors` or `recoveries` present).
@@ -2059,7 +2064,7 @@ pub enum CompilerError {
 impl std::fmt::Display for CompilerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Import(err) => write!(f, "{err}"),
+            Self::Import(err, _) => write!(f, "{err}"),
             Self::MissingRoot { source } => write!(f, "parse returned no root for {source}"),
             Self::Parse {
                 source,
@@ -2115,6 +2120,14 @@ impl std::fmt::Display for CompilerError {
 impl std::error::Error for CompilerError {}
 
 impl CompilerError {
+    /// Builds an [`CompilerError::Import`] with its structured `FRS-SRC-*`
+    /// bundle attached.
+    #[must_use]
+    pub fn import(err: SourceReaderError) -> Self {
+        let diagnostics = err.to_diagnostics();
+        Self::Import(err, diagnostics)
+    }
+
     /// Returns structured diagnostics when this error variant carries them.
     #[must_use]
     pub fn diagnostics(&self) -> Option<&DiagnosticBundle> {
@@ -2125,6 +2138,7 @@ impl CompilerError {
             Self::Type { diagnostics, .. } => Some(diagnostics),
             Self::Transform { diagnostics, .. } => Some(diagnostics),
             Self::FirVerify { diagnostics, .. } => Some(diagnostics),
+            Self::Import(_, diagnostics) => Some(diagnostics),
             Self::Codegen { .. } => None,
             Self::CodegenC { .. } => None,
             Self::CodegenJulia { .. } => None,

@@ -275,26 +275,47 @@ fn division_by_zero_is_a_clean_diagnostic_not_a_panic() {
     );
 }
 
+/// An unresolved import must carry `FRS-SRC-0002`, a span at the directive,
+/// and the list of searched directories.
+///
+/// Until 2026-07-21 the whole `FRS-SRC-*` family was declared but never
+/// constructed, so this failure reached the user through the `code: null`
+/// no-bundle fallback with no span and no notes — for what is the single most
+/// common newcomer error. The reference C++ compiler reports only
+/// `ERROR : unable to open file <name>`, so the span and the searched-path
+/// list are deliberately more informative than parity.
 #[test]
-fn check_json_src_family_failure_falls_back_to_clean_null_code_envelope() {
-    // No FRS-SRC-* code is ever actually constructed (see
-    // docs/diagnostics-codes-en.md) -- a real unresolved import raises
-    // `CompilerError::Import`, which carries no `DiagnosticBundle`. This
-    // exercises the D1 no-bundle fallback envelope end to end and confirms
-    // it is still exactly one clean JSON document with `code: null`.
+fn check_json_src_family_unresolved_import_is_structured() {
     let result = run_and_assert_clean_json(&local_fixture("src_missing_import.dsp"), &[]);
     assert!(!result.success, "expected exit 1 on an unresolved import");
+    assert_eq!(first_code(&result), "FRS-SRC-0002");
     assert!(
-        result.stdout["diagnostics"][0]["code"].is_null(),
-        "expected the null-code fallback envelope, got: {}",
-        result.stdout
+        first_message(&result).contains("cannot resolve import"),
+        "unexpected message: {}",
+        first_message(&result)
     );
-    let message = result.stdout["diagnostics"][0]["message"]
-        .as_str()
-        .expect("fallback diagnostic must carry a message string");
+
+    let labels = result.stdout["diagnostics"][0]["labels"]
+        .as_array()
+        .expect("labels must be an array");
+    assert_eq!(
+        labels.len(),
+        1,
+        "expected one label pointing at the import directive, got: {}",
+        result.stdout["diagnostics"][0]
+    );
+    let line = labels[0]["line"].as_u64().expect("label must carry a line");
+    assert!(line >= 1, "label line must be 1-based, got {line}");
+
+    let notes: Vec<&str> = result.stdout["diagnostics"][0]["notes"]
+        .as_array()
+        .expect("notes must be an array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
     assert!(
-        message.contains("cannot resolve import"),
-        "unexpected fallback message: {message}"
+        notes.iter().any(|n| n.contains("searched")),
+        "the diagnostic must list the searched directories, got: {notes:?}"
     );
 }
 

@@ -18,6 +18,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use errors::{
+    Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan, Stage,
+    codes,
+};
+
 /// One source-origin marker for a line in expanded source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Origin information for one expanded source line.
@@ -112,12 +117,76 @@ impl VirtualSourceMap {
     }
 }
 
+/// Source location of an `import(...)` directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportSite {
+    /// 1-based line of the directive.
+    pub line: u32,
+    /// 1-based column of the import name within that line.
+    pub col: u32,
+}
+
+impl ImportSite {
+    /// Locates the first `import("<name>");` directive in `text`.
+    ///
+    /// Used by the box-level expansion path, which resolves imports from an
+    /// already-parsed tree: box nodes carry no source location, so recovering
+    /// the span means re-scanning the file. That work happens only on the error
+    /// path, never during a successful compile.
+    ///
+    /// Reuses the same line recognizer as expansion, so a commented-out or
+    /// malformed directive is not mistaken for the real one. If the same name is
+    /// imported more than once, the first occurrence wins.
+    #[must_use]
+    pub fn locate_in(text: &str, name: &str) -> Option<Self> {
+        let mut in_block_comment = false;
+        for (line_index, line) in text.lines().enumerate() {
+            let line_starts_in_comment = in_block_comment;
+            in_block_comment = SourceReader::advance_block_comment_state(in_block_comment, line);
+            if line_starts_in_comment {
+                continue;
+            }
+            if parse_import_line(line).as_deref() != Some(name) {
+                continue;
+            }
+            let col = line
+                .find(name)
+                .map_or(1, |byte_idx| line[..byte_idx].chars().count() + 1);
+            return Some(Self {
+                line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
+                col: u32::try_from(col).unwrap_or(1),
+            });
+        }
+        None
+    }
+}
+
 /// Errors returned by [`SourceReader`] during source loading and import expansion.
+///
+/// Each variant maps to one stable `FRS-SRC-*` diagnostic code; see
+/// [`SourceReaderError::to_diagnostics`] and `docs/diagnostics-codes-en.md`.
 #[derive(Debug)]
 pub enum SourceReaderError {
-    Io { path: PathBuf, message: Box<str> },
-    UnresolvedImport { name: Box<str>, from: PathBuf },
-    ImportCycle { path: PathBuf },
+    Io {
+        path: PathBuf,
+        message: Box<str>,
+    },
+    UnresolvedImport {
+        name: Box<str>,
+        from: PathBuf,
+        /// Location of the `import(...)` directive, when the caller knows it.
+        ///
+        /// `None` for the box-level expansion path, which resolves imports from
+        /// an already-parsed tree and has no line information. Emitting a
+        /// placeholder span there would point the user at the wrong line, so
+        /// the diagnostic simply carries no label in that case.
+        site: Option<ImportSite>,
+        /// Directories that were searched, in order, before giving up.
+        searched: Vec<PathBuf>,
+    },
+    ImportCycle {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for SourceReaderError {
@@ -126,7 +195,7 @@ impl fmt::Display for SourceReaderError {
             Self::Io { path, message } => {
                 write!(f, "I/O error while reading {}: {message}", path.display())
             }
-            Self::UnresolvedImport { name, from } => {
+            Self::UnresolvedImport { name, from, .. } => {
                 write!(f, "cannot resolve import `{name}` from {}", from.display())
             }
             Self::ImportCycle { path } => {
@@ -137,6 +206,102 @@ impl fmt::Display for SourceReaderError {
 }
 
 impl std::error::Error for SourceReaderError {}
+
+impl SourceReaderError {
+    /// Returns the stable diagnostic code for this failure.
+    #[must_use]
+    pub fn code(&self) -> DiagnosticCode {
+        match self {
+            Self::Io { .. } => codes::SRC_IO_ERROR,
+            Self::UnresolvedImport { .. } => codes::SRC_UNRESOLVED_IMPORT,
+            Self::ImportCycle { .. } => codes::SRC_IMPORT_CYCLE,
+        }
+    }
+
+    /// Converts this error into a structured diagnostic bundle.
+    ///
+    /// Before this existed, source-loading failures reached the CLI as
+    /// `CompilerError::Import`, which carried no bundle at all, so every one of
+    /// them was reported through the `code: null` fallback envelope with no
+    /// span and no notes — the single most common newcomer failure (an
+    /// unresolved `import`) answered with an unstructured string.
+    ///
+    /// The reference C++ compiler reports the same condition as
+    /// `ERROR : unable to open file <name>`, i.e. without a location or the
+    /// searched paths; this is deliberately more informative than parity.
+    #[must_use]
+    pub fn to_diagnostics(&self) -> DiagnosticBundle {
+        let mut bundle = DiagnosticBundle::new();
+        let diag = match self {
+            Self::Io { path, message } => Diagnostic::new(
+                Severity::Error,
+                Stage::SourceReader,
+                self.code(),
+                format!("cannot read {}: {message}", path.display()),
+            )
+            .with_note(format!("path: {}", path.display()))
+            .with_help("check that the path exists and is a readable file"),
+
+            Self::UnresolvedImport {
+                name,
+                from,
+                site,
+                searched,
+            } => {
+                let mut diag = Diagnostic::new(
+                    Severity::Error,
+                    Stage::SourceReader,
+                    self.code(),
+                    format!("cannot resolve import `{name}`"),
+                );
+                if let Some(ImportSite { line, col }) = site {
+                    let end_col = col + u32::try_from(name.chars().count()).unwrap_or(0);
+                    diag = diag.with_label(Label::new(
+                        LabelStyle::Primary,
+                        SourceSpan::new(from.clone(), *line, *col, *line, end_col),
+                        "unresolved import",
+                    ));
+                }
+                diag = diag
+                    .with_note(format!("import name: {name}"))
+                    .with_note(format!("imported from: {}", from.display()));
+                // The importing file's own directory is usually also on the
+                // search path, so de-duplicate while keeping probe order.
+                let mut unique: Vec<&PathBuf> = Vec::with_capacity(searched.len());
+                for dir in searched {
+                    if !unique.contains(&dir) {
+                        unique.push(dir);
+                    }
+                }
+                if unique.is_empty() {
+                    diag = diag.with_note("no search directories were configured");
+                } else {
+                    diag = diag.with_note(format!(
+                        "searched {} director{}:",
+                        unique.len(),
+                        if unique.len() == 1 { "y" } else { "ies" }
+                    ));
+                    for dir in unique {
+                        diag = diag.with_note(format!("  {}", dir.display()));
+                    }
+                }
+                diag.with_help("add the directory containing the file with `-I <dir>`")
+                    .with_help("or correct the import name")
+            }
+
+            Self::ImportCycle { path } => Diagnostic::new(
+                Severity::Error,
+                Stage::SourceReader,
+                self.code(),
+                format!("import cycle detected at {}", path.display()),
+            )
+            .with_note("a file transitively imports itself")
+            .with_help("break the cycle by removing one of the `import(...)` directives"),
+        };
+        bundle.push(diag);
+        bundle
+    }
+}
 
 /// File-backed source reader that expands `import("...");` directives recursively.
 #[derive(Debug, Default)]
@@ -288,9 +453,24 @@ impl SourceReader {
                 let from_dir = path.parent();
                 let Some(import_path) = self.resolve_import_from(&import_name, from_dir) else {
                     self.visiting.remove(path);
+                    // Report where the directive is and where we looked, so the
+                    // diagnostic is actionable instead of just "not found".
+                    let col = line
+                        .find(&import_name)
+                        .map_or(1, |byte_idx| line[..byte_idx].chars().count() + 1);
+                    let mut searched: Vec<PathBuf> = Vec::new();
+                    if let Some(dir) = from_dir {
+                        searched.push(dir.to_path_buf());
+                    }
+                    searched.extend(self.search_paths.iter().cloned());
                     return Err(SourceReaderError::UnresolvedImport {
                         name: import_name.into_boxed_str(),
                         from: path.to_path_buf(),
+                        site: Some(ImportSite {
+                            line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
+                            col: u32::try_from(col).unwrap_or(1),
+                        }),
+                        searched,
                     });
                 };
                 if !self.expanded_files.contains(&import_path) {
@@ -322,12 +502,26 @@ impl SourceReader {
         Ok(expanded)
     }
 
+    /// Tracks `/* ... */` block-comment state across one line.
+    ///
+    /// A `//` line comment outside a block comment ends the scan: without that,
+    /// an ordinary comment mentioning a glob such as `// see tests/*.dsp` reads
+    /// as opening a block comment, and every following line is treated as
+    /// commented out until some `*/` appears. That silently hid `import(...)`
+    /// directives from this expander (the box-level expansion path still
+    /// resolved them, so the visible symptom was a diagnostic losing its source
+    /// span rather than a miscompile).
+    ///
+    /// String literals are not tracked: `"/*"` inside a string still toggles
+    /// the state. Pre-existing, and not reachable from a well-formed
+    /// `import("...");` line, which is all this scanner gates.
     fn advance_block_comment_state(mut in_comment: bool, line: &str) -> bool {
         let bytes = line.as_bytes();
         let mut i = 0;
 
         while i + 1 < bytes.len() {
             match (bytes[i], bytes[i + 1]) {
+                (b'/', b'/') if !in_comment => break,
                 (b'/', b'*') if !in_comment => {
                     in_comment = true;
                     i += 2;

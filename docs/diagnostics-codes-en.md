@@ -22,9 +22,9 @@ enumerate every code actually present in source is:
 grep -rhoE 'FRS-[A-Z]+-[0-9]+' --include=*.rs crates/ | sort -u
 ```
 
-This currently returns **34 codes** across **8 stage-family namespaces**:
+This currently returns **30 codes** across **8 stage-family namespaces**:
 `FRS-LEX-*` (1), `FRS-PARSE-*` (3), `FRS-SRC-*` (3), `FRS-EVAL-*` (8),
-`FRS-PROP-*` (5), `FRS-COMP-*` (4), `FRS-FIR-*` (2), `FRS-SFIR-*` (8).
+`FRS-PROP-*` (5), `FRS-COMP-*` (1), `FRS-FIR-*` (2), `FRS-SFIR-*` (8).
 
 Note the family prefix (`LEX`, `PARSE`, ...) is a naming convention only; the
 JSON payload's `"stage"` field comes from the independent `errors::Stage`
@@ -32,7 +32,7 @@ enum and does not always equal the family name (e.g. every `FRS-SFIR-*` code
 reports `"stage": "transform"`, not `"stage": "sfir"` — there is no `Sfir`
 `Stage` variant). Both are listed per code below.
 
-## Important caveat: several codes are currently unreachable or unused
+## Important caveat: a few codes are currently unreachable or unused
 
 The extraction command above is a textual grep over `.rs` source, not a
 reachability analysis. Building this table required tracing every code from
@@ -42,13 +42,27 @@ real gaps, recorded here rather than papered over:
 - **`FRS-SRC-0001`, `FRS-SRC-0002`, `FRS-SRC-0003`** are defined in
   `crates/errors/src/codes.rs` and listed in `codes::all_codes()`, but no
   code anywhere in the workspace ever constructs a `Diagnostic` with them.
-  The real-world failure they were presumably meant to cover — an
-  unresolved `import(...)` — does happen (e.g. `import("missing.lib")`
-  fails), but it surfaces as `CompilerError::Import(SourceReaderError)`,
-  which carries **no** `DiagnosticBundle` at all (see the `format_fallback_diagnostics_json`
-  note below). The `FRS-SRC-*` family is reserved but dormant.
-- **`FRS-COMP-0001`, `FRS-COMP-0002`, `FRS-COMP-0003`** are similarly
-  defined and registered but never raised. Only `FRS-COMP-0004` is wired up.
+
+  **Wired up 2026-07-21.** These were never dead reservations:
+  `parser::source_reader::SourceReaderError` has exactly three variants that map
+  one-to-one onto the three codes, and all three fire in practice.
+  `SourceReaderError::to_diagnostics` now builds a real bundle for each, and
+  `CompilerError::import` attaches it, so source-loading failures no longer fall
+  through to the `code: null` envelope:
+
+  | Variant | Code | Diagnostic content |
+  |---|---|---|
+  | `Io { path, message }` | `FRS-SRC-0001` | path note + readability help |
+  | `UnresolvedImport { .. }` | `FRS-SRC-0002` | span on the `import(...)` directive, import name, importing file, ordered list of searched directories, `-I` help |
+  | `ImportCycle { path }` | `FRS-SRC-0003` | cycle note + help to break it |
+
+  The reference C++ compiler reports the same conditions as bare strings
+  (`ERROR : unable to open file <name>`), with no location and no searched
+  paths, so this is deliberately more informative than parity rather than a
+  port of it.
+
+- **`FRS-COMP-0001`, `FRS-COMP-0002`, `FRS-COMP-0003` were retired**
+  (2026-07-21) — see "Retired codes" below.
 - **`FRS-LEX-0001`** is defined and its call site
   (`crates/parser/src/lib.rs:1926`) is live code, but it is not reachable
   from any DSP text found during this audit: `crates/parser/src/grammar/faustlexer.l`
@@ -58,22 +72,26 @@ real gaps, recorded here rather than papered over:
   a `lrpar::LexParseError::LexError`. Genuinely invalid bytes (e.g. a
   non-UTF-8 byte sequence) are rejected even earlier, at file read time,
   before lexing starts, with no diagnostics bundle at all.
+
+  **Decision (2026-07-21): kept deliberately.** Unlike the dormant `FRS-SRC-*`
+  / `FRS-COMP-000{1,2,3}` declarations above, this one is not an unused
+  constant: it is one arm of an exhaustive `match` over `lrpar::LexParseError`,
+  a third-party enum (`parser_code_for_lex_parse_error`). Removing the code
+  would not remove any code path — it would only force that arm to report a
+  less accurate code. It becomes reachable again if the lexer's catch-all rule
+  is ever narrowed.
 - **`FRS-FIR-0001`** (verifier *error*, as opposed to `FRS-FIR-0002`
   warnings) requires the FIR verifier to reject FIR text that a
   *successful* front-end run produced — i.e. a compiler bug, not a user
   DSP mistake. No corpus file triggers it; only `--fir-fixture` bring-up
   fixtures could, and the eight built-in fixtures
   (`--list-fir-fixtures`) are all valid by construction.
-- **`FRS-EVAL-0100`** does not come from `errors::codes` at all. It is a
-  literal string used once, in `crates/errors/src/lib.rs`'s own unit test
-  `bundle_counts_error_severity_only`, purely to exercise
-  `DiagnosticBundle::error_count()`'s severity filtering. It is not a code
-  the compiler ever emits. It is included here — and in the frozen set —
-  because the task that produced this table defined "frozen" as "whatever
-  the grep above returns", and excluding it would make the checker test
-  diverge from its own specification. If this test literal is ever changed,
-  update this table in the same commit (that is the "renumbering fails"
-  contract in practice, not just in principle).
+- **`FRS-EVAL-0100` was removed from this table** (2026-07-21). It never came
+  from `errors::codes`: it was a literal string in `crates/errors/src/lib.rs`'s
+  own unit test `bundle_counts_error_severity_only`, picked up only because the
+  extraction is textual. Documenting it made the table promise a public code
+  that nothing emits. The test now uses a real registered code
+  (`EVAL_GENERIC_FAILURE`), so the extraction no longer sees a phantom.
 
 Nothing here blocks freezing: a dormant or unreachable code is still a valid,
 stable reservation. But a consumer should not assume every documented code is
@@ -95,13 +113,13 @@ observable in practice today.
 | `FRS-PARSE-0002` | `parser` | Parser recovered from an error and emitted recovery diagnostics (warning/remark severity). | `crates/parser/src/lib.rs:1913` |
 | `FRS-PARSE-0003` | `parser` | Parser encountered an invalid literal form. | `crates/parser/src/lib.rs:1915` |
 
-### `FRS-SRC-*` — Source reader (3 codes, currently unused)
+### `FRS-SRC-*` — Source reader (3 codes)
 
 | Code | Stage | Meaning | Raised at |
 |---|---|---|---|
-| `FRS-SRC-0001` | `source_reader` | Source reader I/O failure. | Defined `crates/errors/src/codes.rs:9`; never constructed — see caveat. |
-| `FRS-SRC-0002` | `source_reader` | Imported file could not be resolved. | Defined `crates/errors/src/codes.rs:11`; never constructed — see caveat. Real unresolved imports raise `CompilerError::Import` with no diagnostics bundle instead. |
-| `FRS-SRC-0003` | `source_reader` | Import graph contains a cycle. | Defined `crates/errors/src/codes.rs:13`; never constructed — see caveat. |
+| `FRS-SRC-0001` | `source_reader` | Source reader I/O failure (unreadable file, directory passed as input). | `SourceReaderError::Io` → `to_diagnostics` (`crates/parser/src/source_reader.rs`) |
+| `FRS-SRC-0002` | `source_reader` | Imported file could not be resolved. Carries a span on the `import(...)` directive and the ordered list of searched directories. | `SourceReaderError::UnresolvedImport` → `to_diagnostics` |
+| `FRS-SRC-0003` | `source_reader` | Import graph contains a cycle. | `SourceReaderError::ImportCycle` → `to_diagnostics` |
 
 ### `FRS-EVAL-*` — Box evaluation (8 codes)
 
@@ -114,7 +132,6 @@ observable in practice today.
 | `FRS-EVAL-0005` | `eval` | Symbol redefined with a different value in the same lexical scope. | `crates/eval/src/error.rs:620` |
 | `FRS-EVAL-0006` | `eval` | Slider/numentry init value is outside the `[min, max]` range. | `crates/eval/src/error.rs:692` |
 | `FRS-EVAL-0099` | `eval` | Generic eval failure fallback code (covers eval-error variants without a dedicated code). | `crates/eval/src/error.rs` (multiple sites, e.g. `:508,517,530,539,554,584,592,603,646,669,704`) |
-| `FRS-EVAL-0100` | `eval` | Not a real compiler code — synthetic literal used only in `errors` crate's own unit test to exercise severity-filtered counting. See caveat above. | `crates/errors/src/lib.rs:310` (test-only) |
 
 ### `FRS-PROP-*` — Box-to-signal propagation (5 codes)
 
@@ -126,14 +143,14 @@ observable in practice today.
 | `FRS-PROP-0004` | `propagate` | Automatic differentiation (`fad`/`rad`) reached a clock-domain boundary it cannot cross. | `crates/propagate/src/error.rs:548` |
 | `FRS-PROP-0099` | `propagate` | Generic propagate failure fallback code. | `crates/propagate/src/error.rs:372,380,390,422` |
 
-### `FRS-COMP-*` — Top-level compiler pipeline (4 codes)
+### `FRS-COMP-*` — Top-level compiler pipeline (1 code)
 
 | Code | Stage | Meaning | Raised at |
 |---|---|---|---|
-| `FRS-COMP-0001` | `compiler` | Parse stage failed in top-level compiler pipeline. | Defined `crates/errors/src/codes.rs:81`; never constructed — see caveat. |
-| `FRS-COMP-0002` | `compiler` | Eval stage failed in top-level compiler pipeline. | Defined `crates/errors/src/codes.rs:83`; never constructed — see caveat. |
-| `FRS-COMP-0003` | `compiler` | Propagate stage failed in top-level compiler pipeline. | Defined `crates/errors/src/codes.rs:85`; never constructed — see caveat. |
-| `FRS-COMP-0004` | `compiler` | Signal type validation failed in top-level compiler pipeline (`sigtype`/interval checks after propagation). | `crates/compiler/src/error_mapping.rs:142` (`type_error_to_compiler`); reachable, e.g. `tests/corpus/rep_74_soundfile_basic.dsp` (out-of-range soundfile part number). |
+| `FRS-COMP-0004` | `compiler` | Signal type validation failed. | `crates/compiler/src/error_mapping.rs:142` |
+
+`FRS-COMP-0001`..`0003` are retired; the numbering gap is deliberate (see
+below).
 
 ### `FRS-FIR-*` — FIR verifier (2 codes)
 
@@ -168,12 +185,34 @@ intentional, not an omission from this table, and consumers should treat
 `code == null` as "unstructured legacy error text" rather than look it up
 here.
 
+## Retired codes — never reassign
+
+Deleting a code that was never emitted is safe: no consumer can have matched on
+it. Reusing its *number* for a different meaning later is not — that is the same
+silent break the freeze rule prevents, just delayed. Retired numbers are
+therefore burned permanently.
+
+| Code | Retired | Why |
+|---|---|---|
+| `FRS-COMP-0001` | 2026-07-21 | "parse stage failed" — already covered by `FRS-PARSE-*`, with spans the wrapper lacked |
+| `FRS-COMP-0002` | 2026-07-21 | "eval stage failed" — already covered by `FRS-EVAL-*` (incl. the `0099` fallback) |
+| `FRS-COMP-0003` | 2026-07-21 | "propagate stage failed" — already covered by `FRS-PROP-*` (incl. `0099`) |
+| `FRS-EVAL-0100` | 2026-07-21 | never a code — a literal in a unit test, captured by the textual extraction |
+
+`FRS-COMP-0004` is deliberately **not** renumbered into the gap left by
+`0001`..`0003`: renumbering a live code is the one operation the freeze rule
+forbids. A gap in the numbering is the correct end state.
+
 ## Where this is enforced
 
 - `crates/compiler/src/cli/tests.rs::frozen_frs_code_table_matches_source` —
   re-runs the extraction grep and diffs it against the set documented above;
   fails on an undocumented new code or a renumbered existing one.
+- `crates/compiler/src/cli/tests.rs::code_registry_matches_frozen_table` —
+  checks that the runtime registry `errors::codes::all_codes()` lists exactly
+  the codes documented here, in both directions. Added 2026-07-21 after the two
+  were found to have silently diverged (`FRS-EVAL-0006` was emitted but absent
+  from the registry).
 - `crates/errors/src/codes.rs`'s own `all_codes_follow_stable_format` /
   `all_codes_are_unique` unit tests check the format/uniqueness invariants of
-  the *registered* subset (`codes::all_codes()`), which is a strict subset of
-  this table (it excludes the test-only `FRS-EVAL-0100` literal).
+  the registered set.

@@ -39,7 +39,7 @@ pub mod source_reader;
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
 pub use metadata::{CompilationMetadataKey, CompilationMetadataSnapshot, CompilationMetadataStore};
 pub use source_reader::{
-    ExpandedSource, SourceLineOrigin, SourceReader, SourceReaderError, VirtualSourceMap,
+    ExpandedSource, ImportSite, SourceLineOrigin, SourceReader, SourceReaderError, VirtualSourceMap,
 };
 
 /// Primitive operator family recognized directly by the parser.
@@ -1661,9 +1661,22 @@ impl StructuralImportExpander {
                             .reader
                             .resolve_import_source_path(import_name, current_file.parent())
                         else {
+                            // Box nodes carry no source location, so recover the
+                            // directive's span by re-scanning the file. Error
+                            // path only.
+                            let site = std::fs::read_to_string(current_file)
+                                .ok()
+                                .and_then(|text| ImportSite::locate_in(&text, import_name));
+                            let mut searched: Vec<PathBuf> = Vec::new();
+                            if let Some(dir) = current_file.parent() {
+                                searched.push(dir.to_path_buf());
+                            }
+                            searched.extend(self.reader.search_paths().iter().cloned());
                             return Err(SourceReaderError::UnresolvedImport {
                                 name: import_name.into(),
                                 from: current_file.to_path_buf(),
+                                site,
+                                searched,
                             });
                         };
 
