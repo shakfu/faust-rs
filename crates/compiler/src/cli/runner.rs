@@ -1537,7 +1537,12 @@ pub fn run_main() {
     if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
-        let options = InterpOptions::default();
+        // Honor `-cn`/`--class-name` like every other textual backend; this
+        // used to be a hardcoded default, so the flag was silently ignored.
+        let options = InterpOptions {
+            module_name: selected_class_name(&cli).or_else(|| Some("mydsp".to_owned())),
+            ..InterpOptions::default()
+        };
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_interp_with_lane(
                 input_path,
