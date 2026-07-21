@@ -66,6 +66,12 @@ pub enum NormalFormError {
     Recursion(String),
     /// Full-type annotation failed.
     Type(String),
+    /// A division by a constant zero was detected during simplification.
+    ///
+    /// C++ raises `faustexception` from `mterm::operator/=` for this; see
+    /// `mterm::DivisionByZero` for why the Rust port keeps an unwind
+    /// rather than threading a `Result` through the simplifier.
+    DivisionByZero(String),
 }
 
 impl std::fmt::Display for NormalFormError {
@@ -73,6 +79,7 @@ impl std::fmt::Display for NormalFormError {
         match self {
             Self::Recursion(e) => write!(f, "de-Bruijn conversion error: {e}"),
             Self::Type(e) => write!(f, "type annotation error: {e}"),
+            Self::DivisionByZero(e) => write!(f, "{e}"),
         }
     }
 }
@@ -209,25 +216,46 @@ pub fn promote_signals_fastlane(
 }
 
 /// Simplify a prepared signal forest using the canonical `SigType` context.
+///
+/// # Panic handling
+///
+/// Simplification runs under `catch_unwind`. Two outcomes are distinguished:
+///
+/// - a `mterm::DivisionByZero` payload is an *expected* failure of the
+///   input program, and is converted into
+///   [`NormalFormError::DivisionByZero`] — matching C++, where the
+///   `faustexception` thrown by `mterm::operator/=` aborts compilation with
+///   `ERROR : division by 0 in ...` and exit status 1;
+/// - any other payload is an unexpected internal failure; the cache is cleared
+///   and the original signal is returned unsimplified, which is the
+///   pre-existing best-effort behavior.
+///
+/// The second arm is deliberately preserved rather than widened in this change,
+/// but note that it silently degrades output on a compiler bug. Before this
+/// change *both* arms behaved that way, so a division by zero compiled to a
+/// green `--check` while printing raw panic text to stderr.
 pub fn simplify_signals_fastlane(
     arena: &mut TreeArena,
     types: &HashMap<SigId, SigType>,
     sigs: &[SigId],
-) -> Vec<SigId> {
+) -> Result<Vec<SigId>, NormalFormError> {
     let mut cache = SimplifyCache::new();
-    sigs.iter()
-        .map(|sig| {
-            match catch_unwind(AssertUnwindSafe(|| {
-                simplify_with_cache(arena, &mut cache, types, *sig)
-            })) {
-                Ok(simplified) => simplified,
-                Err(_) => {
-                    cache.clear();
-                    *sig
+    let mut out = Vec::with_capacity(sigs.len());
+    for sig in sigs {
+        match catch_unwind(AssertUnwindSafe(|| {
+            simplify_with_cache(arena, &mut cache, types, *sig)
+        })) {
+            Ok(simplified) => out.push(simplified),
+            Err(payload) => {
+                if let Some(div) = payload.downcast_ref::<crate::mterm::DivisionByZero>() {
+                    return Err(NormalFormError::DivisionByZero(div.to_string()));
                 }
+                cache.clear();
+                out.push(*sig);
             }
-        })
-        .collect()
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

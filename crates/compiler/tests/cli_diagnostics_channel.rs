@@ -26,12 +26,19 @@
 //!   `crates/compiler/src/cli/tests.rs` has a synthetic-diagnostic unit test
 //!   for the LEX code shape (documented there and in this module's report).
 //!
-//! `FRS-FIR-*` also has no failing corpus case (verifier errors require a
-//! compiler bug; only warnings are naturally reachable), so this module
-//! carries a purpose-written fixture
-//! (`fixtures/cli_diagnostics/fir_constant_zero_division.dsp`) instead of
-//! skipping it, per the phase's "write a minimal fixture rather than skip"
-//! instruction.
+//! `FRS-FIR-*` errors require a compiler bug and are unreachable, but the
+//! *warning* code `FRS-FIR-0002` is reachable from any DSP under
+//! `--fir-verify-strict`, which promotes warnings to fatal: an ordinary
+//! passthrough already raises `FIR-M07` ("expected DSP API function
+//! 'getSampleRate' is not declared"). The FIR case therefore uses a plain
+//! corpus DSP.
+//!
+//! (An earlier revision of this module used a constant-zero-division fixture
+//! here, on the belief that a dedicated fixture was needed to reach the FIR
+//! verifier at all. That was wrong on two counts: strict mode fires on every
+//! DSP, and constant division by zero is now rejected earlier, in signal
+//! preparation, matching C++ `mterm::operator/=`. That fixture now backs
+//! `division_by_zero_is_a_clean_diagnostic_not_a_panic` below.)
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -125,6 +132,18 @@ fn first_code(result: &CheckResult) -> &str {
         })
 }
 
+/// First diagnostic's `message` field, or panics if the array is empty.
+fn first_message(result: &CheckResult) -> &str {
+    result.stdout["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "expected diagnostics[0].message to be a string, got: {}",
+                result.stdout
+            )
+        })
+}
+
 // ─── D2: success shares the same schema as failure ────────────────────────
 
 #[test]
@@ -213,12 +232,11 @@ fn check_json_sfir_family_failure_is_clean() {
 
 #[test]
 fn check_json_fir_family_failure_is_clean() {
-    // Purpose-written fixture: no corpus DSP naturally trips the FIR
-    // verifier (see the module doc comment and
-    // docs/diagnostics-codes-en.md). `--fir-verify-strict` promotes the
-    // constant-zero-division warning to fatal.
+    // `--fir-verify-strict` promotes FIR verifier warnings to fatal, and
+    // FIR-M07 ("expected DSP API function 'getSampleRate' is not declared")
+    // is raised for an ordinary DSP -- no special fixture needed.
     let result = run_and_assert_clean_json(
-        &local_fixture("fir_constant_zero_division.dsp"),
+        &corpus_path("rep_01_passthrough.dsp"),
         &["--fir-verify-strict"],
     );
     assert!(!result.success, "expected exit 1 under --fir-verify-strict");
@@ -226,6 +244,34 @@ fn check_json_fir_family_failure_is_clean() {
         first_code(&result).starts_with("FRS-FIR-"),
         "expected a FRS-FIR-* code, got {}",
         first_code(&result)
+    );
+}
+
+/// Division by a constant zero must be a structured diagnostic, not a panic.
+///
+/// Parity: the reference C++ compiler rejects `process = _ / (0 : *(0));`
+/// with `ERROR : division by 0 in IN[0] / 0.0f` and exit status 1 (verified
+/// directly, and unaffected by `-wall`). Before this test existed, faust-rs
+/// printed raw panic text to stderr, swallowed the unwind in
+/// `simplify_signals_fastlane`, and then reported `Check OK: 0 diagnostics`
+/// with exit 0 -- a false green on a program the reference compiler rejects.
+#[test]
+fn division_by_zero_is_a_clean_diagnostic_not_a_panic() {
+    let result = run_and_assert_clean_json(&local_fixture("fir_constant_zero_division.dsp"), &[]);
+    assert!(
+        !result.success,
+        "expected exit 1 on a constant division by zero, matching C++"
+    );
+    assert_eq!(first_code(&result), "FRS-SFIR-0004");
+    assert!(
+        first_message(&result).contains("division by 0"),
+        "expected the message to name the division by zero, got {}",
+        first_message(&result)
+    );
+    assert!(
+        !result.stderr.contains("panicked"),
+        "the expected rejection must not print panic text to stderr, got: {}",
+        result.stderr
     );
 }
 

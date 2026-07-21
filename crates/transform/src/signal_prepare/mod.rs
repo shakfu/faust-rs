@@ -238,6 +238,11 @@ pub enum SignalPrepareError {
     Validation(String),
     /// The signal promotion pass failed (type-driven cast insertion).
     Promotion(NormalFormError),
+    /// Algebraic simplification found a division by a constant zero.
+    ///
+    /// C++ equivalent: the `faustexception` thrown by `mterm::operator/=`,
+    /// which aborts compilation with `ERROR : division by 0 in ...`.
+    DivisionByZero(String),
 }
 
 impl fmt::Display for SignalPrepareError {
@@ -252,6 +257,7 @@ impl fmt::Display for SignalPrepareError {
                 write!(f, "signal preparation postcondition failed: {msg}")
             }
             Self::Promotion(err) => write!(f, "signal preparation promotion failed: {err}"),
+            Self::DivisionByZero(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -261,7 +267,7 @@ impl Error for SignalPrepareError {
         match self {
             Self::Recursion(e) => Some(e),
             Self::Promotion(e) => Some(e),
-            Self::Typing(_) | Self::Validation(_) => None,
+            Self::Typing(_) | Self::Validation(_) | Self::DivisionByZero(_) => None,
         }
     }
 }
@@ -402,8 +408,17 @@ impl<'ui> Staging<'ui> {
     }
 
     /// Pass 2.7 / 2.10: algebraic simplification of the promoted / merged forest.
-    fn simplify(&mut self) {
-        self.outputs = simplify_signals_fastlane(&mut self.arena, &self.sig_types, &self.outputs);
+    ///
+    /// Fails when simplification detects a division by a constant zero, which
+    /// C++ reports as a fatal `ERROR : division by 0 in ...` from
+    /// `mterm::operator/=`.
+    fn simplify(&mut self) -> Result<(), SignalPrepareError> {
+        self.outputs = simplify_signals_fastlane(&mut self.arena, &self.sig_types, &self.outputs)
+            .map_err(|err| match err {
+            NormalFormError::DivisionByZero(msg) => SignalPrepareError::DivisionByZero(msg),
+            other => SignalPrepareError::Promotion(other),
+        })?;
+        Ok(())
     }
 
     /// Pass 2.8: merges isomorphic symbolic recursion groups.
@@ -476,14 +491,14 @@ fn prepare_signals_for_fir_unverified(
     // Step 2.6 — retype #2 (before simplify #1).
     s.retype()?;
     // Step 2.7 — simplify #1.
-    s.simplify();
+    s.simplify()?;
 
     // Step 2.8 — merge isomorphic SYMREC groups.
     s.merge_iso_rec();
     // Step 2.9 — retype #3 (before simplify #2).
     s.retype()?;
     // Step 2.10 — simplify #2.
-    s.simplify();
+    s.simplify()?;
 
     // Step 2.11 — Delay(x,1) → Delay1(x).
     s.canon_one_sample_delays()?;

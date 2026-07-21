@@ -28,6 +28,92 @@ use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::{SigType, Variability};
 use tlib::TreeArena;
 
+// ─── Division by zero ─────────────────────────────────────────────────────────
+
+/// Payload carried by the panic raised when a division by a constant zero is
+/// detected during multiplicative-term normalization.
+///
+/// # Why a panic rather than a `Result`
+///
+/// C++ `mterm::operator/=` raises `faustexception`, which unwinds all the way
+/// to the compiler boundary and becomes a fatal error (verified against the
+/// reference binary: `process = _ / (0 : *(0));` prints
+/// `ERROR : division by 0 in IN[0] / 0.0f` and exits 1, with and without
+/// `-wall`). The faithful Rust analogue of that unwind is a panic caught at the
+/// normalization boundary, which is why `crate::normalform` already wraps
+/// simplification in `catch_unwind`.
+///
+/// Threading a `Result` through instead would mean converting the whole
+/// `Mterm`/`Aterm`/`simplify` call graph — `add_sig`/`sub_sig` are mutually
+/// recursive and reach every simplification rule — for a condition that is
+/// fatal anyway. The typed payload keeps the existing unwind mechanism while
+/// making this specific, expected failure distinguishable from a genuine
+/// compiler bug, which the previous bare `assert!` was not.
+///
+/// # Why detection cannot move earlier
+///
+/// A pre-normalization scan for `Div(_, 0)` is not sufficient: in
+/// `_ / (0 : *(0))` the divisor only becomes the constant zero *after*
+/// constant folding, which happens during simplification. C++ detects it at
+/// the same point for the same reason.
+#[derive(Debug, Clone)]
+pub struct DivisionByZero {
+    /// Human-readable description of the offending division.
+    pub detail: String,
+}
+
+impl std::fmt::Display for DivisionByZero {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "division by 0 in {}", self.detail)
+    }
+}
+
+/// Render a numeric coefficient for a division-by-zero message.
+///
+/// Non-numeric nodes are rendered as `<expr>`: the message is diagnostic
+/// context, not a signal dump, and the dividend is not always a literal.
+fn describe_num(arena: &TreeArena, sig: SigId) -> String {
+    match match_sig(arena, sig) {
+        SigMatch::Int(v) => v.to_string(),
+        SigMatch::Real(v) => format!("{v:?}"),
+        _ => "<expr>".to_owned(),
+    }
+}
+
+/// Raise the typed division-by-zero panic.
+///
+/// C++ equivalent: `throw faustexception("ERROR : division by 0 in ...")`.
+pub(crate) fn division_by_zero(detail: impl Into<String>) -> ! {
+    install_quiet_hook();
+    std::panic::panic_any(DivisionByZero {
+        detail: detail.into(),
+    })
+}
+
+/// Silence the default panic hook for [`DivisionByZero`] payloads only.
+///
+/// Without this, a division by zero prints `thread panicked at ... Box<dyn Any>`
+/// to stderr before the caught unwind is turned into a proper diagnostic — noise
+/// that describes an *expected* rejection as if it were a compiler crash, and
+/// which the reference C++ compiler does not produce.
+///
+/// The hook is installed once and delegates every other payload to the hook it
+/// replaced, so genuine panics keep their normal report. Filtering on the
+/// payload type (rather than installing/removing a hook around each call) keeps
+/// this safe when several compilations run on different threads.
+fn install_quiet_hook() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if info.payload().downcast_ref::<DivisionByZero>().is_some() {
+                return;
+            }
+            previous(info);
+        }));
+    });
+}
+
 // ─── Order helper ─────────────────────────────────────────────────────────────
 
 /// Return the variability order of a signal node.
@@ -202,7 +288,9 @@ pub(crate) fn mul_nums(arena: &mut TreeArena, a: SigId, b: SigId) -> SigId {
 /// Divide two numeric constant nodes.
 ///
 /// Returns an integer if the division is exact (no remainder), otherwise promotes
-/// to float. Panics on division by zero.
+/// to float. Raises the typed [`DivisionByZero`] panic on a zero divisor; the
+/// guard is defensive here, since [`Mterm::div_sig`] rejects a zero divisor
+/// before reaching this function (as C++ does before `divExtendedNums`).
 ///
 /// C++ equivalent: `divExtendedNums(a, b)`.
 pub(crate) fn div_nums(arena: &mut TreeArena, a: SigId, b: SigId) -> SigId {
@@ -220,7 +308,9 @@ pub(crate) fn div_nums(arena: &mut TreeArena, a: SigId, b: SigId) -> SigId {
     let mut b = SigBuilder::new(arena);
     match (va, vb) {
         (V::I(x), V::I(y)) => {
-            assert!(y != 0, "div_nums: division by zero");
+            if y == 0 {
+                division_by_zero(format!("{x} / {y}"));
+            }
             if x % y == 0 {
                 b.int(x / y)
             } else {
@@ -228,7 +318,9 @@ pub(crate) fn div_nums(arena: &mut TreeArena, a: SigId, b: SigId) -> SigId {
             }
         }
         (V::F(x), V::F(y)) => {
-            assert!(y != 0.0, "div_nums: division by zero");
+            if y == 0.0 {
+                division_by_zero(format!("{x} / {y}"));
+            }
             b.real(x / y)
         }
         _ => unreachable!(),
@@ -395,9 +487,15 @@ impl Mterm {
     /// Divide this mterm by an expression tree in place.
     ///
     /// Recursively expands `Mul` and `Div` sub-expressions.  C++ `operator/=(Tree)`.
+    ///
+    /// Raises the typed [`DivisionByZero`] panic when the divisor has folded to
+    /// a constant zero, mirroring the `faustexception` thrown at the same point
+    /// by C++ `mterm::operator/=(Tree)`.
     pub(crate) fn div_sig(&mut self, arena: &mut TreeArena, t: SigId) {
         if is_num(arena, t) {
-            assert!(!is_zero(arena, t), "Mterm: division by zero");
+            if is_zero(arena, t) {
+                division_by_zero(format!("{} / 0", describe_num(arena, self.coef)));
+            }
             self.coef = div_nums(arena, self.coef, t);
         } else {
             match match_sig(arena, t) {
@@ -468,8 +566,18 @@ impl Mterm {
     }
 
     /// Divide this mterm by another mterm in place.  C++ `operator/=(mterm)`.
+    ///
+    /// Raises the typed [`DivisionByZero`] panic on a zero divisor coefficient.
+    ///
+    /// Note on the guard condition: C++ tests `m.fCoef == nullptr` (a null
+    /// coefficient tree), not "the coefficient is zero". Rust `Mterm` has no
+    /// null-coefficient state — [`Mterm::zero`] builds a real numeric node — so
+    /// the closest faithful guard is a zero coefficient, which is also the
+    /// condition that would make `div_nums` divide by zero one line below.
     pub(crate) fn div_mterm(&mut self, arena: &mut TreeArena, m: &Mterm) {
-        assert!(!is_zero(arena, m.coef), "div_mterm: division by zero");
+        if is_zero(arena, m.coef) {
+            division_by_zero(format!("{} / 0", describe_num(arena, self.coef)));
+        }
         self.coef = div_nums(arena, self.coef, m.coef);
         for (&base, &exp) in &m.factors {
             *self.factors.entry(base).or_insert(0) -= exp;
