@@ -201,6 +201,7 @@ Use the following variables to increase the evaluation depth stack:
 
 - User CLI reference: `docs/user-cli-guide-en.md`
 - User diagnostics guide: `docs/user-diagnostics-guide-en.md`
+- Clock domains (`ondemand`/`upsampling`/`downsampling`): `docs/ondemand-note-en.md` / `docs/ondemand-note-fr.md`
 - Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
 - Technical/developer workflows: `docs/developer-workflows-en.md`
 - Code graphs and public API index: `docs/code-graphs/`
