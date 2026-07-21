@@ -63,6 +63,9 @@ use codegen::backends::interp::{
 use codegen::backends::julia::{
     CodegenError as JuliaCodegenError, JuliaOptions, JuliaRealType, generate_julia_module,
 };
+use codegen::backends::rust::{
+    CodegenError as RustCodegenError, RustOptions, RustRealType, generate_rust_module,
+};
 use codegen::backends::wasm::layout::WasmMemoryLayout;
 use codegen::backends::wasm::{
     WasmBackendError, WasmJsonContext, WasmModule, WasmOptions, generate_wasm_module_with_context,
@@ -881,6 +884,36 @@ impl Compiler {
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
 
+    /// Parses + evaluates + propagates one source, then emits Rust text.
+    pub fn compile_source_to_rust(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &RustOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_source_to_rust_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
+    /// Parses + evaluates + propagates one source, then emits Rust text using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_source_to_rust_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &RustOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        let ctx = self.lowering_ctx(lane);
+        lower_signals_to_rust(source_name, &signals, options, ctx)
+            .map_err(|e| lower_rust_error_to_compiler(source_name, e))
+    }
+
     /// Parses + evaluates + propagates one source, then emits Julia text using
     /// the selected signal->FIR lowering lane.
     pub fn compile_source_to_julia_with_lane(
@@ -1112,6 +1145,37 @@ impl Compiler {
         )
     }
 
+    /// Parses + evaluates + propagates one file, then emits Rust text.
+    pub fn compile_file_to_rust(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &RustOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_rust_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
+    }
+
+    /// Parses + evaluates + propagates one file, then emits Rust text using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_file_to_rust_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &RustOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        let ctx = self.lowering_ctx(lane);
+        lower_signals_to_rust(&source, &signals, options, ctx)
+            .map_err(|e| lower_rust_error_to_compiler(&source, e))
+    }
+
     /// Parses + evaluates + propagates one file, then emits C text using
     /// the selected signal->FIR lowering lane.
     pub fn compile_file_to_c_with_lane(
@@ -1331,6 +1395,27 @@ impl Compiler {
             options,
             SignalFirLane::TransformFastLane,
         )
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits Rust text.
+    pub fn compile_file_default_to_rust(
+        &self,
+        path: &Path,
+        options: &RustOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_default_to_rust_with_lane(path, options, SignalFirLane::TransformFastLane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits Rust text using the selected signal->FIR lowering lane.
+    pub fn compile_file_default_to_rust_with_lane(
+        &self,
+        path: &Path,
+        options: &RustOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_rust_with_lane(path, &[], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -2042,6 +2127,12 @@ pub enum CompilerError {
         error: JuliaCodegenError,
         diagnostics: DiagnosticBundle,
     },
+    /// Rust backend emission failed from FIR.
+    CodegenRust {
+        source: Box<str>,
+        error: RustCodegenError,
+        diagnostics: DiagnosticBundle,
+    },
     /// Interpreter backend emission failed from FIR.
     CodegenInterp {
         source: Box<str>,
@@ -2100,6 +2191,9 @@ impl std::fmt::Display for CompilerError {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenJulia { source, error, .. } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
+            Self::CodegenRust { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenInterp { source, error, .. } => {
@@ -2214,6 +2308,7 @@ impl CompilerError {
             Self::Codegen { diagnostics, .. } => Some(diagnostics),
             Self::CodegenC { diagnostics, .. } => Some(diagnostics),
             Self::CodegenJulia { diagnostics, .. } => Some(diagnostics),
+            Self::CodegenRust { diagnostics, .. } => Some(diagnostics),
             Self::CodegenInterp { diagnostics, .. } => Some(diagnostics),
             Self::CodegenWasm { diagnostics, .. } => Some(diagnostics),
             Self::MissingRoot { diagnostics, .. } => Some(diagnostics),

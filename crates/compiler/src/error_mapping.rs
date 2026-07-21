@@ -77,6 +77,24 @@ pub(crate) fn lower_julia_error_to_compiler(
     }
 }
 
+/// Maps a `LowerToRustError` into a `CompilerError`, attaching the source name.
+pub(crate) fn lower_rust_error_to_compiler(source: &str, error: LowerToRustError) -> CompilerError {
+    match error {
+        LowerError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
+        LowerError::Codegen(error) => CompilerError::CodegenRust {
+            source: source.into(),
+            diagnostics: CompilerError::codegen_diagnostics(
+                source,
+                "rust",
+                error.code().as_str(),
+                error.message(),
+            ),
+            error,
+        },
+    }
+}
+
 /// Maps a `LowerToInterpError` into a `CompilerError`, attaching the source name.
 ///
 /// The serialization failure arm is normalized into the interpreter backend

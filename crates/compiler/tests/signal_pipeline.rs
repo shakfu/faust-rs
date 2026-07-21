@@ -1613,3 +1613,62 @@ fn assert_mul_input_ui(arena: &TreeArena, sig: TreeId, expected_input: i32) {
         "mul branch should combine input({expected_input}) with hslider"
     );
 }
+
+/// The Rust backend must be reachable through the facade, not only the CLI.
+///
+/// `crates/compiler/README.md` documents `compile_*` helpers as the library
+/// surface; before this existed, `-lang rust` worked but no API did, so a
+/// reader of that table concluded the backend was unsupported.
+#[test]
+fn compile_source_to_rust_emits_rust_source() {
+    let compiler = compiler::Compiler::default();
+    let options = codegen::backends::rust::RustOptions::default();
+    let out = compiler
+        .compile_source_to_rust("facade.dsp", "process = _ * 0.5;", &options)
+        .expect("rust facade compile must succeed");
+
+    assert!(
+        out.contains("Faust Rust backend"),
+        "expected the Rust backend header, got: {}",
+        &out[..out.len().min(200)]
+    );
+    assert!(
+        out.contains("struct") && out.contains("fn compute"),
+        "expected a Rust DSP struct with a compute method"
+    );
+}
+
+/// The facade and the CLI must agree byte-for-byte for the same input.
+///
+/// They reach the backend by different routes (`lower_signals_to_rust` vs the
+/// CLI calling `generate_rust_module` directly), so nothing structural forces
+/// them to stay in step.
+#[test]
+fn compile_source_to_rust_matches_cli_output() {
+    let dir = std::env::temp_dir().join("frs_rust_facade_parity");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dsp = dir.join("facade.dsp");
+    std::fs::write(&dsp, "process = _ * 0.5;\n").expect("write dsp");
+
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_faust-rs"))
+        .arg(&dsp)
+        .args(["-lang", "rust"])
+        .output()
+        .expect("spawn faust-rs");
+    assert!(cli.status.success(), "CLI rust emission must succeed");
+    let cli_out = String::from_utf8(cli.stdout).expect("CLI output must be UTF-8");
+
+    let compiler = compiler::Compiler::default();
+    // The CLI keeps the backend default struct name (`mydsp`) rather than
+    // deriving it from the file stem, so the facade must use the default too.
+    let options = codegen::backends::rust::RustOptions::default();
+    let api_out = compiler
+        .compile_file_default_to_rust(&dsp, &options)
+        .expect("rust facade compile must succeed");
+
+    assert_eq!(
+        api_out.trim(),
+        cli_out.trim(),
+        "facade and CLI Rust emission drifted"
+    );
+}
