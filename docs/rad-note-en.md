@@ -1,5 +1,7 @@
 # Reverse-Mode AD in `faust-rs`
 
+Verified against the implementation and runtime tests on 2026-07-22.
+
 Synthesis note describing the reverse-mode automatic differentiation
 (RAD) pass implemented in `crates/propagate/src/reverse_ad.rs`, with
 emphasis on the algorithm, the rule table, the temporal boundary, and
@@ -8,6 +10,8 @@ the relationship to the forward-mode pass.
 ## 1. Surface
 
 `rad(expr, seeds)` is a two-child node mirroring `fad(expr, seeds)`.
+It is a `faust-rs` extension; the C++ Faust reference compiler used by this
+project does not currently recognize it.
 
 ```faust
 x = hslider("x", 1, 0, 10, 0.01);
@@ -16,7 +20,7 @@ loss = sin(x * y);
 process = rad(loss, (x, y));
 ```
 
-Output bundle layout (per-primal section):
+Output bundle layout:
 
 ```text
 rad(expr, (s_0, …, s_{N-1})) =
@@ -145,6 +149,10 @@ same closed-form derivatives as FAD:
 | `asin(x)` | `1 / √(1 - x²)` |
 | `atan(x)` | `1 / (1 + x²)` |
 
+At non-differentiable points the emitted formula is not regularized. In
+particular, the current `abs` rule can produce `NaN` at `x = 0` because it uses
+`x / |x|`.
+
 ### 3.4 Binary math
 
 | `y = f(x, z)` | Contribution to `x_bar` | Contribution to `z_bar` |
@@ -167,6 +175,7 @@ selector.
 | `select2(cond, x, z)` | `x_bar += select2(cond, y_bar, 0)`; `z_bar += select2(cond, 0, y_bar)`; `cond` receives nothing |
 | `float_cast(x)` | `x_bar += float_cast(y_bar)` |
 | `int_cast(x)` | no contribution (discontinuous truncation) |
+| `bit_cast(x)` | unsupported representation-level operation; RAD rejects it |
 
 ### 3.6 Read-only tables
 
@@ -285,6 +294,7 @@ The diagnostic kinds are:
 | `ffun` | non-unary or unrecognised foreign function |
 | `soundfile` | `Soundfile`, `SoundfileLength`, `SoundfileRate`, `SoundfileBuffer` |
 | `other` | catch-all (representation casts, generators, opaque) |
+| clock-domain kinds | `ondemand`, `upsampling`, `downsampling`, `Seq`, and boundary glue; rejected until a clock-aware reverse tape exists |
 
 Temporal/recursive kinds are normally caught by the public dispatcher
 and converted to `BlockReverseAD`. If one of those diagnostics surfaces
@@ -294,18 +304,21 @@ help text.
 
 ## 5. Relationship to FAD
 
-Both passes share the same differentiable subset for feed-forward
-expressions; only the temporal extension differs.
+The explicit symbolic rules of both passes overlap for feed-forward
+expressions, but their unsupported-family policies differ: FAD generally
+preserves the primal with zero tangents, while RAD rejects hard unsupported
+families rather than emitting an unverified gradient.
 
-| Property | FAD | RAD (phase 1) |
+| Property | FAD | RAD (current) |
 |----------|-----|---------------|
 | Direction | tangent ↑ (per seed) | adjoint ↓ (per primal) |
 | Seed model | explicit `(s_0, …, s_{N-1})` | explicit `(s_0, …, s_{N-1})` |
 | Output layout | `[p, t_0, …, t_{N-1}]` interleaved per primal | `[primals…, gradient(s_0), …]` flat |
-| Cost per added seed | one extra tangent lane per primal node | one extra accumulation in the seed map |
-| Cost per added primal | one extra rebuild | one extra adjoint init + one extra postorder sweep |
+| Cost per added seed | one extra tangent lane per primal node | one gradient extraction lane; the reverse sweep is shared |
+| Cost per added primal | one extra dual rebuild | one extra adjoint initialization; active-subgraph traversal remains shared |
 | Recursive primals | yes (via `DEBRUIJNREC` interleaving) | yes, via block-local `BlockReverseAD` fallback |
 | Delays | yes (causal forward rule) | yes, via block-local `BlockReverseAD` fallback |
+| Clock domains | dual rules for valid clocked blocks; runtime tests cover inside/around `ondemand`; clock is opaque | crossing clock-domain machinery is rejected |
 | Multi-output cotangent | implicit per-tangent | implicit all-ones (sum cotangent) |
 
 For feed-forward expressions, RAD gradients agree with the
@@ -316,19 +329,19 @@ parity tests in `crates/compiler/tests/rad_runtime.rs`.
 
 ## 6. Test surface
 
-- **Structural** ([crates/propagate/tests/core_api.rs](crates/propagate/tests/core_api.rs))
+- **Structural** ([crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs))
   — arity contract, feed-forward success, temporal/recursive
   `BlockReverseAD` fallback, diagnostic content checks for hard
   unsupported families and internal kind labels.
-- **Runtime parity** ([crates/compiler/tests/rad_runtime.rs](crates/compiler/tests/rad_runtime.rs))
+- **Runtime parity** ([crates/compiler/tests/rad_runtime.rs](../crates/compiler/tests/rad_runtime.rs))
   — RAD vs FAD parity, RAD vs central finite differences, repeated /
   absent seeds, multi-output sum cotangent, read-only table index,
   supported unary FFun families (`tanh`, `sinh`, `cosh`, `atanh`,
   `asinh`, `acosh`), and recursive BRA cases.
-- **Backend parity** ([crates/compiler/tests/signal_fir_lane.rs](crates/compiler/tests/signal_fir_lane.rs))
+- **Backend parity** ([crates/compiler/tests/signal_fir_lane.rs](../crates/compiler/tests/signal_fir_lane.rs))
   — C, C++, interpreter, and Cranelift lowering of RAD/BRA shapes within the
   current fast-lane subset.
-- **Corpus** ([tests/corpus/rad_*.dsp](tests/corpus)) — fixtures
+- **Corpus** ([tests/corpus/rad_*.dsp](../tests/corpus)) — fixtures
   pin the source-level shape of each contract: arithmetic, trig
   composition, multi-seed, multi-output, repeated/absent seeds,
   read-only table indexing, accepted recursive/block RAD forms,
@@ -348,6 +361,7 @@ The following remain explicitly out of scope for current RAD:
 - custom vector-output cotangent API (`vjp(...)`),
 - backend-level Enzyme/LLVM integration,
 - automatic discovery of differentiable UI controls.
+- reverse mode across `ondemand` / `upsampling` / `downsampling` boundaries.
 
 Plan phases E and F sketch the next steps:
 
@@ -365,13 +379,16 @@ of latency and memory footprints before merge.
 ## 8. Source locations
 
 - `generate_rad_signals` and `ReverseADTransform`:
-  [crates/propagate/src/reverse_ad.rs](crates/propagate/src/reverse_ad.rs)
+  [crates/propagate/src/reverse_ad.rs](../crates/propagate/src/reverse_ad.rs)
 - Propagation arm and arity contract:
-  [crates/propagate/src/lib.rs](crates/propagate/src/lib.rs) — search
+  [crates/propagate/src/lib.rs](../crates/propagate/src/lib.rs) — search
   for `FlatNodeKind::ReverseAD`.
 - `RadBodyArity` / `RadSeedArity` / `RadUnsupportedNode` diagnostics:
-  same file, `IntoDiagnostic` impl on `PropagateError`.
+  [crates/propagate/src/error.rs](../crates/propagate/src/error.rs), in the
+  `IntoDiagnostic` implementation for `PropagateError`.
+- `BlockReverseAD` FIR lowering:
+  [crates/transform/src/signal_fir/block_reverse_ad.rs](../crates/transform/src/signal_fir/block_reverse_ad.rs).
 - Stateful RAD feasibility classifier:
-  [crates/propagate/src/stateful_rad.rs](crates/propagate/src/stateful_rad.rs).
+  [crates/propagate/src/stateful_rad.rs](../crates/propagate/src/stateful_rad.rs).
 - Implementation plan:
   [porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md](../porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md).

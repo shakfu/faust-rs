@@ -190,6 +190,28 @@ cargo run -p compiler -- -lang wast foo.dsp
 
 ```
 
+## Clock domains and automatic differentiation
+
+`faust-rs` adds clock-domain and automatic-differentiation primitives to the
+Faust language. They are compiler extensions: do not expect the C++ Faust
+reference compiler to accept them.
+
+- `ondemand(C)` (**OD**) runs `C` only when its clock input fires; it holds the
+  last computed value between firings.
+- `upsampling(C)` (**US**) runs `C` at an increased local rate.
+- `downsampling(C)` (**DS**) runs `C` at a reduced local rate.
+- `fad(expr, seeds)` emits every primal output followed by one forward-mode
+  tangent per seed lane. It is useful when a local derivative is consumed
+  directly inside the DSP.
+- `rad(expr, seeds)` emits the primal outputs followed by reverse-mode
+  gradients for the sum of the primals. Delays and recursion use a
+  block-local reverse sweep, which is particularly useful for host-driven
+  optimization.
+
+See [the clock-domain note](docs/ondemand-note-en.md) for OD/US/DS timing and
+rate semantics, and [the FAD/RAD synthesis](docs/fad-rad-synthesis-en.md) for
+output layouts, examples, and current limits.
+
 ## Environment variables
 
 Use the following variables to increase the evaluation depth stack:
@@ -202,6 +224,7 @@ Use the following variables to increase the evaluation depth stack:
 - User CLI reference: `docs/user-cli-guide-en.md`
 - User diagnostics guide: `docs/user-diagnostics-guide-en.md`
 - Clock domains (`ondemand`/`upsampling`/`downsampling`): `docs/ondemand-note-en.md` / `docs/ondemand-note-fr.md`
+- Automatic differentiation (`fad`/`rad`): `docs/fad-rad-synthesis-en.md` / `docs/fad-rad-synthesis-fr.md`
 - Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
 - Technical/developer workflows: `docs/developer-workflows-en.md`
 - Code graphs and public API index: `docs/code-graphs/`

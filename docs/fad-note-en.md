@@ -1,7 +1,7 @@
 ---
 title: "Technical White Paper: Forward Automatic Differentiation in faust-rs"
 author: "OpenAI Codex"
-date: "2026-04-24"
+date: "2026-07-22"
 ---
 
 # Forward Automatic Differentiation in `faust-rs`
@@ -12,18 +12,23 @@ date: "2026-04-24"
 `fad(expr, seed)`, inside the compiler pipeline. This turns differentiation
 into a compile-time symbolic transform rather than a dynamic runtime graph.
 
-The practical result is that a Faust DSP program can now emit both its primal
-signal and exact local derivatives with respect to explicit seed parameters,
-while keeping the normal static Faust compilation model:
+The practical result is that a Faust DSP program can emit both its primal
+signals and compiler-generated local derivatives with respect to explicit seed
+signals, while keeping the normal static Faust compilation model:
 
 - parsing and evaluation stay symbolic,
 - propagation builds a differentiated signal graph,
 - FIR lowering and backends emit ordinary DSP code,
 - recursion is handled without requiring an external ML runtime.
 
-This is not reverse-mode machine learning infrastructure retrofitted onto DSP.
-It is a forward-mode differentiable extension of the Faust signal language,
-implemented directly in the Rust compiler.
+The rules are exact symbolic chain rules for the explicitly modeled signal
+families. Read-only table indices use a documented finite-difference slope, and
+unsupported families preserve the primal with zero tangents; those boundaries
+must not be confused with exact mathematical derivatives.
+
+This is a forward-mode differentiable extension of the Faust signal language,
+implemented directly in the Rust compiler. It is a `faust-rs` extension: the
+current C++ Faust reference used by this project does not recognize `fad`.
 
 ## 1. Overview
 
@@ -38,17 +43,22 @@ At a high level:
 - `expr` is the DSP expression to differentiate.
 - `seed` selects the variable or variables with respect to which the derivative
   is taken.
-- the result is a multi-output DSP expression:
-  - first the primal value of `expr`,
-  - then one tangent output per seed.
+- each output of `expr` is followed by one tangent output per seed lane.
 
 The primitive is deliberately explicit. `faust-rs` does not implicitly
 differentiate with respect to "all controls in scope"; instead, the seed
 expression determines the differentiation variables. This makes the primitive
 predictable, composable, and much easier to reason about in recursive code.
 
-The current implementation focuses on **forward AD**. Reverse AD (`rad`) is not
-part of the supported compilation path yet.
+At Signal IR level, a seed is recognized by `SigId` identity after lowering and
+hash-consing. A seed may be a control, input, recursive value, or expression,
+but it must be the same lowered signal that occurs in the differentiated body;
+`fad` does not solve for an arbitrary algebraically equivalent expression.
+Repeated seed lanes are preserved rather than deduplicated.
+
+This note focuses on **forward AD**. Reverse AD (`rad`) is also available in the
+compiler, with different output and temporal semantics; see
+[rad-usage-en.md](rad-usage-en.md) and [rad-note-en.md](rad-note-en.md).
 
 This note summarizes:
 
@@ -62,11 +72,18 @@ This note summarizes:
 
 ### 2.1 Basic rule
 
-Conceptually:
+If `expr` lowers to `M` outputs `p_0 ... p_(M-1)` and `seed` lowers to `N`
+signals `s_0 ... s_(N-1)`, the output contract is:
 
 ```text
-fad(expr, seed) = [ expr, d(expr)/d(seed_0), d(expr)/d(seed_1), ... ]
+fad(expr, seed) =
+  [p_0, dp_0/ds_0, ..., dp_0/ds_(N-1),
+   p_1, dp_1/ds_0, ..., dp_1/ds_(N-1),
+   ...]
 ```
+
+The output arity is therefore `M * (1 + N)`. With no seed outputs,
+`fad(expr, ())` is an identity on the primal outputs.
 
 If `seed` is a single signal, `fad` produces two outputs:
 
@@ -77,6 +94,8 @@ If `seed` is a tuple-like parallel expression, `fad` produces one tangent per
 seed lane. For example:
 
 ```faust
+x = hslider("x", 1, -10, 10, 0.01);
+y = hslider("y", 1, -10, 10, 0.01);
 process = fad(x * y, (x, y));
 ```
 
@@ -193,8 +212,9 @@ The actual AD transform lives in:
 - [crates/propagate/src/lib.rs](../crates/propagate/src/lib.rs)
 
 This is the key stage. Once the box graph has been lowered to signals,
-`generate_fad_signals_multi(...)` invokes a `ForwardADTransform` that traverses
-the signal DAG and produces a bundle:
+`generate_fad_signals_multi(...)` creates one `ForwardADTransform` for the
+complete seed set, traverses the signal DAG, and produces a dual bundle for
+each primal signal:
 
 ```text
 [primal, tangent_0, tangent_1, ... tangent_n]
@@ -202,9 +222,9 @@ the signal DAG and produces a bundle:
 
 for every visited node.
 
-The transform is memoized. Shared sub-expressions are differentiated once and
-reused, which keeps the derivative graph linear in the size of the original
-DAG.
+The transform is memoized. Shared sub-expressions are traversed once and reused.
+The resulting graph scales with the source DAG and the number of tangent lanes,
+although individual derivative rules can introduce additional algebraic nodes.
 
 ### 4.4 Multi-lane dual representation
 
@@ -232,9 +252,9 @@ stable.
 ### 4.5 FIR and backend code generation
 
 After propagation, `fad` no longer exists as a source primitive. It has become
-an ordinary expanded multi-output signal graph. The downstream FIR lowering and
-the C, C++, interpreter, Cranelift, and Wasm backends just see extra outputs
-and recursive state lanes.
+an ordinary expanded multi-output signal graph. Downstream preparation, FIR
+lowering, and code generation see only extra outputs and recursive state lanes,
+so the individual backends do not need their own differentiation pass.
 
 That design is useful because it keeps AD mostly localized to the propagation
 phase. The backend does not need a dedicated differentiation pass.
@@ -268,7 +288,7 @@ recursive branch. The compiler now supports that by switching from the original
 "expand after recursion" model to an **augmented-state recursion** model when a
 recursive branch consumes `fad` outputs immediately.
 
-### 5.2 What is still out of scope
+### 5.2 Validated recursive families
 
 The implementation is strong on several recursive families:
 
@@ -278,27 +298,34 @@ The implementation is strong on several recursive families:
 - multi-output recursion,
 - multi-seed recursive differentiation.
 
-However, it is not yet a universal differentiable extension for every Faust
-construct. In particular:
-
-- `rad(...)` is not supported in the propagation path,
-- some external recursive AD feedback patterns still require explicit support
-  work,
-- discrete/non-differentiable primitives intentionally fall back to zero
-  tangents.
+The tracked corpus and runtime tests cover these families with nested and local
+seed variants. This does not make every signal family differentiable: the
+boundary is set by the explicit rule table summarized below, not by recursion
+alone.
 
 ## 6. Supported Signal Families
 
-The current forward AD implementation covers the signal families most relevant
-to DSP:
+The current forward AD implementation has explicit rules for the signal
+families most relevant to DSP:
 
-- arithmetic and algebraic nodes,
-- standard transcendentals,
-- `pow`, `atan2`, `min/max`, `fmod`, `remainder`,
-- delays,
+- arithmetic, standard transcendentals, and the recognized unary foreign
+  functions (`tanh`, `sinh`, `cosh` and their inverse hyperbolic forms),
+- `pow`, `atan2`, `min/max`, `fmod`/remainder-style operations, `select2`, and
+  numeric casts with a defined rule,
+- unit and variable delays,
 - recursive projections,
 - explicit seeds with duplicates or multiple lanes,
-- read-only table and waveform reads.
+- read-only table and waveform reads through their index,
+- valid `ondemand`, `upsampling`, and `downsampling` blocks, including `fad`
+  inside a block and around a block.
+
+For clock-domain blocks, the differentiated payload is augmented once so the
+primal and tangent lanes share the same firing and hold behavior. The clock is
+opaque to FAD; differentiating the scheduling decision itself is not part of
+the contract. Runtime tests in
+[crates/compiler/tests/ondemand_pipeline.rs](../crates/compiler/tests/ondemand_pipeline.rs)
+check representative gradients against analytic results or central finite
+differences.
 
 Table reads deserve a special note. `faust-rs` now differentiates read-only
 `rdtable` and waveform lookups with respect to the index using a symmetric
@@ -310,12 +337,21 @@ d(table[i]) / di ~= (table[i + 1] - table[i - 1]) / 2
 
 This is practical for modulation, wavetable indexing, and lookup-based models.
 
-The main intentional "zero tangent" boundaries remain:
+The main intentional "zero tangent" boundaries remain (unless the whole node
+is itself matched as an explicit seed before node dispatch):
 
-- buttons and checkboxes,
-- integer-only and bitwise operations,
-- casts that destroy differentiable structure,
-- mutable table writes and broader effectful memory updates.
+- unselected controls, buttons, and checkboxes,
+- integer comparisons, shifts, and bitwise operations,
+- integer and bit casts,
+- mutable table writes, soundfiles, standalone effectful memory forms, and
+  unknown or non-unary foreign functions.
+
+At these boundaries, a zero tangent means "no implemented forward rule", not a
+general mathematical assertion. The primal signal is preserved.
+
+Rules at non-differentiable points retain their emitted formula. For example,
+the current derivative of `abs(x)` is `x / abs(x)`, which is undefined and may
+produce `NaN` at `x = 0`.
 
 ## 7. Demonstration DSP Examples
 
@@ -510,12 +546,10 @@ The more interesting long-term point is that `fad` is not only useful for
 exporting gradients to a host. It also makes it possible to express the
 **optimizer itself in Faust code**.
 
-That is exactly the direction illustrated by local repository examples such as:
+That direction is illustrated by the filter-training and physical/controller
+design listings in Appendices A and B.
 
-- `fad_filter3.dsp`
-- `fad_pendulum_cello4.dsp`
-
-In those patches, Faust code computes:
+In those listings, Faust code computes:
 
 - the model output,
 - the error signal,
@@ -527,9 +561,9 @@ between DSP code and host code.
 
 #### Faust-expressed adaptive optimizers
 
-`fad_filter3.dsp` is a better illustration of this idea than a simple
-sign-descent patch. It keeps two trainable filter parameters, frequency and
-resonance, in recursive state and updates them directly in Faust.
+The Appendix A filter sketch is a better illustration of this idea than a
+simple sign-descent patch. It keeps two trainable filter parameters, frequency
+and resonance, in recursive state and updates them directly in Faust.
 
 It already contains the main ingredients of a practical optimizer:
 
@@ -575,7 +609,7 @@ host-side training loop.
 
 #### More elaborate in-graph learning architectures
 
-`fad_pendulum_cello4.dsp` shows a more ambitious direction. It combines:
+The Appendix B sketch shows a more ambitious direction. It combines:
 
 - a physical or kinetic generator,
 - a small neural-style controller,
@@ -638,9 +672,9 @@ parameter. That gradient can then be consumed either:
 #### Black-box or neural-style modeling
 
 The compiler-side differentiation engine is also compatible with the idea of
-larger differentiable blocks, including recurrent ones. What is still missing is
-not the core `fad` transform itself, but the higher-level library layer that
-would package:
+larger differentiable blocks, including recurrent ones. What is still missing
+from the versioned repository is not the core `fad` transform itself, but a
+supported higher-level library layer that would package:
 
 - trainable parameter buses,
 - optimizer state,
@@ -667,12 +701,16 @@ For day-to-day use, the following guidelines are accurate:
 - use `: !, _` to extract the tangent for a single-seed `fad`,
 - expect robust behavior on feed-forward graphs and on the recursive families
   already covered by the corpus,
+- use FAD inside or around clock-domain blocks when the clock itself is treated
+  as scheduling data rather than a differentiation variable,
 - use host-driven optimization when integration simplicity matters,
 - but keep in mind that Faust-defined update laws are also a core intended use
   of `fad`, not an edge case.
 
-The most important non-goal to keep in mind is that `fad` is not yet "differentiate all Faust code automatically". It is a strong, well-tested forward AD
-primitive over an explicitly supported differentiable subset of Faust.
+The most important non-goal to keep in mind is that `fad` is not "differentiate
+all Faust code automatically". It is a forward AD primitive over an explicitly
+supported differentiable subset of Faust, with zero-tangent fallbacks that users
+must account for when composing unfamiliar signal families.
 
 ## 9. Conclusion
 
@@ -692,13 +730,19 @@ That makes `fad` useful in two complementary ways:
 1. as an analysis tool, to inspect local sensitivities of a DSP graph,
 2. as a building block for adaptive or optimization-driven audio systems.
 
-The implementation is already broad enough to support serious experimentation,
-especially on feed-forward graphs, recursive local gradient patterns, Faust
-expressed optimizers, and host-driven adaptive effects. The remaining work is
-mostly about extending the supported differentiable subset further, rather than
-proving the core model.
+The implementation is broad enough to support serious experimentation,
+especially on feed-forward graphs, recursive local gradient patterns,
+clock-domain blocks, Faust-expressed optimizers, and host-driven adaptive
+effects. The tracked corpus, runtime finite-difference checks, and golden tests
+define the current evidence; broader differentiability claims require new rules
+and tests.
 
-## Appendix A. Full Listing: `fad_filter3.dsp`
+## Appendix A. Illustrative Filter-Training Sketch
+
+The two appendix listings are design sketches retained to explain in-graph
+optimization. They are not versioned corpus fixtures, and Appendix B depends on
+an external `ad.lib` helper library. Use the tracked examples and runtime tests
+linked in the main text as the compatibility contract.
 
 ```faust
 import("stdfaust.lib");
@@ -760,7 +804,7 @@ with {
 };
 ```
 
-## Appendix B. Full Listing: `fad_pendulum_cello4.dsp`
+## Appendix B. Illustrative Physical/Neural Controller Sketch
 
 ```faust
 import("stdfaust.lib");

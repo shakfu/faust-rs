@@ -1,9 +1,14 @@
 # Using `rad(expr, seeds)` for Gradient Descent
 
+Verified against the implementation and runtime examples on 2026-07-22.
+
 This note shows how to use the reverse-mode AD primitive
 `rad(expr, seeds)` from a host program. It complements
-[`docs/rad-note-en.md`](rad-note-en.md), which describes the algorithm
+[`rad-note-en.md`](rad-note-en.md), which describes the algorithm
 and rule table.
+
+`rad` is a `faust-rs` extension; the C++ Faust reference compiler used by this
+project does not currently recognize it.
 
 ## What you get from RAD today
 
@@ -19,8 +24,8 @@ contribution signals for the current `compute(count)` block. Sum them
 over the block in the host, or inside Faust when a DSP-level reduction
 is needed and the block size is known through `ma.BS`.
 
-The differentiable subset matches FAD for feed-forward code and routes
-temporal/recursive bodies through the `BlockReverseAD` fallback:
+The supported symbolic rule set largely matches FAD for feed-forward code,
+while temporal/recursive bodies route through the `BlockReverseAD` fallback:
 arithmetic, trig, transcendentals, `pow`, `atan2`, `min`/`max`,
 `select2`, casts, read-only tables, unary FFun, pass-through wrappers,
 delay/prefix forms, and recursive feedback. Mutable tables,
@@ -28,11 +33,10 @@ soundfiles, non-unary or unrecognised foreign functions still surface
 a structured `RadUnsupportedNode` diagnostic — never a silently wrong
 gradient.
 
-In short: any feed-forward DSP whose parameters live in `hslider` /
-`vslider` / `numentry` controls is fittable by gradient descent today,
-and temporal/recursive DSPs are fittable within the current
-block-local BRA horizon when their lowered signal families are covered
-by the BRA backward rules.
+In short: feed-forward DSPs built from the listed rule families are fittable by
+gradient descent when their parameters are explicit seeds. Temporal/recursive
+DSPs are fittable within the current block-local BRA horizon when their lowered
+signal families are covered by the BRA backward rules.
 
 ## Pattern: host-driven gradient descent
 
@@ -279,16 +283,24 @@ cargo run --release -p compiler --example rad_vs_fad_perf
 - **Block-local temporal boundary.** `delay`, `prefix`, and recursive
   bodies use the current `compute(count)` block as the reverse horizon
   through `BlockReverseAD`. This is exact for the block-local objective,
-  not a cross-call infinite-horizon adjoint.
+  with zero terminal adjoint state, not a cross-call infinite-horizon adjoint.
 - **Implicit all-ones cotangent.** Multi-output `expr` produces the
   gradient of `sum(primals)`. A future `vjp(expr, cotangent, seeds)`
   primitive will expose custom output cotangents.
 - **No automatic seed discovery.** Seeds must be listed explicitly,
-  same as for FAD. UI-control annotations are not consulted.
-- **Block-local recursion horizon.** BRA uses the current
-  `compute(count)` block as its horizon and resets reverse adjoint
-  carriers at each compute call. Longer cross-block horizons remain
-  future work.
+  same as for FAD. UI-control annotations are not consulted, and seed
+  recognition is Signal IR identity rather than algebraic equivalence.
+- **Clock domains.** RAD across `ondemand`, `upsampling`, or `downsampling`
+  clock-domain machinery is rejected with a structured diagnostic; a
+  clock-aware reverse tape is not implemented yet.
+- **Hard unsupported families.** Mutable tables, soundfiles, and unknown or
+  non-unary foreign functions are rejected rather than assigned a fabricated
+  gradient.
+- **Table-index approximation.** Read-only table lookup differentiates the
+  index using a symmetric finite-difference slope; table contents remain
+  constant.
+- **Non-smooth points.** Rules are not automatically regularized; for example,
+  the current `abs` derivative uses `x / abs(x)` and may produce `NaN` at zero.
 
 ## Source pointers
 
@@ -302,7 +314,7 @@ cargo run --release -p compiler --example rad_vs_fad_perf
   — adaptive 3-tap notch filter, LMS convergence on output power.
 - [`crates/compiler/examples/rad_vs_fad_perf.rs`](../crates/compiler/examples/rad_vs_fad_perf.rs)
   — RAD-vs-FAD comparison harness.
-- [`docs/rad-note-en.md`](rad-note-en.md) — RAD algorithm and rule
+- [`rad-note-en.md`](rad-note-en.md) — RAD algorithm and rule
   table.
 - [`porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md`](../porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md)
   — full implementation plan including the stateful-RAD §19 analysis.
