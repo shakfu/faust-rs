@@ -130,21 +130,21 @@ int main()
         return 1;
     }
 
-    std::unique_ptr<dsp> processor(factory->createDSPInstance());
-    if (!processor) {
-        deleteInterpreterDSPFactory(factory);
-        return 1;
-    }
+    {
+        std::unique_ptr<dsp> processor(factory->createDSPInstance());
+        if (!processor) {
+            deleteInterpreterDSPFactory(factory);
+            return 1;
+        }
 
-    processor->init(48000);
-    std::array<FAUSTFLOAT, 64> input{};
-    std::array<FAUSTFLOAT, 64> output{};
-    FAUSTFLOAT* inputs[] = {input.data()};
-    FAUSTFLOAT* outputs[] = {output.data()};
-    processor->compute(64, inputs, outputs);
+        processor->init(48000);
+        std::array<FAUSTFLOAT, 64> input{};
+        std::array<FAUSTFLOAT, 64> output{};
+        FAUSTFLOAT* inputs[] = {input.data()};
+        FAUSTFLOAT* outputs[] = {output.data()};
+        processor->compute(64, inputs, outputs);
+    } // Destroy the DSP instance before its factory.
 
-    // The factory must outlive all DSP instances created from it.
-    processor.reset();
     deleteInterpreterDSPFactory(factory);
 }
 ```
@@ -175,15 +175,17 @@ int main()
         return 1;
     }
 
-    std::unique_ptr<dsp> processor(factory->createDSPInstance());
-    if (!processor) {
-        deleteCraneliftDSPFactory(factory);
-        return 1;
-    }
+    {
+        std::unique_ptr<dsp> processor(factory->createDSPInstance());
+        if (!processor) {
+            deleteCraneliftDSPFactory(factory);
+            return 1;
+        }
 
-    processor->init(48000);
-    // Use processor->compute(...) exactly as in the Interpreter example.
-    processor.reset();
+        processor->init(48000);
+        // Use processor->compute(...) exactly as in the Interpreter example.
+    } // Destroy the DSP instance before its factory.
+
     deleteCraneliftDSPFactory(factory);
 }
 ```
