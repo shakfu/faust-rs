@@ -4,12 +4,18 @@
 //! - `interpreter_dsp_aux<REAL, TRACE>` in `interpreter_dsp_aux.hh`
 //!
 //! # Design notes
-//! - Holds a reference to its parent [`FbcDspFactory`] and owns an
-//!   [`FbcExecutor`] with heaps sized from the factory.
-//! - Lifecycle: `new()` → `init(sr)` → `compute()` loop.
-//! - The factory must be optimized before creating an instance; this is
-//!   enforced by requiring `&mut FbcDspFactory` in `new()`.
+//! - One generic base, [`FbcDspInstanceImpl`], holds its factory as any
+//!   `Borrow<FbcDspFactory<R>>` and owns an [`FbcExecutor`] with heaps sized
+//!   from the factory. Two aliases specialize it:
+//!   - [`FbcDspInstance`] borrows a factory owned elsewhere (`&'a FbcDspFactory`).
+//!   - [`OwnedFbcDspInstance`] owns its factory, carrying no lifetime — a
+//!     self-contained, movable, persistent instance for hosts/bindings.
+//! - Lifecycle: construct (`new()` / `from_factory()`) → `init(sr)` →
+//!   `compute()` loop.
+//! - The factory is optimized before the executor is built.
 //! - No `TRACE` template parameter — tracing is a future runtime option.
+
+use std::borrow::Borrow;
 
 use super::executor::{FbcExecError, FbcExecutor};
 use super::factory::FbcDspFactory;
@@ -29,11 +35,59 @@ use super::soundfile::Soundfile;
 /// interpreter design:
 /// - the factory owns immutable bytecode and metadata,
 /// - the instance owns mutable heaps and lifecycle state.
-pub struct FbcDspInstance<'a, R: FbcReal> {
-    factory: &'a FbcDspFactory<R>,
+///
+/// # Factory ownership
+/// The instance is generic over how it holds its factory (`F`), which is any
+/// `Borrow<FbcDspFactory<R>>`. Two aliases specialize it:
+/// - [`FbcDspInstance<'a, R>`] borrows a factory owned elsewhere (`F = &'a
+///   FbcDspFactory<R>`) — the historical, zero-copy form.
+/// - [`OwnedFbcDspInstance<R>`] owns its factory (`F = FbcDspFactory<R>`), so it
+///   carries no lifetime and can be stored, moved, and returned freely. This is
+///   the form language bindings use for a persistent, self-contained instance,
+///   avoiding a self-referential (factory + borrowing instance) construction.
+///
+/// Both share one implementation: every method reads the factory through
+/// `Borrow`, and the mutable executor lives in a sibling field, so the borrows
+/// stay disjoint with no `unsafe`.
+pub struct FbcDspInstanceImpl<F, R: FbcReal>
+where
+    F: Borrow<FbcDspFactory<R>>,
+{
+    factory: F,
     executor: FbcExecutor<R>,
     initialized: bool,
     cycle: usize,
+}
+
+/// DSP instance that borrows a factory owned elsewhere (zero-copy).
+///
+/// The factory must outlive the instance.
+pub type FbcDspInstance<'a, R> = FbcDspInstanceImpl<&'a FbcDspFactory<R>, R>;
+
+/// DSP instance that owns its factory, carrying no lifetime.
+///
+/// Because the factory and the runtime state live in the same value, this type
+/// is a self-contained, persistent instance: it can be moved into a struct,
+/// returned from a function, or held across calls without any self-referential
+/// borrowing. Preferred by FFI/language bindings.
+pub type OwnedFbcDspInstance<R> = FbcDspInstanceImpl<FbcDspFactory<R>, R>;
+
+/// Allocates an executor sized for `factory`, with soundfile slots pre-filled
+/// with default silence until the host provides real audio.
+fn build_executor<R: FbcReal>(factory: &FbcDspFactory<R>) -> FbcExecutor<R> {
+    let mut executor = FbcExecutor::new(
+        factory.int_heap_size as usize,
+        factory.real_heap_size as usize,
+    );
+
+    // Populate soundfile slots with default silence until the host provides
+    // real audio files via the UI callback.
+    let sf_count = factory.soundfile_count();
+    executor.soundfiles = (0..sf_count)
+        .map(|_| Box::new(Soundfile::default_silence()))
+        .collect();
+
+    executor
 }
 
 /// Structured runtime error returned by [`FbcDspInstance::try_compute`].
@@ -63,8 +117,8 @@ impl From<FbcExecError> for FbcDspRuntimeError {
     }
 }
 
-impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
-    /// Creates a new DSP instance from a factory.
+impl<'a, R: FbcReal> FbcDspInstanceImpl<&'a FbcDspFactory<R>, R> {
+    /// Creates a new DSP instance that borrows `factory`.
     ///
     /// The factory is optimized (if not already) before the instance is created.
     /// The executor is allocated with heap sizes from the factory.
@@ -79,19 +133,27 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     pub fn new(factory: &'a mut FbcDspFactory<R>) -> Self {
         // Done before createFBCExecutor that may compile blocks...
         factory.optimize();
+        let executor = build_executor(factory);
+        Self {
+            // `&mut` coerces to the stored shared `&'a` reference.
+            factory,
+            executor,
+            initialized: false,
+            cycle: 0,
+        }
+    }
+}
 
-        let mut executor = FbcExecutor::new(
-            factory.int_heap_size as usize,
-            factory.real_heap_size as usize,
-        );
-
-        // Populate soundfile slots with default silence until the host provides
-        // real audio files via the UI callback.
-        let sf_count = factory.soundfile_count();
-        executor.soundfiles = (0..sf_count)
-            .map(|_| Box::new(Soundfile::default_silence()))
-            .collect();
-
+impl<R: FbcReal> FbcDspInstanceImpl<FbcDspFactory<R>, R> {
+    /// Creates a persistent DSP instance that *owns* its factory.
+    ///
+    /// Equivalent to [`FbcDspInstance::new`] but consumes the factory, so the
+    /// resulting instance carries no lifetime and can be stored or returned.
+    /// The factory is optimized before the executor is built.
+    #[must_use]
+    pub fn from_factory(mut factory: FbcDspFactory<R>) -> Self {
+        factory.optimize();
+        let executor = build_executor(&factory);
         Self {
             factory,
             executor,
@@ -100,6 +162,24 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
         }
     }
 
+    /// Returns a shared reference to the owned factory.
+    #[must_use]
+    pub fn factory(&self) -> &FbcDspFactory<R> {
+        &self.factory
+    }
+
+    /// Consumes the instance and returns the owned factory, discarding runtime
+    /// state.
+    #[must_use]
+    pub fn into_factory(self) -> FbcDspFactory<R> {
+        self.factory
+    }
+}
+
+impl<F, R: FbcReal> FbcDspInstanceImpl<F, R>
+where
+    F: Borrow<FbcDspFactory<R>>,
+{
     /// Full initialization entrypoint used by the public DSP lifecycle.
     ///
     /// This marks the instance initialized, then runs the canonical C++ backend
@@ -134,8 +214,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::classInit()` in `interpreter_dsp_aux.hh`
     ///   (lines 570–584).
     pub fn class_init(&mut self, _sample_rate: i32) {
+        let factory = self.factory.borrow();
         self.executor
-            .execute_block(&self.factory.arena, self.factory.static_init_block);
+            .execute_block(&factory.arena, factory.static_init_block);
     }
 
     /// Sets sample rate and executes the init (constants) block.
@@ -144,11 +225,12 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::instanceConstants()` in `interpreter_dsp_aux.hh`
     ///   (lines 586–603).
     pub fn instance_constants(&mut self, sample_rate: i32) {
+        let factory = self.factory.borrow();
         // Store sample_rate in 'fSampleRate' variable at correct offset in fIntHeap.
-        self.executor.int_heap[self.factory.sr_offset as usize] = sample_rate;
+        self.executor.int_heap[factory.sr_offset as usize] = sample_rate;
 
         self.executor
-            .execute_block(&self.factory.arena, self.factory.init_block);
+            .execute_block(&factory.arena, factory.init_block);
     }
 
     /// Executes the reset UI block (sets UI controls to default values).
@@ -157,8 +239,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::instanceResetUserInterface()` in
     ///   `interpreter_dsp_aux.hh` (lines 605–619).
     pub fn instance_reset_user_interface(&mut self) {
+        let factory = self.factory.borrow();
         self.executor
-            .execute_block(&self.factory.arena, self.factory.reset_ui_block);
+            .execute_block(&factory.arena, factory.reset_ui_block);
     }
 
     /// Executes the clear block (zeros delay lines, state variables).
@@ -167,8 +250,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::instanceClear()` in `interpreter_dsp_aux.hh`
     ///   (lines 621–635).
     pub fn instance_clear(&mut self) {
+        let factory = self.factory.borrow();
         self.executor
-            .execute_block(&self.factory.arena, self.factory.clear_block);
+            .execute_block(&factory.arena, factory.clear_block);
     }
 
     /// Processes one buffer of audio samples.
@@ -190,17 +274,18 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
             return; // Beware: compiled loop does not work with an index of 0.
         }
 
+        let factory = self.factory.borrow();
         // Set count in 'count' variable at the correct offset in fIntHeap.
-        self.executor.int_heap[self.factory.count_offset as usize] = count;
+        self.executor.int_heap[factory.count_offset as usize] = count;
 
         // Executes the 'control' block.
         self.executor
-            .execute_block(&self.factory.arena, self.factory.compute_block);
+            .execute_block(&factory.arena, factory.compute_block);
 
         // Executes the 'DSP' block (with audio I/O).
         self.executor.execute_block_io(
-            &self.factory.arena,
-            self.factory.compute_dsp_block,
+            &factory.arena,
+            factory.compute_dsp_block,
             inputs,
             outputs,
         );
@@ -223,17 +308,18 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
             return Ok(()); // Beware: compiled loop does not work with an index of 0.
         }
 
+        let factory = self.factory.borrow();
         // Set count in 'count' variable at the correct offset in fIntHeap.
-        self.executor.int_heap[self.factory.count_offset as usize] = count;
+        self.executor.int_heap[factory.count_offset as usize] = count;
 
         // Executes the 'control' block.
         self.executor
-            .execute_block(&self.factory.arena, self.factory.compute_block);
+            .execute_block(&factory.arena, factory.compute_block);
 
         // Executes the 'DSP' block (with audio I/O).
         self.executor.try_execute_block_io(
-            &self.factory.arena,
-            self.factory.compute_dsp_block,
+            &factory.arena,
+            factory.compute_dsp_block,
             inputs,
             outputs,
         )?;
@@ -248,19 +334,19 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::getSampleRate()` in `interpreter_dsp_aux.hh`.
     #[must_use]
     pub fn get_sample_rate(&self) -> i32 {
-        self.executor.int_heap[self.factory.sr_offset as usize]
+        self.executor.int_heap[self.factory.borrow().sr_offset as usize]
     }
 
     /// Returns the number of audio inputs.
     #[must_use]
     pub fn get_num_inputs(&self) -> i32 {
-        self.factory.num_inputs
+        self.factory.borrow().num_inputs
     }
 
     /// Returns the number of audio outputs.
     #[must_use]
     pub fn get_num_outputs(&self) -> i32 {
-        self.factory.num_outputs
+        self.factory.borrow().num_outputs
     }
 
     /// Returns whether `init()` has been called.
@@ -282,7 +368,7 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// factory; layout matches the C++ `buildUserInterface` traversal order.
     #[must_use]
     pub fn ui_instructions(&self) -> &[super::bytecode::FbcUiInstruction<R>] {
-        &self.factory.ui_block
+        &self.factory.borrow().ui_block
     }
 
     /// Reads the current value of a real-heap slot.

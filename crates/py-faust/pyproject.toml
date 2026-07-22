@@ -9,6 +9,13 @@ description = "Proof-of-concept Python bindings for the faust-rs interpreter bac
 requires-python = ">=3.9"
 license = { text = "LGPL-2.1-or-later" }
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [tool.maturin]
 # The importable module is `faust_rs` (the [lib] name in Cargo.toml).
 module-name = "faust_rs"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

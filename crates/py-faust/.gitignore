@@ -2,3 +2,5 @@
 /.venv
 Cargo.lock
 *.so
+__pycache__/
+.pytest_cache/

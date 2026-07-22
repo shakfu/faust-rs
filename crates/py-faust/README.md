@@ -12,10 +12,17 @@ crates.
 ## Binding path
 
 ```
-Python  ──▶  compiler::Compiler          # .dsp source -> FBC bytecode text (fast lane)
-        ──▶  read_fbc::<f32>             # -> FbcDspFactory<f32>
-        ──▶  FbcDspInstance::try_compute # -> rendered audio blocks
+Python  ──▶  compiler::Compiler               # .dsp source -> FBC bytecode text (fast lane)
+        ──▶  read_fbc::<f32>                  # -> FbcDspFactory<f32>
+        ──▶  OwnedFbcDspInstance::from_factory # persistent, factory-owning instance
+        ──▶  .try_compute(...)                # -> rendered audio blocks (state persists)
 ```
+
+The binding holds a `codegen::backends::interp::OwnedFbcDspInstance<f32>`, which
+owns its factory alongside the runtime state (no lifetime, no self-referential
+borrowing). As a result the binding contains **no hand-written `unsafe`** — the
+persistent-instance machinery lives, fully safe and unit-tested, in the `codegen`
+interpreter backend.
 
 ## Build
 
@@ -28,6 +35,20 @@ pip install maturin
 maturin develop            # builds + installs `faust_rs` into the venv
 # or: maturin build --release   # produce a wheel
 ```
+
+## Test
+
+A pytest suite lives in `tests/`. Build the extension first, then run it:
+
+```bash
+maturin develop
+pip install pytest         # or: pip install -e '.[test]'
+pytest                     # from crates/py-faust
+```
+
+The suite verifies exact rendered sample values (compile, compute, persistence,
+precision, lifetime/determinism) and exercises a vendored `noise.dsp` fixture.
+If the extension is not built, the suite skips rather than errors.
 
 ## Usage
 
@@ -47,19 +68,49 @@ dsp.compute([[1.0, 2.0], [1.0, 2.0]])    # [[1.0, 2.0]]
 faust_rs.compile("process = 0.7;").compute([], frames=4)   # [[0.7, 0.7, 0.7, 0.7]]
 ```
 
+### Precision
+
+Single precision (`f32`) is the default; pass `double=True` for `f64`. Audio
+crosses the boundary as Python floats (`f64`) either way.
+
+```python
+# 2^24 + 1 is exact in f64, but rounds to 2^24 in f32
+faust_rs.compile("process = 16777217.0;").compute([], frames=1)               # [[16777216.0]]
+faust_rs.compile("process = 16777217.0;", double=True).compute([], frames=1)  # [[16777217.0]]
+
+faust_rs.compile("process = _;", double=True).precision   # "double"
+```
+
+### Persistent, stateful instance
+
+`compile()` initializes a single interpreter instance that is reused across
+`compute()` calls, so DSP state (recursive filters, oscillator phase, delay
+lines) carries from one block to the next.
+
+```python
+# counter: y[n] = y[n-1] + 1
+c = faust_rs.compile("process = (+(1))~_;")
+c.compute([], frames=4)   # [[1.0, 2.0, 3.0, 4.0]]
+c.compute([], frames=4)   # [[5.0, 6.0, 7.0, 8.0]]   <- continues (persists)
+c.cycle                   # 2  (monotonic block counter)
+c.reset()                 # clear DSP state
+c.compute([], frames=4)   # [[1.0, 2.0, 3.0, 4.0]]   <- restarts
+```
+
 `compile()` and `compute()` raise `ValueError` on compile errors, bad bytecode,
 channel-count mismatches, and interpreter runtime errors.
 
 ## Scope / limitations (deliberate for a PoC)
 
-- Single precision (`f32`) only; no `double` path yet.
-- One-shot block render. Each `compute()` builds a fresh interpreter instance
-  and re-`init()`s, so state does not persist **across** calls (it does within a
-  single block, e.g. recursive filters). A persistent-instance API would hold the
-  `FbcDspInstance` across calls (needs a self-referential holder or an
-  owning-instance redesign).
+See `LIMITATIONS.md` for the full list and lift paths. In brief:
+
 - No `import("stdfaust.lib")` search-path wiring in this example surface — pass
-  self-contained sources, or extend `compile()` to set import search paths.
+  self-contained sources.
 - No UI-parameter (button/slider) get/set bridge yet; the interpreter exposes
   zone read/write (`get_real_zone`/`set_real_zone`) that a fuller binding would map
   to Python.
+- Whole-block render over plain Python lists (no NumPy zero-copy).
+
+**Resolved:** cross-call state persistence (`Dsp` holds a safe, factory-owning
+`OwnedFbcDspInstance`; `reset()` clears state), and single/double precision
+(`double=True`).

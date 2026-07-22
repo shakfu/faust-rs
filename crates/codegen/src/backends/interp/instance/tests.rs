@@ -269,3 +269,95 @@ fn instance_compute_gain() {
     assert!((output[0] - 0.5).abs() < 1e-6);
     assert_eq!(instance.cycle(), 1);
 }
+
+/// Builds the same gain DSP block used by `instance_compute_gain`.
+fn make_gain_factory() -> FbcDspFactory<f32> {
+    let mut arena = FbcBlockArena::<f32>::new();
+
+    let mut dsp_block = FbcBlock::new();
+    dsp_block.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 0, 0.0));
+    dsp_block.push(FbcInstruction::with_values_and_offsets(
+        FbcOpcode::LoadInput,
+        0,
+        0.0,
+        0,
+        -1,
+    ));
+    dsp_block.push(FbcInstruction::with_values(FbcOpcode::RealValue, 0, 0.5));
+    dsp_block.push(FbcInstruction::new(FbcOpcode::MultReal));
+    dsp_block.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 0, 0.0));
+    dsp_block.push(FbcInstruction::with_values_and_offsets(
+        FbcOpcode::StoreOutput,
+        0,
+        0.0,
+        0,
+        -1,
+    ));
+    dsp_block.push(FbcInstruction::new(FbcOpcode::Return));
+
+    let dsp_id = arena.alloc(dsp_block);
+    make_factory_with_dsp_block(&mut arena, dsp_id)
+}
+
+#[test]
+fn owned_instance_matches_borrowing_instance() {
+    // The owned and borrowing forms share one implementation; confirm they
+    // produce identical output from the same factory.
+    let mut borrow_factory = make_gain_factory();
+    let mut borrowing = FbcDspInstance::new(&mut borrow_factory);
+    borrowing.init(44100);
+    let input = vec![1.0_f32];
+    let mut borrow_out = vec![0.0_f32];
+    borrowing.compute(1, &[&input], &mut [&mut borrow_out]);
+
+    let mut owned = OwnedFbcDspInstance::from_factory(make_gain_factory());
+    owned.init(44100);
+    let mut owned_out = vec![0.0_f32];
+    owned.compute(1, &[&input], &mut [&mut owned_out]);
+
+    assert_eq!(owned_out, borrow_out);
+    assert!((owned_out[0] - 0.5).abs() < 1e-6);
+    assert_eq!(owned.get_num_inputs(), 1);
+    assert_eq!(owned.get_num_outputs(), 1);
+    assert_eq!(owned.get_sample_rate(), 44100);
+}
+
+#[test]
+fn owned_instance_is_self_contained_and_persists() {
+    // The owned instance carries no lifetime: it can be moved out of the scope
+    // that built its factory and keep running, with state persisting across
+    // compute calls (cycle counter advances).
+    fn build() -> OwnedFbcDspInstance<f32> {
+        let mut instance = OwnedFbcDspInstance::from_factory(make_gain_factory());
+        instance.init(48000);
+        instance // factory-owning scope ends here; instance escapes freely
+    }
+
+    let mut instance = build();
+    let input = vec![1.0_f32];
+
+    for expected_cycle in 1..=3 {
+        let mut output = vec![0.0_f32];
+        instance.compute(1, &[&input], &mut [&mut output]);
+        assert!((output[0] - 0.5).abs() < 1e-6);
+        assert_eq!(instance.cycle(), expected_cycle);
+    }
+
+    // Storing many owned instances in a Vec (moves) keeps each independent.
+    let mut fleet: Vec<OwnedFbcDspInstance<f32>> = (0..8).map(|_| build()).collect();
+    let mut output = vec![0.0_f32];
+    fleet[3].compute(1, &[&input], &mut [&mut output]);
+    assert_eq!(fleet[3].cycle(), 1);
+    assert_eq!(fleet[0].cycle(), 0); // untouched instance unaffected
+}
+
+#[test]
+fn owned_instance_into_factory_roundtrips() {
+    let factory = make_gain_factory();
+    let name = factory.name.clone();
+    let instance = OwnedFbcDspInstance::from_factory(factory);
+    assert_eq!(instance.factory().name, name);
+    let recovered = instance.into_factory();
+    assert_eq!(recovered.name, name);
+    assert!(recovered.is_optimized());
+}

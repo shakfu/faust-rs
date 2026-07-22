@@ -55,7 +55,7 @@ pub use foreign::{
     ForeignScalarType, ForeignSignature, clear_foreign_functions, is_registered_foreign_function,
     lookup_foreign_function, register_foreign_function, unregister_foreign_function,
 };
-pub use instance::{FbcDspInstance, FbcDspRuntimeError};
+pub use instance::{FbcDspInstance, FbcDspInstanceImpl, FbcDspRuntimeError, OwnedFbcDspInstance};
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
 pub use optimizer::{MAX_OPT_LEVEL, optimize_block};
 pub use real::FbcReal;

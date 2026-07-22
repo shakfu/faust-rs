@@ -13,7 +13,9 @@ authors = ["faust-rs contributors"]
 description = "Proof-of-concept PyO3 Python bindings for the faust-rs interpreter backend"
 publish = false
 
-# PyO3 codegen emits `unsafe`, so relax the workspace-wide `unsafe_code = forbid`.
+# The binding contains no hand-written `unsafe` (the owning interpreter instance
+# lives safely in `codegen`), but PyO3's `#[pyclass]`/`#[pymethods]` macros expand
+# to `unsafe` impls, so the workspace-wide `unsafe_code = forbid` must be relaxed.
 [lints.rust]
 unsafe_code = "allow"
 
