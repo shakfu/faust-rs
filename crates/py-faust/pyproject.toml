@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "faust-rs"
+version = "0.5.0"
+description = "Proof-of-concept Python bindings for the faust-rs interpreter backend"
+requires-python = ">=3.9"
+license = { text = "LGPL-2.1-or-later" }
+
+[tool.maturin]
+# The importable module is `faust_rs` (the [lib] name in Cargo.toml).
+module-name = "faust_rs"

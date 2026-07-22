@@ -1,0 +1,27 @@
+# Standalone crate: intentionally its own workspace root so the PyO3 cdylib and
+# its `extension-module` linkage never enter `cargo build --workspace` or CI.
+# It path-depends on the main workspace crates, which resolve their own
+# `*.workspace = true` inheritance against the root faust-rs workspace.
+[workspace]
+
+[package]
+name = "faust-rs-py"
+version = "0.5.0"
+edition = "2024"
+license = "LGPL-2.1-or-later"
+authors = ["faust-rs contributors"]
+description = "Proof-of-concept PyO3 Python bindings for the faust-rs interpreter backend"
+publish = false
+
+# PyO3 codegen emits `unsafe`, so relax the workspace-wide `unsafe_code = forbid`.
+[lints.rust]
+unsafe_code = "allow"
+
+[lib]
+name = "faust_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module"] }
+compiler = { path = "../compiler" }
+codegen = { path = "../codegen" }
