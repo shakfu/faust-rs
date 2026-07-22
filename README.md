@@ -63,6 +63,9 @@ DSP compilation examples:
 
 ```bash
 
+# Use the project-local Faust libraries (optimizers.lib and interleave.lib)
+faust-rs -I libraries -lang cpp foo.dsp
+
 # Generate AssemblyScript
 faust-rs -lang asc foo.dsp
 
@@ -211,6 +214,10 @@ reference compiler to accept them.
 See [the clock-domain note](docs/ondemand-note-en.md) for OD/US/DS timing and
 rate semantics, and [the FAD/RAD synthesis](docs/fad-rad-synthesis-en.md) for
 output layouts, examples, and current limits.
+
+Project-local Faust helpers live in [`libraries/`](libraries/README.md). Add
+that directory to the import path with `-I libraries` when a DSP imports
+`optimizers.lib` or loads `interleave.lib`.
 
 ## Environment variables
 

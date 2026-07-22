@@ -12,7 +12,7 @@
 //
 // Semantics: porting/interleave-spectral-primitive-2026-07-07-en.md,
 // mirrored by crates/compiler/tests/interleave_fft.rs.
-// Requires -I <faustlibraries> (analyzers.lib, signals.lib) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers.lib, signals.lib) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

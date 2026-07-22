@@ -10,7 +10,7 @@
 // (gain 2) — the window is what makes OLA reconstruct. FX applies the analysis
 // window on the N real taps before complexify/FFT.
 //
-// Requires -I <faustlibraries> (analyzers.lib, maths.lib) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers.lib, maths.lib) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

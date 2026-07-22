@@ -9,7 +9,7 @@ it without re-deriving this table.
 Tracking surface:
 [ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md](ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md)
 §4 (analysis) and §7 (S1–S5). This note is the S1 deliverable; the library
-definitions (S2) live in `interleave.lib` at the repo root.
+definitions (S2) live in `libraries/interleave.lib`.
 
 ## 1. What it is
 

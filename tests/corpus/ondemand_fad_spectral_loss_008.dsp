@@ -12,7 +12,7 @@
 // differences (crates/compiler/tests/ondemand_pipeline.rs). Magnitude carries an
 // epsilon so the derivative is defined at a zero bin.
 //
-// Requires -I <faustlibraries> (analyzers, maths, signals) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers, maths, signals) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

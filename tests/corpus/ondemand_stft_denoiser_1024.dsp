@@ -20,7 +20,7 @@
 // and the O(N log N) FIR CSE (per-scope, commit 03127f30) that keeps the
 // generated code tractable (~0.5 M interp lines, ~40 s to compile).
 //
-// Requires -I <faustlibraries> (analyzers.lib, maths.lib) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers.lib, maths.lib) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

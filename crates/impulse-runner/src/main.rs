@@ -53,6 +53,19 @@ struct Options {
 }
 
 fn main() -> ExitCode {
+    // Faust library expansion and structural lowering can recurse deeply even
+    // when the final FIR is compact. Match the compiler CLI stack contract so
+    // stdfaust-based inputs do not depend on the platform's main-thread stack.
+    std::thread::Builder::new()
+        .name("impulse-runner".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_main)
+        .expect("failed to spawn impulse-runner thread")
+        .join()
+        .expect("impulse-runner thread panicked")
+}
+
+fn run_main() -> ExitCode {
     match real_main() {
         Ok(text) => {
             print!("{text}");

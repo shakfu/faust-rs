@@ -1,0 +1,193 @@
+// optimizers.lib - Factorized FAD Library
+// Version 4.2 - Harmonized return layout (faust-rs safe)
+
+import("stdfaust.lib");
+
+/* ==============================================================================
+   PART 1: UPDATE ENGINES
+   ============================================================================== */
+
+sgd(lr, max_step, err, grad) = max(-max_step, min(max_step, lr * smooth_grad))
+with {
+    smooth_grad = err * grad : si.smooth(0.99);
+};
+
+adam(lr, err, grad) = step
+with {
+    raw_grad = err * grad;
+    m = raw_grad : si.smooth(0.9);
+    v = (raw_grad * raw_grad) : si.smooth(0.999);
+    step = (lr * m) / (sqrt(v) + 0.00000001);
+};
+
+/*
+rmsprop(lr, err, grad) = step
+with {
+    raw_grad = err * grad;
+    v = (raw_grad * raw_grad) : si.smooth(0.9);
+    step = (lr * raw_grad) / (sqrt(v) + 0.00000001);
+};
+*/
+
+/*
+rmsprop(lr, err, grad) = step
+with {
+    // NaN protection: clamp the error to +/- 10.0.
+    // If the filter becomes unstable, keep the optimizer arithmetic bounded.
+    safe_err = max(-10.0, min(10.0, err));
+
+    raw_grad = safe_err * grad;
+    v = (raw_grad * raw_grad) : si.smooth(0.9);
+    step = (lr * raw_grad) / (sqrt(v) + 0.00000001);
+};
+*/
+
+// Robust rmsprop implementation for optimizers.lib.
+rmsprop(lr, err, grad) = step
+with {
+    // 1. Clamp the error to absorb outliers.
+    safe_err = max(-2.0, min(2.0, err));
+
+    // 2. Clamp the gradient to prevent v from growing without bound.
+    raw_grad = max(-1.0, min(1.0, safe_err * grad));
+
+    // 3. Use more responsive smoothing (0.9) to forget old errors quickly.
+    v = (raw_grad * raw_grad) : si.smooth(0.9);
+
+    step = (lr * raw_grad) / (sqrt(v) + 0.00000001);
+};
+
+nadam(lr, err, grad) = step
+with {
+    raw_grad = err * grad;
+    m = raw_grad : si.smooth(0.9);
+    v = (raw_grad * raw_grad) : si.smooth(0.999);
+    m_nesterov = (0.9 * m) + ((1.0 - 0.9) * raw_grad);
+    step = (lr * m_nesterov) / (sqrt(v) + 0.00000001);
+};
+
+sign_sgd(lr, err, grad) = lr * ba.signum(err * grad);
+
+
+/* ==============================================================================
+   PART 2: GENERIC FAD ROUTERS (UNIFIED)
+   ============================================================================== */
+
+optimize_1D(mdl, upd1, min1, max1, target, x) =
+    (loop ~ _)
+with {
+    diff_mdl(p1) = fad(mdl(p1, x), (p1));
+
+    loop(p1_prev) = p1_next
+    with {
+        p1_act = max(min1, min(max1, p1_prev));
+        pt = diff_mdl(p1_act);
+
+        err = (pt : _, !) - target;
+        grad1 = pt : !, _;
+
+        p1_next = max(min1, min(max1, p1_act - upd1(err, grad1)));
+    };
+};
+
+optimize_2D(mdl, upd1, upd2, min1, max1, min2, max2, target, x) =
+    (loop ~ (_, _))
+with {
+    diff_mdl(p1, p2) = fad(mdl(p1, p2, x), (p1, p2));
+
+    loop(p1_prev, p2_prev) = p1_next, p2_next
+    with {
+        p1_act = max(min1, min(max1, p1_prev));
+        p2_act = max(min2, min(max2, p2_prev));
+
+        pt = diff_mdl(p1_act, p2_act);
+
+        err   = (pt : _, !, !) - target;
+        grad1 = pt : !, _, !;
+        grad2 = pt : !, !, _;
+
+        p1_next = max(min1, min(max1, p1_act - upd1(err, grad1)));
+        p2_next = max(min2, min(max2, p2_act - upd2(err, grad2)));
+    };
+};
+
+optimize_3D(mdl, upd1, upd2, upd3, min1, max1, min2, max2, min3, max3, target, x) =
+    (loop ~ (_, _, _))
+with {
+    diff_mdl(p1, p2, p3) = fad(mdl(p1, p2, p3, x), (p1, p2, p3));
+
+    loop(p1_prev, p2_prev, p3_prev) = p1_next, p2_next, p3_next
+    with {
+        p1_act = max(min1, min(max1, p1_prev));
+        p2_act = max(min2, min(max2, p2_prev));
+        p3_act = max(min3, min(max3, p3_prev));
+
+        pt = diff_mdl(p1_act, p2_act, p3_act);
+
+        err   = (pt : _, !, !, !) - target;
+        grad1 = pt : !, _, !, !;
+        grad2 = pt : !, !, _, !;
+        grad3 = pt : !, !, !, _;
+
+        p1_next = max(min1, min(max1, p1_act - upd1(err, grad1)));
+        p2_next = max(min2, min(max2, p2_act - upd2(err, grad2)));
+        p3_next = max(min3, min(max3, p3_act - upd3(err, grad3)));
+    };
+};
+
+optimize_4D(mdl, upd1, upd2, upd3, upd4, min1, max1, min2, max2, min3, max3, min4, max4, target, x) =
+    (loop ~ (_, _, _, _))
+with {
+    diff_mdl(p1, p2, p3, p4) = fad(mdl(p1, p2, p3, p4, x), (p1, p2, p3, p4));
+
+    loop(p1_prev, p2_prev, p3_prev, p4_prev) = p1_next, p2_next, p3_next, p4_next
+    with {
+        p1_act = max(min1, min(max1, p1_prev));
+        p2_act = max(min2, min(max2, p2_prev));
+        p3_act = max(min3, min(max3, p3_prev));
+        p4_act = max(min4, min(max4, p4_prev));
+
+        pt = diff_mdl(p1_act, p2_act, p3_act, p4_act);
+
+        err   = (pt : _, !, !, !, !) - target;
+        grad1 = pt : !, _, !, !, !;
+        grad2 = pt : !, !, _, !, !;
+        grad3 = pt : !, !, !, _, !;
+        grad4 = pt : !, !, !, !, _;
+
+        p1_next = max(min1, min(max1, p1_act - upd1(err, grad1)));
+        p2_next = max(min2, min(max2, p2_act - upd2(err, grad2)));
+        p3_next = max(min3, min(max3, p3_act - upd3(err, grad3)));
+        p4_next = max(min4, min(max4, p4_act - upd4(err, grad4)));
+    };
+};
+
+optimize_5D(mdl, upd1, upd2, upd3, upd4, upd5, min1, max1, min2, max2, min3, max3, min4, max4, min5, max5, target, x) =
+    (loop ~ (_, _, _, _, _))
+with {
+    diff_mdl(p1, p2, p3, p4, p5) = fad(mdl(p1, p2, p3, p4, p5, x), (p1, p2, p3, p4, p5));
+
+    loop(p1_prev, p2_prev, p3_prev, p4_prev, p5_prev) = (p1_next, p2_next, p3_next, p4_next, p5_next)
+    with {
+        p1_act = max(min1, min(max1, p1_prev));
+        p2_act = max(min2, min(max2, p2_prev));
+        p3_act = max(min3, min(max3, p3_prev));
+        p4_act = max(min4, min(max4, p4_prev));
+        p5_act = max(min5, min(max5, p5_prev));
+
+        pt = diff_mdl(p1_act, p2_act, p3_act, p4_act, p5_act);
+
+        err   = (pt : _, !, !, !, !, !) - target;
+        grad1 = pt : !, _, !, !, !, !;
+        grad2 = pt : !, !, _, !, !, !;
+        grad3 = pt : !, !, !, _, !, !;
+        grad4 = pt : !, !, !, !, _, !;
+        grad5 = pt : !, !, !, !, !, _;
+
+        p1_next = max(min1, min(max1, p1_act - upd1(err, grad1)));
+        p2_next = max(min2, min(max2, p2_act - upd2(err, grad2)));
+        p3_next = max(min3, min(max3, p3_act - upd3(err, grad3)));
+        p4_next = max(min4, min(max4, p4_act - upd4(err, grad4)));
+        p5_next = max(min5, min(max5, p5_act - upd5(err, grad5)));
+    };
+};

@@ -7,7 +7,7 @@
 // *circular* convolution per frame. A linear-convolution / windowed STFT needs
 // il.interleave_hop + a COLA window (see ondemand_stft_pv_*).
 //
-// Requires -I <faustlibraries> (analyzers.lib, maths.lib) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers.lib, maths.lib) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

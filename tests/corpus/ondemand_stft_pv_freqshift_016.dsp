@@ -18,7 +18,7 @@
 // frequency shifter (below). A duration-changing stretch needs an external
 // rate-decoupling buffer (out of the synchronous model).
 //
-// Requires -I <faustlibraries> (analyzers, maths, oscillators) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers, maths, oscillators) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

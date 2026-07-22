@@ -208,10 +208,11 @@ pour réduire l'erreur.
 
 ## 4. Biquad auto-apprenant à cinq coefficients
 
-Exemple de conception illustratif. Le dépôt versionné couvre le biquad adaptatif
-avec RAD dans
-[`rad_tbptt_biquad1.dsp`](../tests/corpus/rad_tbptt_biquad1.dsp); la bibliothèque
-`optimizers.lib` utilisée ci-dessous n'appartient pas au contrat versionné.
+Cet exemple de conception exécutable complète le biquad adaptatif avec RAD de
+[`rad_tbptt_biquad1.dsp`](../tests/corpus/rad_tbptt_biquad1.dsp). La bibliothèque
+locale au projet [`optimizers.lib`](../libraries/optimizers.lib), utilisée
+ci-dessous, est versionnée avec `faust-rs`. Concaténer les blocs Faust de cette
+section et compiler le programme obtenu avec `-I libraries`.
 
 Cas d'usage: apprendre les cinq coefficients d'un biquad
 `b0, b1, b2, a1, a2` pour imiter une cible manipulée par l'utilisateur.
@@ -256,6 +257,21 @@ opts = optimize_5D(
     target,
     bruit
 );
+```
+
+On extrait ensuite les cinq paramètres appris, on reconstruit le modèle appris
+et on définit un `process` complet:
+
+```faust
+b0 = opts : _, !, !, !, !;
+b1 = opts : !, _, !, !, !;
+b2 = opts : !, !, _, !, !;
+a1 = opts : !, !, !, _, !;
+a2 = opts : !, !, !, !, _;
+
+modele = modele_biquad(b0, b1, b2, a1, a2, bruit);
+
+process = target, modele, b0, b1, b2, a1, a2;
 ```
 
 `optimize_5D` factorise le motif suivant:
@@ -326,7 +342,8 @@ de feedback, les approximations de circuits et les solveurs zéro-delay.
 
 ## 6. Contrôle actif de bruit avec FxLMS
 
-Exemple illustratif; il ne constitue pas un test de régression versionné.
+Cet exemple exécutable utilise un contrôleur à un coefficient et un modèle de
+chemin secondaire du premier ordre.
 
 Cas d'usage: adapter un coefficient de contrôle pour minimiser le bruit
 résiduel mesuré après un chemin secondaire. C'est le schéma classique FxLMS,
@@ -335,39 +352,35 @@ mais la dérivée est obtenue par FAD.
 ```faust
 import("stdfaust.lib");
 
-sq(x) = x * x;
 clamp(lo, hi, x) = min(hi, max(lo, x));
 secondaryPath(x) = fi.lowpass(1, 1200, x);
 
-process = err, y, w_monitor
+process(ref, dist) = (loop ~ _) : !, _, _, _
 with {
-    ref  = _;
-    dist = _;
-
     mu = hslider("Mu", 0.001, 0.000001, 0.05, 0.000001);
     reset = button("Reset");
+    filtered_ref = secondaryPath(ref);
 
-    w = w_state
+    loop(w_prev) = w_next, err, y, w_prev
     with {
-        init = 0.0;
-        next = clamp(-2.0, 2.0, w_state - mu * grad_w);
-        w_state = ba.if(reset, init, next) ~ _;
+        y = w_prev * ref;
+        err = dist + secondaryPath(y);
+
+        sensitivity = fad(w_prev * filtered_ref, w_prev) : !, _;
+        grad_w = 2.0 * err * sensitivity;
+
+        updated = clamp(-2.0, 2.0, w_prev - mu * grad_w);
+        w_next = select2(reset, updated, 0.0);
     };
-
-    y = w * ref;
-    y_sec = secondaryPath(y);
-    err = dist + y_sec;
-    loss = sq(err);
-
-    grad_w = fad(loss, w) : !, _;
-    w_monitor = w;
 };
 ```
 
 Ce que montre l'exemple:
 
-- le chemin secondaire peut faire partie du graphe différentié;
-- le gradient de la perte est disponible échantillon par échantillon;
+- le chemin secondaire physique et la récursion canonique restent hors de
+  l'expression différentiée;
+- FAD calcule la sensibilité du contrôleur à partir de la référence filtrée;
+- l'erreur mesurée complète le gradient FxLMS échantillon par échantillon;
 - le coefficient adaptatif reste borné;
 - le bouton `Reset` remet l'apprentissage à zéro.
 

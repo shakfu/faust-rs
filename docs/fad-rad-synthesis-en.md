@@ -204,10 +204,11 @@ model, observe a target, and let the DSP adjust its parameters to reduce error.
 
 ## 4. Self-Training Five-Coefficient Biquad
 
-This is an illustrative design example. The tracked repository covers an
-adaptive biquad with RAD in
-[`rad_tbptt_biquad1.dsp`](../tests/corpus/rad_tbptt_biquad1.dsp); the
-`optimizers.lib` library used below is not part of the versioned contract.
+This executable design example complements the adaptive biquad with RAD in
+[`rad_tbptt_biquad1.dsp`](../tests/corpus/rad_tbptt_biquad1.dsp). The
+project-local [`optimizers.lib`](../libraries/optimizers.lib) library used below
+is versioned with `faust-rs`. Concatenate the Faust blocks in this section and
+compile the resulting program with `-I libraries`.
 
 Use case: learn the five coefficients `b0, b1, b2, a1, a2` of a biquad to
 imitate a user-controlled target.
@@ -252,6 +253,21 @@ opts = optimize_5D(
     target,
     noise
 );
+```
+
+Extract the five learned parameters, rebuild the learned model, and expose a
+complete `process`:
+
+```faust
+b0 = opts : _, !, !, !, !;
+b1 = opts : !, _, !, !, !;
+b2 = opts : !, !, _, !, !;
+a1 = opts : !, !, !, _, !;
+a2 = opts : !, !, !, !, _;
+
+model = biquad_model(b0, b1, b2, a1, a2, noise);
+
+process = target, model, b0, b1, b2, a1, a2;
 ```
 
 `optimize_5D` factors out this pattern:
@@ -312,7 +328,8 @@ solvers.
 
 ## 6. Active Noise Control with FxLMS
 
-This example is illustrative and is not a versioned regression fixture.
+This executable example uses a one-coefficient controller and a first-order
+secondary-path model.
 
 Use case: adapt a control coefficient to minimize residual noise measured after
 a secondary path. This is the classic FxLMS structure, with the derivative
@@ -321,38 +338,33 @@ obtained from FAD.
 ```faust
 import("stdfaust.lib");
 
-sq(x) = x * x;
 clamp(lo, hi, x) = min(hi, max(lo, x));
 secondaryPath(x) = fi.lowpass(1, 1200, x);
 
-process = err, y, w_monitor
+process(ref, dist) = (loop ~ _) : !, _, _, _
 with {
-    ref  = _;
-    dist = _;
-
     mu = hslider("Mu", 0.001, 0.000001, 0.05, 0.000001);
     reset = button("Reset");
+    filtered_ref = secondaryPath(ref);
 
-    w = w_state
+    loop(w_prev) = w_next, err, y, w_prev
     with {
-        init = 0.0;
-        next = clamp(-2.0, 2.0, w_state - mu * grad_w);
-        w_state = ba.if(reset, init, next) ~ _;
+        y = w_prev * ref;
+        err = dist + secondaryPath(y);
+
+        sensitivity = fad(w_prev * filtered_ref, w_prev) : !, _;
+        grad_w = 2.0 * err * sensitivity;
+
+        updated = clamp(-2.0, 2.0, w_prev - mu * grad_w);
+        w_next = select2(reset, updated, 0.0);
     };
-
-    y = w * ref;
-    y_sec = secondaryPath(y);
-    err = dist + y_sec;
-    loss = sq(err);
-
-    grad_w = fad(loss, w) : !, _;
-    w_monitor = w;
 };
 ```
 
-The secondary path is part of the differentiated graph, the loss gradient is
-available sample by sample, the adaptive coefficient is constrained, and the
-Reset button restarts learning.
+The physical secondary path and the canonical learning recursion stay outside
+the differentiated expression. FAD computes the controller sensitivity from
+the filtered reference; the measured error completes the FxLMS gradient. The
+adaptive coefficient is constrained, and the Reset button restarts learning.
 
 ## 7. Host-Driven Gain-and-Bias Regression with RAD
 

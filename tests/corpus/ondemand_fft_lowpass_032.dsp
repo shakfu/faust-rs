@@ -8,7 +8,7 @@
 // exactly one frame, so reconstruction with an identity FX is exact (COLA holds
 // trivially). A real windowed / overlap-add STFT would use il.interleave_hop.
 //
-// Requires -I <faustlibraries> (analyzers.lib) and -I . (interleave.lib).
+// Requires -I <faustlibraries> (analyzers.lib) and -I libraries (interleave.lib).
 
 il = library("interleave.lib");
 an = library("analyzers.lib");

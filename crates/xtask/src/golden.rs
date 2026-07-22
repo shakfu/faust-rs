@@ -11,10 +11,11 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// Returns `false` for corpus fixtures that cannot be golden-checked because
-/// they import the repo-root `interleave.lib` (the spectral FFT-on-`ondemand`
-/// examples). The golden import search path is `tests/corpus` +
-/// `/usr/local/share/faust` (see `default_import_search_paths`), which does not
-/// include the repository root, so `library("interleave.lib")` never resolves.
+/// they import the project-local `libraries/interleave.lib` (the spectral
+/// FFT-on-`ondemand` examples). The golden import search path contains
+/// `tests/corpus` and `/usr/local/share/faust` (see
+/// `default_import_search_paths`), but not `libraries`, so
+/// `library("interleave.lib")` never resolves.
 /// These examples are exercised by the runtime tests
 /// (`crates/compiler/tests/interleave_fft.rs`, the impulse-runner effect
 /// checks) instead of by golden snapshots.
