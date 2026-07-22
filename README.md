@@ -484,15 +484,18 @@ Use the following variables to increase the evaluation depth stack:
 | `transform` | Signal preparation and signal-to-FIR lowering |
 | `fir` | Faust Intermediate Representation |
 | `foreign-call` | Raw C ABI foreign-function invocation bridge |
-| `codegen` | C, C++, interpreter, Cranelift, WASM, and Julia backend generation |
+| `codegen` | AssemblyScript, C, C++, Rust, interpreter, Cranelift, WASM, and Julia backend generation |
 | `draw` | SVG block-diagram rendering |
 | `doc` | Documentation/reporting scaffold |
 | `utils` | Shared FFI utilities |
+| `tree-ffi` | Shared opaque tree-handle support for Box and Signal C APIs |
 | `compiler` | Top-level compiler facade and CLI |
+| `impulse-runner` | Interpreter-backed scalar impulse-test runner |
 | `xtask` | Developer and CI automation |
 | `interp-ffi` | Interpreter backend C/C++ API |
 | `cranelift-ffi` | Experimental Cranelift backend C/C++ API |
 | `box-ffi` | Box manipulation C/C++ API |
+| `signal-ffi` | Signal manipulation C/C++ API |
 | `faust-ffi` | Unified `libfaust` distribution crate |
 | `wasm-ffi` | Raw WASM ABI for `faustwasm` embedded compiler mode |
 

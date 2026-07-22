@@ -72,7 +72,8 @@ FFI mechanics:
 - `freeCMemory` string helper
 - `argv` decoding
 - error buffer writing (`4096` bytes)
-- minimal shared FFI option parsing (`-I <path>`, `-cn <name>`)
+- shared FFI option parsing (`-I`, `-cn`, `-double`, `-vec`, `-vs`, `-lv`,
+  and `-ss`)
 
 Backend-specific semantics remain local to this crate (factory/runtime behavior,
 `.fbc` serialization semantics, interpreter execution).

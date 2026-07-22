@@ -5,7 +5,8 @@ Developer and CI automation for the `faust-rs` workspace.
 `xtask` is not part of the compiler runtime. It hosts repository maintenance
 workflows: golden snapshot generation/checks, runtime trace validation,
 backend-alignment smoke runs, differential reports, code-graph generation, and
-the `faustwasm` compiler-module build helper.
+the `faustwasm` compiler-module build helper, plus vector certification and
+structure checks.
 
 ## Usage
 
@@ -60,15 +61,20 @@ dot -V
 | `libfaust-api-matrix` | Generate Box and Signal C API parity matrices from libfaust reference headers |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
+| `corpus-status-query` | Query selected or all corpus cases in human or JSON form |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
 | `c-fastlane-diff-report` | Write C fast-lane diff report |
 | `backend-full-corpus-diff-report` | Write full corpus diff for all backends |
 | `table-fastlane-diff-report` | Write table fast-lane diff report |
+| `libfaust-export-check` | Build unified `libfaust`, audit exported symbols, and syntax-check C/C++ clients |
+| `p7-matrix-report` | Generate the executable-backend matrix from impulse-test artifacts |
 | `vector-coverage-merge` | Validate and merge `count_vector_corpus` JSON reports into the checked vector-coverage baseline |
 | `vector-coverage-check` | Recompile every baseline-certified mode/DSP pair and require checked vector chunk-driver structure |
 | `vector-compile-budget-check` | Measure the versioned release scalar/vector compile-time basket and reject unexplained regressions |
 | `vector-interp-opt-check` | Compare interpreter `opt_level=0` and max optimization on representative checked-vector cases |
 | `lockstep-simd-check` | Require Clang to emit four-wide LLVM floating-point operations for complex lockstep corpus cases |
+| `structure-check` | Validate repository layout, checker isolation, and source-size contracts |
+| `emission-determinism` | Repeat selected compilations and report nondeterministic output |
 
 ## Vector Coverage Retention
 
@@ -114,6 +120,7 @@ cargo run --release -p xtask -- vector-compile-budget-check
 | `FAUST_CPP_BIN` | `golden-gen-cpp`, `interp-trace-dump-cppfbc`, `interp-trace-gen-cppfbc` | Path to the reference C++ `faust` binary |
 | `GOLDEN_REF` | `golden-check` | `rust` (default) or `cpp` |
 | `CLANGXX` | `lockstep-simd-check` | Clang C++ executable used to emit optimized LLVM IR (default: `clang++`) |
+| `CC` / `CXX` | `libfaust-export-check` | C11/C++17 compilers used for maintained-header smoke checks |
 
 ## Design Invariants
 
@@ -440,7 +447,7 @@ crates.
 
 ```bash
 cargo run -p xtask -- libfaust-api-matrix \
-  --cpp-root /Users/letz/Developpements/RUST/faust \
+  --cpp-root /path/to/faust \
   --out porting/generated
 ```
 

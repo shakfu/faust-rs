@@ -53,10 +53,10 @@ duplicating labels and ranges in DSP signal nodes.
 |---|---|
 | `match_ui(arena, id)` | Structural decode of one UI tree node into `UiMatch` |
 | `UiMatch<'a>` | Decoded UI node view returned by `match_ui` |
-| `normalize_widget_label_path(label)` | Normalize `/`-separated widget label paths |
-| `normalize_group_label_navigation(label)` | Normalize group label navigation segments |
+| `normalize_widget_label_path(label, current_groups)` | Normalize a widget path relative to the current group stack |
+| `normalize_group_label_navigation(label, current_groups, kind)` | Normalize group navigation relative to the current group stack |
 | `split_label_metadata(label)` | Split a `"label [key:val]"` string into label + metadata |
-| `canonicalize_group_spec(spec)` | Canonicalize a `UiGroupSpec` (normalize segments) |
+| `canonicalize_group_spec(segment)` | Convert one normalized path segment into a `UiGroupSpec` |
 
 ### Utilities
 

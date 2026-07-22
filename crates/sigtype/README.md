@@ -23,24 +23,24 @@ annotator (`TypeAnnotator`) for full signal-graph inference.
 | Item | Description |
 |---|---|
 | `SigType` | Unified signal type: `Simple`, `Table`, or `Tuplet` |
-| `SimpleType` | Scalar type carrying all five lattice qualifiers + interval |
+| `SimpleType` | Scalar type carrying five lattice qualifiers, interval, and fixed-point resolution |
 | `TableType` | Indexed table type with content `SigType` |
 | `TupletType` | Aggregate of multiple component `SigType`s |
-| `Nature` | `Integer` / `Real` / `Any` (wildcard) |
-| `Variability` | `Constant` / `Parameter` / `Block` / `Sample` |
-| `Computability` | `Constant` / `Computable` / `General` |
-| `Vectorability` | `Vect` / `Scalar` |
-| `Boolean` | `False` / `True` / `Unknown` |
+| `Nature` | `Int` / `Real` / `Any` (foreign-function wildcard) |
+| `Variability` | `Konst` / `Block` / `Samp` |
+| `Computability` | `Comp` / `Init` / `Exec` |
+| `Vectorability` | `Vect` / `Scal` / `TrueScal` |
+| `Boolean` | `Num` / `Bool` |
 | `Res` | Quantization resolution (LSB bit position) |
 
 ### Factories
 
 | Function | Description |
 |---|---|
-| `make_simple(nature, variability, computability, vectorability, boolean)` | Create a `SimpleType` |
-| `make_simple_with_res(…, res)` | Create a `SimpleType` with explicit resolution |
+| `make_simple(nature, variability, computability, vectorability, boolean, interval)` | Create a `SimpleType` |
+| `make_simple_with_res(…, interval, res)` | Create a `SimpleType` with explicit resolution |
 | `make_table_type(content)` | Create a `TableType` |
-| `make_table_type_with(content, nature, variability)` | Create a `TableType` with overrides |
+| `make_table_type_with(content, nature, variability, computability, vectorability, boolean, interval)` | Create a `TableType` with explicit aggregate qualifiers |
 | `make_tuplet(components)` | Create a `TupletType` |
 | `make_maximal()` | Create the lattice top element |
 

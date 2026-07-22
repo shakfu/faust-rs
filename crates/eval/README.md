@@ -44,11 +44,11 @@ evaluated box tree ready for `propagate`.
 | Item | Description |
 |---|---|
 | `EvalError` | Typed error covering all evaluation failure modes |
-| `EvalStats` | Counters collected during evaluation (reductions, steps, …) |
+| `EvalStats` | Environment, lookup, node-visit, loop-depth, and definition-name statistics |
 | `Environment` | Lexical environment (name → `TreeId`) |
 | `EvalSourceContext` | Source-location tracking context passed to evaluator |
 | `LoopDetector` | Per-symbol expansion depth guard (mirrors C++ `loopDetector`) |
-| `SamplePrecision` | `single` / `double` precision selector |
+| `SamplePrecision` | `Float32` / `Float64` precision selector |
 | `SymId` | Interned symbol identifier |
 | `EnvId` | Environment frame identifier |
 

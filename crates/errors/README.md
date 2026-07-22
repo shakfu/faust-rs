@@ -15,7 +15,7 @@ Structured diagnostics model shared by every stage of the `faust-rs` compiler pi
 |---|---|
 | `Diagnostic` | Single diagnostic with severity, stage, message, notes, labels |
 | `DiagnosticBundle` | Aggregated set of diagnostics with error count |
-| `DiagnosticCode` | Stable string identifier (`FRS-EVAL-001`, …) |
+| `DiagnosticCode` | Stable string identifier (`FRS-EVAL-0001`, …) |
 | `Severity` | `Error` / `Warning` / `Remark` |
 | `Stage` | Pipeline stage attribution (`Parser`, `Eval`, `Propagate`, …) |
 | `SourceSpan` / `Label` | Source location and annotation |
@@ -29,5 +29,7 @@ Structured diagnostics model shared by every stage of the `faust-rs` compiler pi
 
 ## Position in the pipeline
 
-All crates depend on `errors`.  None of them render diagnostics — that is the
-responsibility of the final consumer (`faust-rs` binary or external tooling).
+Compiler stages that emit structured diagnostics depend on `errors`; leaf IR,
+runtime, FFI, and tooling crates may use their own typed errors instead. The
+`errors` crate only models diagnostics: final rendering belongs to the
+`faust-rs` binary or another consumer.

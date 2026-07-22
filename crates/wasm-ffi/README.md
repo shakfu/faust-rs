@@ -13,15 +13,16 @@ The exported ABI is intentionally small:
 - one compile request in
 - one owned result handle out
 - raw pointer/length accessors for `{ wasm, json, compile_options }`
-- helper text-result calls for `getInfos(...)` and the current explicit stubs
+- handle-based helper calls for `getInfos(...)`, `expandDSP(...)`, and
+  `generateAuxFiles(...)`
 
 ## Build the compiler module
 
 From the workspace root:
 
 ```bash
-$HOME/.cargo/bin/rustup target add wasm32-unknown-unknown
-$HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
+rustup target add wasm32-unknown-unknown
+cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
 This command:
@@ -35,14 +36,14 @@ This command:
 Use `--debug` to build the non-release artifact:
 
 ```bash
-$HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module --debug
+cargo run -p xtask -- build-faustwasm-compiler-module --debug
 ```
 
 If you want to force a specific standard-library root into the embedded bundle:
 
 ```bash
 FAUST_RS_EMBEDDED_LIB_ROOT=/path/to/faust/libraries \
-  $HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
+  cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
 If a `faustwasm` source string depends on project-local `.lib` files, embed
@@ -50,7 +51,7 @@ both the local root and the standard-library root through `FAUST_LIB_PATH`:
 
 ```bash
 FAUST_LIB_PATH=/path/to/project:/path/to/faust/libraries \
-  $HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
+  cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
 The default release artifact is:
@@ -140,8 +141,8 @@ Import precedence:
 | `getInfos("version")` | implemented |
 | `getInfos("help")` | implemented |
 | `getInfos("libdir"\\|"includedir"\\|"archdir"\\|"dspdir"\\|"pathslist")` | supported; mirrors C++ Faust directory-info queries |
-| `expandDSP(...)` | API present, currently returns the Rust service result when implemented for the requested shape, otherwise `unsupported` |
-| `generateAuxFiles(...)` | API present for `-cpp`, `-c`, `-wasm`, `-json`, and `-svg`; SVG artifacts are generated in memory through `draw::draw_schema_to_memory` |
+| `expandDSP(...)` | Implemented as Rust frontend validation plus source passthrough; invalid/unsupported requests return an explicit error |
+| `generateAuxFiles(...)` | Implemented for `-cpp`, `-c`, `-wasm`, `-json`, `-svg`, and `-lang asc`; SVG artifacts are generated in memory through `draw::draw_schema_to_memory` |
 
 That `.wasm` file is the compiler-module artifact that the `faustwasm`
 embedded-compiler path is expected to load.

@@ -22,7 +22,7 @@ deduplication.
 |---|---|
 | `TreeArena` | Owns all nodes; provides interning and child-list management |
 | `TreeId` | Lightweight copyable node handle |
-| `NodeKind` | Node payload: `Int(i64)`, `Float(u64)`, `Symbol(&str)`, `Nil` |
+| `NodeKind` | Node payload: `Nil`, `Cons`, `Symbol`, `StringLiteral`, `Int(i64)`, `FloatBits(u64)`, or interned `Tag(u32)` |
 | `PropertyStore` | Node-keyed side-channel storage (parser `def`/`use` props, …) |
 | `de_bruijn_rec` / `de_bruijn_ref` | De Bruijn recursive-tree builders |
 | `sym_rec` / `sym_ref` | Symbolic recursive-tree builders |

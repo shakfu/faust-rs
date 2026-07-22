@@ -9,15 +9,16 @@ live here.
 
 ## Position in the pipeline
 
-``` 
+```text
 parser → boxes → eval → propagate → signals → transform → fir → [codegen]
                                                                 → AssemblyScript source
                                                                 → C source
                                                                 → C++ source
+                                                                → Rust source
                                                                 → .fbc bytecode
                                                                 → native C++ (AOT from .fbc)
                                                                 → Cranelift JIT
-                                                                → WASM binary + JSON
+                                                                → WASM binary/WAT + JSON
                                                                 → Julia source
                                                                 → … (scaffolded)
 ```
@@ -32,6 +33,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `backends::cranelift` | *(new — no C++ equivalent)* |
 | `backends::interp` | `compiler/generator/interpreter/` |
 | `backends::julia` | `compiler/generator/julia/` |
+| `backends::rust` | `compiler/generator/rust/` |
 | `backends::wasm` | `compiler/generator/wasm/` + `code_container.hh` JSON path |
 | Other backends | `compiler/generator/<backend>/` *(planned)* |
 
@@ -88,7 +90,7 @@ let asc_source = generate_asc_module(&store, root_id, &opts)?;
 
 | Item | Description |
 |---|---|
-| `AscOptions` | `class_name`, `quad_type_name`, `fixed_type_name`, `json` |
+| `AscOptions` | `class_name`, `double_precision`, `quad_type_name`, `fixed_type_name`, `json` |
 | `generate_asc_module` | `(&FirStore, FirId, &AscOptions) → Result<String, CodegenError>` |
 | `CodegenError` | Codes `FRS-CGEN-ASC-0001..0003` |
 
@@ -142,7 +144,7 @@ let cpp_source = generate_cpp_module(&store, root_id, &opts)?;
 
 | Item | Description |
 |---|---|
-| `CppOptions` | `class_name`, `namespace`, `quad_type_name`, `fixed_type_name` |
+| `CppOptions` | `class_name`, `namespace`, `super_class_name`, `quad_type_name`, `fixed_type_name` |
 | `generate_cpp_module` | `(&FirStore, FirId, &CppOptions) → Result<String, CodegenError>` |
 | `CodegenError` | Codes `FRS-CGEN-CPP-0001..0003` |
 
@@ -163,7 +165,7 @@ let jit = generate_cranelift_module(&store, root_id, &opts)?;
 
 | Item | Description |
 |---|---|
-| `CraneliftOptions` | `opt_level`, `target_triple`, `enable_nan_canonicalization`, `fail_on_subset_gap` |
+| `CraneliftOptions` | Optimization, target/debug, strict-subset, external data/function symbol, and precision settings |
 | `CraneliftOptLevel` | `None`, `Speed` (default), `SpeedAndSize` |
 | `generate_cranelift_module` | Main entry point; returns compiled JIT module |
 | `diagnose_cranelift_compute_subset_gap` | Reports unsupported FIR nodes |
@@ -192,7 +194,7 @@ emitter (see below).
 use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
 
 let opts = InterpOptions { opt_level: 4, module_name: None };
-let factory = generate_interp_module(&store, root_id, &opts)?;
+let factory = generate_interp_module::<f32>(&store, root_id, &opts)?;
 let mut buf = Vec::new();
 write_fbc(&factory, &mut buf)?;
 ```
@@ -217,7 +219,7 @@ write_fbc(&factory, &mut buf)?;
 | `FbcDspInstance` | Runtime DSP state; provides `init` and `compute` |
 | `FbcBlockArena` | Arena of `FbcBlock`s indexed by `BlockId` |
 | `FbcInstruction<R>` | Single FBC instruction (`opcode + offsets + branches`) |
-| `FbcOpcode` | 294-variant enum of all interpreter opcodes |
+| `FbcOpcode` | 298-variant enum of all interpreter opcodes |
 | `FbcReal` | Trait for `f32`/`f64` dispatch |
 | `write_fbc` / `read_fbc` | `.fbc` text serialization |
 | `optimize_block` | Peephole optimizer |
@@ -236,7 +238,7 @@ at the output side.
 
 The generator performs a single pass over each of the 6 code blocks,
 maintaining a **virtual stack** of named C++ temporaries (`fRN` for reals,
-`iIN` for integers). All 294 FBC opcodes are covered.
+`iIN` for integers). All 298 FBC opcodes are covered.
 
 #### Control-flow translation
 
@@ -355,6 +357,38 @@ cargo run -p compiler -- --lang julia -double my.dsp -o mydsp.jl
 
 ---
 
+### Rust backend — `backends::rust`
+
+Emits Faust-compatible Rust source using the host-provided `F32`, `F64`,
+`FaustFloat`, `ParamIndex`, `UI`, `Meta`, and `FaustDsp` contracts. The output
+is intended for inclusion in a Faust Rust architecture rather than as a
+standalone private runtime.
+
+```rust
+use codegen::backends::rust::{RustOptions, RustRealType, generate_rust_module};
+
+let opts = RustOptions {
+    class_name: Some("mydsp".to_owned()),
+    faust_float_type: RustRealType::Float32,
+};
+let rust_source = generate_rust_module(&store, root_id, &opts)?;
+```
+
+| Item | Description |
+|---|---|
+| `RustOptions` | `class_name`, `faust_float_type` |
+| `RustRealType` | `Float32` (default) or `Float64` |
+| `generate_rust_module` | `(&FirStore, FirId, &RustOptions) -> Result<String, CodegenError>` |
+| `CodegenError` | Codes `FRS-CGEN-RUST-0001..0003` |
+
+CLI entry point:
+
+```sh
+cargo run -p compiler -- --lang rust my.dsp -o mydsp.rs
+```
+
+---
+
 ### WASM backend — `backends::wasm`
 
 Lowers a FIR module to a binary `.wasm` artifact plus the matched companion
@@ -432,6 +466,10 @@ access.
 | `generate_wasm_module_with_context` | Same as above, plus `&WasmJsonContext` |
 | `WasmBackendError` | Codes `FRS-CGEN-WASM-0001..0005` |
 | `WasmMemoryLayout` | Runtime prefix / I/O zone / JSON placement descriptor |
+
+`emit_wat` and `WasmModule::wat_text` are retained in the Rust API but are not
+populated by the binary emitter yet. The compiler CLI's `-lang wast` path
+converts the emitted binary module to text separately.
 
 CLI entry points live in `compiler`:
 

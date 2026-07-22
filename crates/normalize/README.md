@@ -31,10 +31,10 @@ normalform   ← pipeline coordinator (de-Bruijn → symbolic → typed → prom
 
 | Item | Description |
 |---|---|
-| `normalform::prepare_signals(arena, sigs, opts)` | Phase 1 normal-form preparation (de-Bruijn → symbolic → typed → promoted) |
-| `normalform::prepare_signals_multi(arena, sigs, opts)` | Multi-output variant of `prepare_signals` |
-| `normalform::promote_signals(arena, sigs)` | Signal promotion pass only |
-| `normalform::promote_signals_fastlane(arena, sigs)` | Promotion fast path for `transform::signal_fir` |
+| `normalform::prepare_signals(arena, ui, sig, opts)` | Normal-form preparation for one signal (de-Bruijn → symbolic → typed → promoted) |
+| `normalform::prepare_signals_multi(arena, ui, sigs, opts)` | Multi-output variant of `prepare_signals` |
+| `normalform::promote_signals(arena, types, sigs)` | Signal promotion pass using canonical inferred types |
+| `normalform::promote_signals_fastlane(arena, types, sigs)` | Fallible promotion path used by `transform::signal_fir` |
 | `normalform::NormalFormOpts` | Options controlling the preparation pipeline |
 | `normalform::NormalFormError` | Typed error covering recursion and type failures |
 | `simplify_const(arena, sig)` | Fold constant sub-expressions in a signal tree |

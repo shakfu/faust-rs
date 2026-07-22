@@ -4,8 +4,8 @@ C/C++ FFI export crate for the experimental Cranelift backend (`cranelift_dsp` f
 
 ## Purpose
 
-This crate hosts the Rust-side C ABI and C++ wrapper scaffolding for a Faust
-backend implemented with Cranelift.
+This crate hosts the Rust-side C ABI and C++ wrappers for a Faust backend
+implemented with Cranelift.
 
 It mirrors the overall strategy used by `llvm_dsp` / `interpreter_dsp`:
 
@@ -16,14 +16,14 @@ It mirrors the overall strategy used by `llvm_dsp` / `interpreter_dsp`:
 
 ## Current status (important)
 
-This crate is **experimental** and still in scaffold/bring-up mode.
+This crate is **experimental** and remains in active bring-up.
 
 What is already implemented:
 
-- executable C ABI scaffold
+- executable C ABI
 - factory/instance opaque types
 - minimal factory cache
-- source factory creation preflight through `compiler -> FIR -> codegen::cranelift`
+- source factory creation through `compiler -> FIR -> codegen::cranelift`
 - bitcode family scaffold (temporary text format, for API-path validation)
 - FIR-derived native runtime descriptor for state/UI/meta handling
 - native JIT-backed `compute` path for file/string factory constructors
@@ -60,11 +60,11 @@ Headers are in `include/`:
 
 Related files:
 
-- `cpp/cranelift-dsp.cpp` (C++ wrapper bridge scaffold)
+- `cpp/cranelift-dsp.cpp` (translation unit for the inline C++ wrapper)
 - `tests/header-smoke/` (syntax smoke for C/C++ headers)
 
-The headers document the currently exposed scaffold surface and explicitly list
-V1-deferred families where relevant.
+The headers document the currently exposed compatibility surface and explicitly
+list V1-deferred families where relevant.
 
 ## Internal structure
 
@@ -75,8 +75,8 @@ V1-deferred families where relevant.
   - global factory cache wrappers over `utils::FactoryCache<T>`
 - `src/factory.rs`
   - Cranelift factory `extern "C"` API
-  - compiler/FIR preflight
-  - scaffold bitcode family
+  - compiler/FIR/JIT factory construction
+  - temporary bitcode family
 - `src/instance.rs`
   - instance lifecycle / UI / metadata / compute exports
 - `src/runtime.rs`
@@ -95,7 +95,8 @@ This crate uses shared backend-agnostic FFI helpers from `crates/utils`:
 - error buffer writing (`4096` bytes)
 - C-string argument decoding helpers
 - empty `char**` helper
-- minimal FFI option parsing (`-I <path>`, `-cn <name>`)
+- FFI option parsing (`-I`, `-cn`, `-double`, `-vec`, `-vs`, `-lv`, and
+  `-ss`)
 
 Cranelift-specific factory/runtime state and backend semantics remain local to
 this crate.
@@ -123,7 +124,7 @@ cargo test -p cranelift-ffi -- --nocapture
 Header smoke checks (examples):
 
 ```bash
-cc -fsyntax-only -I crates/cranelift-ffi/include -I /path/to/faust/architecture \
+cc -fsyntax-only -I crates/cranelift-ffi/include \
   crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_c_header_smoke.c
 
 c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /path/to/faust/architecture \
@@ -133,12 +134,12 @@ c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /path/to/faust/a
 ## Known limitations
 
 - Some LLVM-specific API families are intentionally omitted/deferred in V1
-  (target getters, LLVM IR/machine/object serialization, memory-manager hooks,
-  foreign-function registration).
+  (target getters, LLVM IR/machine/object serialization, and memory-manager
+  hooks). Cranelift foreign-function registration is implemented separately.
 - The bitcode API family currently uses a temporary scaffold format marker
   (`CRANELIFT_FFI_SCAFFOLD_V1`) and is not the final backend serialization.
-- Runtime behavior is still progressing toward a fully operational Cranelift
-  backend path.
+- Runtime behavior is still progressing toward full Interpreter/C++ backend
+  parity across the complete Faust language and runtime surface.
 
 ## Related planning docs
 

@@ -10,10 +10,10 @@ signals/source, backed by Rust `boxes::BoxBuilder` and `boxes::match_box`.
   (`CboxPar*`, `CboxSeq`, `CboxSplit`, `CboxMerge`, `CboxRec`, `CboxRoute`),
   tables, selectors, UI widgets, soundfiles, waveforms, and foreign
   primitives (`CboxFFun`).
-- Exposes a matcher family (`CisBox*`, 29 predicates including `CisBoxPrim0..4`,
-  `CisBoxAppl`, `CisBoxAccess`, `CisBoxMetadata`). Some advanced predicates are
-  mapped to the nearest Rust IR equivalent when an exact node kind does not yet
-  exist in this port.
+- Exposes the broad matcher family declared by the maintained C header,
+  including `CisBoxPrim0..5`, `CisBoxAppl`, `CisBoxAccess`, and
+  `CisBoxMetadata`. Some advanced predicates are mapped to the nearest Rust IR
+  equivalent when an exact node kind does not yet exist in this port.
 - Exposes the pipeline-conversion helpers:
   - `CDSPToBoxes` — compile DSP source text to a box graph,
   - `CboxesToSignals` / `CboxesToSignals2` — propagate a box graph to signals,

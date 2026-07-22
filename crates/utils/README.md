@@ -4,7 +4,7 @@ Shared FFI utilities for Rust-side Faust backend crates.
 
 Provides common C ABI types (`UIGlue`, `MetaGlue`), heap allocation helpers,
 error buffer writing, and CLI argument parsing used by `interp-ffi`,
-`cranelift-ffi`, and `box-ffi`.
+`cranelift-ffi`, `box-ffi`, and `signal-ffi`.
 
 ## Public API
 
@@ -40,7 +40,7 @@ error buffer writing, and CLI argument parsing used by `interp-ffi`,
 
 | Item | Description |
 |---|---|
-| `FfiCompileArgs` | Parsed CLI-like options: `-I`, `-cn`, `-double` |
+| `FfiCompileArgs` | Parsed CLI-like options: `-I`, `-cn`, `-double`, `-vec`, `-vs`, `-lv`, and `-ss` |
 | `parse_ffi_compile_args(argv)` | Parse a string slice into `FfiCompileArgs` |
 
 ### Factory caching
