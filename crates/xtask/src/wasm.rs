@@ -10,6 +10,9 @@ use super::*;
 // `build-faustwasm-compiler-module`
 // ---------------------------------------------------------------------------
 
+const CARGO_WASM_MODULE_NAME: &str = "faust_wasm_ffi.wasm";
+const DISTRIBUTED_WASM_MODULE_NAME: &str = "libfaust-rs.wasm";
+
 /// Parsed options for the `build-faustwasm-compiler-module` workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FaustwasmCompilerModuleOptions {
@@ -81,11 +84,13 @@ pub(crate) fn build_faustwasm_compiler_module(
         );
     }
 
-    let module_path = root
+    let artifact_dir = root
         .join("target")
         .join("wasm32-unknown-unknown")
-        .join(profile)
-        .join("faust_wasm_ffi.wasm");
+        .join(profile);
+    let cargo_module_path = artifact_dir.join(CARGO_WASM_MODULE_NAME);
+    let module_path = artifact_dir.join(DISTRIBUTED_WASM_MODULE_NAME);
+    publish_wasm_compiler_module(&cargo_module_path, &module_path)?;
     let bytes = fs::read(&module_path)?;
     verify_wasm_ffi_exports(&bytes)?;
     println!(
@@ -93,6 +98,37 @@ pub(crate) fn build_faustwasm_compiler_module(
         workspace_relative_path(&module_path)
     );
     Ok(())
+}
+
+/// Publishes Cargo's crate-normalized artifact under the stable distribution
+/// name consumed by WebAssembly hosts.
+///
+/// Cargo derives the linked filename from the Rust library target and emits
+/// `faust_wasm_ffi.wasm`; Rust target names cannot directly express the
+/// hyphenated `libfaust-rs.wasm` distribution contract. Re-running the workflow
+/// is supported when Cargo considers the raw artifact fresh and only the
+/// already-published module is present.
+pub(crate) fn publish_wasm_compiler_module(
+    cargo_module_path: &Path,
+    distributed_module_path: &Path,
+) -> Result<(), io::Error> {
+    if cargo_module_path.is_file() {
+        if distributed_module_path.exists() {
+            fs::remove_file(distributed_module_path)?;
+        }
+        fs::rename(cargo_module_path, distributed_module_path)?;
+        return Ok(());
+    }
+    if distributed_module_path.is_file() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "Cargo WebAssembly artifact not found at {}",
+            cargo_module_path.display()
+        ),
+    ))
 }
 
 /// Lists the minimum raw export surface expected by the `faustwasm`

@@ -9,13 +9,13 @@ Rust side (`faust-rs`) and TypeScript integration (`faustwasm`) are both complet
 
 Make Rust-generated SVG block diagrams usable from
 `/Users/letz/Developpements/faust-wasm/faustwasm` when the embedded compiler is
-the raw Rust `faust_wasm_ffi.wasm` module.
+the raw Rust `libfaust-rs.wasm` module.
 
 This plan covers the integration boundary between:
 
 - `crates/draw`: Rust SVG block-diagram renderer,
 - `crates/compiler`: `generate_aux_files(...)` service facade,
-- `crates/wasm-ffi`: raw WebAssembly ABI exported by `faust_wasm_ffi.wasm`,
+- `crates/wasm-ffi`: raw WebAssembly ABI exported by `libfaust-rs.wasm`,
 - `faustwasm`: TypeScript adapter and `FaustSvgDiagrams` helper.
 
 ## Current State

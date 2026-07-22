@@ -27,6 +27,7 @@ $HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
 This command:
 
 - builds `wasm-ffi` for `wasm32-unknown-unknown`
+- publishes Cargo's crate-normalized output as `libfaust-rs.wasm`
 - verifies that the emitted module exports the raw ABI expected by the
   `faustwasm` Rust adapter
 - prints the output path under `target/wasm32-unknown-unknown/`
@@ -55,7 +56,7 @@ FAUST_LIB_PATH=/path/to/project:/path/to/faust/libraries \
 The default release artifact is:
 
 ```text
-target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm
+target/wasm32-unknown-unknown/release/libfaust-rs.wasm
 ```
 
 ## Raw ABI usage

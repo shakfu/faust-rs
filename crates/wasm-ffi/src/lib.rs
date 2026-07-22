@@ -32,7 +32,7 @@
 //! `cargo run -p xtask -- build-faustwasm-compiler-module`
 //!
 //! That workflow produces and validates the standalone
-//! `target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm` module consumed
+//! `target/wasm32-unknown-unknown/release/libfaust-rs.wasm` module consumed
 //! by the future `faustwasm` embedded-compiler loader.
 //!
 //! # Embedded Faust libraries

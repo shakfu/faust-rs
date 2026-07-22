@@ -378,6 +378,8 @@ cargo run -p xtask -- build-faustwasm-compiler-module
 What it does:
 
 - runs `cargo build -p wasm-ffi --target wasm32-unknown-unknown --release`;
+- renames Cargo's `faust_wasm_ffi.wasm` output to the public
+  `libfaust-rs.wasm` distribution name;
 - verifies the raw exports expected by the `faustwasm` Rust adapter;
 - prints the resulting module path.
 
@@ -390,7 +392,7 @@ cargo run -p xtask -- build-faustwasm-compiler-module --debug
 Expected release artifact:
 
 ```text
-target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm
+target/wasm32-unknown-unknown/release/libfaust-rs.wasm
 ```
 
 ## Code Graphs

@@ -216,6 +216,44 @@ fn parse_faustwasm_compiler_module_options_accepts_debug_flag() {
 }
 
 #[test]
+fn publish_wasm_compiler_module_uses_distribution_name_and_replaces_old_output() {
+    let root = std::env::temp_dir().join(format!(
+        "faust-rs-xtask-wasm-publish-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let cargo_module = root.join("faust_wasm_ffi.wasm");
+    let distributed_module = root.join("libfaust-rs.wasm");
+    fs::write(&cargo_module, b"new module").unwrap();
+    fs::write(&distributed_module, b"old module").unwrap();
+
+    publish_wasm_compiler_module(&cargo_module, &distributed_module).unwrap();
+
+    assert!(!cargo_module.exists());
+    assert_eq!(fs::read(&distributed_module).unwrap(), b"new module");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn publish_wasm_compiler_module_accepts_an_already_published_module() {
+    let root = std::env::temp_dir().join(format!(
+        "faust-rs-xtask-wasm-existing-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let cargo_module = root.join("faust_wasm_ffi.wasm");
+    let distributed_module = root.join("libfaust-rs.wasm");
+    fs::write(&distributed_module, b"published module").unwrap();
+
+    publish_wasm_compiler_module(&cargo_module, &distributed_module).unwrap();
+
+    assert_eq!(fs::read(&distributed_module).unwrap(), b"published module");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verify_wasm_ffi_exports_accepts_expected_surface() {
     let bytes = wat::parse_str(
         r#"

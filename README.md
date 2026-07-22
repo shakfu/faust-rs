@@ -42,6 +42,233 @@ cargo run -p xtask -- golden-check
 Use `cargo run -p xtask -- golden-check-cpp` for the long-run C++ parity target
 when `tests/golden/cpp/` is expected to match the current Rust output.
 
+## Build the compiler for WebAssembly
+
+The `wasm-ffi` crate packages the Faust compiler itself as a raw WebAssembly
+module. This is different from `faust-rs -lang wasm`, which compiles one Faust
+DSP to WebAssembly.
+
+Install the Rust target and run the verified packaging workflow:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo run -p xtask -- build-faustwasm-compiler-module
+```
+
+The release module is published as:
+
+```text
+target/wasm32-unknown-unknown/release/libfaust-rs.wasm
+```
+
+The workflow builds the module with a 16 MiB WebAssembly stack, renames Cargo's
+crate-normalized `faust_wasm_ffi.wasm` artifact to `libfaust-rs.wasm`, and
+verifies the exported compiler ABI. The equivalent unverified manual build and
+rename is:
+
+```bash
+cargo build -p wasm-ffi --target wasm32-unknown-unknown --release
+mv target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm \
+   target/wasm32-unknown-unknown/release/libfaust-rs.wasm
+```
+
+A Web host can load `libfaust-rs.wasm` with the standard `WebAssembly` API and
+call its handle-based `faust_wasm_*` exports to compile Faust source strings to
+DSP WebAssembly and JSON artifacts. See the
+[`wasm-ffi` guide](crates/wasm-ffi/README.md) for the raw allocation, result,
+and lifetime contract, plus options for embedding Faust libraries.
+
+## Use `libfaust` from C and C++
+
+The `faust-ffi` crate builds one unified C ABI library named `libfaust`, with
+C++ wrappers over the same ABI. It exports the factory and DSP APIs for both the
+bytecode Interpreter and the experimental native Cranelift JIT backend:
+
+```bash
+cargo build -p faust-ffi --release
+```
+
+This produces the platform static library (`libfaust.a` or `faust.lib`) and
+dynamic library (`libfaust.dylib`, `libfaust.so`, or `faust.dll`) under
+`target/release/`. The C++ headers are
+`crates/interp-ffi/include/interpreter-dsp.h` and
+`crates/cranelift-ffi/include/cranelift-dsp.h`; the corresponding C headers are
+`interpreter-dsp-c.h` and `cranelift-dsp-c.h` in the same directories. The C++
+wrappers also use the standard Faust architecture headers, so add the Faust
+`architecture/` directory to the include path. For example:
+
+```bash
+c++ -std=c++17 app.cpp \
+  -I crates/interp-ffi/include \
+  -I crates/cranelift-ffi/include \
+  -I /path/to/faust/architecture \
+  -L target/release -lfaust \
+  -Wl,-rpath,"$PWD/target/release" \
+  -o app
+```
+
+### Interpreter API
+
+Create an `interpreter_dsp_factory` from a Faust source file or string, create a
+standard Faust `dsp` instance from it, then initialize and process audio:
+
+```cpp
+#include "interpreter-dsp.h"
+
+#include <array>
+#include <iostream>
+#include <memory>
+#include <string>
+
+int main()
+{
+    std::string error;
+    auto* factory = createInterpreterDSPFactoryFromString(
+        "gain", "process = _ * 0.5;", 0, nullptr, error);
+    if (!factory) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+
+    std::unique_ptr<dsp> processor(factory->createDSPInstance());
+    if (!processor) {
+        deleteInterpreterDSPFactory(factory);
+        return 1;
+    }
+
+    processor->init(48000);
+    std::array<FAUSTFLOAT, 64> input{};
+    std::array<FAUSTFLOAT, 64> output{};
+    FAUSTFLOAT* inputs[] = {input.data()};
+    FAUSTFLOAT* outputs[] = {output.data()};
+    processor->compute(64, inputs, outputs);
+
+    // The factory must outlive all DSP instances created from it.
+    processor.reset();
+    deleteInterpreterDSPFactory(factory);
+}
+```
+
+Use `createInterpreterDSPFactoryFromFile(...)` to compile a `.dsp` file. The
+Interpreter API also provides `readInterpreterDSPFactoryFromBitcodeFile(...)`
+and `writeInterpreterDSPFactoryToBitcodeFile(...)` for `.fbc` files.
+
+### Cranelift API
+
+The Cranelift wrapper exposes the same `dsp` lifecycle, so only the header and
+factory functions change in the example above:
+
+```cpp
+#include "cranelift-dsp.h"
+
+#include <iostream>
+#include <memory>
+#include <string>
+
+int main()
+{
+    std::string error;
+    auto* factory = createCraneliftDSPFactoryFromString(
+        "gain", "process = _ * 0.5;", 0, nullptr, error, 2);
+    if (!factory) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+
+    std::unique_ptr<dsp> processor(factory->createDSPInstance());
+    if (!processor) {
+        deleteCraneliftDSPFactory(factory);
+        return 1;
+    }
+
+    processor->init(48000);
+    // Use processor->compute(...) exactly as in the Interpreter example.
+    processor.reset();
+    deleteCraneliftDSPFactory(factory);
+}
+```
+
+The final `opt_level` argument is optional and defaults to `0`; values `1` and
+`2` currently select speed optimization, while values of `3` or more select
+speed-and-size optimization. `createCraneliftDSPFactoryFromFile(...)` is the
+file-based equivalent.
+
+### C API
+
+The C API uses opaque factory and instance pointers and does not require the
+Faust architecture headers. This complete Interpreter example follows the same
+factory-before-instance destruction order as the C++ example:
+
+```c
+#include "interpreter-dsp-c.h"
+
+#include <stdio.h>
+
+int main(void)
+{
+    char error[4096] = {0};
+    interpreter_dsp_factory* factory =
+        createCInterpreterDSPFactoryFromString(
+            "gain", "process = _ * 0.5;", 0, NULL, error);
+    if (factory == NULL) {
+        fprintf(stderr, "%s\n", error);
+        return 1;
+    }
+
+    interpreter_dsp* processor = createCInterpreterDSPInstance(factory);
+    if (processor == NULL) {
+        deleteCInterpreterDSPFactory(factory);
+        return 1;
+    }
+
+    initCInterpreterDSPInstance(processor, 48000);
+    FAUSTFLOAT input[64] = {0};
+    FAUSTFLOAT output[64] = {0};
+    FAUSTFLOAT* inputs[] = {input};
+    FAUSTFLOAT* outputs[] = {output};
+    computeCInterpreterDSPInstance(processor, 64, inputs, outputs);
+
+    deleteCInterpreterDSPInstance(processor);
+    deleteCInterpreterDSPFactory(factory);
+}
+```
+
+Compile it against the same unified library:
+
+```bash
+cc -std=c11 app.c \
+  -I crates/interp-ffi/include \
+  -L target/release -lfaust \
+  -Wl,-rpath,"$PWD/target/release" \
+  -o app
+```
+
+The Cranelift C API has the same lifecycle with backend-specific names:
+
+| Operation | Interpreter C API | Cranelift C API |
+|---|---|---|
+| Header | `interpreter-dsp-c.h` | `cranelift-dsp-c.h` |
+| Factory from string | `createCInterpreterDSPFactoryFromString(..., error)` | `createCCraneliftDSPFactoryFromString(..., error, opt_level)` |
+| Factory from file | `createCInterpreterDSPFactoryFromFile(..., error)` | `createCCraneliftDSPFactoryFromFile(..., error, opt_level)` |
+| Create instance | `createCInterpreterDSPInstance(factory)` | `createCCraneliftDSPInstance(factory)` |
+| Initialize | `initCInterpreterDSPInstance(dsp, sample_rate)` | `initCCraneliftDSPInstance(dsp, sample_rate)` |
+| Process | `computeCInterpreterDSPInstance(...)` | `computeCCraneliftDSPInstance(...)` |
+| Delete instance | `deleteCInterpreterDSPInstance(dsp)` | `deleteCCraneliftDSPInstance(dsp)` |
+| Delete factory | `deleteCInterpreterDSPFactory(factory)` | `deleteCCraneliftDSPFactory(factory)` |
+
+Unlike the C++ wrapper, the Cranelift C constructor always takes the
+`opt_level` argument. Returned strings such as factory JSON or serialized
+factory data are owned by `libfaust` and must be released with `freeCMemory()`
+when the corresponding header says so.
+
+Cranelift support is experimental: native JIT execution works for the currently
+supported compiler/FIR subset, but full runtime parity and its serialized
+factory format are not yet final. Always check the returned factory and report
+the supplied error string. See the detailed
+[`Interpreter C/C++ API guide`](crates/interp-ffi/README.md) and
+[`Cranelift C/C++ API guide`](crates/cranelift-ffi/README.md), as well as the
+corresponding `*-dsp-c.h` headers when calling `libfaust` from C.
+
 ## Install
 
 ```bash

@@ -124,7 +124,7 @@ public:
     explicit interpreter_dsp_factory(cinterpreter_dsp_factory* impl)
         : impl_(impl) {}
 
-    ~interpreter_dsp_factory() = default;
+    ~interpreter_dsp_factory() override = default;
 
     // Non-copyable: ownership managed explicitly by the C API.
     interpreter_dsp_factory(const interpreter_dsp_factory&) = delete;
@@ -216,7 +216,7 @@ class interpreter_dsp : public dsp {
 public:
     explicit interpreter_dsp(cinterpreter_dsp* impl) : impl_(impl) {}
 
-    ~interpreter_dsp() {
+    ~interpreter_dsp() override {
         if (impl_) {
             deleteCInterpreterDSPInstance(impl_);
             impl_ = nullptr;
@@ -239,23 +239,23 @@ public:
         return getSampleRateCInterpreterDSPInstance(impl_);
     }
 
-    void init(int sample_rate) {
+    void init(int sample_rate) override {
         initCInterpreterDSPInstance(impl_, sample_rate);
     }
 
-    void instanceInit(int sample_rate) {
+    void instanceInit(int sample_rate) override {
         instanceInitCInterpreterDSPInstance(impl_, sample_rate);
     }
 
-    void instanceConstants(int sample_rate) {
+    void instanceConstants(int sample_rate) override {
         instanceConstantsCInterpreterDSPInstance(impl_, sample_rate);
     }
 
-    void instanceResetUserInterface() {
+    void instanceResetUserInterface() override {
         instanceResetUserInterfaceCInterpreterDSPInstance(impl_);
     }
 
-    void instanceClear() {
+    void instanceClear() override {
         instanceClearCInterpreterDSPInstance(impl_);
     }
 
