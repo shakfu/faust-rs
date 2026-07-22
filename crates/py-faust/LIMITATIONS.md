@@ -40,29 +40,38 @@ lines) reset every call. State was correct *within* one block but never carried
   block count. The owning type is covered by `cargo test` (and is Miri-clean, as
   it carries no unsafe) in `codegen`'s interp instance tests.
 
-## 3. No UI parameter (button/slider) bridge
+## 3. UI parameter (button/slider) bridge  [RESOLVED]
 
-The interpreter exposes control zones via `get_real_zone(offset)` /
-`set_real_zone(offset, value)` and a UI instruction list (`ui_instructions()`),
-but the bindings do not yet map Faust UI widgets (buttons, sliders, nentries) to
-named Python get/set accessors.
+**Original limitation:** the interpreter exposed control zones
+(`get_real_zone`/`set_real_zone`) and a UI instruction list
+(`ui_instructions()`), but the bindings did not map Faust UI widgets to named
+Python accessors.
 
-- **Cause:** requires walking the factory `ui_block` to build a label -> zone
-  offset map and exposing it as a Python dict / property API.
-- **To lift:** parse `ui_instructions()` into a `{label: offset}` table at
-  compile time; add `set_param(label, value)` / `get_param(label)` that call the
-  instance zone accessors.
+- **Resolution:** at compile time the binding walks `ui_instructions()` into a
+  `Param` list (tracking enclosing box labels to build each control's full UI
+  path). It exposes:
+  - `dsp.params()` -> list of `Param` (path, leaf label, kind, `init`/`min`/
+    `max`/`step`, `is_input`, zone offset), in declaration order;
+  - `dsp.get_param(key)` / `dsp.set_param(key, value)` keyed by full path or an
+    unambiguous leaf label. Set takes effect on the next `compute()`.
+  Buttons, checkboxes, h/v sliders, and nentries are settable inputs; h/v
+  bargraphs are outputs (readable via `get_param`, reflecting the most recent
+  `compute`; not settable). `reset()` restores all controls to their defaults.
+  Values are not clamped to `[min, max]`, matching Faust's `setParamValue`.
 
-## 4. No import search-path wiring
+## 4. Import search-path wiring  [RESOLVED]
 
-The example `compile()` surface does not configure `import("stdfaust.lib")`
+**Original limitation:** `compile()` did not configure `import("stdfaust.lib")`
 search paths, so sources using the standard libraries (`os.osc`, `fi.lowpass`,
-etc.) fail to resolve. Only self-contained sources compile.
+etc.) failed to resolve. Only self-contained sources compiled.
 
-- **Cause:** the fast-lane string compile path is called without search paths.
-- **To lift:** add a `search_paths` / `use_stdlib` argument routed to the
-  compiler's file/search-path aware entry points (see
-  `compiler::default_import_search_paths`).
+- **Resolution:** `compile(..., search_paths=[...])` resolves imports against
+  the given directories; directories in the `FAUST_LIB_PATH` environment
+  variable are appended automatically. This is backed by a new compiler method,
+  `compile_source_to_interp_with_lane_and_search_paths`. The faust-rs workspace
+  does not bundle the full Faust standard library, so point `search_paths` (or
+  `FAUST_LIB_PATH`) at an existing stdlib install; the import test suite skips
+  when none is discoverable.
 
 ## 5. Whole-block render, no host loop / streaming
 

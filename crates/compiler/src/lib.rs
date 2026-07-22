@@ -1890,6 +1890,28 @@ impl Compiler {
             .map_err(|e| lower_interp_error_to_compiler(source_name, e))
     }
 
+    /// Like [`compile_source_to_interp_with_lane`](Self::compile_source_to_interp_with_lane)
+    /// but resolves `import("...")` directives against `search_paths`.
+    ///
+    /// Passing an empty `search_paths` is equivalent to
+    /// [`compile_source_to_interp_with_lane`]. Supply directories holding the
+    /// Faust standard libraries (e.g. containing `stdfaust.lib`) to compile
+    /// sources that depend on them.
+    pub fn compile_source_to_interp_with_lane_and_search_paths(
+        &self,
+        source_name: &str,
+        source: &str,
+        search_paths: &[PathBuf],
+        options: &InterpOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals =
+            self.compile_source_to_signals_with_search_paths(source_name, source, search_paths)?;
+        let ctx = self.lowering_ctx(lane);
+        lower_signals_to_interp(source_name, &signals, options, ctx)
+            .map_err(|e| lower_interp_error_to_compiler(source_name, e))
+    }
+
     /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
     /// text via the interpreter backend using the transform fast lane.
     pub fn compile_file_to_interp(

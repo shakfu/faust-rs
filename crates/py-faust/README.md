@@ -81,6 +81,20 @@ faust_rs.compile("process = 16777217.0;", double=True).compute([], frames=1)  # 
 faust_rs.compile("process = _;", double=True).precision   # "double"
 ```
 
+### Standard-library imports
+
+Sources that `import("stdfaust.lib")` (and use `os.osc`, `fi.lowpass`, etc.)
+need the Faust standard libraries on an import search path. Pass `search_paths`,
+or set `FAUST_LIB_PATH` (appended automatically). The faust-rs workspace does
+not bundle the full stdlib, so point these at an existing install.
+
+```python
+libs = "/path/to/faust/libraries"          # dir containing stdfaust.lib
+dsp = faust_rs.compile('import("stdfaust.lib"); process = os.osc(440);',
+                       sample_rate=48000, search_paths=[libs])
+dsp.compute([], frames=8)                  # a 440 Hz sine block
+```
+
 ### Persistent, stateful instance
 
 `compile()` initializes a single interpreter instance that is reused across
@@ -97,20 +111,37 @@ c.reset()                 # clear DSP state
 c.compute([], frames=4)   # [[1.0, 2.0, 3.0, 4.0]]   <- restarts
 ```
 
+### UI parameters (sliders, buttons, bargraphs)
+
+DSP controls are exposed as parameters. `params()` lists them; `get_param` /
+`set_param` address a control by full UI path or unambiguous leaf label. A set
+takes effect on the next `compute()`.
+
+```python
+dsp = faust_rs.compile('process = _ * hslider("gain", 1, 0, 2, 0.01);')
+[p.path for p in dsp.params()]     # ['/FaustDSP/gain']
+dsp.params()[0].kind               # 'hslider'  (init/min/max/step also exposed)
+
+dsp.set_param("gain", 0.5)         # by leaf label (or "/FaustDSP/gain")
+dsp.compute([[2.0, 4.0]])          # [[1.0, 2.0]]
+dsp.get_param("gain")              # 0.5
+dsp.reset()                        # restores gain to its init (1.0)
+```
+
+Buttons, checkboxes, sliders, and nentries are settable inputs; bargraphs are
+outputs (read-only, reflecting the most recent `compute`).
+
 `compile()` and `compute()` raise `ValueError` on compile errors, bad bytecode,
-channel-count mismatches, and interpreter runtime errors.
+channel-count mismatches, and interpreter runtime errors; `get_param`/`set_param`
+raise on unknown/ambiguous keys (and `set_param` on an output).
 
 ## Scope / limitations (deliberate for a PoC)
 
 See `LIMITATIONS.md` for the full list and lift paths. In brief:
 
-- No `import("stdfaust.lib")` search-path wiring in this example surface — pass
-  self-contained sources.
-- No UI-parameter (button/slider) get/set bridge yet; the interpreter exposes
-  zone read/write (`get_real_zone`/`set_real_zone`) that a fuller binding would map
-  to Python.
 - Whole-block render over plain Python lists (no NumPy zero-copy).
 
 **Resolved:** cross-call state persistence (`Dsp` holds a safe, factory-owning
-`OwnedFbcDspInstance`; `reset()` clears state), and single/double precision
-(`double=True`).
+`OwnedFbcDspInstance`; `reset()` clears state), single/double precision
+(`double=True`), `import(...)` resolution (`search_paths=` / `FAUST_LIB_PATH`),
+and the UI parameter bridge (`params()` / `get_param` / `set_param`).

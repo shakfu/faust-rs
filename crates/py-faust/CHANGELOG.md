@@ -20,13 +20,26 @@ tracks the faust-rs workspace and its API may change at any time.
   owning instance) and a `precision` getter reporting `"float"` / `"double"`.
   Audio crosses the Python boundary as `f64` (lossless for double, cast for
   single).
+- `import(...)` resolution: `compile(..., search_paths=[dir, ...])` resolves
+  `import("stdfaust.lib")` and friends against the given directories, with
+  `FAUST_LIB_PATH` entries appended automatically. Backed by a new
+  `compiler::Compiler::compile_source_to_interp_with_lane_and_search_paths`
+  method. Adds a skip-guarded import test group and a vendored `osc.dsp`
+  fixture (both need a discoverable Faust standard library).
 - `Dsp` class with a persistent, stateful interpreter instance:
   - `compute(inputs, frames=None)` renders one block (list of input channels ->
     list of output channels); DSP state carries across calls.
   - `reset()` re-initializes the instance, clearing filter memory, oscillator
-    phase, and delay lines.
+    phase, and delay lines, and restoring control parameters to their defaults.
   - `num_inputs`, `num_outputs`, `sample_rate`, `name`, `precision`, and `cycle`
     getters.
+- UI parameter bridge: `params()` lists DSP controls as `Param` objects (full UI
+  path, leaf label, kind, `init`/`min`/`max`/`step`, `is_input`, zone offset);
+  `get_param(key)` / `set_param(key, value)` address a control by full path or
+  unambiguous leaf label. Buttons, checkboxes, sliders, and nentries are
+  settable inputs; bargraphs are read-only outputs. A `set` takes effect on the
+  next `compute()`. Backed by the interpreter's `ui_instructions()` and
+  `get_real_zone`/`set_real_zone`.
 - `version()` returning the underlying faust-rs compiler version.
 - `LIMITATIONS.md` documenting known scope reductions and their lift paths.
 - pytest suite under `tests/` (42 tests) covering module surface, compilation

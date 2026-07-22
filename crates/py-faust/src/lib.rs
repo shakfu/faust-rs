@@ -14,9 +14,11 @@
 //! (`f64`) precision are supported via the `double=` flag on `compile`.
 
 use std::io::Cursor;
+use std::path::PathBuf;
 
 use codegen::backends::interp::{
-    FbcDspFactory, FbcReal, InterpOptions, OwnedFbcDspInstance, read_fbc,
+    FbcDspFactory, FbcOpcode, FbcReal, FbcUiInstruction, InterpOptions, OwnedFbcDspInstance,
+    read_fbc,
 };
 use compiler::{Compiler, RealType, SignalFirLane};
 use pyo3::exceptions::PyValueError;
@@ -30,6 +32,102 @@ use pyo3::prelude::*;
 enum Engine {
     F32(OwnedFbcDspInstance<f32>),
     F64(OwnedFbcDspInstance<f64>),
+}
+
+/// A DSP control parameter (button, slider, nentry, or bargraph).
+///
+/// Bargraphs are *outputs* (metering) — readable via `get_param` but not
+/// settable. All other kinds are settable inputs. `offset` is the real-heap
+/// zone the interpreter binds the control to.
+// `Param` is only ever returned to Python (never taken as an argument), so skip
+// the `FromPyObject` derive that `Clone` would otherwise opt into.
+#[pyclass(frozen, get_all, skip_from_py_object)]
+#[derive(Clone)]
+struct Param {
+    /// Full UI path, e.g. `/Oscillator/freq`.
+    path: String,
+    /// Leaf label, e.g. `freq`.
+    label: String,
+    /// Widget kind: `button`, `checkbox`, `hslider`, `vslider`, `nentry`,
+    /// `hbargraph`, or `vbargraph`.
+    kind: &'static str,
+    /// Whether the control is a settable input (false for bargraphs).
+    is_input: bool,
+    init: f64,
+    min: f64,
+    max: f64,
+    step: f64,
+    /// Real-heap zone offset.
+    offset: i32,
+}
+
+#[pymethods]
+impl Param {
+    fn __repr__(&self) -> String {
+        format!(
+            "Param(path={:?}, kind={:?}, init={}, min={}, max={}, step={}, input={})",
+            self.path, self.kind, self.init, self.min, self.max, self.step, self.is_input
+        )
+    }
+}
+
+/// Widget kind name for a UI opcode, or `None` if it is not a control.
+fn control_kind(opcode: FbcOpcode) -> Option<&'static str> {
+    Some(match opcode {
+        FbcOpcode::AddButton => "button",
+        FbcOpcode::AddCheckButton => "checkbox",
+        FbcOpcode::AddHorizontalSlider => "hslider",
+        FbcOpcode::AddVerticalSlider => "vslider",
+        FbcOpcode::AddNumEntry => "nentry",
+        FbcOpcode::AddHorizontalBargraph => "hbargraph",
+        FbcOpcode::AddVerticalBargraph => "vbargraph",
+        _ => return None,
+    })
+}
+
+/// Walks the interpreter UI instruction list into a flat parameter list,
+/// building each control's full path from the enclosing box labels.
+fn collect_params<R: FbcReal>(ui: &[FbcUiInstruction<R>]) -> Vec<Param> {
+    let mut params = Vec::new();
+    let mut stack: Vec<&str> = Vec::new();
+    for instr in ui {
+        match instr.opcode {
+            FbcOpcode::OpenVerticalBox | FbcOpcode::OpenHorizontalBox | FbcOpcode::OpenTabBox => {
+                stack.push(&instr.label)
+            }
+            FbcOpcode::CloseBox => {
+                stack.pop();
+            }
+            opcode => {
+                let Some(kind) = control_kind(opcode) else {
+                    continue; // Declare, AddSoundfile, etc.
+                };
+                let mut path = String::new();
+                for segment in &stack {
+                    path.push('/');
+                    path.push_str(segment);
+                }
+                path.push('/');
+                path.push_str(&instr.label);
+                let is_bargraph = matches!(
+                    opcode,
+                    FbcOpcode::AddHorizontalBargraph | FbcOpcode::AddVerticalBargraph
+                );
+                params.push(Param {
+                    path,
+                    label: instr.label.clone(),
+                    kind,
+                    is_input: !is_bargraph,
+                    init: instr.init.to_f64(),
+                    min: instr.min.to_f64(),
+                    max: instr.max.to_f64(),
+                    step: instr.step.to_f64(),
+                    offset: instr.offset,
+                });
+            }
+        }
+    }
+    params
 }
 
 /// A compiled Faust DSP program with a persistent, stateful interpreter
@@ -54,6 +152,7 @@ struct Dsp {
     num_outputs: i32,
     name: String,
     double: bool,
+    params: Vec<Param>,
 }
 
 /// Initializes a persistent owning instance over `factory` at `sample_rate`.
@@ -94,20 +193,23 @@ fn render<R: FbcReal>(
 }
 
 impl Dsp {
-    /// Wraps a precision-erased engine, caching audio-layout metadata.
+    /// Wraps a precision-erased engine, caching audio-layout metadata and the
+    /// UI parameter list.
     fn new(engine: Engine, sample_rate: i32) -> Self {
-        let (num_inputs, num_outputs, name, double) = match &engine {
+        let (num_inputs, num_outputs, name, double, params) = match &engine {
             Engine::F32(i) => (
                 i.get_num_inputs(),
                 i.get_num_outputs(),
                 i.factory().name.clone(),
                 false,
+                collect_params(i.ui_instructions()),
             ),
             Engine::F64(i) => (
                 i.get_num_inputs(),
                 i.get_num_outputs(),
                 i.factory().name.clone(),
                 true,
+                collect_params(i.ui_instructions()),
             ),
         };
         Self {
@@ -117,6 +219,46 @@ impl Dsp {
             num_outputs,
             name,
             double,
+            params,
+        }
+    }
+
+    /// Resolves a parameter key (full path or unambiguous leaf label) to its
+    /// `Param`. Errors on unknown or ambiguous keys.
+    fn resolve(&self, key: &str) -> PyResult<&Param> {
+        let mut by_path = self.params.iter().filter(|p| p.path == key);
+        if let Some(p) = by_path.next() {
+            // Paths are unique in a well-formed UI, so first match wins.
+            return Ok(p);
+        }
+        let mut by_label = self.params.iter().filter(|p| p.label == key);
+        match (by_label.next(), by_label.next()) {
+            (Some(p), None) => Ok(p),
+            (None, _) => {
+                let available: Vec<&str> = self.params.iter().map(|p| p.path.as_str()).collect();
+                Err(PyValueError::new_err(format!(
+                    "unknown parameter {key:?}; available: {available:?}"
+                )))
+            }
+            (Some(_), Some(_)) => Err(PyValueError::new_err(format!(
+                "ambiguous parameter label {key:?}; use the full path"
+            ))),
+        }
+    }
+
+    /// Reads a real-heap zone (precision-erased to `f64`).
+    fn get_zone(&self, offset: i32) -> Option<f64> {
+        match &self.engine {
+            Engine::F32(i) => i.get_real_zone(offset).map(FbcReal::to_f64),
+            Engine::F64(i) => i.get_real_zone(offset).map(FbcReal::to_f64),
+        }
+    }
+
+    /// Writes a real-heap zone, casting to the engine precision.
+    fn set_zone(&mut self, offset: i32, value: f64) -> bool {
+        match &mut self.engine {
+            Engine::F32(i) => i.set_real_zone(offset, f32::from_f64(value)),
+            Engine::F64(i) => i.set_real_zone(offset, f64::from_f64(value)),
         }
     }
 }
@@ -168,11 +310,53 @@ impl Dsp {
     }
 
     /// Re-initialize the instance, clearing all DSP state (filter memory,
-    /// oscillator phase, delay lines) as if freshly compiled.
+    /// oscillator phase, delay lines) as if freshly compiled. This also resets
+    /// every control parameter to its default (`init`) value.
     fn reset(&mut self) {
         match &mut self.engine {
             Engine::F32(i) => i.init(self.sample_rate),
             Engine::F64(i) => i.init(self.sample_rate),
+        }
+    }
+
+    /// The DSP's UI control parameters (sliders, buttons, nentries, bargraphs),
+    /// in UI-declaration order. Each carries its path, kind, and range metadata.
+    fn params(&self) -> Vec<Param> {
+        self.params.clone()
+    }
+
+    /// Read the current value of a control parameter.
+    ///
+    /// `key` may be the full UI path (e.g. `/Oscillator/freq`) or an
+    /// unambiguous leaf label (e.g. `freq`). Works for both input controls and
+    /// output bargraphs (the latter reflect the most recent `compute`).
+    fn get_param(&self, key: &str) -> PyResult<f64> {
+        let offset = self.resolve(key)?.offset;
+        self.get_zone(offset)
+            .ok_or_else(|| PyValueError::new_err(format!("parameter {key:?} zone out of range")))
+    }
+
+    /// Set the value of an input control parameter; takes effect on the next
+    /// `compute()`. Bargraphs (outputs) cannot be set.
+    ///
+    /// `key` may be the full UI path or an unambiguous leaf label. The value is
+    /// not clamped to the control's declared `[min, max]` range (matching
+    /// Faust's `setParamValue` semantics).
+    fn set_param(&mut self, key: &str, value: f64) -> PyResult<()> {
+        let param = self.resolve(key)?;
+        if !param.is_input {
+            return Err(PyValueError::new_err(format!(
+                "parameter {:?} is an output ({}) and cannot be set",
+                param.path, param.kind
+            )));
+        }
+        let offset = param.offset;
+        if self.set_zone(offset, value) {
+            Ok(())
+        } else {
+            Err(PyValueError::new_err(format!(
+                "parameter {key:?} zone out of range"
+            )))
         }
     }
 
@@ -243,9 +427,20 @@ impl Dsp {
 /// Set `double=True` for double-precision (`f64`) DSP; the default is single
 /// precision (`f32`). Uses the transform fast lane, matching the interpreter
 /// FFI's default compilation path.
+///
+/// `search_paths` is an optional list of directories in which to resolve
+/// `import("...")` directives (e.g. a directory containing the Faust standard
+/// libraries so `import("stdfaust.lib")` works). Directories listed in the
+/// `FAUST_LIB_PATH` environment variable are appended automatically.
 #[pyfunction]
-#[pyo3(signature = (source, name = "FaustDSP", sample_rate = 48000, double = false))]
-fn compile(source: &str, name: &str, sample_rate: i32, double: bool) -> PyResult<Dsp> {
+#[pyo3(signature = (source, name = "FaustDSP", sample_rate = 48000, double = false, search_paths = None))]
+fn compile(
+    source: &str,
+    name: &str,
+    sample_rate: i32,
+    double: bool,
+    search_paths: Option<Vec<String>>,
+) -> PyResult<Dsp> {
     if sample_rate <= 0 {
         return Err(PyValueError::new_err("sample_rate must be positive"));
     }
@@ -255,6 +450,17 @@ fn compile(source: &str, name: &str, sample_rate: i32, double: bool) -> PyResult
         ..InterpOptions::default()
     };
 
+    // Effective import search paths: explicit argument first, then any
+    // directories from FAUST_LIB_PATH (Faust's conventional env var).
+    let mut paths: Vec<PathBuf> = search_paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    if let Some(env_paths) = std::env::var_os("FAUST_LIB_PATH") {
+        paths.extend(std::env::split_paths(&env_paths));
+    }
+
     let real_type = if double {
         RealType::Float64
     } else {
@@ -262,9 +468,10 @@ fn compile(source: &str, name: &str, sample_rate: i32, double: bool) -> PyResult
     };
     let compiler = Compiler::new().with_real_type(real_type);
     let fbc = compiler
-        .compile_source_to_interp_with_lane(
+        .compile_source_to_interp_with_lane_and_search_paths(
             name,
             source,
+            &paths,
             &options,
             SignalFirLane::TransformFastLane,
         )
@@ -298,5 +505,6 @@ fn faust_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<Dsp>()?;
+    m.add_class::<Param>()?;
     Ok(())
 }
