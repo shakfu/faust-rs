@@ -10,8 +10,8 @@
         "scheduling_strategy": 0
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -87,6 +87,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -381,8 +382,8 @@
         "scheduling_strategy": 1
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -458,6 +459,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -752,8 +754,8 @@
         "scheduling_strategy": 2
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -829,6 +831,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -1123,8 +1126,8 @@
         "scheduling_strategy": 3
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -1200,6 +1203,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -1494,8 +1498,8 @@
         "scheduling_strategy": 0
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -1571,6 +1575,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -1865,8 +1870,8 @@
         "scheduling_strategy": 1
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -1942,6 +1947,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -2236,8 +2242,8 @@
         "scheduling_strategy": 2
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -2313,6 +2319,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -2607,8 +2614,8 @@
         "scheduling_strategy": 3
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -2684,6 +2691,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -2978,8 +2986,8 @@
         "scheduling_strategy": 0
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -3055,6 +3063,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -3349,8 +3358,8 @@
         "scheduling_strategy": 1
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -3426,6 +3435,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -3720,8 +3730,8 @@
         "scheduling_strategy": 2
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -3797,6 +3807,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -4091,8 +4102,8 @@
         "scheduling_strategy": 3
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -4168,6 +4179,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -4462,8 +4474,8 @@
         "scheduling_strategy": 0
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -4539,6 +4551,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -4833,8 +4846,8 @@
         "scheduling_strategy": 1
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -4910,6 +4923,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -5204,8 +5218,8 @@
         "scheduling_strategy": 2
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -5281,6 +5295,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",
@@ -5575,8 +5590,8 @@
         "scheduling_strategy": 3
       },
       "summary": {
-        "total": 132,
-        "certified": 96,
+        "total": 133,
+        "certified": 97,
         "fallback": 35,
         "error": 1,
         "fallback_by_reason": {
@@ -5652,6 +5667,7 @@
         "tests/impulse-tests/dsp/priority.dsp",
         "tests/impulse-tests/dsp/priority1.dsp",
         "tests/impulse-tests/dsp/quadecho.dsp",
+        "tests/impulse-tests/dsp/recursive_identity_passthrough.dsp",
         "tests/impulse-tests/dsp/reverb_designer.dsp",
         "tests/impulse-tests/dsp/reverb_tester.dsp",
         "tests/impulse-tests/dsp/select2.dsp",

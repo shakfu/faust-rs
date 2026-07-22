@@ -63,6 +63,7 @@ tests/impulse-tests/dsp/prefix.dsp
 tests/impulse-tests/dsp/priority.dsp
 tests/impulse-tests/dsp/priority1.dsp
 tests/impulse-tests/dsp/quadecho.dsp
+tests/impulse-tests/dsp/recursive_identity_passthrough.dsp
 tests/impulse-tests/dsp/reverb_designer.dsp
 tests/impulse-tests/dsp/reverb_tester.dsp
 tests/impulse-tests/dsp/select2.dsp
