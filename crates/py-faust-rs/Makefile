@@ -37,10 +37,14 @@ build: ## Build a release wheel into target/wheels
 # --- checks ----------------------------------------------------------------
 
 # Rebuild the extension first so the suite runs against current sources rather
-# than skipping (the suite skips when `faust_rs` is not importable).
+# than skipping (the suite skips when `faust_rs` is not importable). `--no-sync`
+# is essential: a bare `uv run` re-syncs the environment before pytest, which
+# reinstalls the project from uv's cache and clobbers the fresh `develop` build
+# (an unchanged version is served from cache). `develop` already synced the dev
+# tools, so skipping the sync here is safe.
 .PHONY: test
 test: develop ## Build the extension, then run the pytest suite
-	$(UV) run pytest $(PYTEST_ARGS)
+	$(UV) run --no-sync pytest $(PYTEST_ARGS)
 
 .PHONY: fmt
 fmt: ## Format the Rust sources

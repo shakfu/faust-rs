@@ -73,12 +73,26 @@ etc.) failed to resolve. Only self-contained sources compiled.
   `FAUST_LIB_PATH`) at an existing stdlib install; the import test suite skips
   when none is discoverable.
 
-## 5. Whole-block render, no host loop / streaming
+## 5. Whole-block render, no host loop / streaming  [BUFFER PROTOCOL ADDED]
 
-`compute()` renders one block passed entirely from Python (a list of lists). No
-streaming, no NumPy buffer protocol, no real-time callback integration. Large
-renders copy Python lists to `Vec<f32>` and back.
+**Original limitation:** `compute()` renders one block passed entirely from
+Python (a list of lists). No streaming, no NumPy buffer protocol, no real-time
+callback integration. Large renders copy Python lists to `Vec<f32>` and back,
+boxing every sample as a `PyFloat`.
 
-- **Cause:** PoC uses plain Python lists for portability (no NumPy dependency).
-- **To lift:** accept and return NumPy arrays via the buffer protocol / `numpy`
-  crate for zero-copy block I/O.
+- **Resolution (buffer protocol):** `compute_into(inputs, outputs)` renders one
+  block **in place** through the Python buffer protocol. `inputs` and `outputs`
+  are 2-D `(channels, frames)` C-contiguous buffers — a NumPy array, a shaped
+  `memoryview`, an `array.array`, or any object exposing the buffer protocol —
+  whose dtype must match the DSP precision (`float32` for `"float"`, `float64`
+  for `"double"`; a mismatch raises rather than silently casting). This removes
+  the per-sample Python-object marshaling of the list path: each direction is a
+  single bulk copy via PyO3's `PyBuffer::copy_to_slice` / `copy_from_slice`, so
+  the extension needs **no NumPy build dependency** and keeps **no hand-written
+  `unsafe`**. The list-based `compute()` remains for convenience.
+- **Still open:** this is a bulk *copy* into and out of the interpreter's own
+  buffers, not a true zero-copy in which the interpreter reads and writes the
+  caller's memory directly. That would require reinterpreting the buffer's
+  `Cell` view as `&mut [R]` — hand-written `unsafe` — which the crate
+  deliberately avoids (see item 2). Rendering is still block-at-a-time: no
+  streaming ring buffer and no real-time audio-callback integration.

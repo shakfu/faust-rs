@@ -11,8 +11,10 @@ license = { text = "LGPL-2.1-or-later" }
 
 # Dev tooling managed by uv (`uv sync` installs these into the venv). maturin is
 # both the PEP 517 build backend (above) and the develop/build CLI used here.
+# NumPy is dev-only (it is not a runtime dependency of the extension); it lets the
+# `compute_into` buffer-protocol tests exercise the primary real-world consumer.
 [dependency-groups]
-dev = ["maturin>=1.5,<2.0", "pytest>=7"]
+dev = ["maturin>=1.5,<2.0", "pytest>=7", "numpy>=1.24"]
 
 [tool.maturin]
 # The importable module is `faust_rs` (the [lib] name in Cargo.toml).

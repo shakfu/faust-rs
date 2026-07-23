@@ -21,6 +21,7 @@ use codegen::backends::interp::{
     read_fbc,
 };
 use compiler::{Compiler, RealType, SignalFirLane};
+use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -190,6 +191,111 @@ fn render<R: FbcReal>(
         .iter()
         .map(|ch| ch.iter().map(|&x| x.to_f64()).collect())
         .collect())
+}
+
+/// Validates a 2-D `(channels, frames)` buffer-protocol object of precision `R`,
+/// returning the acquired buffer plus its channel and frame counts.
+///
+/// `PyBuffer::<R>::get` also enforces that the object's element format matches
+/// `R` (`float32` for `f32`, `float64` for `f64`), so the copy path below never
+/// casts precision. C-contiguity is required so a single bulk copy is valid.
+fn view_2d<R: Element>(
+    obj: &Bound<'_, PyAny>,
+    role: &str,
+) -> PyResult<(PyBuffer<R>, usize, usize)> {
+    let buf = PyBuffer::<R>::get(obj).map_err(|e| {
+        PyValueError::new_err(format!(
+            "{role} must be a contiguous buffer whose dtype matches the DSP precision: {e}"
+        ))
+    })?;
+    if buf.dimensions() != 2 {
+        return Err(PyValueError::new_err(format!(
+            "{role} must be a 2-D (channels, frames) buffer, got {}-D",
+            buf.dimensions()
+        )));
+    }
+    if !buf.is_c_contiguous() {
+        return Err(PyValueError::new_err(format!(
+            "{role} must be C-contiguous"
+        )));
+    }
+    let (channels, frames) = (buf.shape()[0], buf.shape()[1]);
+    Ok((buf, channels, frames))
+}
+
+/// Renders one block in place through buffer-protocol arrays for an instance of
+/// precision `R`. Input samples are bulk-copied out of `inputs`, the block is
+/// rendered, and results are bulk-copied into `outputs` — no per-sample Python
+/// object marshaling and no precision cast (the dtype is required to match `R`).
+fn compute_into_impl<R: FbcReal + Element>(
+    py: Python<'_>,
+    instance: &mut OwnedFbcDspInstance<R>,
+    inputs: &Bound<'_, PyAny>,
+    outputs: &Bound<'_, PyAny>,
+    num_in: usize,
+    num_out: usize,
+) -> PyResult<()> {
+    let (in_buf, in_ch, in_frames) = view_2d::<R>(inputs, "inputs")?;
+    let (out_buf, out_ch, out_frames) = view_2d::<R>(outputs, "outputs")?;
+
+    if in_ch != num_in {
+        return Err(PyValueError::new_err(format!(
+            "inputs has {in_ch} channel(s), DSP expects {num_in}"
+        )));
+    }
+    if out_ch != num_out {
+        return Err(PyValueError::new_err(format!(
+            "outputs has {out_ch} channel(s), DSP produces {num_out}"
+        )));
+    }
+    if out_buf.readonly() {
+        return Err(PyValueError::new_err("outputs buffer is read-only"));
+    }
+
+    // Frame count is authoritative from whichever side carries channels; if both
+    // do, they must agree. A DSP with neither inputs nor outputs is a no-op.
+    let frames = match (num_in > 0, num_out > 0) {
+        (true, true) if in_frames != out_frames => {
+            return Err(PyValueError::new_err(format!(
+                "inputs has {in_frames} frame(s) but outputs has {out_frames}"
+            )));
+        }
+        (true, _) => in_frames,
+        (false, true) => out_frames,
+        (false, false) => return Ok(()),
+    };
+    let count = i32::try_from(frames)
+        .map_err(|_| PyValueError::new_err("block length exceeds i32::MAX"))?;
+
+    // Copy inputs into contiguous per-channel storage (one memcpy for the whole
+    // buffer), then view it as `num_in` channel slices.
+    let mut flat_in = vec![R::default(); num_in * frames];
+    if !flat_in.is_empty() {
+        in_buf.copy_to_slice(py, &mut flat_in)?;
+    }
+    let in_refs: Vec<&[R]> = if frames == 0 {
+        (0..num_in).map(|_| &[] as &[R]).collect()
+    } else {
+        flat_in.chunks(frames).collect()
+    };
+
+    // Render into contiguous output storage, then bulk-copy into the caller's
+    // writable buffer.
+    let mut flat_out = vec![R::default(); num_out * frames];
+    {
+        let mut out_refs: Vec<&mut [R]> = if frames == 0 {
+            (0..num_out).map(|_| &mut [] as &mut [R]).collect()
+        } else {
+            flat_out.chunks_mut(frames).collect()
+        };
+        instance
+            .try_compute(count, &in_refs, &mut out_refs)
+            .map_err(|e| PyValueError::new_err(format!("interpreter runtime error: {e}")))?;
+    }
+    if !flat_out.is_empty() {
+        out_buf.copy_from_slice(py, &flat_out)?;
+    }
+    Ok(())
 }
 
 impl Dsp {
@@ -406,6 +512,40 @@ impl Dsp {
         match &mut self.engine {
             Engine::F32(i) => render(i, &inputs, count, num_out),
             Engine::F64(i) => render(i, &inputs, count, num_out),
+        }
+    }
+
+    /// Render one block **in place** through buffer-protocol arrays, advancing
+    /// the persistent instance state.
+    ///
+    /// This is the zero-marshaling counterpart to [`Dsp::compute`]: instead of
+    /// Python lists (which box every sample as a `PyFloat`), it reads and writes
+    /// contiguous native buffers, so large blocks avoid per-sample conversion.
+    ///
+    /// Both `inputs` and `outputs` are 2-D `(channels, frames)` C-contiguous
+    /// buffer-protocol objects — a NumPy array, a shaped `memoryview`, or any
+    /// object exposing the buffer protocol. Their **dtype must match the DSP
+    /// precision**: `float32` for a `"float"` DSP, `float64` for a `"double"`
+    /// one (mismatches raise, they are never silently cast). `inputs` must have
+    /// `num_inputs` rows, `outputs` must have `num_outputs` rows and be
+    /// writable, and (when both carry channels) their frame counts must agree.
+    /// The rendered block is written into `outputs` in place; nothing is
+    /// returned.
+    ///
+    /// For a zero-input DSP, pass a `(0, frames)` input array — the frame count
+    /// is then taken from `outputs`.
+    #[pyo3(signature = (inputs, outputs))]
+    fn compute_into(
+        &mut self,
+        py: Python<'_>,
+        inputs: &Bound<'_, PyAny>,
+        outputs: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let num_in = self.num_inputs as usize;
+        let num_out = self.num_outputs as usize;
+        match &mut self.engine {
+            Engine::F32(i) => compute_into_impl::<f32>(py, i, inputs, outputs, num_in, num_out),
+            Engine::F64(i) => compute_into_impl::<f64>(py, i, inputs, outputs, num_in, num_out),
         }
     }
 

@@ -29,6 +29,14 @@ tracks the faust-rs workspace and its API may change at any time.
 - `Dsp` class with a persistent, stateful interpreter instance:
   - `compute(inputs, frames=None)` renders one block (list of input channels ->
     list of output channels); DSP state carries across calls.
+  - `compute_into(inputs, outputs)` renders one block **in place** through the
+    Python buffer protocol: `inputs`/`outputs` are 2-D `(channels, frames)`
+    C-contiguous buffers (NumPy array, shaped `memoryview`, `array.array`, ...)
+    whose dtype must match the DSP precision (`float32`/`float64`; never silently
+    cast). This avoids the per-sample `PyFloat` boxing of the list-based path via
+    a single bulk copy each way (`PyBuffer::copy_to_slice`/`copy_from_slice`), so
+    it needs no NumPy build dependency and keeps the binding free of hand-written
+    `unsafe`. Same persistent state as `compute()`.
   - `reset()` re-initializes the instance, clearing filter memory, oscillator
     phase, and delay lines, and restoring control parameters to their defaults.
   - `num_inputs`, `num_outputs`, `sample_rate`, `name`, `precision`, and `cycle`
@@ -42,12 +50,17 @@ tracks the faust-rs workspace and its API may change at any time.
   `get_real_zone`/`set_real_zone`.
 - `version()` returning the underlying faust-rs compiler version.
 - `LIMITATIONS.md` documenting known scope reductions and their lift paths.
-- pytest suite under `tests/` (62 tests) covering module surface, compilation
+- pytest suite under `tests/` (75 tests) covering module surface, compilation
   and errors, exact compute output, persistence/reset, single/double precision,
   and instance lifetime/determinism. Self-contained DSP snippets and a vendored
   `noise.dsp` fixture are adapted from the sibling `cyfaust` project's tests,
   but assert exact sample values rather than only non-null factories. The suite
-  skips (does not error) when the extension is not built.
+  skips (does not error) when the extension is not built. The `compute_into`
+  buffer-protocol tests use stdlib `array.array`/`memoryview` (no NumPy needed)
+  and additionally exercise the NumPy path when NumPy is installed.
+- `numpy` added as a dev-only dependency so the `compute_into` tests exercise the
+  primary real-world consumer directly; it is not a runtime dependency of the
+  extension.
 
 ### Changed
 
@@ -73,6 +86,12 @@ tracks the faust-rs workspace and its API may change at any time.
 
 ### Fixed
 
+- `make test` now runs pytest with `uv run --no-sync`. A bare `uv run pytest`
+  re-syncs the environment first, which reinstalls the project from uv's cache
+  and clobbers the fresh `make develop` build whenever the version is unchanged
+  (an editable rebuild keeps the same `0.5.0` version). The stale extension then
+  lacked any newly added method. `develop` already syncs the dev tools, so the
+  test step can safely skip the sync and keep the just-built extension.
 - Compiling a source that expands `import("stdfaust.lib")` no longer crashes the
   interpreter with a stack overflow (SIGSEGV). `compile()` ran the compiler's
   deeply-recursive structural-lowering pass on Python's main-thread stack

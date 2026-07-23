@@ -117,6 +117,32 @@ c.reset()                 # clear DSP state
 c.compute([], frames=4)   # [[1.0, 2.0, 3.0, 4.0]]   <- restarts
 ```
 
+### In-place rendering via the buffer protocol
+
+`compute_into(inputs, outputs)` is the zero-marshaling counterpart to
+`compute()`. Instead of Python lists (which box every sample as a `PyFloat`), it
+reads and writes contiguous native buffers, so large blocks skip per-sample
+conversion. `inputs` and `outputs` are 2-D `(channels, frames)` C-contiguous
+buffer-protocol objects — a NumPy array, a shaped `memoryview`, or an
+`array.array` — whose dtype must match the DSP precision (`float32` for a
+`"float"` DSP, `float64` for a `"double"` one; a mismatch raises). The block is
+written into `outputs` in place; state persists exactly as with `compute()`. No
+NumPy build dependency is required, and the binding stays free of hand-written
+`unsafe` (each direction is one bulk copy).
+
+```python
+import numpy as np
+
+dsp = faust_rs.compile("process = _, _ : + : *(0.5);")   # 2 in, 1 out (f32)
+ins = np.array([[1.0, 2.0], [1.0, 2.0]], dtype=np.float32)  # (channels, frames)
+outs = np.zeros((dsp.num_outputs, ins.shape[1]), dtype=np.float32)
+dsp.compute_into(ins, outs)                # outs -> [[1.0, 2.0]]
+
+# zero-input generator: pass a (0, frames) input; frames come from outputs
+gen = faust_rs.compile("process = 0.7;")
+gen.compute_into(np.zeros((0, 4), np.float32), np.zeros((1, 4), np.float32))
+```
+
 ### UI parameters (sliders, buttons, bargraphs)
 
 DSP controls are exposed as parameters. `params()` lists them; `get_param` /
@@ -145,9 +171,14 @@ raise on unknown/ambiguous keys (and `set_param` on an output).
 
 See `LIMITATIONS.md` for the full list and lift paths. In brief:
 
-- Whole-block render over plain Python lists (no NumPy zero-copy).
+- Whole-block render only: no streaming ring buffer or real-time audio-callback
+  integration. `compute_into` avoids per-sample marshaling but still bulk-copies
+  into and out of the interpreter's own buffers (not a true zero-copy, which
+  would need hand-written `unsafe`).
 
 **Resolved:** cross-call state persistence (`Dsp` holds a safe, factory-owning
 `OwnedFbcDspInstance`; `reset()` clears state), single/double precision
 (`double=True`), `import(...)` resolution (`search_paths=` / `FAUST_LIB_PATH`),
-and the UI parameter bridge (`params()` / `get_param` / `set_param`).
+the UI parameter bridge (`params()` / `get_param` / `set_param`), and
+buffer-protocol block I/O (`compute_into`, accepting NumPy/`memoryview`/
+`array.array`).
