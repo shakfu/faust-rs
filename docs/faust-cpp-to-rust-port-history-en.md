@@ -1096,6 +1096,13 @@ naming and ownership rules:
   source generation;
 - thin C++ overload wrappers over the stable C ABI.
 
+Source generation through this API is deliberately narrower than the CLI. At
+the cutoff, `CcreateSourceFromBoxes` and `CcreateSourceFromSignals` accepted
+`c`, `cpp`, `fir`, and `interp`, and rejected any other language with a typed
+error. The later Julia, WebAssembly, AssemblyScript, and Rust emitters are
+reached through the CLI and the compiler facade, not through the
+libfaust-compatible Box/Signal entry points.
+
 The implementation extracted a shared `tree-ffi` context so Box and Signal
 handles use one arena, allocation pool, and provenance model. A dedicated
 `signal-ffi` crate then filled construction, recursion, table, waveform,
@@ -1190,6 +1197,13 @@ the oracle rather than regenerate “expected” files through the Rust compiler
 The 93 DSP inputs were brought into a backend-neutral directory, while the
 original C++ architecture headers remained referenced from an overridable
 checkout instead of being copied into the Rust repository.
+
+Two populations must not be confused in the numbers that follow. **93** is the
+imported C++ impulse population, and it is the denominator for C++-oracle
+comparison and for the per-backend impulse gates. The same directory later also
+received Rust-extension and clock-domain DSPs, so the **corpus** it holds had
+grown to 133 programs by the July 23 cutoff; that larger number is the
+denominator for Rust-only measurements such as vector admission.
 
 The new harness made the original idea more systematic across backends:
 
@@ -1446,13 +1460,19 @@ a bundle.
 
 By mid-July, checked vector lowering covered pure regions, recursive delays,
 UI, tables, soundfiles, clocked regions, AD policy, C/C++ generation, runtime
-backends, and expanding impulse matrices. The July 16 implementation review
-measured 49 of 93 corpus DSPs as actually admitted to certified vector plans;
-the remaining cases fell back explicitly. The larger all-green backend
-matrices established semantic correctness for requested vector modes, but
-must not be read as 92 or 93 DSPs all executing vectorized code. The
-significant innovation was not the chunk loop itself; it was making
-vectorization a typed, inspectable, fail-closed compiler decision.
+backends, and expanding impulse matrices. Admission was then tracked as a
+regenerable baseline rather than a prose claim. The July 16 implementation
+review measured 49 of the 93 impulse programs as actually admitted to
+certified vector plans; after the coverage recovery work, the baseline
+regenerated on July 22 measured **97 of 133 corpus DSPs certified, identically
+in all 16 vector modes**, with 35 explicit fallbacks (13 plan, 11 clock/AD, 7
+event, 4 pure) and 1 error. The remaining cases fell back explicitly. The
+larger all-green backend matrices established semantic correctness for
+requested vector modes, but must not be read as every corpus DSP executing
+vectorized code. The significant innovation was not the chunk loop itself; it
+was making vectorization a typed, inspectable, fail-closed compiler decision
+whose coverage is a checked-in artifact
+([`tests/vector-coverage/corpus-baseline.json`](../tests/vector-coverage/corpus-baseline.json)).
 
 See [vector signal-level analysis and port plan](../porting/vector-mode-signal-level-analysis-cpp-port-plan-2026-07-10-en.md),
 [reader-oriented vector synthesis](vector-scheduling-synthesis-en.md), and
@@ -1483,7 +1503,10 @@ The first emitter was followed immediately by an impulse-test target, which
 reached 92/92 on July 17. July 18 removed dependencies on locally installed
 Faust libraries from tests, aligned the generated runtime contract more closely
 with the C++ Rust backend, and expanded Julia/Rust impulse matrices. On July 21
-the backend was exposed through the library facade as well as the CLI.
+the backend was exposed through the compiler facade as well as the CLI, together
+with AssemblyScript. That facade is the `compiler` crate's programmatic entry
+point; the libfaust-compatible Box/Signal source generators kept their narrower
+`c`/`cpp`/`fir`/`interp` language set.
 
 The Rust backend closes an important loop in the project's history: the same
 typed FIR that helped port Faust *to* Rust can now emit DSP code *in* Rust for
@@ -1514,7 +1537,9 @@ The growth is visible in historical snapshots:
 - March 24 reported 82 of 83, with the same known stream-wrapper gap;
 - March 27 tracked 104 compiler corpus cases and more than 1,000 tests;
 - the May assessment counted 194 corpus inputs, about 1,387 tests, and 93 of 94
-  portable C++-accepted backend cases.
+  portable C++-accepted backend cases;
+- by July 23 the impulse corpus alone held 133 DSPs, the 93 imported C++
+  programs plus Rust-extension and clock-domain additions.
 
 Each new DSP could fail in a different layer. AI agents were used to inspect
 and modify parser, evaluator, propagation, signal typing, normalization, FIR,
@@ -1692,7 +1717,7 @@ features.
 | AssemblyScript | Real FIR backend with `asc` and impulse execution; still dependent on the external AssemblyScript toolchain and its runtime contract |
 | Julia | Useful module-first emitter with precision, UI, casts, and architecture wrapping; still an initial slice assuming a host Julia Faust runtime |
 | Rust | Architecture-compatible source backend with a 92/92 impulse gate; breadth beyond the exercised FIR/corpus surface remained subject to expansion |
-| Vector mode | Checked and executable on covered plans; the July 16 review measured 49/93 DSPs admitted, while unsupported or uncertified shapes fell back to scalar; profitability was not yet automatically modeled |
+| Vector mode | Checked and executable on covered plans; the July 22 baseline measured 97/133 corpus DSPs certified in all 16 vector modes, while unsupported or uncertified shapes fell back to scalar; profitability was not yet automatically modeled |
 | Lean | Experimental specification/checker research; no proof of the Rust compiler or scalar/vector semantic equivalence |
 
 ### Explicit gaps, policies, and exclusions
@@ -1754,8 +1779,10 @@ parity-equivalent.
 | 2026-07-07–10 | Clock-domain inference and lowering, local-time state, FAD Phase A/B, spectral/interleave examples |
 | 2026-07-10–16 | `-vec`/`-vs`/`-lv`, checked `VectorPlan`, 49/93 DSPs admitted at review time, lockstep vectorization, and experimental Lean structural model |
 | 2026-07-17–21 | Rust source backend, 92/92 impulse gate, runtime-contract alignment, and compiler facade API |
+| 2026-07-20 | Vector module decomposition (R5–R9), byte-deterministic scalar emission, independent `clock_ad` checker, LGPL-2.1-or-later license alignment, and README marked experimental / work in progress |
 | 2026-07-21 | Clean JSON diagnostic channel, `--check`, and frozen phase-wide diagnostic code table |
-| 2026-07-23 | Native distribution library renamed `libfaust-rs` to coexist with official `libfaust` |
+| 2026-07-22 | Vector coverage baseline regenerated at 97/133 certified in all 16 modes; project-local Faust libraries; published compiler Wasm artifact |
+| 2026-07-23 | Native distribution library renamed `libfaust-rs` to coexist with official `libfaust`; `-ec`/`-os` porting plan written |
 
 ## Conclusion
 
@@ -1764,8 +1791,9 @@ The first phase of `faust-rs` succeeded because it combined two kinds of speed.
 The first was implementation speed: AI agents could analyze large C++ areas,
 generate Rust enum and matcher families, produce tests, and move between
 compiler layers quickly. The hand-built FIR oscillator and the four-day
-source-to-code spine showed how effectively intermediate contracts could
-decouple unfinished work.
+source-to-code spine — valid over a deliberately limited subset, and not yet
+good code — showed how effectively intermediate contracts could decouple
+unfinished work.
 
 The second was feedback speed: golden files, C++ differentials, the FIR
 verifier, the interpreter, runtime traces, and a growing DSP corpus shortened
