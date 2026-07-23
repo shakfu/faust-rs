@@ -149,7 +149,141 @@ plain Faust. `il.interleave(N, id)` is exactly `@(N-1)`, so the round-trip
 latency of the construct is `N-1` samples. See
 [ondemand-fft-spectral-comparison-en.md](ondemand-fft-spectral-comparison-en.md).
 
-## 5. Links with FAD and RAD
+## 5. Spectral processing with `ondemand` and `interleave.lib`
+
+### From an audio stream to a frame operator
+
+The FFT operators in `analyzers.lib` are spatial circuits: an `N`-point
+transform expects the `N` samples of a frame at the same logical instant.
+`libraries/interleave.lib` provides the streaming harness that connects such a
+frame operator to an ordinary one-sample-at-a-time Faust stream:
+
+```text
+audio stream
+  -> serialize_in(N)
+  -> frame_clock(N) + ondemand(FX)
+  -> serialize_out(N)
+  -> audio stream
+```
+
+`serialize_in(N)` exposes the latest `N` samples as `N` parallel lanes. The
+boolean frame clock fires when the window is complete, so `ondemand(FX)` runs
+the FFT or the complete spectral effect only once per frame. `serialize_out`
+holds, delays, and sums the result lanes back into a stream. The convenience
+operator `il.interleave(N, FX)` packages this non-overlapping path; use
+`il.interleave_hop(N, hop, FX)` for overlapping windows and overlap-add.
+
+For analysis without resynthesis, the bins can remain as held frame-rate
+signals:
+
+```faust
+il = library("interleave.lib");
+an = library("analyzers.lib");
+si = library("signals.lib");
+
+N = 128;
+fftFX(NN) =
+    par(i, NN, (_, 0))
+    : an.c_bit_reverse_shuffle(NN)
+    : an.fftb(NN);
+
+process =
+    il.serialize_in(N)
+    : (il.frame_clock(N), si.bus(N))
+    : ondemand(fftFX(N));
+```
+
+For a time-to-spectrum-to-time effect, `FX` complexifies the frame, transforms
+it, modifies the complex bins, and performs the inverse transform. This compact
+example implements a 16-point brick-wall low-pass:
+
+```faust
+il = library("interleave.lib");
+an = library("analyzers.lib");
+
+N = 16;
+kc = 4;
+gain(m) = float(min(m, N-m) <= kc);
+scaleBin(g) = *(g), *(g);
+mask = par(m, N, scaleBin(gain(m)));
+
+lowpass(NN) =
+    par(i, NN, (_, 0))
+    : an.fft(NN)
+    : mask
+    : an.ifft(NN)
+    : par(i, NN, (_, !));
+
+process = il.interleave(N, lowpass(N));
+```
+
+Compile examples that import the project-local library with `-I libraries`, in
+addition to the path containing the standard Faust libraries.
+
+### Checked DSP examples
+
+The corpus contains complete programs that can be used as starting points:
+
+- [ondemand_fft_framed_128.dsp](../tests/corpus/ondemand_fft_framed_128.dsp)
+  exposes held FFT bins for analyzers or spectral losses;
+- [ondemand_fft_roundtrip_id_016.dsp](../tests/corpus/ondemand_fft_roundtrip_id_016.dsp)
+  checks exact non-overlapping FFT/IFFT reconstruction after the `N-1` latency;
+- [ondemand_fft_lowpass_016.dsp](../tests/corpus/ondemand_fft_lowpass_016.dsp),
+  [ondemand_fft_highpass_016.dsp](../tests/corpus/ondemand_fft_highpass_016.dsp),
+  and [ondemand_fft_bandpass_016.dsp](../tests/corpus/ondemand_fft_bandpass_016.dsp)
+  apply Hermitian-symmetric spectral masks;
+- [ondemand_fft_fastconv_032.dsp](../tests/corpus/ondemand_fft_fastconv_032.dsp)
+  performs per-frame convolution by multiplying complex bins;
+- [ondemand_stft_robot_ola_016.dsp](../tests/corpus/ondemand_stft_robot_ola_016.dsp)
+  combines a Hann window, 50% overlap, overlap-add, and magnitude-only
+  robotization;
+- [ondemand_stft_pv_freqshift_016.dsp](../tests/corpus/ondemand_stft_pv_freqshift_016.dsp)
+  keeps per-bin phase state inside the frame domain to implement a
+  phase-vocoder frequency shifter;
+- [ondemand_stft_denoiser_1024.dsp](../tests/corpus/ondemand_stft_denoiser_1024.dsp)
+  is a larger Wiener-style spectral gate.
+
+### Compilation and generated-code limits
+
+`ondemand` fixes the most important execution-rate problem: the transform runs
+once per hop rather than once per audio sample. It does not, however, turn the
+FFT into an opaque backend intrinsic. The current compiler expands
+`an.fft(N)`/`an.ifft(N)` into a hash-consed graph of scalar butterfly
+expressions before code generation.
+
+This has two practical consequences:
+
+- **Compilation grows with the transform.** Even with common-subexpression
+  elimination inside the clocked block, the compiler must build, type,
+  transform, and emit an `O(N log N)` graph. Large transforms consume much more
+  time and memory than a call to a precompiled FFT library, and the recursive
+  Faust FFT definition can require a raised evaluator depth. The checked
+  1024-point denoiser uses `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=4096` and is an
+  intentionally heavy example (about 0.5 million interpreter lines and roughly
+  40 seconds to compile on the machine used for its validation).
+- **The generated transform is scalar and fully specialized.** Small FFTs can
+  benefit from constant-folded twiddles, no planning overhead, and no inner
+  indexing loop. At larger sizes, code size, instruction-cache pressure,
+  register spilling, and the burst of work on a frame tick become limiting.
+  The current path also computes a complex FFT for real input and cannot match
+  a tuned FFT implementation that uses real-FFT kernels, cache-aware staged
+  loops, explicit SIMD, or architecture-specific assembly.
+
+These are limits of the current lowering path, not of the `ondemand` semantics.
+A future FFT primitive or backend-level structured FFT IR could retain the
+frame-rate behavior while generating a compact looped or library-backed kernel.
+For now, small and medium transforms are the natural operating range; measure
+both compile time and worst-case frame-tick CPU cost before using a large FFT in
+a real-time application.
+
+Finally, framing remains the programmer's responsibility:
+`il.interleave(N, FX)` has a fixed `N-1` round-trip latency and implements
+non-overlapping rectangular frames. With `interleave_hop`, select analysis and
+synthesis windows satisfying the required overlap-add condition. A
+duration-changing time stretch still needs rate decoupling outside a
+synchronous one-input/one-output Faust process.
+
+## 6. Links with FAD and RAD
 
 Clock domains are the practical vehicle for **in-graph learning** — the
 applicative motivation behind much of this machinery. See
@@ -184,7 +318,7 @@ diagnostic for automatic differentiation reaching a clock-domain boundary it
 cannot cross (`FRS-PROP-0004`). If you are building a learning loop, keep the
 seed, the loss, and the update in the **same** domain.
 
-## 6. Practical notes and current limits
+## 7. Practical notes and current limits
 
 - The clock is a signal, so it can itself be computed inside another domain.
   Nesting works, but reason in fire time at each level — the rates multiply.

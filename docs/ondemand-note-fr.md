@@ -160,7 +160,150 @@ exactement `@(N-1)` : la latence d'aller-retour de la construction est de `N-1`
 échantillons. Voir
 [ondemand-fft-spectral-comparison-en.md](ondemand-fft-spectral-comparison-en.md).
 
-## 5. Liens avec FAD et RAD
+## 5. Calcul spectral avec `ondemand` et `interleave.lib`
+
+### Du flux audio à l'opérateur de trame
+
+Les opérateurs FFT de `analyzers.lib` sont des circuits spatiaux : une
+transformée de taille `N` attend les `N` échantillons d'une trame au même
+instant logique. `libraries/interleave.lib` fournit l'enrobage de flux qui relie
+un tel opérateur de trame à un flux Faust ordinaire, échantillon par
+échantillon :
+
+```text
+flux audio
+  -> serialize_in(N)
+  -> frame_clock(N) + ondemand(FX)
+  -> serialize_out(N)
+  -> flux audio
+```
+
+`serialize_in(N)` expose les `N` derniers échantillons sous forme de `N` voies
+parallèles. L'horloge booléenne se déclenche quand la fenêtre est complète ;
+`ondemand(FX)` n'exécute donc la FFT, ou l'effet spectral complet, qu'une fois
+par trame. `serialize_out` maintient, retarde et somme les voies de résultat
+pour reconstruire un flux. L'opérateur pratique `il.interleave(N, FX)` regroupe
+ce chemin sans recouvrement ; pour des fenêtres recouvrantes et
+l'overlap-add, utiliser `il.interleave_hop(N, hop, FX)`.
+
+Pour une analyse sans resynthèse, les bins peuvent rester des signaux maintenus
+au rythme des trames :
+
+```faust
+il = library("interleave.lib");
+an = library("analyzers.lib");
+si = library("signals.lib");
+
+N = 128;
+fftFX(NN) =
+    par(i, NN, (_, 0))
+    : an.c_bit_reverse_shuffle(NN)
+    : an.fftb(NN);
+
+process =
+    il.serialize_in(N)
+    : (il.frame_clock(N), si.bus(N))
+    : ondemand(fftFX(N));
+```
+
+Pour un effet temps-spectre-temps, `FX` complexifie la trame, la transforme,
+modifie les bins complexes, puis effectue la transformée inverse. Cet exemple
+compact réalise un passe-bas « brick-wall » sur 16 points :
+
+```faust
+il = library("interleave.lib");
+an = library("analyzers.lib");
+
+N = 16;
+kc = 4;
+gain(m) = float(min(m, N-m) <= kc);
+scaleBin(g) = *(g), *(g);
+mask = par(m, N, scaleBin(gain(m)));
+
+lowpass(NN) =
+    par(i, NN, (_, 0))
+    : an.fft(NN)
+    : mask
+    : an.ifft(NN)
+    : par(i, NN, (_, !));
+
+process = il.interleave(N, lowpass(N));
+```
+
+Compiler les exemples qui importent la bibliothèque locale avec `-I
+libraries`, en plus du chemin contenant les bibliothèques Faust standard.
+
+### Exemples DSP vérifiés
+
+Le corpus contient des programmes complets utilisables comme points de départ :
+
+- [ondemand_fft_framed_128.dsp](../tests/corpus/ondemand_fft_framed_128.dsp)
+  expose les bins FFT maintenus pour les analyseurs ou les pertes spectrales ;
+- [ondemand_fft_roundtrip_id_016.dsp](../tests/corpus/ondemand_fft_roundtrip_id_016.dsp)
+  vérifie la reconstruction FFT/IFFT exacte sans recouvrement, après la latence
+  de `N-1` ;
+- [ondemand_fft_lowpass_016.dsp](../tests/corpus/ondemand_fft_lowpass_016.dsp),
+  [ondemand_fft_highpass_016.dsp](../tests/corpus/ondemand_fft_highpass_016.dsp)
+  et [ondemand_fft_bandpass_016.dsp](../tests/corpus/ondemand_fft_bandpass_016.dsp)
+  appliquent des masques spectraux à symétrie hermitienne ;
+- [ondemand_fft_fastconv_032.dsp](../tests/corpus/ondemand_fft_fastconv_032.dsp)
+  effectue une convolution par trame en multipliant les bins complexes ;
+- [ondemand_stft_robot_ola_016.dsp](../tests/corpus/ondemand_stft_robot_ola_016.dsp)
+  combine fenêtre de Hann, recouvrement à 50 %, overlap-add et robotisation par
+  conservation de la magnitude ;
+- [ondemand_stft_pv_freqshift_016.dsp](../tests/corpus/ondemand_stft_pv_freqshift_016.dsp)
+  conserve l'état de phase de chaque bin dans le domaine de trame pour réaliser
+  un décalage fréquentiel par vocodeur de phase ;
+- [ondemand_stft_denoiser_1024.dsp](../tests/corpus/ondemand_stft_denoiser_1024.dsp)
+  est une porte spectrale de type Wiener de plus grande taille.
+
+### Limites de compilation et du code généré
+
+`ondemand` corrige le principal problème de fréquence d'exécution : la
+transformée s'exécute une fois par saut, et non à chaque échantillon audio. Il
+ne transforme toutefois pas la FFT en primitive opaque du backend. Le
+compilateur actuel développe `an.fft(N)`/`an.ifft(N)` en un graphe d'expressions
+scalaires de papillons, avec partage par hash-consing, avant la génération de
+code.
+
+Cela a deux conséquences pratiques :
+
+- **La compilation croît avec la transformée.** Même avec l'élimination des
+  sous-expressions communes dans le bloc cadencé, le compilateur doit
+  construire, typer, transformer et émettre un graphe en `O(N log N)`. Une
+  grande transformée consomme bien plus de temps et de mémoire qu'un appel à
+  une bibliothèque FFT précompilée, et la définition récursive de la FFT Faust
+  peut nécessiter une profondeur d'évaluation augmentée. Le débruiteur vérifié
+  sur 1024 points utilise `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=4096` ; c'est
+  volontairement un exemple lourd (environ 0,5 million de lignes interpréteur
+  et approximativement 40 secondes de compilation sur la machine de
+  validation).
+- **La transformée générée est scalaire et entièrement spécialisée.** Les
+  petites FFT peuvent profiter des twiddles repliés en constantes, de l'absence
+  de planification et de boucle d'indexation interne. Pour les grandes tailles,
+  le volume de code, la pression sur le cache d'instructions, les débordements
+  de registres et le pic de calcul au tick de trame deviennent limitants. Le
+  chemin actuel calcule aussi une FFT complexe pour une entrée réelle et ne
+  peut égaler une implémentation optimisée utilisant des noyaux FFT réels, des
+  boucles étagées adaptées au cache, du SIMD explicite ou de l'assembleur
+  spécifique à l'architecture.
+
+Ce sont les limites de l'abaissement actuel, pas de la sémantique
+`ondemand`. Une future primitive FFT, ou un IR FFT structuré au niveau des
+backends, pourrait conserver l'exécution au rythme des trames tout en produisant
+un noyau compact, bouclé ou fourni par une bibliothèque. Pour l'instant, les
+petites et moyennes transformées constituent la zone d'utilisation naturelle ;
+mesurez le temps de compilation et le pire coût CPU au tick de trame avant
+d'utiliser une grande FFT dans une application temps réel.
+
+Enfin, le tramage reste sous la responsabilité du programmeur :
+`il.interleave(N, FX)` a une latence aller-retour fixe de `N-1` et utilise des
+trames rectangulaires sans recouvrement. Avec `interleave_hop`, choisir des
+fenêtres d'analyse et de synthèse satisfaisant la condition d'overlap-add
+requise. Un changement de durée reste dépendant d'un découplage de rythme
+extérieur au modèle Faust synchrone à une entrée et une sortie.
+
+## 6. Liens avec FAD et RAD
 
 Les domaines d'horloge sont le véhicule pratique de l'**apprentissage dans le
 graphe** — la motivation applicative de toute cette machinerie. Voir
@@ -199,7 +342,7 @@ atteint une frontière de domaine qu'elle ne peut franchir (`FRS-PROP-0004`). Si
 vous construisez une boucle d'apprentissage, gardez la graine, la perte et la
 mise à jour dans le **même** domaine.
 
-## 6. Remarques pratiques et limites actuelles
+## 7. Remarques pratiques et limites actuelles
 
 - L'horloge est un signal : elle peut elle-même être calculée dans un autre
   domaine. L'imbrication fonctionne, mais raisonnez en temps de déclenchement à

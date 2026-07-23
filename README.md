@@ -464,6 +464,22 @@ Project-local Faust helpers live in [`libraries/`](libraries/README.md). Add
 that directory to the import path with `-I libraries` when a DSP imports
 `optimizers.lib` or loads `interleave.lib`.
 
+## Frame-rate FFT and spectral processing
+
+`libraries/interleave.lib` combines frame serialization with `ondemand` so an
+`N`-point FFT, spectral effect, and inverse FFT run once per frame or hop rather
+than once per audio sample. This supports analysis-only FFTs, spectral masks,
+fast convolution, overlap-add STFT effects, phase-vocoder state, and
+differentiable spectral losses in ordinary Faust graphs.
+
+The current compiler expands the FFT into a specialized scalar butterfly graph:
+this works well for small and medium transforms, but large FFTs increase
+compilation time, generated-code size, instruction-cache pressure, and the
+worst-case work performed on a frame tick. See
+[the clock-domain and spectral-processing note](docs/ondemand-note-en.md#5-spectral-processing-with-ondemand-and-interleavelib)
+for executable DSP examples, framing semantics, and a comparison with optimized
+FFT implementations.
+
 ## Environment variables
 
 Use the following variables to increase the evaluation depth stack:
