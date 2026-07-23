@@ -14,7 +14,7 @@ unused_lifetimes = "warn"
 all = "warn"
 
 [lib]
-name = "faust"
+name = "faust_rs"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]

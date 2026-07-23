@@ -69,6 +69,7 @@ Usage:
   cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane fast] [--strict-fir-types]
   cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane fast]
   cargo run -p xtask -- build-faustwasm-compiler-module [--debug]
+  cargo run -p xtask -- build-libfaust [--release]
   cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]
   cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]
   cargo run -p xtask -- code-graphs [--out-dir <dir>]
@@ -163,6 +164,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "interp-trace-check" => interp_trace_check(args)?,
         "fir-dump-scan" => fir_dump_scan(args)?,
         "build-faustwasm-compiler-module" => build_faustwasm_compiler_module(args)?,
+        "build-libfaust" => build_libfaust_distribution_command(args)?,
         "backend-align-smoke" => backend_align_smoke(args)?,
         "backend-align-nightly" => backend_align_nightly(args)?,
         "code-graphs" => code_graphs(args)?,

@@ -467,11 +467,11 @@ Add a CI/local check that:
 - compiles a tiny C example and a tiny C++ example using the headers.
 
 Status 2026-06-09: added `cargo run -p xtask -- libfaust-export-check`.
-The check builds `faust-ffi`, extracts native dynamic exports from the produced
-`libfaust` library, compares them with the maintained Box/Signal C headers, and
+The check builds and packages `faust-ffi`, extracts native dynamic exports from
+the produced `libfaust-rs` library, compares them with the maintained Box/Signal C headers, and
 syntax-checks generated C11 and C++17 smoke clients using the C and C++ headers.
 Local validation exported all 269 header-declared symbols from
-`target/debug/libfaust.dylib`.
+`target/debug/libfaust-rs.dylib`.
 
 ## 9. Tests
 
