@@ -1,4 +1,4 @@
-"""Shared fixtures for the faust-rs-py test suite.
+"""Shared fixtures for the py-faust-rs test suite.
 
 The suite runs against the installed `faust_rs` extension module. Build it into
 the active environment first:

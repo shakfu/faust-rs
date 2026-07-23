@@ -1,4 +1,4 @@
-# faust-rs-py — Known Limitations
+# py-faust-rs — Known Limitations
 
 Status of the proof-of-concept PyO3 bindings. Each item notes the cause and what
 a fuller implementation would require. Updated as items are addressed.

@@ -5,7 +5,7 @@
 [workspace]
 
 [package]
-name = "faust-rs-py"
+name = "py-faust-rs"
 version = "0.5.0"
 edition = "2024"
 license = "LGPL-2.1-or-later"

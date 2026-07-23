@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `faust-rs-py` are documented here.
+All notable changes to `py-faust-rs` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This crate is an experimental proof of concept (`publish = false`); its version
@@ -66,6 +66,10 @@ tracks the faust-rs workspace and its API may change at any time.
 - Added a `Makefile` with self-documenting targets (`make help`): `sync`,
   `develop`, `build`, `test`, `lint` (`fmt-check` + `clippy`), `clean`, and
   friends. `make test` rebuilds the extension before running pytest.
+- Renamed the crate to `py-faust-rs` (Cargo package and `crates/py-faust-rs`
+  directory) and the Python distribution to `py-faust-rs`, for consistency with
+  the parent `faust-rs` workspace. The importable module is unchanged
+  (`import faust_rs`), as is the `faust_rs` Cargo `[lib]` name.
 
 ### Fixed
 

@@ -1,4 +1,4 @@
-# faust-rs-py (proof of concept)
+# py-faust-rs (proof of concept)
 
 Minimal PyO3/maturin bindings that expose the faust-rs **interpreter (FBC)
 backend** to Python: compile a Faust `.dsp` source string and render audio

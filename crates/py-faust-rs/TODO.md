@@ -1,4 +1,4 @@
-# faust-rs-py TODO
+# py-faust-rs TODO
 
 Remaining work for the proof-of-concept binding. Resolved items (persistence,
 single/double precision, import search paths, UI parameter bridge) are recorded

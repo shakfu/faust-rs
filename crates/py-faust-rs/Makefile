@@ -1,4 +1,4 @@
-# Makefile for the faust-rs-py crate (PyO3/maturin bindings, managed with uv).
+# Makefile for the py-faust-rs crate (PyO3/maturin bindings, managed with uv).
 #
 # Python tooling runs through uv; the Rust extension is built via the maturin
 # backend. Bootstrap with `make sync`, then `make test` is the primary check.
@@ -12,7 +12,7 @@ PYTEST_ARGS ?=
 # Self-documenting help: lists every target with a `## ` comment.
 .PHONY: help
 help:
-	@echo "faust-rs-py targets:"
+	@echo "py-faust-rs targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 

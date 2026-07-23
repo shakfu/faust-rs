@@ -33,7 +33,7 @@ members = [
 ]
 # Proof-of-concept PyO3 bindings: standalone crate kept out of the workspace so
 # its `extension-module` linkage never affects `cargo build --workspace` or CI.
-exclude = ["crates/py-faust"]
+exclude = ["crates/py-faust-rs"]
 resolver = "2"
 
 [workspace.package]
