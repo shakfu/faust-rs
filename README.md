@@ -499,6 +499,19 @@ Use the following variables to increase the evaluation depth stack:
 - Code graphs and public API index: `docs/code-graphs/`
 - Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
 
+## Contributing
+
+Pull requests are welcome, including contributions developed with AI
+assistance. Human-authored and AI-assisted changes are held to the same
+standards, and contributors remain responsible for the correctness,
+maintainability, tests, and documentation of the submitted work.
+
+Every pull request must follow
+[Commit and Documentation Hygiene](AGENTS.md#11-commit-and-documentation-hygiene).
+In particular, keep the Git history linear, submit small and coherent commits,
+update the README and porting journal when required, and keep documentation
+concise, factual, and implementation-oriented.
+
 ## Workspace crates
 
 | Crate | Role |
