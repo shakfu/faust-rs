@@ -55,6 +55,7 @@ dot -V
 | `interp-trace-check` | Compare Rust runtime traces against persisted snapshots |
 | `fir-dump-scan` | Scan `dump_fir` output for loop-body expansion regressions |
 | `build-faustwasm-compiler-module` | Build `wasm-ffi` for `wasm32-unknown-unknown` and verify the raw export ABI |
+| `build-libfaust` | Build and publish the native C/C++ `libfaust-rs` distribution (`--release` for release artifacts) |
 | `backend-align-smoke` | CI-friendly alignment orchestration |
 | `backend-align-nightly` | Broader alignment orchestration intended for longer jobs |
 | `code-graphs` | Generate Mermaid/DOT/SVG crate graphs, IR overview graphs, and a public API source-scan index |
@@ -465,12 +466,18 @@ API tests before being treated as final parity.
 ## libfaust Export Check
 
 `libfaust-export-check` validates the maintained local C/C++ distribution
-surface. It builds `faust-ffi`, extracts dynamic exports from the produced
-`libfaust` library, compares them against the Box and Signal C headers, and
+surface. It builds and packages `faust-ffi`, extracts dynamic exports from the
+produced `libfaust-rs` library, compares them against the Box and Signal C headers, and
 syntax-checks tiny C11 and C++17 clients using the maintained headers.
 
 ```bash
 cargo run -p xtask -- libfaust-export-check
+```
+
+To publish the C/C++ artifacts directly:
+
+```bash
+cargo run -p xtask -- build-libfaust --release
 ```
 
 ## Differential Reports

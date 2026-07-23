@@ -628,7 +628,7 @@ pub fn run_main() {
     // Two-pronged timeout approach:
     // 1. The cooperative cancel flag is checked by the evaluator on every
     //    recursive call and returns `EvalError::Cancelled`. This is safe for
-    //    library (libfaust) usage because it never calls `process::exit`.
+    //    library (libfaust-rs) usage because it never calls `process::exit`.
     // 2. The CLI watchdog calls `process::exit(1)` as a last resort if the
     //    cancel flag didn't abort in time (e.g. hang in propagation phase
     //    where cancel checks are not yet wired). This is CLI-only and

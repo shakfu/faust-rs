@@ -78,18 +78,18 @@ DSP WebAssembly and JSON artifacts. See the
 [`wasm-ffi` guide](crates/wasm-ffi/README.md) for the raw allocation, result,
 and lifetime contract, plus options for embedding Faust libraries.
 
-## Use `libfaust` from C and C++
+## Use `libfaust-rs` from C and C++
 
-The `faust-ffi` crate builds one unified C ABI library named `libfaust`, with
+The `faust-ffi` crate builds one unified C ABI library named `libfaust-rs`, with
 C++ wrappers over the same ABI. It exports the factory and DSP APIs for both the
 bytecode Interpreter and the experimental native Cranelift JIT backend:
 
 ```bash
-cargo build -p faust-ffi --release
+cargo run -p xtask -- build-libfaust --release
 ```
 
-This produces the platform static library (`libfaust.a` or `faust.lib`) and
-dynamic library (`libfaust.dylib`, `libfaust.so`, or `faust.dll`) under
+This produces the platform static library (`libfaust-rs.a` or `faust-rs.lib`)
+and dynamic library (`libfaust-rs.dylib`, `libfaust-rs.so`, or `faust-rs.dll`) under
 `target/release/`. The C++ headers are
 `crates/interp-ffi/include/interpreter-dsp.h` and
 `crates/cranelift-ffi/include/cranelift-dsp.h`; the corresponding C headers are
@@ -102,7 +102,7 @@ c++ -std=c++17 app.cpp \
   -I crates/interp-ffi/include \
   -I crates/cranelift-ffi/include \
   -I /path/to/faust/architecture \
-  -L target/release -lfaust \
+  -L target/release -lfaust-rs \
   -Wl,-rpath,"$PWD/target/release" \
   -o app
 ```
@@ -130,21 +130,21 @@ int main()
         return 1;
     }
 
-    std::unique_ptr<dsp> processor(factory->createDSPInstance());
-    if (!processor) {
-        deleteInterpreterDSPFactory(factory);
-        return 1;
-    }
+    {
+        std::unique_ptr<dsp> processor(factory->createDSPInstance());
+        if (!processor) {
+            deleteInterpreterDSPFactory(factory);
+            return 1;
+        }
 
-    processor->init(48000);
-    std::array<FAUSTFLOAT, 64> input{};
-    std::array<FAUSTFLOAT, 64> output{};
-    FAUSTFLOAT* inputs[] = {input.data()};
-    FAUSTFLOAT* outputs[] = {output.data()};
-    processor->compute(64, inputs, outputs);
+        processor->init(48000);
+        std::array<FAUSTFLOAT, 64> input{};
+        std::array<FAUSTFLOAT, 64> output{};
+        FAUSTFLOAT* inputs[] = {input.data()};
+        FAUSTFLOAT* outputs[] = {output.data()};
+        processor->compute(64, inputs, outputs);
+    } // Destroy the DSP instance before its factory.
 
-    // The factory must outlive all DSP instances created from it.
-    processor.reset();
     deleteInterpreterDSPFactory(factory);
 }
 ```
@@ -175,15 +175,17 @@ int main()
         return 1;
     }
 
-    std::unique_ptr<dsp> processor(factory->createDSPInstance());
-    if (!processor) {
-        deleteCraneliftDSPFactory(factory);
-        return 1;
-    }
+    {
+        std::unique_ptr<dsp> processor(factory->createDSPInstance());
+        if (!processor) {
+            deleteCraneliftDSPFactory(factory);
+            return 1;
+        }
 
-    processor->init(48000);
-    // Use processor->compute(...) exactly as in the Interpreter example.
-    processor.reset();
+        processor->init(48000);
+        // Use processor->compute(...) exactly as in the Interpreter example.
+    } // Destroy the DSP instance before its factory.
+
     deleteCraneliftDSPFactory(factory);
 }
 ```
@@ -238,7 +240,7 @@ Compile it against the same unified library:
 ```bash
 cc -std=c11 app.c \
   -I crates/interp-ffi/include \
-  -L target/release -lfaust \
+  -L target/release -lfaust-rs \
   -Wl,-rpath,"$PWD/target/release" \
   -o app
 ```
@@ -258,7 +260,7 @@ The Cranelift C API has the same lifecycle with backend-specific names:
 
 Unlike the C++ wrapper, the Cranelift C constructor always takes the
 `opt_level` argument. Returned strings such as factory JSON or serialized
-factory data are owned by `libfaust` and must be released with `freeCMemory()`
+factory data are owned by `libfaust-rs` and must be released with `freeCMemory()`
 when the corresponding header says so.
 
 Cranelift support is experimental: native JIT execution works for the currently
@@ -267,7 +269,7 @@ factory format are not yet final. Always check the returned factory and report
 the supplied error string. See the detailed
 [`Interpreter C/C++ API guide`](crates/interp-ffi/README.md) and
 [`Cranelift C/C++ API guide`](crates/cranelift-ffi/README.md), as well as the
-corresponding `*-dsp-c.h` headers when calling `libfaust` from C.
+corresponding `*-dsp-c.h` headers when calling `libfaust-rs` from C.
 
 ## Install
 
@@ -438,6 +440,22 @@ reference compiler to accept them.
   block-local reverse sweep, which is particularly useful for host-driven
   optimization.
 
+Inside a `US` or `DS` block, `ma.SR` is adapted automatically to the local
+clock domain: an upsampling factor `H` makes the block observe `SR * H`, while
+a downsampling factor `H` makes it observe `SR / H`. Filters, oscillators, and
+other algorithms that derive their coefficients from `ma.SR` therefore use the
+effective sample rate of the block without requiring a manual correction.
+
+There is currently one practical limitation in the Faust libraries:
+`platform.lib` defines `ma.SR` with an upper and lower clamp equivalent to
+`min(192000, max(1, fSamplingFreq))`. The compiler adapts the sample-rate value
+inside `US`/`DS`, but the generated expression retains that surrounding
+`min`/`max`. Consequently, a large `US` factor can still clamp the effective
+local rate to 192 kHz—for example, `US(8)` at 48 kHz should observe 384 kHz but
+currently observes 192 kHz through this definition. The `ma.SR` definition in
+`platform.lib` must therefore be relaxed or redesigned before large
+upsampling factors can expose their full local sample rate.
+
 See [the clock-domain note](docs/ondemand-note-en.md) for OD/US/DS timing and
 rate semantics, and [the FAD/RAD synthesis](docs/fad-rad-synthesis-en.md) for
 output layouts, examples, and current limits.
@@ -445,6 +463,22 @@ output layouts, examples, and current limits.
 Project-local Faust helpers live in [`libraries/`](libraries/README.md). Add
 that directory to the import path with `-I libraries` when a DSP imports
 `optimizers.lib` or loads `interleave.lib`.
+
+## Frame-rate FFT and spectral processing
+
+`libraries/interleave.lib` combines frame serialization with `ondemand` so an
+`N`-point FFT, spectral effect, and inverse FFT run once per frame or hop rather
+than once per audio sample. This supports analysis-only FFTs, spectral masks,
+fast convolution, overlap-add STFT effects, phase-vocoder state, and
+differentiable spectral losses in ordinary Faust graphs.
+
+The current compiler expands the FFT into a specialized scalar butterfly graph:
+this works well for small and medium transforms, but large FFTs increase
+compilation time, generated-code size, instruction-cache pressure, and the
+worst-case work performed on a frame tick. See
+[the clock-domain and spectral-processing note](docs/ondemand-note-en.md#5-spectral-processing-with-ondemand-and-interleavelib)
+for executable DSP examples, framing semantics, and a comparison with optimized
+FFT implementations.
 
 ## Environment variables
 
@@ -496,7 +530,7 @@ Use the following variables to increase the evaluation depth stack:
 | `cranelift-ffi` | Experimental Cranelift backend C/C++ API |
 | `box-ffi` | Box manipulation C/C++ API |
 | `signal-ffi` | Signal manipulation C/C++ API |
-| `faust-ffi` | Unified `libfaust` distribution crate |
+| `faust-ffi` | Unified `libfaust-rs` distribution crate |
 | `wasm-ffi` | Raw WASM ABI for `faustwasm` embedded compiler mode |
 
 ## Generate API docs

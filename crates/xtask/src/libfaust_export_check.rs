@@ -1,4 +1,4 @@
-//! Verifies the local libfaust C/C++ distribution surface.
+//! Builds and verifies the local libfaust-rs C/C++ distribution surface.
 //!
 //! The check intentionally exercises the installed shape of the Rust port:
 //! build the unified `faust-ffi` dynamic library, compare exported symbols
@@ -6,20 +6,16 @@
 
 use super::*;
 
-/// Builds `faust-ffi`, checks exported C symbols against local headers, and
-/// syntax-checks tiny C/C++ clients using the maintained wrapper headers.
+/// Builds `faust-ffi`, publishes the native `libfaust-rs` artifacts, checks
+/// exported C symbols against local headers, and syntax-checks tiny C/C++
+/// clients using the maintained wrapper headers.
 pub(crate) fn libfaust_export_check() -> Result<(), Box<dyn std::error::Error>> {
-    build_faust_ffi()?;
+    let dynamic_library = build_libfaust_distribution(false)?;
 
     let workspace = workspace_root();
-    let dynamic_library = workspace.join("target").join("debug").join(format!(
-        "{}faust{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    ));
     if !dynamic_library.exists() {
         return Err(format!(
-            "expected faust dynamic library after build: {}",
+            "expected libfaust-rs dynamic library after build: {}",
             dynamic_library.display()
         )
         .into());
@@ -33,7 +29,7 @@ pub(crate) fn libfaust_export_check() -> Result<(), Box<dyn std::error::Error>> 
         .collect::<Vec<String>>();
     if !missing.is_empty() {
         return Err(format!(
-            "faust dynamic library is missing header-declared exports: {}",
+            "libfaust-rs dynamic library is missing header-declared exports: {}",
             missing.join(", ")
         )
         .into());
@@ -42,21 +38,104 @@ pub(crate) fn libfaust_export_check() -> Result<(), Box<dyn std::error::Error>> 
     syntax_check_headers(&workspace)?;
 
     println!(
-        "libfaust-export-check: {} header symbols exported by {}",
+        "libfaust-rs export check: {} header symbols exported by {}",
         expected.len(),
         workspace_relative_path(&dynamic_library)
     );
     Ok(())
 }
 
-fn build_faust_ffi() -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("cargo")
-        .args(["build", "-p", "faust-ffi"])
-        .status()?;
+/// Builds and publishes the C/C++ distribution artifacts.
+///
+/// Rust library target names cannot contain hyphens, so `faust-ffi` builds
+/// internal `faust_rs` artifacts and this packaging step publishes the stable
+/// native names: `libfaust-rs.a` plus the platform dynamic-library equivalent.
+/// Returns the published dynamic-library path.
+pub(crate) fn build_libfaust_distribution(
+    release: bool,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mut command = Command::new("cargo");
+    command.args(["build", "-p", "faust-ffi"]);
+    if release {
+        command.arg("--release");
+    }
+    let status = command.status()?;
     if !status.success() {
         return Err("cargo build -p faust-ffi failed".into());
     }
+
+    let profile = if release { "release" } else { "debug" };
+    let artifact_dir = workspace_root().join("target").join(profile);
+    Ok(publish_libfaust_native_artifacts(&artifact_dir)?)
+}
+
+/// Parses and runs the explicit native C/C++ distribution workflow.
+pub(crate) fn build_libfaust_distribution_command(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut release = false;
+    for arg in args {
+        match arg.as_str() {
+            "--release" => release = true,
+            other => {
+                return Err(format!(
+                    "usage: cargo run -p xtask -- build-libfaust [--release]\nunknown option: {other}"
+                )
+                .into());
+            }
+        }
+    }
+    let dynamic_library = build_libfaust_distribution(release)?;
+    println!(
+        "libfaust-rs native distribution ready: {}",
+        workspace_relative_path(&dynamic_library)
+    );
     Ok(())
+}
+
+pub(crate) fn publish_libfaust_native_artifacts(artifact_dir: &Path) -> Result<PathBuf, io::Error> {
+    let static_source = artifact_dir.join(native_static_library_name("faust_rs"));
+    let static_destination = artifact_dir.join(native_static_library_name("faust-rs"));
+    publish_native_artifact(&static_source, &static_destination)?;
+
+    let dynamic_source = artifact_dir.join(native_dynamic_library_name("faust_rs"));
+    let dynamic_destination = artifact_dir.join(native_dynamic_library_name("faust-rs"));
+    publish_native_artifact(&dynamic_source, &dynamic_destination)?;
+    Ok(dynamic_destination)
+}
+
+fn publish_native_artifact(source: &Path, destination: &Path) -> Result<(), io::Error> {
+    if source.is_file() {
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+        fs::rename(source, destination)?;
+        return Ok(());
+    }
+    if destination.is_file() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("native library artifact not found at {}", source.display()),
+    ))
+}
+
+pub(crate) fn native_static_library_name(stem: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{stem}.lib")
+    } else {
+        format!("lib{stem}.a")
+    }
+}
+
+pub(crate) fn native_dynamic_library_name(stem: &str) -> String {
+    format!(
+        "{}{}{}",
+        std::env::consts::DLL_PREFIX,
+        stem,
+        std::env::consts::DLL_SUFFIX
+    )
 }
 
 fn expected_header_symbols(

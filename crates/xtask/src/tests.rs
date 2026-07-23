@@ -254,6 +254,35 @@ fn publish_wasm_compiler_module_accepts_an_already_published_module() {
 }
 
 #[test]
+fn publish_libfaust_native_artifacts_uses_hyphenated_distribution_names() {
+    let root = std::env::temp_dir().join(format!(
+        "faust-rs-xtask-native-publish-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    let raw_static = root.join(native_static_library_name("faust_rs"));
+    let raw_dynamic = root.join(native_dynamic_library_name("faust_rs"));
+    fs::write(&raw_static, b"static").unwrap();
+    fs::write(&raw_dynamic, b"dynamic").unwrap();
+
+    let dynamic = publish_libfaust_native_artifacts(&root).unwrap();
+    assert_eq!(
+        dynamic.file_name().unwrap().to_string_lossy(),
+        native_dynamic_library_name("faust-rs")
+    );
+    assert_eq!(
+        fs::read(root.join(native_static_library_name("faust-rs"))).unwrap(),
+        b"static"
+    );
+    assert_eq!(fs::read(dynamic).unwrap(), b"dynamic");
+    assert!(!raw_static.exists());
+    assert!(!raw_dynamic.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verify_wasm_ffi_exports_accepts_expected_surface() {
     let bytes = wat::parse_str(
         r#"
