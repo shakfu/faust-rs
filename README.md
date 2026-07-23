@@ -489,15 +489,15 @@ Use the following variables to increase the evaluation depth stack:
 
 ## Documentation
 
-- User CLI reference: `docs/user-cli-guide-en.md`
-- User diagnostics guide: `docs/user-diagnostics-guide-en.md`
-- Clock domains (`ondemand`/`upsampling`/`downsampling`): `docs/ondemand-note-en.md` / `docs/ondemand-note-fr.md`
-- Automatic differentiation (`fad`/`rad`): `docs/fad-rad-synthesis-en.md` / `docs/fad-rad-synthesis-fr.md`
-- Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
-- Technical/developer workflows: `docs/developer-workflows-en.md`
-- Porting history: `docs/faust-cpp-to-rust-port-history-en.md`
-- Code graphs and public API index: `docs/code-graphs/`
-- Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
+- [User CLI reference](docs/user-cli-guide-en.md)
+- [User diagnostics guide](docs/user-diagnostics-guide-en.md)
+- Clock domains (`ondemand`/`upsampling`/`downsampling`): [English](docs/ondemand-note-en.md) / [French](docs/ondemand-note-fr.md)
+- Automatic differentiation (`fad`/`rad`): [English](docs/fad-rad-synthesis-en.md) / [French](docs/fad-rad-synthesis-fr.md)
+- [Supported Faust subset](porting/faust-rs-supported-faust-subset-en.md)
+- [Technical/developer workflows](docs/developer-workflows-en.md)
+- [Porting history](docs/faust-cpp-to-rust-port-history-en.md)
+- [Code graphs and public API index](docs/code-graphs/)
+- [`faustwasm` compiler-module build notes](crates/wasm-ffi/README.md)
 
 ## Contributing
 
@@ -573,8 +573,8 @@ Crate-specific entry point example:
 
 ## Porting references
 
-- Porting plan: `porting/faust-rust-porting-plan-en.md`
-- Critical points: `porting/faust-rust-points-critiques-en.md`
-- Phases: `porting/phases/`
-- Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
-- Porting journal index: `JOURNAL.md`
+- [Porting plan](porting/faust-rust-porting-plan-en.md)
+- [Critical points](porting/faust-rust-points-critiques-en.md)
+- [Porting phases](porting/phases/)
+- [Supported Faust subset](porting/faust-rs-supported-faust-subset-en.md)
+- [Porting journal index](JOURNAL.md)
