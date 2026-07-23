@@ -752,7 +752,15 @@ fn eval_value(
     if let Some(cached) = loop_detector.eval_cache.get(&cache_key) {
         return Ok(cached.clone());
     }
-    let result = eval_value_uncached(arena, expr, env, loop_detector)?;
+    // Bound syntactic recursion depth: a deeply nested acyclic expression
+    // recurses through `eval_value` without pushing a `call_stack` frame, so it
+    // would overflow the OS stack before the `max_depth` budget trips. The
+    // keyless `enter_eval` counter caps that depth, converting the crash into a
+    // `RecursionDepthExceeded` error (balanced by `leave_eval` below).
+    loop_detector.enter_eval()?;
+    let result = eval_value_uncached(arena, expr, env, loop_detector);
+    loop_detector.leave_eval();
+    let result = result?;
     if should_cache_eval_value(&result) {
         loop_detector.eval_cache.insert(cache_key, result.clone());
     }

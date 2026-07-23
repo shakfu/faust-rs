@@ -26,24 +26,30 @@ interpreter backend.
 
 ## Build
 
-Requires a Python interpreter and [maturin](https://www.maturin.rs/).
+Requires a Rust toolchain and [uv](https://docs.astral.sh/uv/). uv manages the
+virtualenv, builds the extension through the [maturin](https://www.maturin.rs/)
+backend, and installs the dev tooling (`maturin`, `pytest`).
 
 ```bash
 cd crates/py-faust
-python3 -m venv .venv && . .venv/bin/activate
-pip install maturin
-maturin develop            # builds + installs `faust_rs` into the venv
-# or: maturin build --release   # produce a wheel
+uv sync                        # create .venv, build + install `faust_rs`, add dev tools
+```
+
+`uv sync` builds the extension once. After editing the Rust sources, rebuild it
+into the venv with:
+
+```bash
+uv run maturin develop --uv    # fast in-place rebuild
+# or: uv sync --reinstall-package faust-rs
+# or: uv run maturin build --release   # produce a wheel
 ```
 
 ## Test
 
-A pytest suite lives in `tests/`. Build the extension first, then run it:
+A pytest suite lives in `tests/`; `uv sync` has already built the extension:
 
 ```bash
-maturin develop
-pip install pytest         # or: pip install -e '.[test]'
-pytest                     # from crates/py-faust
+uv run pytest                  # from crates/py-faust
 ```
 
 The suite verifies exact rendered sample values (compile, compute, persistence,

@@ -422,6 +422,63 @@ impl Dsp {
     }
 }
 
+/// 64 MiB worker-thread stack for the compile path.
+///
+/// The evaluator's structural-lowering pass recurses deeply for large programs
+/// (notably anything that expands `import("stdfaust.lib")`), and its guarded
+/// recursion budgets are sized against the workspace's 64 MiB stack contract
+/// (see `compiler::main`). Python calls this extension on its main thread, whose
+/// stack (~8 MiB on CPython) is far below that contract, so a stdfaust-based
+/// compile overflows it. Running the compile on a thread with the contract's
+/// headroom keeps the binding within the same envelope as every other embedder.
+const COMPILE_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+/// The pure-Rust compile pipeline: source string -> FBC bytecode -> precision-
+/// erased owning instance -> `Dsp`. Runs entirely off the GIL on the worker
+/// thread; errors come back as strings for the caller to wrap in `ValueError`.
+fn compile_pipeline(
+    source: String,
+    name: String,
+    sample_rate: i32,
+    double: bool,
+    paths: Vec<PathBuf>,
+) -> Result<Dsp, String> {
+    let options = InterpOptions {
+        module_name: Some(name.clone()),
+        ..InterpOptions::default()
+    };
+
+    let real_type = if double {
+        RealType::Float64
+    } else {
+        RealType::Float32
+    };
+    let compiler = Compiler::new().with_real_type(real_type);
+    let fbc = compiler
+        .compile_source_to_interp_with_lane_and_search_paths(
+            &name,
+            &source,
+            &paths,
+            &options,
+            SignalFirLane::TransformFastLane,
+        )
+        .map_err(|e| format!("compile error: {e}"))?;
+
+    // Load the bytecode at the matching precision and wrap it precision-erased.
+    let mut cursor = Cursor::new(fbc.into_bytes());
+    let engine = if double {
+        let factory =
+            read_fbc::<f64>(&mut cursor).map_err(|e| format!("bytecode load error: {e}"))?;
+        Engine::F64(build_instance(factory, sample_rate))
+    } else {
+        let factory =
+            read_fbc::<f32>(&mut cursor).map_err(|e| format!("bytecode load error: {e}"))?;
+        Engine::F32(build_instance(factory, sample_rate))
+    };
+
+    Ok(Dsp::new(engine, sample_rate))
+}
+
 /// Compile a Faust `.dsp` source string into a runnable [`Dsp`] handle.
 ///
 /// Set `double=True` for double-precision (`f64`) DSP; the default is single
@@ -435,6 +492,7 @@ impl Dsp {
 #[pyfunction]
 #[pyo3(signature = (source, name = "FaustDSP", sample_rate = 48000, double = false, search_paths = None))]
 fn compile(
+    py: Python<'_>,
     source: &str,
     name: &str,
     sample_rate: i32,
@@ -444,11 +502,6 @@ fn compile(
     if sample_rate <= 0 {
         return Err(PyValueError::new_err("sample_rate must be positive"));
     }
-
-    let options = InterpOptions {
-        module_name: Some(name.to_owned()),
-        ..InterpOptions::default()
-    };
 
     // Effective import search paths: explicit argument first, then any
     // directories from FAUST_LIB_PATH (Faust's conventional env var).
@@ -461,35 +514,23 @@ fn compile(
         paths.extend(std::env::split_paths(&env_paths));
     }
 
-    let real_type = if double {
-        RealType::Float64
-    } else {
-        RealType::Float32
-    };
-    let compiler = Compiler::new().with_real_type(real_type);
-    let fbc = compiler
-        .compile_source_to_interp_with_lane_and_search_paths(
-            name,
-            source,
-            &paths,
-            &options,
-            SignalFirLane::TransformFastLane,
-        )
-        .map_err(|e| PyValueError::new_err(format!("compile error: {e}")))?;
+    let source = source.to_owned();
+    let name = name.to_owned();
 
-    // Load the bytecode at the matching precision and wrap it precision-erased.
-    let mut cursor = Cursor::new(fbc.into_bytes());
-    let engine = if double {
-        let factory = read_fbc::<f64>(&mut cursor)
-            .map_err(|e| PyValueError::new_err(format!("bytecode load error: {e}")))?;
-        Engine::F64(build_instance(factory, sample_rate))
-    } else {
-        let factory = read_fbc::<f32>(&mut cursor)
-            .map_err(|e| PyValueError::new_err(format!("bytecode load error: {e}")))?;
-        Engine::F32(build_instance(factory, sample_rate))
-    };
+    // Run the deeply-recursive compile on a worker thread with the workspace
+    // stack contract (see `COMPILE_STACK_SIZE`), releasing the GIL while it runs
+    // since the pipeline touches no Python state.
+    let result = py.detach(move || {
+        std::thread::Builder::new()
+            .name("faust-rs-compile".to_owned())
+            .stack_size(COMPILE_STACK_SIZE)
+            .spawn(move || compile_pipeline(source, name, sample_rate, double, paths))
+            .map_err(|e| format!("failed to spawn compile thread: {e}"))?
+            .join()
+            .map_err(|_| "compile thread panicked".to_owned())?
+    });
 
-    Ok(Dsp::new(engine, sample_rate))
+    result.map_err(PyValueError::new_err)
 }
 
 /// Return the underlying faust-rs compiler version string.

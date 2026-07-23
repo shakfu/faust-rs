@@ -42,7 +42,7 @@ tracks the faust-rs workspace and its API may change at any time.
   `get_real_zone`/`set_real_zone`.
 - `version()` returning the underlying faust-rs compiler version.
 - `LIMITATIONS.md` documenting known scope reductions and their lift paths.
-- pytest suite under `tests/` (42 tests) covering module surface, compilation
+- pytest suite under `tests/` (62 tests) covering module surface, compilation
   and errors, exact compute output, persistence/reset, single/double precision,
   and instance lifetime/determinism. Self-contained DSP snippets and a vendored
   `noise.dsp` fixture are adapted from the sibling `cyfaust` project's tests,
@@ -57,6 +57,27 @@ tracks the faust-rs workspace and its API may change at any time.
   hand-written `unsafe` has been removed. The binding contains no hand-written
   `unsafe` (only PyO3 macro expansion requires relaxing `unsafe_code`), and the
   `Dsp` pyclass is `Send`.
+- Development tooling migrated from the pip/`venv` workflow to
+  [uv](https://docs.astral.sh/uv/). `uv sync` creates the venv, builds and
+  installs the extension through the maturin backend, and installs the dev
+  tools; dev dependencies moved from `[project.optional-dependencies]` to a
+  PEP 735 `[dependency-groups]` table, pinned by a committed `uv.lock`. Build
+  and test docs (README, `conftest.py`) updated accordingly.
+- Added a `Makefile` with self-documenting targets (`make help`): `sync`,
+  `develop`, `build`, `test`, `lint` (`fmt-check` + `clippy`), `clean`, and
+  friends. `make test` rebuilds the extension before running pytest.
+
+### Fixed
+
+- Compiling a source that expands `import("stdfaust.lib")` no longer crashes the
+  interpreter with a stack overflow (SIGSEGV). `compile()` ran the compiler's
+  deeply-recursive structural-lowering pass on Python's main-thread stack
+  (~8 MiB on CPython), but the evaluator's guarded recursion budgets are sized
+  against the workspace's 64 MiB stack contract (see `compiler::main`), which
+  every other embedder honors. `compile()` now runs the compile pipeline on a
+  64 MiB-stack worker thread, releasing the GIL while it runs. The overflow was
+  reliable in debug builds and latent in release (deep enough inputs could still
+  overflow before the fix).
 
 ### Notes
 

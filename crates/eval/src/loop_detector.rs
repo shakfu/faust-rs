@@ -140,6 +140,18 @@ pub struct LoopDetector {
     /// `RecursionDepthExceeded` gracefully, matching the reference C++
     /// compiler's `"stack overflow in eval"` error.
     pub(crate) structural_depth: usize,
+    /// Syntactic expression-tree recursion depth for [`eval_value`].
+    ///
+    /// The `call_stack` cycle guard only records frames at definition-resolution
+    /// and tree-reentry sites, so a deeply *nested but acyclic* expression (e.g.
+    /// a long `a + a + ... + a` chain) recurses through `eval_value` without ever
+    /// pushing a frame, and overflows the OS stack before the `max_depth` budget
+    /// can trip. This keyless counter, incremented at every `eval_value` entry,
+    /// bounds that syntactic depth too, so such an expression fails with
+    /// `RecursionDepthExceeded` instead of aborting the process. Every recursive
+    /// path routes through `eval_value`, so this also caps total native eval
+    /// recursion.
+    pub(crate) eval_depth: usize,
 }
 
 /// Environment variable overriding the default evaluator recursion budget.
@@ -241,6 +253,7 @@ impl LoopDetector {
             symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             structural_depth: 0,
+            eval_depth: 0,
         }
     }
 
@@ -355,6 +368,28 @@ impl LoopDetector {
     pub(crate) fn leave_structural(&mut self) {
         self.structural_depth = self.structural_depth.saturating_sub(1);
     }
+
+    /// Enters a syntactic-evaluation frame ([`eval_value`]).
+    ///
+    /// Like [`enter_structural`], this records no identity key — it only enforces
+    /// the `max_depth` budget so a deeply nested acyclic expression fails with
+    /// `RecursionDepthExceeded` rather than aborting the process on OS stack
+    /// overflow. Pair with [`leave_eval`](Self::leave_eval).
+    pub(crate) fn enter_eval(&mut self) -> Result<(), EvalError> {
+        if self.eval_depth >= self.max_depth {
+            return Err(EvalError::RecursionDepthExceeded {
+                max_depth: self.max_depth,
+            });
+        }
+        self.eval_depth += 1;
+        Ok(())
+    }
+
+    /// Decrements the syntactic-evaluation counter, balancing an
+    /// [`enter_eval`](Self::enter_eval) call.
+    pub(crate) fn leave_eval(&mut self) {
+        self.eval_depth = self.eval_depth.saturating_sub(1);
+    }
 }
 
 /// Reads a recursion-depth limit from the environment variable `var_name`,
@@ -438,6 +473,33 @@ mod tests {
             detector.enter_structural(),
             Err(EvalError::RecursionDepthExceeded { max_depth: 3 })
         ));
+    }
+
+    #[test]
+    fn eval_depth_trips_at_max_depth() {
+        let mut detector = LoopDetector::with_max_depth(4);
+        for _ in 0..4 {
+            detector.enter_eval().unwrap();
+        }
+
+        // A fifth syntactic-recursion level past the budget returns a clean
+        // error rather than recursing further and overflowing the OS stack.
+        assert!(matches!(
+            detector.enter_eval(),
+            Err(EvalError::RecursionDepthExceeded { max_depth: 4 })
+        ));
+    }
+
+    #[test]
+    fn eval_depth_leave_restores_budget() {
+        let mut detector = LoopDetector::with_max_depth(2);
+        detector.enter_eval().unwrap();
+        detector.enter_eval().unwrap();
+        assert!(detector.enter_eval().is_err()); // at the cap
+
+        detector.leave_eval(); // unwind one frame
+        // The freed budget is reusable, so entry succeeds again.
+        detector.enter_eval().unwrap();
     }
 
     #[test]

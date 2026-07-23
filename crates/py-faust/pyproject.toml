@@ -9,8 +9,10 @@ description = "Proof-of-concept Python bindings for the faust-rs interpreter bac
 requires-python = ">=3.9"
 license = { text = "LGPL-2.1-or-later" }
 
-[project.optional-dependencies]
-test = ["pytest>=7"]
+# Dev tooling managed by uv (`uv sync` installs these into the venv). maturin is
+# both the PEP 517 build backend (above) and the develop/build CLI used here.
+[dependency-groups]
+dev = ["maturin>=1.5,<2.0", "pytest>=7"]
 
 [tool.maturin]
 # The importable module is `faust_rs` (the [lib] name in Cargo.toml).

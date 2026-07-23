@@ -3,7 +3,7 @@
 The suite runs against the installed `faust_rs` extension module. Build it into
 the active environment first:
 
-    maturin develop           # from crates/py-faust
+    uv run maturin develop --uv   # from crates/py-faust
 
 Pytest skips the whole suite (rather than erroring) if the module is absent, so
 a checkout without a build does not produce spurious failures.
@@ -16,7 +16,7 @@ import pytest
 
 faust_rs = pytest.importorskip(
     "faust_rs",
-    reason="build the extension first: `maturin develop` in crates/py-faust",
+    reason="build the extension first: `uv run maturin develop --uv` in crates/py-faust",
 )
 
 DSP_DIR = Path(__file__).parent / "dsp"

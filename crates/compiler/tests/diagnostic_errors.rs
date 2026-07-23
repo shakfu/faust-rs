@@ -213,6 +213,65 @@ process = par(i, 3, fact(i));
 }
 
 #[test]
+fn deeply_nested_expression_reports_eval_error_instead_of_aborting() {
+    // Companion to `diverging_recursive_case_...`, but for *syntactic* recursion.
+    // A deeply nested acyclic expression (a long `1 + 1 + ... + 1` chain)
+    // recurses through `eval_value` without pushing a `call_stack` cycle frame,
+    // so before the `eval_depth` counter it overflowed the OS stack instead of
+    // tripping the `max_depth` budget. Assert it now fails with the clean
+    // "stack overflow in eval" diagnostic, as the semantic-recursion path does.
+    const TEST_STACK_SAFE_MAX_DEPTH: usize = 1_024;
+    if let Some(raised) = std::env::var("FAUST_RS_DEFAULT_EVAL_MAX_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&d| d > TEST_STACK_SAFE_MAX_DEPTH)
+    {
+        eprintln!(
+            "skipping deeply_nested_expression: FAUST_RS_DEFAULT_EVAL_MAX_DEPTH={raised} \
+             raises the syntactic-depth budget past the {TEST_STACK_SAFE_MAX_DEPTH}-frame \
+             stack this test is sized for (unset it to run this case)"
+        );
+        return;
+    }
+
+    // ~4000 nested additions: comfortably past the 1024 default budget so the
+    // guard trips, yet far below the depth that would overflow a 64 MiB stack
+    // unguarded, so a regression (guard removed) fails this assertion cleanly
+    // instead of aborting the whole test binary.
+    let source = format!("process = {};", vec!["1"; 4_000].join("+"));
+
+    std::thread::Builder::new()
+        .name("deep-expression-stack-overflow".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let compiler = Compiler::new();
+            let err = compiler
+                .compile_source_to_signals("deep_expression.dsp", &source)
+                .expect_err("a 4000-deep expression should exceed the eval depth budget");
+            let diagnostics = err
+                .diagnostics()
+                .expect("depth-exceeded failure should expose diagnostics");
+            let first = diagnostics
+                .as_slice()
+                .first()
+                .expect("depth-exceeded failure should produce one diagnostic");
+            assert!(
+                first.code.0.starts_with("FRS-EVAL-"),
+                "syntactic-depth failure should stay in eval stage, got: {}",
+                first.code.0
+            );
+            assert!(
+                first.message.contains("stack overflow in eval"),
+                "diagnostic should mirror C++ stack-overflow wording, got: {}",
+                first.message
+            );
+        })
+        .expect("spawn worker")
+        .join()
+        .expect("worker thread should finish");
+}
+
+#[test]
 fn eval_undefined_symbol_exposes_binding_trace() {
     let compiler = Compiler::new();
     let source = read_corpus("err_09_eval_undefined_symbol.dsp");
