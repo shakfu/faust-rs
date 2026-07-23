@@ -440,6 +440,22 @@ reference compiler to accept them.
   block-local reverse sweep, which is particularly useful for host-driven
   optimization.
 
+Inside a `US` or `DS` block, `ma.SR` is adapted automatically to the local
+clock domain: an upsampling factor `H` makes the block observe `SR * H`, while
+a downsampling factor `H` makes it observe `SR / H`. Filters, oscillators, and
+other algorithms that derive their coefficients from `ma.SR` therefore use the
+effective sample rate of the block without requiring a manual correction.
+
+There is currently one practical limitation in the Faust libraries:
+`platform.lib` defines `ma.SR` with an upper and lower clamp equivalent to
+`min(192000, max(1, fSamplingFreq))`. The compiler adapts the sample-rate value
+inside `US`/`DS`, but the generated expression retains that surrounding
+`min`/`max`. Consequently, a large `US` factor can still clamp the effective
+local rate to 192 kHz—for example, `US(8)` at 48 kHz should observe 384 kHz but
+currently observes 192 kHz through this definition. The `ma.SR` definition in
+`platform.lib` must therefore be relaxed or redesigned before large
+upsampling factors can expose their full local sample rate.
+
 See [the clock-domain note](docs/ondemand-note-en.md) for OD/US/DS timing and
 rate semantics, and [the FAD/RAD synthesis](docs/fad-rad-synthesis-en.md) for
 output layouts, examples, and current limits.
