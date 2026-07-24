@@ -489,14 +489,28 @@ Use the following variables to increase the evaluation depth stack:
 
 ## Documentation
 
-- User CLI reference: `docs/user-cli-guide-en.md`
-- User diagnostics guide: `docs/user-diagnostics-guide-en.md`
-- Clock domains (`ondemand`/`upsampling`/`downsampling`): `docs/ondemand-note-en.md` / `docs/ondemand-note-fr.md`
-- Automatic differentiation (`fad`/`rad`): `docs/fad-rad-synthesis-en.md` / `docs/fad-rad-synthesis-fr.md`
-- Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
-- Technical/developer workflows: `docs/developer-workflows-en.md`
-- Code graphs and public API index: `docs/code-graphs/`
-- Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
+- [User CLI reference](docs/user-cli-guide-en.md)
+- [User diagnostics guide](docs/user-diagnostics-guide-en.md)
+- Clock domains (`ondemand`/`upsampling`/`downsampling`): [English](docs/ondemand-note-en.md) / [French](docs/ondemand-note-fr.md)
+- Automatic differentiation (`fad`/`rad`): [English](docs/fad-rad-synthesis-en.md) / [French](docs/fad-rad-synthesis-fr.md)
+- [Supported Faust subset](porting/faust-rs-supported-faust-subset-en.md)
+- [Technical/developer workflows](docs/developer-workflows-en.md)
+- [Porting history](docs/faust-cpp-to-rust-port-history-en.md)
+- [Code graphs and public API index](docs/code-graphs/)
+- [`faustwasm` compiler-module build notes](crates/wasm-ffi/README.md)
+
+## Contributing
+
+Pull requests are welcome, including contributions developed with AI
+assistance. Human-authored and AI-assisted changes are held to the same
+standards, and contributors remain responsible for the correctness,
+maintainability, tests, and documentation of the submitted work.
+
+Every pull request must follow
+[Commit and Documentation Hygiene](AGENTS.md#11-commit-and-documentation-hygiene).
+In particular, keep the Git history linear, submit small and coherent commits,
+update the README and porting journal when required, and keep documentation
+concise, factual, and implementation-oriented.
 
 ## Workspace crates
 
@@ -559,8 +573,8 @@ Crate-specific entry point example:
 
 ## Porting references
 
-- Porting plan: `porting/faust-rust-porting-plan-en.md`
-- Critical points: `porting/faust-rust-points-critiques-en.md`
-- Phases: `porting/phases/`
-- Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
-- Porting journal index: `JOURNAL.md`
+- [Porting plan](porting/faust-rust-porting-plan-en.md)
+- [Critical points](porting/faust-rust-points-critiques-en.md)
+- [Porting phases](porting/phases/)
+- [Supported Faust subset](porting/faust-rs-supported-faust-subset-en.md)
+- [Porting journal index](JOURNAL.md)
