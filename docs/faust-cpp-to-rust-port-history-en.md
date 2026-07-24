@@ -1,5 +1,9 @@
 # From Faust C++ to `faust-rs`: a porting history
 
+> This is the complete technical history. Readers looking for a shorter
+> introduction should start with the
+> [concise porting history](faust-cpp-to-rust-port-history-overview-en.md).
+
 ## Introduction
 
 The `faust-rs` project began in February 2026 with an ambitious objective:
