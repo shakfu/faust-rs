@@ -495,7 +495,8 @@ Use the following variables to increase the evaluation depth stack:
 - Automatic differentiation (`fad`/`rad`): [English](docs/fad-rad-synthesis-en.md) / [French](docs/fad-rad-synthesis-fr.md)
 - [Supported Faust subset](porting/faust-rs-supported-faust-subset-en.md)
 - [Technical/developer workflows](docs/developer-workflows-en.md)
-- [Porting history](docs/faust-cpp-to-rust-port-history-en.md)
+- [Concise porting history](docs/faust-cpp-to-rust-port-history-overview-en.md)
+- [Detailed technical porting history](docs/faust-cpp-to-rust-port-history-en.md)
 - [Code graphs and public API index](docs/code-graphs/)
 - [`faustwasm` compiler-module build notes](crates/wasm-ffi/README.md)
 
