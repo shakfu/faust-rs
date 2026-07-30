@@ -273,7 +273,8 @@ impl<'a> SignalToFirLower<'a> {
                          back half (inference, guarded blocks, per-domain local \
                          time — roadmap P1–P3) has not been ported"
                     ),
-                ));
+                )
+                .at_signal(sig));
             }
             other => {
                 return Err(SignalFirError::new(
@@ -282,7 +283,8 @@ impl<'a> SignalToFirLower<'a> {
                         "unsupported signal node in Step 2C: {other:?} (expr={})",
                         dump_sig_readable(self.arena, sig)
                     ),
-                ));
+                )
+                .at_signal(sig));
             }
         };
 
@@ -357,6 +359,8 @@ impl<'a> SignalToFirLower<'a> {
             // selected Hsched (`crate::signal_fir::shadow`).
             self.cache
                 .insert_at(self.regions.effective_depth(), sig, lowered);
+            self.fir_origins
+                .record_signal(lowered, sig, self.signal_origins);
             if self.emission_seen.insert(sig) {
                 self.emission_order.push(sig);
             }
@@ -384,16 +388,21 @@ impl<'a> SignalToFirLower<'a> {
             if needs_output_cast {
                 value = b.cast(FirType::FaustFloat, value);
             }
-            let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
-            self.regions
-                .current_phases_mut()
-                .immediate
-                .push(b.store_table(
+            if self.processing_api.is_one_sample() {
+                let chan =
+                    b.int32(i32::try_from(signal_index).expect("validated output index fits i32"));
+                let store = b.store_table("outputs", AccessType::FunArgs, chan, value);
+                self.regions.current_phases_mut().immediate.push(store);
+            } else {
+                let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+                let store = b.store_table(
                     format!("output{signal_index}"),
                     AccessType::Stack,
                     i0,
                     value,
-                ));
+                );
+                self.regions.current_phases_mut().immediate.push(store);
+            }
         } else {
             let mut b = FirBuilder::new(&mut self.store);
             self.regions
@@ -477,6 +486,12 @@ impl<'a> SignalToFirLower<'a> {
         let mut b = FirBuilder::new(&mut self.store);
 
         if name == "count" {
+            if self.control_rate_mode.is_external() || self.processing_api.is_one_sample() {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::ForeignCountInExecutionMode,
+                    "accessing foreign variable 'count' is not allowed in this compilation mode",
+                ));
+            }
             return Ok(b.load_var(name, AccessType::FunArgs, typ));
         }
 
@@ -620,6 +635,17 @@ impl<'a> SignalToFirLower<'a> {
             ));
         }
 
+        // One-sample mode (§4.6): `frame` receives flat channel arrays, so
+        // the sample read is a direct `inputs[channel]` load — no block
+        // pointer alias, no sample index.
+        if self.processing_api.is_one_sample() {
+            let real_ty = self.real_ty();
+            let mut b = FirBuilder::new(&mut self.store);
+            let chan = b.int32(i32::try_from(index).expect("validated input index fits i32"));
+            let raw = b.load_table("inputs", AccessType::FunArgs, chan, FirType::FaustFloat);
+            return Ok(b.cast(real_ty, raw));
+        }
+
         let alias = if let Some(alias) = self.input_ptr_aliases.get(&index) {
             alias.clone()
         } else {
@@ -628,12 +654,13 @@ impl<'a> SignalToFirLower<'a> {
             let chan = b.int32(i32::try_from(index).expect("validated input index fits i32"));
             let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
             let load_chan_ptr = b.load_table("inputs", AccessType::FunArgs, chan, ptr_ty.clone());
-            self.sections.control_statements.push(b.declare_var(
+            let decl = b.declare_var(
                 alias.clone(),
                 ptr_ty,
                 AccessType::Stack,
                 Some(load_chan_ptr),
-            ));
+            );
+            self.sections.push_compute_preamble(decl);
             self.input_ptr_aliases.insert(index, alias.clone());
             alias
         };

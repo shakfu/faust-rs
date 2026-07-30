@@ -22,10 +22,12 @@ tracks the faust-rs workspace and its API may change at any time.
   single).
 - `import(...)` resolution: `compile(..., search_paths=[dir, ...])` resolves
   `import("stdfaust.lib")` and friends against the given directories, with
-  `FAUST_LIB_PATH` entries appended automatically. Backed by a new
-  `compiler::Compiler::compile_source_to_interp_with_lane_and_search_paths`
-  method. Adds a skip-guarded import test group and a vendored `osc.dsp`
-  fixture (both need a discoverable Faust standard library).
+  `FAUST_LIB_PATH` entries appended automatically. Implemented entirely in the
+  binding: the source is staged into a private temp directory and compiled
+  through the facade's existing `compile_file_to_interp_with_lane`, the only
+  entry point that honours search paths. Adds a skip-guarded import test group
+  and a vendored `osc.dsp` fixture (both need a discoverable Faust standard
+  library).
 - `Dsp` class with a persistent, stateful interpreter instance:
   - `compute(inputs, frames=None)` renders one block (list of input channels ->
     list of output channels); DSP state carries across calls.

@@ -8,9 +8,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, ValueEnum};
 use compiler::{Compiler, FaustInstallPaths};
-use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Severity, SourceSpan, Stage};
+use diagnostics::{
+    Applicability, DebugContext, Diagnostic, DiagnosticBundle, DiagnosticCategory, DiagnosticCode,
+    LabelRole, Severity, SourceKind, SourceMapBuilder, SourceRange, SourceSpan, Stage,
+    SuggestedFix, TextEdit,
+};
 use serde_json::Value;
 use signals::{SigMatch, match_sig};
 
@@ -80,9 +84,10 @@ fn vec_flags_map_to_compute_mode() {
 
 // ── `-ss` / `--scheduling-strategy` (vectorization port plan P2) ─────────────
 //
-// P2 is plumbing-only: these tests check parsing, defaulting, legacy `-ss`
-// normalization, and `SchedulingStrategy::decode` mapping — not that
-// scheduling is active (no compiled-output assertions here).
+// Scope: these tests check parsing, defaulting, legacy `-ss` normalization,
+// and `SchedulingStrategy::decode` mapping only. That the decoded strategy
+// actually reorders emitted statements is covered by the transform-level
+// scheduling tests, not here (no compiled-output assertions in this file).
 
 #[test]
 fn scheduling_strategy_flag_decodes_all_documented_values() {
@@ -216,15 +221,48 @@ fn normalize_legacy_args_maps_dash_pn_to_process_name() {
     );
 }
 
+/// The `-lang` tokens must be exactly this set, in alphabetical order.
+///
+/// Read from the value enum rather than from the rendered help, which was the
+/// previous shape of this test: documenting a single `CliLang` variant makes
+/// clap switch from a one-line `possible values: …` to a bulleted list with
+/// per-variant help, and the test broke on that purely cosmetic change. The
+/// accepted tokens are the contract; clap's layout is not.
+///
+/// Aliases are deliberately not listed — `c99`, `cxx`, `rs` and friends are
+/// compatibility spellings, and `to_possible_value` reports only the canonical
+/// name a user sees in the help.
 #[test]
-fn cli_help_lists_lang_possible_values_alphabetically() {
-    let help = CliArgs::command().render_long_help().to_string();
-    assert!(
-        help.contains(
-            "possible values: asc, c, cpp, cranelift, fir, interp, julia, rust, wasm, wast"
-        ),
-        "{help}"
+fn cli_lang_tokens_are_the_expected_set_in_alphabetical_order() {
+    let listed: Vec<String> = CliLang::value_variants()
+        .iter()
+        .map(|lang| {
+            lang.to_possible_value()
+                .expect("no -lang variant is hidden")
+                .get_name()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            "asc",
+            "c",
+            "codebox",
+            "codebox-test",
+            "cpp",
+            "cranelift",
+            "fir",
+            "interp",
+            "julia",
+            "rust",
+            "wasm",
+            "wast",
+        ]
     );
+    let mut sorted = listed.clone();
+    sorted.sort();
+    assert_eq!(listed, sorted, "the -lang values must stay alphabetical");
 }
 
 #[test]
@@ -519,8 +557,8 @@ fn diagnostics_human_renderer_keeps_code_and_location() {
             DiagnosticCode("FRS-EVAL-0001"),
             "missing process",
         )
-        .with_label(errors::Label::new(
-            errors::LabelStyle::Primary,
+        .with_label(diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
             SourceSpan::new("test.dsp", 3, 7, 3, 12),
             "here",
         )),
@@ -538,9 +576,7 @@ fn diagnostics_json_renderer_exposes_structured_fields() {
     let err = compiler
         .compile_source_to_signals("missing_process.dsp", "foo = _;")
         .expect_err("missing process should fail");
-    let diagnostics = err
-        .diagnostics()
-        .expect("compiler errors should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
 
     let rendered = format_diagnostics_json(diagnostics);
     let value: Value =
@@ -575,8 +611,8 @@ fn diagnostics_human_renderer_snapshot_with_snippet_and_caret() {
             DiagnosticCode("FRS-PROP-0002"),
             "split composition mismatch",
         )
-        .with_label(errors::Label::new(
-            errors::LabelStyle::Primary,
+        .with_label(diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
             SourceSpan::new(&path, 1, 13, 1, 15),
             "related source",
         ))
@@ -597,6 +633,61 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
   = help: make B input count a multiple of A output count
 ";
     assert_eq!(normalized, expected);
+
+    std::fs::remove_file(path).expect("fixture should be removed");
+}
+
+#[test]
+fn diagnostics_human_renderer_uses_the_compiled_snapshot_after_file_changes() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "faust_rs_diag_snapshot_{}_{}.dsp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos()
+    ));
+    let compiled = "process = missing;\n";
+    std::fs::write(&path, compiled).expect("fixture should be written");
+
+    let mut sources = SourceMapBuilder::new();
+    sources.add(&path, SourceKind::File, compiled);
+    let mut bundle = DiagnosticBundle::new();
+    bundle.set_source_map(sources.finish());
+    bundle.push(
+        Diagnostic::new(
+            Severity::Error,
+            Stage::Eval,
+            DiagnosticCode("FRS-EVAL-0002"),
+            "undefined symbol",
+        )
+        .with_label(diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
+            SourceSpan::new(&path, 1, 11, 1, 18),
+            "not found",
+        )),
+    );
+
+    std::fs::write(&path, "process = changed_after_compile;\n").expect("fixture should be changed");
+    let rendered = format_diagnostics_human(&bundle);
+    assert!(rendered.contains("1 | process = missing;"));
+    assert!(!rendered.contains("changed_after_compile"));
+
+    let json_with_snapshot: Value =
+        serde_json::from_str(&format_diagnostics_json(&bundle)).expect("v2 JSON should be valid");
+    assert_eq!(json_with_snapshot["sources"][0]["kind"], "file");
+    assert_eq!(
+        json_with_snapshot["diagnostics"][0]["labels"][0]["range"]["start"],
+        10
+    );
+    bundle.set_source_map(diagnostics::SourceMap::new());
+    let json_without_snapshot: Value =
+        serde_json::from_str(&format_diagnostics_json(&bundle)).expect("v2 JSON should be valid");
+    assert!(
+        json_without_snapshot["diagnostics"][0]["labels"][0]["range"].is_null(),
+        "legacy labels without a registered source keep their compatibility span"
+    );
 
     std::fs::remove_file(path).expect("fixture should be removed");
 }
@@ -633,6 +724,77 @@ fn diagnostics_json_renderer_snapshot_shape_stable() {
 }
 
 #[test]
+fn diagnostics_json_v2_serializes_typed_fields_without_parsing_notes() {
+    let mut sources = SourceMapBuilder::new();
+    let source_id = sources.add("typed.dsp", SourceKind::Memory, "process = typo;\n");
+    let mut bundle = DiagnosticBundle::new();
+    bundle.set_source_map(sources.finish());
+    bundle.push(
+        Diagnostic::new(
+            Severity::Error,
+            Stage::Eval,
+            DiagnosticCode("FRS-EVAL-0002"),
+            "undefined symbol",
+        )
+        .with_category(DiagnosticCategory::UserCode)
+        .with_detail_code("undefined-binding")
+        .with_fact("symbol", "typo")
+        .with_note("backend_code=must-not-be-parsed")
+        .with_label(
+            diagnostics::Label::new(
+                diagnostics::LabelStyle::Primary,
+                SourceSpan::new("typed.dsp", 1, 11, 1, 15),
+                "unknown name",
+            )
+            .with_role(LabelRole::UseSite),
+        )
+        .with_fix(SuggestedFix {
+            title: "replace the symbol".into(),
+            applicability: Applicability::MachineApplicable,
+            edits: vec![TextEdit {
+                range: SourceRange::new(source_id, 10, 14),
+                replacement: "known".into(),
+            }],
+            explanation: None,
+        }),
+    );
+
+    let standard: Value =
+        serde_json::from_str(&format_diagnostics_json(&bundle)).expect("v2 must be valid JSON");
+    assert_eq!(standard["schema_version"], 2);
+    assert_eq!(standard["status"], "failed");
+    assert_eq!(
+        standard["sources"][0]["content_hash"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    let diagnostic = &standard["diagnostics"][0];
+    assert_eq!(diagnostic["category"], "user_code");
+    assert_eq!(diagnostic["detail_code"], "undefined-binding");
+    assert_eq!(diagnostic["labels"][0]["role"], "use_site");
+    assert_eq!(diagnostic["labels"][0]["range"]["start"], 10);
+    assert_eq!(diagnostic["facts"]["symbol"]["type"], "string");
+    assert_eq!(diagnostic["facts"]["symbol"]["value"], "typo");
+    assert_eq!(
+        diagnostic["fixes"][0]["applicability"],
+        "machine_applicable"
+    );
+    assert!(
+        diagnostic["facts"].get("backend_code").is_none(),
+        "v2 must not derive a fact by parsing note prose"
+    );
+    assert!(diagnostic["debug"].is_null());
+
+    let debug: Value = serde_json::from_str(&format_diagnostics_json_with_verbosity(
+        &bundle,
+        ErrorVerbosity::Debug,
+    ))
+    .expect("debug v2 must be valid JSON");
+    assert_eq!(debug["schema_version"], 2);
+}
+
+#[test]
 fn diagnostics_json_renderer_debug_mode_exposes_internal_fields() {
     let mut bundle = DiagnosticBundle::new();
     bundle.push(
@@ -643,14 +805,21 @@ fn diagnostics_json_renderer_debug_mode_exposes_internal_fields() {
             "split mismatch",
         )
         .with_note("node_id=42")
-        .with_note("box_expr=3(1(), 1())"),
+        .with_note("box_expr=3(1(), 1())")
+        .with_debug_context(
+            DebugContext::new()
+                .with_field("node_id", 42_u64)
+                .with_field("box_expr", "3(1(), 1())"),
+        ),
     );
     let rendered = format_diagnostics_json_with_verbosity(&bundle, ErrorVerbosity::Debug);
     let value: Value =
         serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
     let diag = &value["diagnostics"][0];
-    assert_eq!(diag["debug"]["node_id"], 42);
-    assert_eq!(diag["debug"]["box_expr"], "3(1(), 1())");
+    assert_eq!(diag["debug"]["node_id"]["type"], "unsigned");
+    assert_eq!(diag["debug"]["node_id"]["value"], 42);
+    assert_eq!(diag["debug"]["box_expr"]["type"], "string");
+    assert_eq!(diag["debug"]["box_expr"]["value"], "3(1(), 1())");
 }
 
 #[test]
@@ -822,9 +991,7 @@ fn diagnostics_human_renderer_snapshots_cover_complex_phase4_failures() {
         let err = compiler
             .compile_file_default_to_signals(&path)
             .expect_err("fixture should fail in signal pipeline");
-        let diagnostics = err
-            .diagnostics()
-            .expect("fixture error should expose diagnostics");
+        let diagnostics = err.diagnostic_bundle();
         let rendered = format_diagnostics_human(diagnostics);
         let path_text = path.to_string_lossy().to_string();
         let normalized = rendered.replace(&path_text, "$FIXTURE");
@@ -889,9 +1056,7 @@ fn diagnostics_json_renderer_snapshots_cover_complex_phase4_failures() {
         let err = compiler
             .compile_file_default_to_signals(&path)
             .expect_err("fixture should fail in signal pipeline");
-        let diagnostics = err
-            .diagnostics()
-            .expect("fixture error should expose diagnostics");
+        let diagnostics = err.diagnostic_bundle();
         let rendered = format_diagnostics_json(diagnostics);
         let value: Value =
             serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
@@ -932,9 +1097,7 @@ fn diagnostics_human_renderer_snapshot_for_eval_undefined_symbol() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_human(diagnostics);
     let path_text = path.to_string_lossy().to_string();
     let normalized = rendered.replace(&path_text, "$FIXTURE");
@@ -953,9 +1116,7 @@ fn diagnostics_human_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_human(diagnostics);
     let path_text = path.to_string_lossy().to_string();
     let normalized = rendered.replace(&path_text, "$FIXTURE");
@@ -977,9 +1138,7 @@ fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_json(diagnostics);
     let value: Value =
         serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
@@ -1003,9 +1162,7 @@ fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_json(diagnostics);
     let value: Value =
         serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
@@ -1021,10 +1178,9 @@ fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
         .collect::<Vec<_>>();
 
     assert_eq!(diag["code"], "FRS-EVAL-0002");
-    assert_eq!(labels[0]["role"], "definition_site");
-    if labels.len() >= 2 {
-        assert_eq!(labels[1]["role"], "call_site");
-    }
+    assert_eq!(labels[0]["role"], "use_site");
+    assert_eq!(labels[1]["role"], "definition_site");
+    assert_eq!(labels[2]["role"], "call_site");
     assert!(
         notes
             .iter()
@@ -1049,9 +1205,7 @@ fn diagnostics_json_renderer_note_order_for_propagate_split_compound() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in propagate stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_json(diagnostics);
     let value: Value =
         serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
@@ -1079,9 +1233,7 @@ fn diagnostics_json_renderer_note_order_for_propagate_merge_alias() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in propagate stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_json(diagnostics);
     let value: Value =
         serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
@@ -1106,9 +1258,7 @@ fn diagnostics_json_renderer_note_order_for_propagate_rec_alias() {
     let err = compiler
         .compile_file_default_to_signals(&path)
         .expect_err("fixture should fail in propagate stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_json(diagnostics);
     let value: Value =
         serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
@@ -1137,9 +1287,7 @@ fn diagnostics_human_renderer_snapshot_for_pipeline_origin_fallback() {
     let err = compiler
         .compile_parsed_to_signals("err_17_origin_fallback_missing_props_eval.dsp", parsed)
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("fixture error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let rendered = format_diagnostics_human(diagnostics);
     assert!(rendered.contains("origin span unavailable; pointing to nearest call/owner site"));
 }
@@ -1169,7 +1317,7 @@ fn diagnostics_json_renderer_handles_lex_family_code_shape() {
     // `. 'EXTRA'` rule (crates/parser/src/grammar/faustlexer.l) matches
     // every byte, so a genuine `lrpar::LexParseError::LexError` never
     // occurs in practice -- the failure surfaces one layer up as
-    // FRS-PARSE-0001 instead (see docs/diagnostics-codes-en.md for the full
+    // FRS-PARSE-0001 instead (see docs/diagnostics-codes-reference-en.md for the full
     // writeup). There is therefore no `.dsp` fixture that can drive this
     // code through the CLI end to end (unlike the other seven families,
     // covered by `crates/compiler/tests/cli_diagnostics_channel.rs`). This
@@ -1248,7 +1396,7 @@ fn extract_frs_codes_into(text: &str, out: &mut std::collections::BTreeSet<Strin
     }
 }
 
-/// The frozen set documented in `docs/diagnostics-codes-en.md`.
+/// The frozen set documented in `docs/diagnostics-codes-reference-en.md`.
 ///
 /// Keep this list and that document's tables in sync by construction: any
 /// change here must be mirrored there in the same commit, and vice versa.
@@ -1283,9 +1431,12 @@ fn documented_frs_codes() -> std::collections::BTreeSet<String> {
         "FRS-SFIR-0006",
         "FRS-SFIR-0007",
         "FRS-SFIR-0008",
+        "FRS-SFIR-0009",
+        "FRS-SFIR-0010",
         "FRS-SRC-0001",
         "FRS-SRC-0002",
         "FRS-SRC-0003",
+        "FRS-UI-0001",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1300,7 +1451,7 @@ fn frozen_frs_code_table_matches_source() {
     // `porting/mcp-server-analysis-and-plan-2026-07-21-en.md` §1.4.5 and the
     // task itself specify: `grep -rhoE 'FRS-[A-Z]+-[0-9]+' --include=*.rs
     // crates/ | sort -u`) and diffs it against the frozen table documented
-    // in docs/diagnostics-codes-en.md. Both adding an undocumented code and
+    // in docs/diagnostics-codes-reference-en.md. Both adding an undocumented code and
     // renumbering a documented one make this fail.
     let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -1315,15 +1466,15 @@ fn frozen_frs_code_table_matches_source() {
     let stale_in_docs = documented.difference(&found).collect::<Vec<_>>();
     assert!(
         missing_from_docs.is_empty() && stale_in_docs.is_empty(),
-        "FRS-* code set drifted from docs/diagnostics-codes-en.md \
+        "FRS-* code set drifted from docs/diagnostics-codes-reference-en.md \
          (present in source but undocumented: {missing_from_docs:?}; \
          documented but no longer present in source -- e.g. a renumbering: \
-         {stale_in_docs:?}). Update docs/diagnostics-codes-en.md and this \
+         {stale_in_docs:?}). Update docs/diagnostics-codes-reference-en.md and this \
          test's `documented_frs_codes` in the same change."
     );
 }
 
-/// The runtime registry `errors::codes::all_codes()` must list exactly the
+/// The runtime registry `diagnostics::codes::all_codes()` must list exactly the
 /// frozen set.
 ///
 /// Nothing compared the two before, and they had silently diverged:
@@ -1334,10 +1485,10 @@ fn frozen_frs_code_table_matches_source() {
 /// exist to prevent, so it is now checked rather than assumed.
 ///
 /// Retired codes are deliberately absent from both sides: they are recorded
-/// only in the "Retired codes" table of `docs/diagnostics-codes-en.md`.
+/// only in the "Retired codes" table of `docs/diagnostics-codes-reference-en.md`.
 #[test]
 fn code_registry_matches_frozen_table() {
-    let registry: std::collections::BTreeSet<String> = errors::codes::all_codes()
+    let registry: std::collections::BTreeSet<String> = diagnostics::codes::all_codes()
         .iter()
         .map(|code| code.0.to_owned())
         .collect();
@@ -1347,8 +1498,242 @@ fn code_registry_matches_frozen_table() {
     let extra_in_registry = registry.difference(&documented).collect::<Vec<_>>();
     assert!(
         missing_from_registry.is_empty() && extra_in_registry.is_empty(),
-        "errors::codes::all_codes() drifted from the frozen table \
+        "diagnostics::codes::all_codes() drifted from the frozen table \
          (documented but absent from the registry: {missing_from_registry:?}; \
          in the registry but undocumented: {extra_in_registry:?})."
     );
+}
+
+#[test]
+fn cli_parse_accepts_execution_option_flags_and_spellings() {
+    // Long forms and both C++ `-ec` spellings (plan §2.1).
+    for argv in [
+        ["faust-rs", "--ec", "foo.dsp"],
+        ["faust-rs", "--external-control", "foo.dsp"],
+        ["faust-rs", "--ext-control", "foo.dsp"],
+    ] {
+        let cli = CliArgs::parse_from(argv);
+        assert!(cli.external_control, "{argv:?}");
+        assert!(!cli.one_sample, "{argv:?}");
+    }
+    for argv in [
+        ["faust-rs", "--os", "foo.dsp"],
+        ["faust-rs", "--one-sample", "foo.dsp"],
+    ] {
+        let cli = CliArgs::parse_from(argv);
+        assert!(cli.one_sample, "{argv:?}");
+        assert!(!cli.external_control, "{argv:?}");
+    }
+    let cli = CliArgs::parse_from(["faust-rs", "foo.dsp"]);
+    assert!(!cli.external_control);
+    assert!(!cli.one_sample);
+}
+
+#[test]
+fn normalize_legacy_args_maps_single_dash_execution_options() {
+    let args = ["faust-rs", "-ec", "-os", "foo.dsp"]
+        .into_iter()
+        .map(str::to_owned);
+    let normalized = normalize_legacy_args(args);
+    assert_eq!(normalized, ["faust-rs", "--ec", "--os", "foo.dsp"]);
+}
+
+#[test]
+fn selected_execution_options_map_cli_flags() {
+    use compiler::{ControlRateMode, ProcessingApi};
+
+    let cli = CliArgs::parse_from(["faust-rs", "--ec", "--os", "foo.dsp"]);
+    assert_eq!(
+        super::runner::selected_control_rate_mode(&cli),
+        ControlRateMode::External
+    );
+    assert_eq!(
+        super::runner::selected_processing_api(&cli),
+        ProcessingApi::OneSample
+    );
+    let cli = CliArgs::parse_from(["faust-rs", "foo.dsp"]);
+    assert_eq!(
+        super::runner::selected_control_rate_mode(&cli),
+        ControlRateMode::InlinePerBlock
+    );
+    assert_eq!(
+        super::runner::selected_processing_api(&cli),
+        ProcessingApi::Block
+    );
+}
+
+// ─── G8: human renderer policy ────────────────────────────────────────────────
+
+/// Builds a bundle over one in-memory source with the given labels.
+fn bundle_over_source(source: &str, labels: Vec<diagnostics::Label>) -> DiagnosticBundle {
+    let mut builder = SourceMapBuilder::new();
+    builder.add(
+        PathBuf::from("mem.dsp"),
+        SourceKind::Memory,
+        source.to_owned(),
+    );
+    let mut diagnostic = Diagnostic::new(
+        Severity::Error,
+        Stage::Eval,
+        DiagnosticCode("FRS-EVAL-0002"),
+        "boom",
+    );
+    for label in labels {
+        diagnostic = diagnostic.with_label(label);
+    }
+    let mut bundle = DiagnosticBundle::new();
+    bundle.push(diagnostic);
+    bundle.set_source_map(builder.finish());
+    bundle
+}
+
+#[test]
+fn human_renderer_shows_secondary_labels_above_concise() {
+    let bundle = bundle_over_source(
+        "process = a;\nb = 1;\n",
+        vec![
+            diagnostics::Label::new(
+                diagnostics::LabelStyle::Primary,
+                SourceSpan::new("mem.dsp", 1, 11, 1, 12),
+                "failing use",
+            ),
+            diagnostics::Label::new(
+                diagnostics::LabelStyle::Secondary,
+                SourceSpan::new("mem.dsp", 2, 1, 2, 2),
+                "related declaration",
+            ),
+        ],
+    );
+
+    let concise = format_diagnostics_human_with_verbosity(&bundle, ErrorVerbosity::Concise);
+    assert!(!concise.contains("related declaration"), "{concise}");
+
+    let standard = format_diagnostics_human(&bundle);
+    assert!(standard.contains("failing use"), "{standard}");
+    assert!(standard.contains("related declaration"), "{standard}");
+}
+
+#[test]
+fn human_renderer_shares_one_snippet_between_labels_on_the_same_line() {
+    let bundle = bundle_over_source(
+        "process = a + a;\n",
+        vec![
+            diagnostics::Label::new(
+                diagnostics::LabelStyle::Primary,
+                SourceSpan::new("mem.dsp", 1, 11, 1, 12),
+                "first",
+            ),
+            diagnostics::Label::new(
+                diagnostics::LabelStyle::Secondary,
+                SourceSpan::new("mem.dsp", 1, 15, 1, 16),
+                "second",
+            ),
+        ],
+    );
+
+    let rendered = format_diagnostics_human(&bundle);
+    assert_eq!(
+        rendered.matches("process = a + a;").count(),
+        1,
+        "the shared source line must be printed once: {rendered}"
+    );
+    assert!(rendered.contains("first"));
+    assert!(rendered.contains("second"));
+}
+
+#[test]
+fn human_renderer_places_carets_by_display_width_on_tabbed_lines() {
+    // One leading tab expands to four columns, so the caret for scalar column
+    // two must sit at display offset four.
+    let bundle = bundle_over_source(
+        "\tprocess = _;\n",
+        vec![diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
+            SourceSpan::new("mem.dsp", 1, 2, 1, 9),
+            "here",
+        )],
+    );
+
+    let rendered = format_diagnostics_human(&bundle);
+    let caret_line = rendered
+        .lines()
+        .find(|line| line.contains('^'))
+        .expect("a caret row");
+    let carets = caret_line.find('^').expect("caret offset");
+    let bar = caret_line.find('|').expect("gutter");
+    assert_eq!(carets - bar - 2, 4, "caret misaligned in: {rendered}");
+}
+
+#[test]
+fn human_renderer_marks_a_multi_line_span_with_an_elision() {
+    let bundle = bundle_over_source(
+        "process = (\n  _\n);\n",
+        vec![diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
+            SourceSpan::new("mem.dsp", 1, 11, 3, 2),
+            "this group",
+        )],
+    );
+
+    let rendered = format_diagnostics_human(&bundle);
+    assert!(rendered.contains("process = ("), "{rendered}");
+    assert!(rendered.contains("..."), "{rendered}");
+    assert!(rendered.contains(");"), "{rendered}");
+}
+
+#[test]
+fn human_renderer_shows_fixes_with_their_applicability() {
+    let mut bundle = bundle_over_source(
+        "process = a;\n",
+        vec![diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
+            SourceSpan::new("mem.dsp", 1, 11, 1, 12),
+            "here",
+        )],
+    );
+    let source_map = bundle.source_map().clone();
+    let mut with_fix = DiagnosticBundle::new();
+    let mut diagnostic = bundle.as_slice()[0].clone();
+    diagnostic = diagnostic.with_fix(SuggestedFix {
+        title: "insert `;`".into(),
+        applicability: Applicability::MachineApplicable,
+        edits: vec![TextEdit {
+            range: SourceRange {
+                source: source_map.iter().next().expect("one source").id(),
+                start: 11,
+                end: 11,
+            },
+            replacement: ";".into(),
+        }],
+        explanation: None,
+    });
+    with_fix.push(diagnostic);
+    with_fix.set_source_map(source_map);
+    bundle = with_fix;
+
+    let rendered = format_diagnostics_human(&bundle);
+    assert!(
+        rendered.contains("= fix (machine-applicable): insert `;`"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn human_renderer_respects_the_selected_path_style() {
+    let bundle = bundle_over_source(
+        "process = a;\n",
+        vec![diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
+            SourceSpan::new("some/dir/mem.dsp", 1, 11, 1, 12),
+            "here",
+        )],
+    );
+    let rendered = super::human::format_bundle(
+        &bundle,
+        super::human::HumanRenderOptions {
+            verbosity: ErrorVerbosity::Standard,
+            path_style: super::args::DiagnosticPathStyle::Basename,
+        },
+    );
+    assert!(rendered.starts_with("mem.dsp:1:11:"), "{rendered}");
 }

@@ -1312,6 +1312,28 @@ fn fc01_call_undeclared_function() {
 }
 
 #[test]
+fn d01_warns_for_dropped_pure_math_but_not_foreign_call() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let base = b.float32(2.0);
+    let exponent = b.float32(3.0);
+    let pow = b.math_call(FirMathOp::Pow, &[base, exponent], FirType::Float32);
+    let pure_drop = b.drop_(pow);
+    let foreign = b.fun_call("observable", &[], FirType::Float32);
+    let foreign_drop = b.drop_(foreign);
+    let module_id = module_with_body(&mut store, &[pure_drop, foreign_drop]);
+
+    let report = verify_fir_module(&store, module_id);
+    let pure_drop_diagnostics = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "FIR-D01")
+        .collect::<Vec<_>>();
+    assert_eq!(pure_drop_diagnostics.len(), 1, "{report:?}");
+    assert_eq!(pure_drop_diagnostics[0].node, pure_drop);
+}
+
+#[test]
 fn fc02_fc03_call_arity_and_arg_type_mismatch() {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
@@ -1781,4 +1803,126 @@ fn lc01_no_warn_when_field_initialized_in_instance_constants() {
         lc01.is_empty(),
         "unexpected FIR-LC01 when field is pre-initialized; diagnostics: {report:?}"
     );
+}
+
+// ══ Execution entry points (execution-options port §4.5) ═════════════════
+
+/// Builds a `frame(dsp, inputs, outputs)` declaration with the given body.
+fn make_frame_fun(b: &mut FirBuilder<'_>, body: FirId) -> FirId {
+    let params = vec![
+        FirType::Ptr(Box::new(FirType::Obj)),
+        FirType::Ptr(Box::new(FirType::FaustFloat)),
+        FirType::Ptr(Box::new(FirType::FaustFloat)),
+    ];
+    let args: Vec<NamedType> = ["dsp", "inputs", "outputs"]
+        .iter()
+        .zip(params.iter())
+        .map(|(n, t)| NamedType {
+            name: (*n).to_string(),
+            typ: t.clone(),
+        })
+        .collect();
+    let typ = FirType::Fun {
+        args: params,
+        ret: Box::new(FirType::Void),
+    };
+    b.declare_fun("frame", typ, &args, Some(body), false)
+}
+
+/// Builds the full API function block plus `frame`, with the given bodies.
+fn make_functions_with_frame(
+    b: &mut FirBuilder<'_>,
+    compute_body: FirId,
+    frame_body: FirId,
+) -> FirId {
+    let compute = {
+        let params = vec![
+            FirType::Ptr(Box::new(FirType::Obj)),
+            FirType::Int32,
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        ];
+        let args: Vec<NamedType> = params
+            .iter()
+            .enumerate()
+            .map(|(i, t)| NamedType {
+                name: format!("p{i}"),
+                typ: t.clone(),
+            })
+            .collect();
+        let typ = FirType::Fun {
+            args: params,
+            ret: Box::new(FirType::Void),
+        };
+        b.declare_fun("compute", typ, &args, Some(compute_body), false)
+    };
+    let frame = make_frame_fun(b, frame_body);
+    let mut funs: Vec<FirId> = DSP_API_FUNCTIONS
+        .iter()
+        .filter(|&&n| n != "compute")
+        .map(|&n| make_void_fun(b, n))
+        .collect();
+    funs.push(compute);
+    funs.push(frame);
+    b.block(&funs)
+}
+
+#[test]
+fn f08_frame_with_empty_compute_is_clean() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let dsp_struct = make_dsp_struct(&mut b);
+    let globals = make_empty_block(&mut b);
+    let compute_body = b.block(&[]);
+    let frame_body = b.block(&[]);
+    let functions = make_functions_with_frame(&mut b, compute_body, frame_body);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+    let report = verify_fir_module(&store, module_id);
+    assert!(!report.diagnostics.iter().any(|d| d.code == "FIR-F08"));
+    assert!(!report.diagnostics.iter().any(|d| d.code == "FIR-F09"));
+}
+
+#[test]
+fn f08_frame_with_nonempty_compute_is_flagged() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let dsp_struct = make_dsp_struct(&mut b);
+    let globals = make_empty_block(&mut b);
+    let compute_body = {
+        let zero = b.int32(0);
+        let stmt = b.declare_var("dead", FirType::Int32, AccessType::Stack, Some(zero));
+        b.block(&[stmt])
+    };
+    let frame_body = b.block(&[]);
+    let functions = make_functions_with_frame(&mut b, compute_body, frame_body);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+    let report = verify_fir_module(&store, module_id);
+    assert!(report.diagnostics.iter().any(|d| d.code == "FIR-F08"));
+}
+
+#[test]
+fn f09_frame_referencing_count_is_flagged() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let dsp_struct = make_dsp_struct(&mut b);
+    let globals = make_empty_block(&mut b);
+    let compute_body = b.block(&[]);
+    let frame_body = {
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let stmt = b.declare_var("n", FirType::Int32, AccessType::Stack, Some(count));
+        b.block(&[stmt])
+    };
+    let functions = make_functions_with_frame(&mut b, compute_body, frame_body);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+    let report = verify_fir_module(&store, module_id);
+    assert!(report.diagnostics.iter().any(|d| d.code == "FIR-F09"));
 }

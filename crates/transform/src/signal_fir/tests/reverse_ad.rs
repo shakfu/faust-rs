@@ -320,6 +320,35 @@ fn bra_body_with_fconst_leaf_compiles() {
     compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
         .expect("BRA body with FConst leaf must compile successfully");
 }
+
+/// `Attach(value, effect)` is transparent to BRA differentiation: the
+/// backward sweep forwards the adjoint to `value` and ignores `effect`.
+///
+/// Keeping `effect` out of the adjoint graph is important for both semantics:
+/// it prevents a spurious gradient through the attached branch and prevents
+/// effectful metering from being replayed during the reverse sweep.
+#[test]
+fn bra_body_with_attach_forwards_adjoint_to_value_only() {
+    let mut arena = TreeArena::new();
+
+    let seed = SigBuilder::new(&mut arena).real(0.5);
+    let delayed_seed = SigBuilder::new(&mut arena).delay1(seed);
+    let attached_effect = SigBuilder::new(&mut arena).input(0);
+    let body = SigBuilder::new(&mut arena).attach(delayed_seed, attached_effect);
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[body],
+        &[seed],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    compile_fastlane_without_ui(&arena, &[primal, grad], 1, 2, &SignalFirOptions::default())
+        .expect("BRA body with Attach must compile successfully");
+}
+
 /// A BRA carrier wrapping a recursive circuit must declare a `fBraCarry*`
 /// struct field for the TBPTT feedback carry.
 ///
@@ -436,4 +465,38 @@ fn bra_body_with_integer_float_cast_compiles() {
     // because the backward sweep propagated Float32 gradient into the Int32 LCG body.
     compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
         .expect("BRA body with FloatCast(int_rec) must compile without BinOp type mismatch");
+}
+
+#[test]
+fn block_reverse_ad_program_is_rejected_under_one_sample() {
+    // Execution-options port D2: `-os` has no meaning for block-scoped
+    // reverse-AD carriers; the pipeline rejects them with FRS-SFIR-0010
+    // before lowering (plan §3.5).
+    use crate::signal_fir::ProcessingApi;
+
+    let mut arena = TreeArena::new();
+    let x = SigBuilder::new(&mut arena).real(2.0);
+    let two = SigBuilder::new(&mut arena).real(2.0);
+    let body = SigBuilder::new(&mut arena).binop(BinOp::Mul, two, x);
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[body],
+        &[x],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    let options = SignalFirOptions {
+        processing_api: ProcessingApi::OneSample,
+        ..SignalFirOptions::default()
+    };
+    let err = compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &options)
+        .expect_err("BRA program must be rejected under -os");
+    assert_eq!(err.code().as_str(), "FRS-SFIR-0010");
+
+    // The same program stays accepted with the default block API.
+    compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+        .expect("BRA program still compiles in block mode");
 }

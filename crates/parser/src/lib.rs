@@ -19,9 +19,11 @@
 
 use boxes::{BoxMatch, dump_box, match_box};
 use cfgrammar::Span;
-use errors::codes;
-use errors::{
-    Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan, Stage,
+use diagnostics::codes;
+use diagnostics::{
+    Applicability, Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelRole, LabelStyle,
+    RelatedDiagnostic, SourceId, SourceKind, SourceMapBuilder, SourceRange, SourceSpan, Stage,
+    SuggestedFix, TextEdit,
 };
 use lrlex::lrlex_mod;
 use lrlex::{DefaultLexerTypes, LRNonStreamingLexerDef};
@@ -36,10 +38,14 @@ pub mod context;
 pub mod metadata;
 pub mod source_reader;
 
-pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
+pub use context::{
+    BoxOrigin, BoxOriginId, BoxOriginRole, BoxProvenance, LocatedBox, ParserCtx, SourceLocation,
+    WidgetDeclaration,
+};
 pub use metadata::{CompilationMetadataKey, CompilationMetadataSnapshot, CompilationMetadataStore};
 pub use source_reader::{
-    ExpandedSource, ImportSite, SourceLineOrigin, SourceReader, SourceReaderError, VirtualSourceMap,
+    ExpandedSource, ImportCycleEdge, ImportSite, SourceLineOrigin, SourceReader, SourceReaderError,
+    VirtualSourceMap,
 };
 
 /// Primitive operator family recognized directly by the parser.
@@ -546,9 +552,7 @@ impl ParseState {
 
     /// Emits the parser diagnostic equivalent of C++ `printRedefinitionError`.
     ///
-    /// `variants_rev` stores payloads in parser-list reverse order. Iterate it
-    /// in reverse when printing so diagnostics follow source order, matching
-    /// the C++ message shape:
+    /// C++ folds the conflicting clauses into the message text:
     ///
     /// ```text
     /// multiple definitions of symbol 'foo'
@@ -556,29 +560,66 @@ impl ParseState {
     /// foo = ...;
     /// ```
     ///
-    /// `dump_box` is used for the expression snippets because this parser layer
-    /// only has normalized box nodes at this point; exact pretty-print parity is
-    /// less important than preserving the semantic error boundary.
+    /// The Rust diagnostic keeps the message to one line and moves the clauses
+    /// into a typed `declarations` fact plus one label per declaration site, so
+    /// a reader sees *where* each clause is and a tool does not have to split a
+    /// multi-line message.
+    ///
+    /// `variants_rev` stores payloads in parser-list reverse order, so it is
+    /// iterated in reverse to follow source order. `dump_box` renders the
+    /// clauses because this parser layer only has normalized box nodes at this
+    /// point; exact pretty-print parity matters less than preserving the
+    /// semantic error boundary.
     fn report_zero_arity_redefinition(&mut self, name: TreeId, variants_rev: &[TreeId]) {
         let name_text = self
             .definition_name_key(name)
             .unwrap_or_else(|| "<invalid>".to_owned());
-        let mut message = format!("multiple definitions of symbol '{name_text}'");
+        let mut declarations = Vec::new();
         for payload in variants_rev.iter().rev() {
             let Some((args, body)) = self.definition_payload_parts(*payload) else {
                 continue;
             };
             if self.arena.is_nil(args) {
-                message.push_str(&format!("\n{name_text} = {};", dump_box(&self.arena, body)));
+                declarations.push(format!("{name_text} = {};", dump_box(&self.arena, body)));
             } else {
-                message.push_str(&format!(
-                    "\n{name_text}{} = {};",
+                declarations.push(format!(
+                    "{name_text}{} = {};",
                     dump_box(&self.arena, args),
                     dump_box(&self.arena, body)
                 ));
             }
         }
-        self.ctx.error(&message);
+        let sites = self.declaration_sites(name);
+        self.ctx.error_conflicting_declarations(
+            codes::PARSE_UNEXPECTED_TOKEN,
+            &format!("multiple definitions of symbol '{name_text}'"),
+            "duplicate-definition",
+            &name_text,
+            &sites,
+            &declarations,
+        );
+    }
+
+    /// Returns every recorded definition-side occurrence of one identifier, in
+    /// source order.
+    ///
+    /// Hash-consing gives all occurrences of the same identifier one node, so
+    /// the occurrence list recorded by the grammar actions is what distinguishes
+    /// the participating declaration sites.
+    fn declaration_sites(&self, name: TreeId) -> Vec<SourceLocation> {
+        let mut sites = self
+            .ctx
+            .box_provenance()
+            .origins_for(name)
+            .iter()
+            .filter_map(|id| self.ctx.box_provenance().get(*id))
+            .filter(|origin| origin.role == BoxOriginRole::Definition)
+            .map(|origin| origin.location.clone())
+            .collect::<Vec<_>>();
+        sites.dedup_by(|left, right| {
+            left.file() == right.file() && left.line() == right.line() && left.col() == right.col()
+        });
+        sites
     }
 
     fn make_definition_from_variants(&mut self, name: TreeId, variants_rev: &[TreeId]) -> TreeId {
@@ -792,7 +833,8 @@ impl ParseState {
         if raw.bytes().all(|b| b.is_ascii_digit()) {
             self.node_builder().int(i32_wrapping_from_str(raw))
         } else {
-            self.ctx.error("invalid INT literal");
+            self.ctx
+                .error_with_code(codes::PARSE_INVALID_LITERAL, "invalid INT literal");
             self.node_builder().int(0)
         }
     }
@@ -811,7 +853,8 @@ impl ParseState {
         match normalized.parse::<f64>() {
             Ok(value) => self.node_builder().real(value),
             Err(_) => {
-                self.ctx.error("invalid FLOAT literal");
+                self.ctx
+                    .error_with_code(codes::PARSE_INVALID_LITERAL, "invalid FLOAT literal");
                 self.node_builder().real(0.0)
             }
         }
@@ -863,7 +906,8 @@ impl ParseState {
                 self.node_builder().import_file(path_node)
             }
             None => {
-                self.ctx.error("invalid import path literal");
+                self.ctx
+                    .error_with_code(codes::PARSE_INVALID_LITERAL, "invalid import path literal");
                 self.nil()
             }
         }
@@ -1002,7 +1046,8 @@ impl ParseState {
             };
             self.node_builder().int(val)
         } else {
-            self.ctx.error("invalid signed INT literal");
+            self.ctx
+                .error_with_code(codes::PARSE_INVALID_LITERAL, "invalid signed INT literal");
             self.node_builder().int(0)
         }
     }
@@ -1022,7 +1067,8 @@ impl ParseState {
         match normalized.parse::<f64>() {
             Ok(value) => self.node_builder().real(value * sign),
             Err(_) => {
-                self.ctx.error("invalid signed FLOAT literal");
+                self.ctx
+                    .error_with_code(codes::PARSE_INVALID_LITERAL, "invalid signed FLOAT literal");
                 self.node_builder().real(0.0)
             }
         }
@@ -1148,6 +1194,26 @@ impl ParseState {
             PrimitiveOp::Delay => self.node_builder().delay(),
             PrimitiveOp::Delay1 => self.node_builder().delay1(),
         }
+    }
+
+    /// Records one written UI widget declaration and returns the widget node
+    /// unchanged.
+    ///
+    /// The cursor is moved to the widget keyword first so the recorded location
+    /// points at `hslider`/`vbargraph`/... rather than at whichever argument
+    /// token the parser last consumed.
+    fn record_widget_declaration<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        keyword: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        label: TreeId,
+        node: TreeId,
+    ) -> TreeId {
+        let span = token_span(&keyword);
+        self.update_cursor_from_span(lexer, span);
+        let raw_label = self.string_node_text(label).unwrap_or_default().to_owned();
+        self.ctx.record_widget_declaration(&raw_label);
+        node
     }
 
     fn mark_use_from_token<'lexer, 'input: 'lexer>(
@@ -1376,7 +1442,14 @@ pub fn parse_program_with_precision_and_metadata(
     float_size: u8,
     metadata_store: CompilationMetadataStore,
 ) -> ParseOutput {
-    parse_program_with_origins_and_precision(input, source_file, None, metadata_store, float_size)
+    parse_program_with_origins_and_precision(
+        input,
+        source_file,
+        None,
+        metadata_store,
+        float_size,
+        SourceKind::Memory,
+    )
 }
 
 /// Parses one in-memory source and expands imports structurally from the parsed
@@ -1489,6 +1562,434 @@ pub fn parse_file_with_imports_and_precision_and_metadata(
     let reader = SourceReader::new(search_paths.to_vec());
     StructuralImportExpander::new(reader, metadata_store, float_size).parse_entry(path)
 }
+
+#[derive(Clone, Debug, Default)]
+struct ParseRecoveryDetails {
+    expected_tokens: Vec<Box<str>>,
+    unexpected_token: Option<Box<str>>,
+    unambiguous_insert: Option<Box<str>>,
+    typo_suggestion: Option<Box<str>>,
+    opening_delimiter: Option<(usize, char)>,
+    previous_token: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Debug)]
+struct EngineParseDiagnostic {
+    code: DiagnosticCode,
+    message: String,
+    location: SourceLocation,
+    span: Span,
+    recovery: ParseRecoveryDetails,
+}
+
+fn parse_recovery_details(
+    error: &lrpar::LexParseError<u32, lrlex::DefaultLexerTypes<u32>>,
+    input: &str,
+) -> ParseRecoveryDetails {
+    let lrpar::LexParseError::ParseError(error) = error else {
+        return ParseRecoveryDetails::default();
+    };
+    let span = error.lexeme().span();
+    let unexpected = input
+        .get(span.start()..span.end())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.into());
+    let mut expected = Vec::<Box<str>>::new();
+    let mut singleton_inserts = Vec::new();
+    for sequence in error.repairs() {
+        if let [lrpar::ParseRepair::Insert(token)] = sequence.as_slice()
+            && let Some(name) = faustparser_y::token_epp(*token)
+        {
+            singleton_inserts.push(normalize_expected_token(name));
+        }
+        for repair in sequence {
+            if let lrpar::ParseRepair::Insert(token) = repair
+                && let Some(name) = faustparser_y::token_epp(*token)
+            {
+                let name = normalize_expected_token(name);
+                if !expected.contains(&name) {
+                    expected.push(name);
+                }
+            }
+        }
+    }
+    expected.sort();
+    let unambiguous_insert = singleton_inserts
+        .first()
+        .filter(|first| {
+            singleton_inserts.len() == error.repairs().len()
+                && singleton_inserts.iter().all(|item| item == *first)
+        })
+        .cloned();
+    let typo_suggestion = unexpected.as_deref().and_then(|unexpected| {
+        expected
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                    && levenshtein_distance(unexpected, candidate) <= 2
+            })
+            .min_by_key(|candidate| levenshtein_distance(unexpected, candidate))
+            .cloned()
+    });
+    let opening_delimiter = unambiguous_insert
+        .as_deref()
+        .and_then(closing_delimiter)
+        .and_then(|opening| unmatched_opening_delimiter(input, span.start(), opening));
+    ParseRecoveryDetails {
+        expected_tokens: expected,
+        unexpected_token: unexpected,
+        unambiguous_insert,
+        typo_suggestion,
+        opening_delimiter,
+        previous_token: previous_token_range(input, span.start()),
+    }
+}
+
+fn normalize_expected_token(token: &str) -> Box<str> {
+    let token = token.trim_matches(|ch| matches!(ch, '\'' | '"' | '`'));
+    match token {
+        "ENDDEF" => ";",
+        "DEF" => "=",
+        "LPAR" => "(",
+        "RPAR" => ")",
+        "LBRAQ" => "{",
+        "RBRAQ" => "}",
+        "LCROC" => "[",
+        "RCROC" => "]",
+        "PAR" => ",",
+        "SEQ" => ":",
+        "REC" => "~",
+        "SPLIT" => "<:",
+        "MIX" => ":>",
+        "ADD" => "+",
+        "SUB" => "-",
+        "MUL" => "*",
+        "DIV" => "/",
+        "MOD" => "%",
+        "FDELAY" => "@",
+        "DELAY1" => "'",
+        "AND" => "&",
+        "OR" => "|",
+        "LT" => "<",
+        "LE" => "<=",
+        "GT" => ">",
+        "GE" => ">=",
+        "EQ" => "==",
+        "NE" => "!=",
+        "LSH" => "<<",
+        "RSH" => ">>",
+        "ARROW" => "=>",
+        "LAPPLY" => "->",
+        "LAMBDA" => "\\",
+        "POWOP" => "^",
+        "DOT" => ".",
+        "PROCESS" => "process",
+        "WITH" => "with",
+        "LETREC" => "letrec",
+        "WHERE" => "where",
+        "MEM" => "mem",
+        "PREFIX" => "prefix",
+        "INTCAST" => "int",
+        "FLOATCAST" => "float",
+        "NOTYPECAST" => "any",
+        "RDTBL" => "rdtable",
+        "RWTBL" => "rwtable",
+        "SELECT2" => "select2",
+        "SELECT3" => "select3",
+        "FFUNCTION" => "ffunction",
+        "FCONSTANT" => "fconstant",
+        "FVARIABLE" => "fvariable",
+        "BUTTON" => "button",
+        "CHECKBOX" => "checkbox",
+        "VSLIDER" => "vslider",
+        "HSLIDER" => "hslider",
+        "NENTRY" => "nentry",
+        "VGROUP" => "vgroup",
+        "HGROUP" => "hgroup",
+        "TGROUP" => "tgroup",
+        "VBARGRAPH" => "vbargraph",
+        "HBARGRAPH" => "hbargraph",
+        "SOUNDFILE" => "soundfile",
+        "ATTACH" => "attach",
+        "MODULATE" => "minput",
+        "ACOS" => "acos",
+        "ASIN" => "asin",
+        "ATAN" => "atan",
+        "ATAN2" => "atan2",
+        "COS" => "cos",
+        "SIN" => "sin",
+        "TAN" => "tan",
+        "EXP" => "exp",
+        "LOG" => "log",
+        "LOG10" => "log10",
+        "POWFUN" => "pow",
+        "SQRT" => "sqrt",
+        "ABS" => "abs",
+        "MIN" => "min",
+        "MAX" => "max",
+        "FMOD" => "fmod",
+        "REMAINDER" => "remainder",
+        "FLOOR" => "floor",
+        "CEIL" => "ceil",
+        "RINT" => "rint",
+        "ROUND" => "round",
+        "XOR" => "xor",
+        "ISEQ" => "seq",
+        "IPAR" => "par",
+        "ISUM" => "sum",
+        "IPROD" => "prod",
+        "INPUTS" => "inputs",
+        "OUTPUTS" => "outputs",
+        "FAUTODIFF" => "fad",
+        "RAUTODIFF" => "rad",
+        "ONDEMAND" => "ondemand",
+        "UPSAMPLING" => "upsampling",
+        "DOWNSAMPLING" => "downsampling",
+        "IMPORT" => "import",
+        "COMPONENT" => "component",
+        "LIBRARY" => "library",
+        "ENVIRONMENT" => "environment",
+        "WAVEFORM" => "waveform",
+        "ROUTE" => "route",
+        "ENABLE" => "enable",
+        "CONTROL" => "control",
+        "DECLARE" => "declare",
+        "CASE" => "case",
+        "ASSERTBOUNDS" => "assertbounds",
+        "LOWEST" => "lowest",
+        "HIGHEST" => "highest",
+        "FLOATMODE" => "singleprecision",
+        "DOUBLEMODE" => "doubleprecision",
+        "QUADMODE" => "quadprecision",
+        "FIXEDPOINTMODE" => "fixedpointprecision",
+        _ => token,
+    }
+    .into()
+}
+
+fn build_engine_parse_diagnostics(
+    errors: Vec<EngineParseDiagnostic>,
+    source_id: SourceId,
+    direct_source: bool,
+    input: &str,
+) -> Vec<Diagnostic> {
+    let mut output: Vec<(Span, Diagnostic)> = Vec::new();
+    for error in errors {
+        let primary_span = SourceSpan::new(
+            error.location.file(),
+            error.location.line(),
+            error.location.col(),
+            error.location.end_line(),
+            error.location.end_col(),
+        );
+        let mut diagnostic = Diagnostic::new(
+            diagnostics::Severity::Error,
+            Stage::Parser,
+            error.code,
+            error.message.clone(),
+        )
+        .with_category(diagnostics::DiagnosticCategory::UserCode)
+        .with_detail_code("unexpected-token")
+        .with_label(
+            Label::new(
+                LabelStyle::Primary,
+                primary_span.clone(),
+                "unexpected token",
+            )
+            .with_role(LabelRole::PrimaryCause),
+        );
+        if !error.recovery.expected_tokens.is_empty() {
+            diagnostic = diagnostic.with_fact(
+                "expected_tokens",
+                error
+                    .recovery
+                    .expected_tokens
+                    .iter()
+                    .map(|token| token.to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        if let Some(unexpected) = &error.recovery.unexpected_token {
+            diagnostic = diagnostic.with_fact("unexpected_token", unexpected.clone());
+        }
+
+        if direct_source
+            && let Some(insert) = &error.recovery.unambiguous_insert
+            && matches!(insert.as_ref(), ";" | ")" | "]" | "}")
+            && let Ok(offset) = u32::try_from(error.span.start())
+        {
+            diagnostic = diagnostic.with_fix(SuggestedFix {
+                title: format!("insert `{insert}`").into(),
+                applicability: Applicability::MachineApplicable,
+                edits: vec![TextEdit {
+                    range: SourceRange::new(source_id, offset, offset),
+                    replacement: insert.clone(),
+                }],
+                explanation: Some("the parser found only this insertion repair".into()),
+            });
+            if insert.as_ref() == ";"
+                && let Some((start, end)) = error.recovery.previous_token
+                && let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end))
+            {
+                let span = source_span_for_offsets(&primary_span, input, start, end);
+                diagnostic = diagnostic.with_label(
+                    Label::new(
+                        LabelStyle::Secondary,
+                        span,
+                        "the previous statement may need `;`",
+                    )
+                    .with_role(LabelRole::PreviousToken),
+                );
+            }
+            if let Some((opening, delimiter)) = error.recovery.opening_delimiter
+                && let (Ok(start), Ok(end)) = (
+                    u32::try_from(opening),
+                    u32::try_from(opening + delimiter.len_utf8()),
+                )
+            {
+                let span = source_span_for_offsets(&primary_span, input, start, end);
+                diagnostic = diagnostic.with_label(
+                    Label::new(
+                        LabelStyle::Secondary,
+                        span,
+                        format!("`{delimiter}` opened here"),
+                    )
+                    .with_role(LabelRole::MatchingDelimiter),
+                );
+            }
+        } else if let Some(insert) = &error.recovery.unambiguous_insert {
+            diagnostic = diagnostic.with_help(format!("insert `{insert}` before this token"));
+        }
+
+        if direct_source
+            && let Some(suggestion) = &error.recovery.typo_suggestion
+            && let (Ok(start), Ok(end)) = (
+                u32::try_from(error.span.start()),
+                u32::try_from(error.span.end()),
+            )
+        {
+            diagnostic = diagnostic
+                .with_fact("suggested_token", suggestion.clone())
+                .with_fix(SuggestedFix {
+                    title: format!("replace with `{suggestion}`").into(),
+                    applicability: Applicability::MaybeIncorrect,
+                    edits: vec![TextEdit {
+                        range: SourceRange::new(source_id, start, end),
+                        replacement: suggestion.clone(),
+                    }],
+                    explanation: Some("closest token accepted by the grammar at this point".into()),
+                });
+        }
+
+        if let Some((previous_span, previous)) = output.last_mut()
+            && *previous_span == error.span
+        {
+            *previous = previous.clone().with_related(RelatedDiagnostic {
+                code: error.code,
+                message: error.message.into(),
+                labels: vec![
+                    Label::new(
+                        LabelStyle::Secondary,
+                        primary_span,
+                        "additional parser recovery",
+                    )
+                    .with_role(LabelRole::DerivedFrom),
+                ],
+            });
+        } else {
+            output.push((error.span, diagnostic));
+        }
+    }
+    output
+        .into_iter()
+        .map(|(_, diagnostic)| diagnostic)
+        .collect()
+}
+
+fn source_span_for_offsets(
+    reference: &SourceSpan,
+    input: &str,
+    start: u32,
+    end: u32,
+) -> SourceSpan {
+    let (line, col) = line_col_for_offset(input, start as usize);
+    let (end_line, end_col) = line_col_for_offset(input, end as usize);
+    SourceSpan::new(reference.file.clone(), line, col, end_line, end_col)
+}
+
+fn line_col_for_offset(input: &str, offset: usize) -> (u32, u32) {
+    let prefix = input.get(..offset).unwrap_or(input);
+    let line =
+        u32::try_from(prefix.bytes().filter(|byte| *byte == b'\n').count() + 1).unwrap_or(u32::MAX);
+    let col = u32::try_from(prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1)
+        .unwrap_or(u32::MAX);
+    (line, col)
+}
+
+fn closing_delimiter(token: &str) -> Option<char> {
+    match token {
+        ")" => Some('('),
+        "]" => Some('['),
+        "}" => Some('{'),
+        _ => None,
+    }
+}
+
+fn unmatched_opening_delimiter(input: &str, end: usize, wanted: char) -> Option<(usize, char)> {
+    let mut stack = Vec::new();
+    for (offset, ch) in input.get(..end)?.char_indices() {
+        match ch {
+            '(' | '[' | '{' => stack.push((offset, ch)),
+            ')' | ']' | '}' => {
+                let expected = match ch {
+                    ')' => '(',
+                    ']' => '[',
+                    '}' => '{',
+                    _ => unreachable!(),
+                };
+                if stack
+                    .last()
+                    .is_some_and(|(_, opening)| *opening == expected)
+                {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    stack
+        .into_iter()
+        .rev()
+        .find(|(_, opening)| *opening == wanted)
+}
+
+fn previous_token_range(input: &str, end: usize) -> Option<(usize, usize)> {
+    let prefix = input.get(..end)?;
+    let last = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_whitespace())?;
+    Some((last.0, last.0 + last.1.len_utf8()))
+}
+
+fn levenshtein_distance(lhs: &str, rhs: &str) -> usize {
+    let mut previous = (0..=rhs.chars().count()).collect::<Vec<_>>();
+    for (row, left) in lhs.chars().enumerate() {
+        let mut current = vec![row + 1];
+        for (column, right) in rhs.chars().enumerate() {
+            current.push(
+                (current[column] + 1)
+                    .min(previous[column + 1] + 1)
+                    .min(previous[column] + usize::from(left != right)),
+            );
+        }
+        previous = current;
+    }
+    previous.last().copied().unwrap_or(0)
+}
+
 /// Parses one in-memory source while preserving external line origins.
 fn parse_program_with_origins_and_precision(
     input: &str,
@@ -1496,7 +1997,9 @@ fn parse_program_with_origins_and_precision(
     source_origins: Option<Vec<SourceLineOrigin>>,
     metadata_store: CompilationMetadataStore,
     float_size: u8,
+    source_kind: SourceKind,
 ) -> ParseOutput {
+    let direct_source = source_origins.is_none();
     let lexerdef = lexerdef();
     let lexer = lexerdef.lexer(input);
     let mut parse_state = ParseState::new_with_origins_and_metadata(
@@ -1511,6 +2014,7 @@ fn parse_program_with_origins_and_precision(
     let mut state = state.into_inner();
 
     let mut rendered_errors = Vec::with_capacity(errors.len());
+    let mut engine_diagnostics = Vec::with_capacity(errors.len());
     for err in errors {
         let span = match &err {
             lrpar::LexParseError::LexError(e) => e.span(),
@@ -1538,13 +2042,25 @@ fn parse_program_with_origins_and_precision(
             );
         }
         let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
-        state
-            .ctx
-            .error_with_code(parser_code_for_lex_parse_error(&err), &message);
+        let recovery = parse_recovery_details(&err, input);
+        engine_diagnostics.push(EngineParseDiagnostic {
+            code: parser_code_for_lex_parse_error(&err),
+            message: message.clone(),
+            location: state.ctx.cursor().clone(),
+            span,
+            recovery,
+        });
+        state.ctx.note_engine_parse_error();
         rendered_errors.push(message);
     }
 
-    let diagnostics = parser_ctx_to_bundle(&state.ctx);
+    let mut diagnostics = parser_ctx_to_bundle(&state.ctx);
+    let mut sources = SourceMapBuilder::new();
+    let source_id = sources.add(source_file, source_kind, input);
+    let engine_diagnostics =
+        build_engine_parse_diagnostics(engine_diagnostics, source_id, direct_source, input);
+    diagnostics.extend(engine_diagnostics);
+    diagnostics.set_source_map(sources.finish());
 
     ParseOutput {
         root,
@@ -1577,7 +2093,15 @@ struct StructuralImportExpander {
     metadata_store: CompilationMetadataStore,
     used_files: Vec<PathBuf>,
     active_stack: HashSet<PathBuf>,
+    active_paths: Vec<PathBuf>,
+    import_edges: Vec<ImportCycleEdge>,
+    source_map: SourceMapBuilder,
     float_size: u8,
+}
+
+struct ImportExpansionReports<'a> {
+    errors: &'a mut Vec<String>,
+    diagnostics: &'a mut DiagnosticBundle,
 }
 
 impl StructuralImportExpander {
@@ -1587,6 +2111,9 @@ impl StructuralImportExpander {
             metadata_store,
             used_files: Vec::new(),
             active_stack: HashSet::new(),
+            active_paths: Vec::new(),
+            import_edges: Vec::new(),
+            source_map: SourceMapBuilder::new(),
             float_size,
         }
     }
@@ -1599,21 +2126,34 @@ impl StructuralImportExpander {
     fn parse_resolved_entry(mut self, resolved: &Path) -> Result<ParseOutput, SourceReaderError> {
         self.note_visit(resolved);
         self.active_stack.insert(resolved.to_path_buf());
+        self.active_paths.push(resolved.to_path_buf());
 
         let source = self.reader.read_source_unit(resolved)?;
         let source_name = resolved.to_string_lossy().into_owned();
+        let source_kind = if self.reader.is_virtual_source(resolved) {
+            SourceKind::Memory
+        } else {
+            SourceKind::File
+        };
+        self.source_map
+            .add(resolved.to_path_buf(), source_kind, source.as_str());
         let mut output = parse_program_with_origins_and_precision(
             &source,
             &source_name,
             None,
             self.metadata_store.clone(),
             self.float_size,
+            source_kind,
         );
         let mut expanded_in_scope = HashSet::new();
         self.expand_imports_in_output(&mut output, resolved, &mut expanded_in_scope)?;
         output.used_files = self.used_files;
         output.compilation_metadata = self.metadata_store.snapshot();
         self.active_stack.remove(resolved);
+        self.active_paths.pop();
+        output
+            .diagnostics
+            .set_source_map(std::mem::take(&mut self.source_map).finish());
         Ok(output)
     }
 
@@ -1626,13 +2166,17 @@ impl StructuralImportExpander {
         let Some(root) = output.root else {
             return Ok(());
         };
+        let mut reports = ImportExpansionReports {
+            errors: &mut output.errors,
+            diagnostics: &mut output.diagnostics,
+        };
         let expanded = self.expand_definition_list_in_arena(
             &mut output.state.arena,
+            &mut output.state.ctx,
             root,
             current_file,
             expanded_in_scope,
-            &mut output.errors,
-            &mut output.diagnostics,
+            &mut reports,
         )?;
         output.root = Some(expanded);
         output.state.ctx.set_parse_result(expanded);
@@ -1642,11 +2186,11 @@ impl StructuralImportExpander {
     fn expand_definition_list_in_arena(
         &mut self,
         arena: &mut TreeArena,
+        ctx: &mut ParserCtx,
         mut defs: TreeId,
         current_file: &Path,
         expanded_in_scope: &mut HashSet<PathBuf>,
-        errors: &mut Vec<String>,
-        diagnostics: &mut DiagnosticBundle,
+        reports: &mut ImportExpansionReports<'_>,
     ) -> Result<TreeId, SourceReaderError> {
         let mut items = Vec::new();
 
@@ -1680,53 +2224,87 @@ impl StructuralImportExpander {
                             });
                         };
 
+                        let site = self
+                            .reader
+                            .read_source_unit(current_file)
+                            .ok()
+                            .and_then(|text| ImportSite::locate_in(&text, import_name));
+                        let import_edge = ImportCycleEdge {
+                            from: current_file.to_path_buf(),
+                            to: resolved_import.clone(),
+                            site,
+                        };
+
                         if self.active_stack.contains(&resolved_import) {
                             return Err(SourceReaderError::ImportCycle {
-                                path: resolved_import,
+                                path: resolved_import.clone(),
+                                cycle: source_reader::import_cycle_from_stack(
+                                    &self.active_paths,
+                                    &self.import_edges,
+                                    &resolved_import,
+                                    Some(import_edge),
+                                ),
                             });
                         }
 
                         if expanded_in_scope.insert(resolved_import.clone()) {
                             self.note_visit(&resolved_import);
                             self.active_stack.insert(resolved_import.clone());
-                            let mut imported = self.parse_single_source_file(&resolved_import)?;
-                            self.expand_imports_in_output(
-                                &mut imported,
-                                &resolved_import,
-                                expanded_in_scope,
-                            )?;
-                            errors.extend(imported.errors.iter().cloned());
-                            diagnostics.extend(imported.diagnostics.as_slice().iter().cloned());
+                            self.active_paths.push(resolved_import.clone());
+                            self.import_edges.push(import_edge);
+                            let imported = (|| {
+                                let mut imported =
+                                    self.parse_single_source_file(&resolved_import)?;
+                                self.expand_imports_in_output(
+                                    &mut imported,
+                                    &resolved_import,
+                                    expanded_in_scope,
+                                )?;
+                                Ok(imported)
+                            })();
+                            self.import_edges.pop();
+                            self.active_paths.pop();
+                            self.active_stack.remove(&resolved_import);
+                            let imported: ParseOutput = imported?;
+                            reports.errors.extend(imported.errors.iter().cloned());
+                            reports
+                                .diagnostics
+                                .extend(imported.diagnostics.as_slice().iter().cloned());
                             if let Some(imported_root) = imported.root {
                                 let mut imported_defs = imported_root;
+                                let mut imported_node_map = std::collections::HashMap::new();
                                 while !imported.state.arena.is_nil(imported_defs) {
                                     let Some(imported_def) = imported.state.arena.hd(imported_defs)
                                     else {
                                         break;
                                     };
-                                    items.push(
-                                        arena.clone_subtree_from(
-                                            &imported.state.arena,
-                                            imported_def,
-                                        ),
+                                    let cloned = arena
+                                        .clone_subtree_from(&imported.state.arena, imported_def);
+                                    map_cloned_subtree_nodes(
+                                        arena,
+                                        cloned,
+                                        &imported.state.arena,
+                                        imported_def,
+                                        &mut imported_node_map,
                                     );
+                                    items.push(cloned);
                                     imported_defs = imported
                                         .state
                                         .arena
                                         .tl(imported_defs)
                                         .unwrap_or_else(|| imported.state.arena.nil());
                                 }
+                                ctx.import_box_provenance(&imported.state.ctx, &imported_node_map);
                             }
-                            self.active_stack.remove(&resolved_import);
                         }
                     }
                 }
                 _ => items.push(self.rewrite_nested_imports(
                     arena,
+                    ctx,
                     def,
                     current_file,
-                    errors,
-                    diagnostics,
+                    reports,
                 )?),
             }
 
@@ -1743,15 +2321,14 @@ impl StructuralImportExpander {
     fn rewrite_nested_imports(
         &mut self,
         arena: &mut TreeArena,
+        ctx: &mut ParserCtx,
         id: TreeId,
         current_file: &Path,
-        errors: &mut Vec<String>,
-        diagnostics: &mut DiagnosticBundle,
+        reports: &mut ImportExpansionReports<'_>,
     ) -> Result<TreeId, SourceReaderError> {
         match match_box(arena, id) {
             BoxMatch::WithLocalDef(body, defs) => {
-                let body =
-                    self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let body = self.rewrite_nested_imports(arena, ctx, body, current_file, reports)?;
                 // Nested local-definition lists need their own duplicate-import
                 // suppression scope. A library imported into one local
                 // environment must not suppress the same library when it is
@@ -1759,48 +2336,46 @@ impl StructuralImportExpander {
                 let mut local_expanded = HashSet::new();
                 let defs = self.expand_definition_list_in_arena(
                     arena,
+                    ctx,
                     defs,
                     current_file,
                     &mut local_expanded,
-                    errors,
-                    diagnostics,
+                    reports,
                 )?;
                 Ok(boxes::BoxBuilder::new(arena).with_local_def(body, defs))
             }
             BoxMatch::ModifLocalDef(body, defs) => {
-                let body =
-                    self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let body = self.rewrite_nested_imports(arena, ctx, body, current_file, reports)?;
                 let mut local_expanded = HashSet::new();
                 let defs = self.expand_definition_list_in_arena(
                     arena,
+                    ctx,
                     defs,
                     current_file,
                     &mut local_expanded,
-                    errors,
-                    diagnostics,
+                    reports,
                 )?;
                 Ok(boxes::BoxBuilder::new(arena).modif_local_def(body, defs))
             }
             BoxMatch::WithRecDef(body, defs1, defs2) => {
-                let body =
-                    self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let body = self.rewrite_nested_imports(arena, ctx, body, current_file, reports)?;
                 let mut local_expanded_1 = HashSet::new();
                 let defs1 = self.expand_definition_list_in_arena(
                     arena,
+                    ctx,
                     defs1,
                     current_file,
                     &mut local_expanded_1,
-                    errors,
-                    diagnostics,
+                    reports,
                 )?;
                 let mut local_expanded_2 = HashSet::new();
                 let defs2 = self.expand_definition_list_in_arena(
                     arena,
+                    ctx,
                     defs2,
                     current_file,
                     &mut local_expanded_2,
-                    errors,
-                    diagnostics,
+                    reports,
                 )?;
                 Ok(boxes::BoxBuilder::new(arena).with_rec_def(body, defs1, defs2))
             }
@@ -1815,13 +2390,8 @@ impl StructuralImportExpander {
                 let mut rewritten = Vec::with_capacity(node.children.len());
                 let mut changed = false;
                 for child in node.children.as_slice() {
-                    let rewritten_child = self.rewrite_nested_imports(
-                        arena,
-                        *child,
-                        current_file,
-                        errors,
-                        diagnostics,
-                    )?;
+                    let rewritten_child =
+                        self.rewrite_nested_imports(arena, ctx, *child, current_file, reports)?;
                     changed |= rewritten_child != *child;
                     rewritten.push(rewritten_child);
                 }
@@ -1844,15 +2414,26 @@ impl StructuralImportExpander {
         }
     }
 
-    fn parse_single_source_file(&self, resolved: &Path) -> Result<ParseOutput, SourceReaderError> {
+    fn parse_single_source_file(
+        &mut self,
+        resolved: &Path,
+    ) -> Result<ParseOutput, SourceReaderError> {
         let source = self.reader.read_source_unit(resolved)?;
         let source_name = resolved.to_string_lossy().into_owned();
+        let source_kind = if self.reader.is_virtual_source(resolved) {
+            SourceKind::VirtualLibrary
+        } else {
+            SourceKind::ImportedFile
+        };
+        self.source_map
+            .add(resolved.to_path_buf(), source_kind, source.as_str());
         Ok(parse_program_with_origins_and_precision(
             &source,
             &source_name,
             None,
             self.metadata_store.clone(),
             self.float_size,
+            source_kind,
         ))
     }
 
@@ -1869,6 +2450,34 @@ fn string_node_text_from_arena(arena: &TreeArena, node: TreeId) -> Option<&str> 
         Some(NodeKind::StringLiteral(value)) => Some(value.as_ref()),
         Some(NodeKind::Symbol(value)) => Some(value.as_ref()),
         _ => None,
+    }
+}
+
+/// Reconstructs the source-to-destination node mapping for one subtree cloned
+/// with `TreeArena::clone_subtree_from`.
+///
+/// Both trees preserve ordered child structure. Destination hash-consing may
+/// map several source ids to one destination id, which is intentional: the
+/// occurrence provenance copied through this map retains their distinct
+/// source locations.
+fn map_cloned_subtree_nodes(
+    destination: &TreeArena,
+    destination_root: TreeId,
+    source: &TreeArena,
+    source_root: TreeId,
+    mapping: &mut std::collections::HashMap<TreeId, TreeId>,
+) {
+    let mut stack = vec![(source_root, destination_root)];
+    while let Some((source_node, destination_node)) = stack.pop() {
+        if mapping.insert(source_node, destination_node).is_some() {
+            continue;
+        }
+        let source_children = source.children(source_node).unwrap_or(&[]);
+        let destination_children = destination.children(destination_node).unwrap_or(&[]);
+        for (&source_child, &destination_child) in source_children.iter().zip(destination_children)
+        {
+            stack.push((source_child, destination_child));
+        }
     }
 }
 
@@ -1892,15 +2501,12 @@ fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
         .diagnostics()
         .iter()
         .map(|diag| {
-            let severity = match diag.severity {
-                DiagnosticSeverity::Error => Severity::Error,
-                DiagnosticSeverity::Warning => Severity::Warning,
-                DiagnosticSeverity::Remark => Severity::Remark,
-            };
-            let code = diag
-                .code
-                .unwrap_or_else(|| parser_code_for_message(diag.message.as_ref(), diag.severity));
-            let mut out = Diagnostic::new(severity, Stage::Parser, code, diag.message.clone());
+            let mut out = Diagnostic::new(
+                diag.severity,
+                Stage::Parser,
+                diag.code,
+                diag.message.clone(),
+            );
             if let Some(location) = &diag.location {
                 let span = SourceSpan::new(
                     location.file(),
@@ -1909,26 +2515,41 @@ fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
                     location.end_line(),
                     location.end_col(),
                 );
-                out = out.with_label(Label::new(LabelStyle::Primary, span, "parser location"));
+                out = out.with_label(Label::new(
+                    LabelStyle::Primary,
+                    span,
+                    diag.primary_message.clone(),
+                ));
+            }
+            for site in &diag.related_sites {
+                let span = SourceSpan::new(
+                    site.location.file(),
+                    site.location.line(),
+                    site.location.col(),
+                    site.location.end_line(),
+                    site.location.end_col(),
+                );
+                out = out.with_label(
+                    Label::new(LabelStyle::Secondary, span, site.message.clone())
+                        .with_role(site.role),
+                );
+            }
+            if let Some(detail_code) = &diag.detail_code {
+                out = out.with_detail_code(detail_code.clone());
+            }
+            for (key, value) in &diag.facts {
+                out = out.with_fact(key.clone(), value.clone());
+            }
+            for note in &diag.notes {
+                out = out.with_note(note.clone());
+            }
+            for help in &diag.help {
+                out = out.with_help(help.clone());
             }
             out
         })
         .collect::<Vec<_>>();
     DiagnosticBundle::from(diagnostics)
-}
-
-/// Chooses a stable parser diagnostic code from one rendered parser message.
-fn parser_code_for_message(message: &str, severity: DiagnosticSeverity) -> DiagnosticCode {
-    if matches!(
-        severity,
-        DiagnosticSeverity::Warning | DiagnosticSeverity::Remark
-    ) {
-        codes::PARSE_RECOVERY
-    } else if message.contains("invalid") && message.contains("literal") {
-        codes::PARSE_INVALID_LITERAL
-    } else {
-        codes::PARSE_UNEXPECTED_TOKEN
-    }
 }
 
 /// Maps lexer/parser engine errors to stable diagnostic codes.

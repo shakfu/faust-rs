@@ -25,26 +25,440 @@
 use std::collections::{HashMap, HashSet};
 
 use interval::Interval;
-use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
+use signals::{BinOp, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiProgram};
 
 use crate::enums::{Boolean, Computability, Nature, Variability, Vectorability};
 use crate::factory::{make_maximal, make_simple, make_table_type, make_tuplet};
-use crate::ops::{check_delay_interval, float_cast, int_cast, samp_cast, union_types};
+use crate::ops::{
+    check_delay_interval, check_init, check_int_param, float_cast, int_cast, samp_cast, union_types,
+};
 use crate::types::SigType;
 
-/// Typed failures returned by the type inference pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeError(pub String);
+/// Stable rule identifier for a signal type-inference failure.
+///
+/// These identifiers are intentionally independent from diagnostic wording so
+/// library clients and JSON consumers never need to parse a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InferenceRule {
+    /// A variable delay requires a bounded interval with a non-negative upper
+    /// bound.
+    DelayInterval,
+    /// A soundfile part selector must remain in `[0, 255]`.
+    SoundfilePartInterval,
+    /// An opaque clock-environment token escaped into signal position.
+    ClockEnvironmentPosition,
+    /// A recursive group/projection violated an internal typing invariant.
+    RecursiveGroup,
+    /// A compile-time operand is entirely outside a mathematical domain.
+    MathDomain,
+    /// A table size/generator/index violates its static type contract.
+    TableConstruction,
+    /// The Signal graph is structurally malformed.
+    SignalStructure,
+}
 
-impl std::fmt::Display for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "type error: {}", self.0)
+impl InferenceRule {
+    /// Stable machine spelling used as the diagnostic detail code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DelayInterval => "delay-interval",
+            Self::SoundfilePartInterval => "soundfile-part-interval",
+            Self::ClockEnvironmentPosition => "clock-environment-position",
+            Self::RecursiveGroup => "recursive-group",
+            Self::MathDomain => "math-domain",
+            Self::TableConstruction => "table-construction",
+            Self::SignalStructure => "signal-structure",
+        }
+    }
+
+    /// One-sentence statement of what this rule requires.
+    ///
+    /// Lives next to the rule rather than in the compiler facade so the
+    /// wording cannot drift away from the check that enforces it.
+    #[must_use]
+    pub const fn statement(self) -> &'static str {
+        match self {
+            Self::DelayInterval => {
+                "a variable delay amount must have a bounded interval with a non-negative upper bound"
+            }
+            Self::SoundfilePartInterval => {
+                "a soundfile part selector must stay within the integer interval [0, 255]"
+            }
+            Self::ClockEnvironmentPosition => {
+                "a clock environment must stay an opaque annotation and never reach signal position"
+            }
+            Self::RecursiveGroup => {
+                "every projection of a recursive group must target that group's own body"
+            }
+            Self::MathDomain => "an operand must stay inside its operation's mathematical domain",
+            Self::TableConstruction => {
+                "a table's size, generator and index must each satisfy their static type contract"
+            }
+            Self::SignalStructure => "the Signal graph must be structurally well formed",
+        }
+    }
+
+    /// One safe next step for a programmer facing this rule.
+    ///
+    /// Deliberately advice, not an edit: none of these repairs is deterministic
+    /// enough to become a [`crate::InferenceError`]-driven source patch.
+    #[must_use]
+    pub const fn help(self) -> &'static str {
+        match self {
+            Self::DelayInterval => {
+                "bound the delay amount, for example `min(maxdelay, max(0, d))`, so its interval is finite and non-negative"
+            }
+            Self::SoundfilePartInterval => {
+                "clamp the part selector into 0..255, for example with `min(255, max(0, part))`"
+            }
+            Self::ClockEnvironmentPosition => {
+                "keep the clocked wrapper applied to a circuit; it cannot be used as a plain signal"
+            }
+            Self::RecursiveGroup => {
+                "check that the recursion's outputs and projections line up; this usually means a `~` whose feedback bus was rewritten"
+            }
+            Self::MathDomain => {
+                "constrain the operand so the domain holds for every sample, for example with `max`/`min`"
+            }
+            Self::TableConstruction => {
+                "give the table a compile-time constant size and a generator with no inputs"
+            }
+            Self::SignalStructure => {
+                "this points at a compiler invariant rather than a DSP mistake; please report it with the source that triggered it"
+            }
+        }
     }
 }
 
-impl std::error::Error for TypeError {}
+/// Domain of `sqrt`: negative operands are undefined over the reals.
+const NON_NEGATIVE_DOMAIN: Interval = Interval::const_new(0.0, f64::MAX);
+/// Domain of `log` / `log10`.
+///
+/// The true domain is open at zero. Interval bounds are closed, so zero is
+/// included here and a warning about an operand reaching exactly zero is left
+/// to the error path, which already rejects a constant zero.
+const POSITIVE_DOMAIN: Interval = Interval::const_new(0.0, f64::MAX);
+/// Domain of `asin` / `acos`.
+const UNIT_DOMAIN: Interval = Interval::const_new(-1.0, 1.0);
+
+/// Typed non-fatal observation produced by the type inference pass.
+///
+/// # Source provenance (C++)
+/// - `compiler/extended/sqrtprim.hh` and its siblings
+/// - `"WARNING : potential out of domain in sqrt(...)"`
+///
+/// C++ emits these only when math exceptions are requested. Rust keeps the
+/// same policy: inference always *can* report them, and the compiler facade
+/// decides whether to run the audit that surfaces them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InferenceWarning {
+    /// A math operation may receive an out-of-domain value at run time.
+    ///
+    /// Distinct from [`InferenceError::MathDomain`], which fires when a
+    /// compile-time constant is *provably* outside the domain. Here the operand
+    /// merely straddles the boundary, so whether it is valid depends on values
+    /// that only exist at run time.
+    PotentialMathDomain {
+        /// Operation node whose operand may leave the domain.
+        signal: SigId,
+        /// The operand in question.
+        operand: SigId,
+        /// Stable operation spelling.
+        operation: Box<str>,
+        /// Inferred operand interval.
+        actual: Interval,
+        /// Human-readable mathematical requirement.
+        required: Box<str>,
+    },
+}
+
+impl InferenceWarning {
+    /// Stable rule that produced this observation.
+    #[must_use]
+    pub const fn rule(&self) -> InferenceRule {
+        match self {
+            Self::PotentialMathDomain { .. } => InferenceRule::MathDomain,
+        }
+    }
+
+    /// Primary Signal node the observation is about.
+    #[must_use]
+    pub const fn signal(&self) -> SigId {
+        match self {
+            Self::PotentialMathDomain { signal, .. } => *signal,
+        }
+    }
+
+    /// Human-facing message without an internal Signal dump.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::PotentialMathDomain {
+                operation,
+                actual,
+                required,
+                ..
+            } => format!(
+                "{operation} may be called outside its mathematical domain: operand interval is {actual}, expected {required}"
+            ),
+        }
+    }
+}
+
+/// Typed failures returned by the type inference pass.
+///
+/// C++ `sigtyperules.cpp` reports most of these failures by formatting the
+/// current Tree. Rust retains the offending Signal ids, inferred values, rule,
+/// and operands instead. The compiler facade may then attach Faust source
+/// provenance while keeping raw Signal expressions in opt-in debug context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InferenceError {
+    /// Invalid variable-delay interval.
+    DelayInterval {
+        /// Delay node rejected by the rule.
+        signal: SigId,
+        /// Signal supplying the delay amount.
+        amount: SigId,
+        /// Full inferred type of the amount.
+        actual: SigType,
+        /// Precise reason returned by the interval checker.
+        reason: Box<str>,
+    },
+    /// Soundfile part selector outside the C++ `[0, 255]` contract.
+    SoundfilePartInterval {
+        /// Soundfile access node rejected by the rule.
+        signal: SigId,
+        /// Part-selector operand.
+        selector: SigId,
+        /// Inferred selector interval.
+        actual: Interval,
+        /// Inclusive lower bound.
+        required_min: i32,
+        /// Inclusive upper bound.
+        required_max: i32,
+    },
+    /// Opaque clock environment used as an ordinary signal.
+    ClockEnvironmentPosition {
+        /// Offending token node.
+        signal: SigId,
+        /// Clock-domain identifier encoded by the token.
+        domain_id: u32,
+    },
+    /// Compile-time mathematical domain violation.
+    MathDomain {
+        /// Operation node rejected by the rule.
+        signal: SigId,
+        /// Relevant operands.
+        operands: Vec<SigId>,
+        /// Stable operation spelling.
+        operation: Box<str>,
+        /// Inferred operand intervals.
+        actual: Vec<Interval>,
+        /// Human-readable mathematical requirement.
+        required: Box<str>,
+    },
+    /// Invalid table construction operand.
+    TableConstruction {
+        /// Table node rejected by the rule.
+        signal: SigId,
+        /// Operand that failed validation.
+        operand: SigId,
+        /// Full inferred operand type.
+        actual: SigType,
+        /// Required type property.
+        required: Box<str>,
+    },
+    /// Malformed recursive-group structure.
+    RecursiveGroup {
+        /// Relevant group/list/projection when known.
+        signal: Option<SigId>,
+        /// Structural invariant that failed.
+        context: Box<str>,
+    },
+    /// Other malformed Signal IR.
+    SignalStructure {
+        /// Relevant node when known.
+        signal: Option<SigId>,
+        /// Structural invariant that failed.
+        context: Box<str>,
+    },
+}
+
+impl InferenceError {
+    fn structure(signal: Option<SigId>, context: impl Into<Box<str>>) -> Self {
+        Self::SignalStructure {
+            signal,
+            context: context.into(),
+        }
+    }
+
+    fn recursion(signal: Option<SigId>, context: impl Into<Box<str>>) -> Self {
+        Self::RecursiveGroup {
+            signal,
+            context: context.into(),
+        }
+    }
+
+    /// Stable rule that rejected the signal.
+    #[must_use]
+    pub const fn rule(&self) -> InferenceRule {
+        match self {
+            Self::DelayInterval { .. } => InferenceRule::DelayInterval,
+            Self::SoundfilePartInterval { .. } => InferenceRule::SoundfilePartInterval,
+            Self::ClockEnvironmentPosition { .. } => InferenceRule::ClockEnvironmentPosition,
+            Self::MathDomain { .. } => InferenceRule::MathDomain,
+            Self::TableConstruction { .. } => InferenceRule::TableConstruction,
+            Self::RecursiveGroup { .. } => InferenceRule::RecursiveGroup,
+            Self::SignalStructure { .. } => InferenceRule::SignalStructure,
+        }
+    }
+
+    /// Primary offending Signal node, when available.
+    #[must_use]
+    pub const fn signal(&self) -> Option<SigId> {
+        match self {
+            Self::DelayInterval { signal, .. }
+            | Self::SoundfilePartInterval { signal, .. }
+            | Self::ClockEnvironmentPosition { signal, .. }
+            | Self::MathDomain { signal, .. }
+            | Self::TableConstruction { signal, .. } => Some(*signal),
+            Self::RecursiveGroup { signal, .. } | Self::SignalStructure { signal, .. } => *signal,
+        }
+    }
+
+    /// Relevant operand Signal ids in rule-specific order.
+    #[must_use]
+    pub fn operands(&self) -> Vec<SigId> {
+        match self {
+            Self::DelayInterval { amount, .. } => vec![*amount],
+            Self::SoundfilePartInterval { selector, .. } => vec![*selector],
+            Self::MathDomain { operands, .. } => operands.clone(),
+            Self::TableConstruction { operand, .. } => vec![*operand],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Inferred type involved in the violation, when applicable.
+    #[must_use]
+    pub const fn actual_type(&self) -> Option<&SigType> {
+        match self {
+            Self::DelayInterval { actual, .. } => Some(actual),
+            Self::TableConstruction { actual, .. } => Some(actual),
+            _ => None,
+        }
+    }
+
+    /// Inferred interval involved in the violation, when applicable.
+    #[must_use]
+    pub fn actual_interval(&self) -> Option<Interval> {
+        match self {
+            Self::DelayInterval { actual, .. } => Some(actual.interval()),
+            Self::SoundfilePartInterval { actual, .. } => Some(*actual),
+            Self::MathDomain { actual, .. } => actual.first().copied(),
+            Self::TableConstruction { actual, .. } => Some(actual.interval()),
+            _ => None,
+        }
+    }
+
+    /// Every inferred interval the rule examined, in operand order.
+    ///
+    /// [`Self::actual_interval`] returns only the first one, which is the whole
+    /// story for a unary rule but not for a binary one: in `x % 0` it is the
+    /// numerator's interval, while the denominator is what failed. Renderers
+    /// that describe the violation to a reader should use this instead.
+    #[must_use]
+    pub fn actual_intervals(&self) -> Vec<Interval> {
+        match self {
+            Self::MathDomain { actual, .. } => actual.clone(),
+            _ => self.actual_interval().into_iter().collect(),
+        }
+    }
+
+    /// Required inclusive integer interval, when the rule defines one.
+    #[must_use]
+    pub const fn required_integer_interval(&self) -> Option<(i32, i32)> {
+        match self {
+            Self::SoundfilePartInterval {
+                required_min,
+                required_max,
+                ..
+            } => Some((*required_min, *required_max)),
+            _ => None,
+        }
+    }
+
+    /// Required type/domain description, when applicable.
+    #[must_use]
+    pub fn expected(&self) -> Option<&str> {
+        match self {
+            Self::DelayInterval { .. } => Some("bounded interval with non-negative upper bound"),
+            Self::SoundfilePartInterval { .. } => Some("integer interval [0, 255]"),
+            Self::ClockEnvironmentPosition { .. } => Some("opaque Clocked annotation"),
+            Self::MathDomain { required, .. } => Some(required),
+            Self::TableConstruction { required, .. } => Some(required),
+            Self::RecursiveGroup { .. } | Self::SignalStructure { .. } => None,
+        }
+    }
+
+    /// Human-facing message without an internal Signal dump.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::DelayInterval { reason, .. } => reason.to_string(),
+            Self::SoundfilePartInterval {
+                actual,
+                required_min,
+                required_max,
+                ..
+            } => format!(
+                "out of range soundfile part number ({actual} instead of interval({required_min},{required_max}))"
+            ),
+            Self::ClockEnvironmentPosition { domain_id, .. } => format!(
+                "clock-env token #{domain_id} reached type inference in signal position; it must stay an opaque annotation of Clocked(env, y)"
+            ),
+            Self::MathDomain {
+                operation,
+                actual,
+                required,
+                ..
+            } => {
+                if operation.as_ref() == "/" {
+                    "division by 0".to_owned()
+                } else if operation.as_ref() == "%" {
+                    "% by 0".to_owned()
+                } else {
+                    format!(
+                        "{operation} is outside its mathematical domain for {}; expected {required}",
+                        actual
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            Self::TableConstruction {
+                actual, required, ..
+            } => {
+                format!("invalid table construction operand: got {actual}; expected {required}")
+            }
+            Self::RecursiveGroup { context, .. } | Self::SignalStructure { context, .. } => {
+                context.to_string()
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for InferenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "type error: {}", self.message())
+    }
+}
+
+impl std::error::Error for InferenceError {}
 
 /// One symbolic recursive group discovered before running the global recursive
 /// typing fixpoint.
@@ -97,7 +511,7 @@ impl RecTypingState {
     /// Discovery order is deterministic DFS over the output list with DAG
     /// sharing preserved by `visited`. This matches the kind of stable vector
     /// ordering the C++ driver expects before running `updateRecTypes(...)`.
-    fn discover(arena: &TreeArena, outputs: &[SigId]) -> Result<Self, TypeError> {
+    fn discover(arena: &TreeArena, outputs: &[SigId]) -> Result<Self, InferenceError> {
         let groups = discover_recursive_groups(arena, outputs)?;
         let mut current = Vec::with_capacity(groups.len());
         let mut upper = Vec::with_capacity(groups.len());
@@ -128,7 +542,7 @@ impl RecTypingState {
 fn discover_recursive_groups(
     arena: &TreeArena,
     outputs: &[SigId],
-) -> Result<Vec<RecGroup>, TypeError> {
+) -> Result<Vec<RecGroup>, InferenceError> {
     let mut groups = Vec::new();
     let mut visited = HashSet::new();
     let mut seen_groups = HashSet::new();
@@ -144,7 +558,7 @@ fn walk_collect_rec_groups(
     visited: &mut HashSet<SigId>,
     seen_groups: &mut HashSet<SigId>,
     groups: &mut Vec<RecGroup>,
-) -> Result<(), TypeError> {
+) -> Result<(), InferenceError> {
     if !visited.insert(sig) {
         return Ok(());
     }
@@ -155,10 +569,16 @@ fn walk_collect_rec_groups(
 
     if arena.is_list(sig) {
         let head = arena.hd(sig).ok_or_else(|| {
-            TypeError("malformed list payload during recursive group discovery".to_owned())
+            InferenceError::recursion(
+                Some(sig),
+                "malformed list payload during recursive group discovery",
+            )
         })?;
         let tail = arena.tl(sig).ok_or_else(|| {
-            TypeError("malformed list payload during recursive group discovery".to_owned())
+            InferenceError::recursion(
+                Some(sig),
+                "malformed list payload during recursive group discovery",
+            )
         })?;
         walk_collect_rec_groups(arena, head, visited, seen_groups, groups)?;
         walk_collect_rec_groups(arena, tail, visited, seen_groups, groups)?;
@@ -183,10 +603,13 @@ fn walk_collect_rec_groups(
     }
 
     let node = arena.node(sig).ok_or_else(|| {
-        TypeError(format!(
-            "missing node {} during recursive group discovery",
-            sig.as_u32()
-        ))
+        InferenceError::structure(
+            Some(sig),
+            format!(
+                "missing node {} during recursive group discovery",
+                sig.as_u32()
+            ),
+        )
     })?;
     for child in node.children.as_slice() {
         walk_collect_rec_groups(arena, *child, visited, seen_groups, groups)?;
@@ -194,14 +617,20 @@ fn walk_collect_rec_groups(
     Ok(())
 }
 
-fn body_list_arity(arena: &TreeArena, mut body_list: SigId) -> Result<usize, TypeError> {
+fn body_list_arity(arena: &TreeArena, mut body_list: SigId) -> Result<usize, InferenceError> {
     let mut n = 0usize;
     while !arena.is_nil(body_list) {
         let _head = arena.hd(body_list).ok_or_else(|| {
-            TypeError("malformed symbolic recursion body list during discovery".to_owned())
+            InferenceError::recursion(
+                Some(body_list),
+                "malformed symbolic recursion body list during discovery",
+            )
         })?;
         body_list = arena.tl(body_list).ok_or_else(|| {
-            TypeError("malformed symbolic recursion body list during discovery".to_owned())
+            InferenceError::recursion(
+                Some(body_list),
+                "malformed symbolic recursion body list during discovery",
+            )
         })?;
         n += 1;
     }
@@ -226,6 +655,8 @@ pub struct TypeAnnotator<'a> {
     env: HashMap<SigId, SigType>,
     /// Nodes whose type is currently being computed (cycle guard).
     in_progress: HashSet<SigId>,
+    /// Non-fatal domain observations collected while inferring.
+    warnings: Vec<InferenceWarning>,
 }
 
 impl<'a> TypeAnnotator<'a> {
@@ -237,14 +668,27 @@ impl<'a> TypeAnnotator<'a> {
             ui_program,
             env: HashMap::new(),
             in_progress: HashSet::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    /// Returns the non-fatal observations collected during inference.
+    ///
+    /// Deduplicated and ordered by first occurrence, so repeated inference of a
+    /// shared sub-expression reports one warning rather than one per reference.
+    #[must_use]
+    pub fn warnings(&self) -> &[InferenceWarning] {
+        &self.warnings
     }
 
     /// Annotate all output roots and return the complete `SigId → SigType` map.
     ///
     /// # C++ source
     /// `typeAnnotation(Tree sig, bool causality)` entry point.
-    pub fn annotate(&mut self, outputs: &[SigId]) -> Result<HashMap<SigId, SigType>, TypeError> {
+    pub fn annotate(
+        &mut self,
+        outputs: &[SigId],
+    ) -> Result<HashMap<SigId, SigType>, InferenceError> {
         let mut rec_state = RecTypingState::discover(self.arena, outputs)?;
         if !rec_state.groups.is_empty() {
             self.solve_recursive_groups(&mut rec_state)?;
@@ -270,7 +714,7 @@ impl<'a> TypeAnnotator<'a> {
     ///
     /// # C++ source
     /// `Type T(Tree term, Tree env)` / `inferSigType(Tree sig, Tree env)`
-    fn infer(&mut self, sig: SigId) -> Result<SigType, TypeError> {
+    fn infer(&mut self, sig: SigId) -> Result<SigType, InferenceError> {
         // Return memoised result if available.
         if let Some(t) = self.env.get(&sig) {
             return Ok(t.clone());
@@ -288,7 +732,7 @@ impl<'a> TypeAnnotator<'a> {
         Ok(ty)
     }
 
-    fn infer_inner(&mut self, sig: SigId) -> Result<SigType, TypeError> {
+    fn infer_inner(&mut self, sig: SigId) -> Result<SigType, InferenceError> {
         match match_sig(self.arena, sig) {
             // ── Literals ────────────────────────────────────────────────────
             SigMatch::Int(n) => Ok(make_simple(
@@ -339,7 +783,12 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Delay(x, n) => {
                 let tn = self.infer(n)?;
                 // Validate that the delay amount has a bounded non-negative interval.
-                check_delay_interval(&tn).map_err(|e| TypeError(e.0))?;
+                check_delay_interval(&tn).map_err(|e| InferenceError::DelayInterval {
+                    signal: sig,
+                    amount: n,
+                    actual: tn.clone(),
+                    reason: e.0.into(),
+                })?;
                 let tx = self.infer(x)?;
                 // C++: castInterval(sampCast(t1), itv::reunion(t1->getInterval(), interval(0)))
                 let itv = interval::reunion(tx.interval(), interval::singleton(0.0));
@@ -387,6 +836,18 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::BinOp(op, lhs, rhs) => {
                 let tl = self.infer(lhs)?;
                 let tr = self.infer(rhs)?;
+                if matches!(op, BinOp::Div | BinOp::Rem)
+                    && tr.variability() == Variability::Konst
+                    && tr.interval() == interval::singleton(0.0)
+                {
+                    return Err(InferenceError::MathDomain {
+                        signal: sig,
+                        operands: vec![lhs, rhs],
+                        operation: op.symbol().into(),
+                        actual: vec![tl.interval(), tr.interval()],
+                        required: "denominator must be non-zero".into(),
+                    });
+                }
                 Ok(self.infer_binop(op, tl, tr))
             }
 
@@ -419,11 +880,32 @@ impl<'a> TypeAnnotator<'a> {
                 let itv = interval::ops::arithmetic::abs(tx.interval());
                 Ok(tx.promote_interval(itv))
             }
-            SigMatch::Sqrt(x) => self.infer_unary_math(x, interval::ops::math::sqrt),
+            SigMatch::Sqrt(x) => self.infer_domain_math(
+                sig,
+                x,
+                "sqrt",
+                "[0, +infinity)",
+                NON_NEGATIVE_DOMAIN,
+                interval::ops::math::sqrt,
+            ),
             SigMatch::Exp(x) => self.infer_unary_math(x, interval::ops::math::exp),
             SigMatch::Exp10(x) => self.infer_unary_math(x, interval::ops::math::exp10),
-            SigMatch::Log(x) => self.infer_unary_math(x, interval::ops::math::log),
-            SigMatch::Log10(x) => self.infer_unary_math(x, interval::ops::math::log10),
+            SigMatch::Log(x) => self.infer_domain_math(
+                sig,
+                x,
+                "log",
+                "(0, +infinity)",
+                POSITIVE_DOMAIN,
+                interval::ops::math::log,
+            ),
+            SigMatch::Log10(x) => self.infer_domain_math(
+                sig,
+                x,
+                "log10",
+                "(0, +infinity)",
+                POSITIVE_DOMAIN,
+                interval::ops::math::log10,
+            ),
             SigMatch::Floor(x) => self.infer_unary_math(x, interval::ops::math::floor),
             SigMatch::Ceil(x) => self.infer_unary_math(x, interval::ops::math::ceil),
             SigMatch::Rint(x) => self.infer_unary_math(x, interval::ops::math::rint),
@@ -431,8 +913,22 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Sin(x) => self.infer_unary_math(x, interval::ops::trig::sin),
             SigMatch::Cos(x) => self.infer_unary_math(x, interval::ops::trig::cos),
             SigMatch::Tan(x) => self.infer_unary_math(x, interval::ops::trig::tan),
-            SigMatch::Asin(x) => self.infer_unary_math(x, interval::ops::trig::asin),
-            SigMatch::Acos(x) => self.infer_unary_math(x, interval::ops::trig::acos),
+            SigMatch::Asin(x) => self.infer_domain_math(
+                sig,
+                x,
+                "asin",
+                "[-1, 1]",
+                UNIT_DOMAIN,
+                interval::ops::trig::asin,
+            ),
+            SigMatch::Acos(x) => self.infer_domain_math(
+                sig,
+                x,
+                "acos",
+                "[-1, 1]",
+                UNIT_DOMAIN,
+                interval::ops::trig::acos,
+            ),
             SigMatch::Atan(x) => self.infer_unary_math(x, interval::ops::trig::atan),
 
             SigMatch::Atan2(y, x) => {
@@ -447,6 +943,17 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Fmod(x, y) => {
                 let tx = self.infer(x)?;
                 let ty = self.infer(y)?;
+                if ty.variability() == Variability::Konst
+                    && ty.interval() == interval::singleton(0.0)
+                {
+                    return Err(InferenceError::MathDomain {
+                        signal: sig,
+                        operands: vec![x, y],
+                        operation: "fmod".into(),
+                        actual: vec![tx.interval(), ty.interval()],
+                        required: "denominator must be non-zero".into(),
+                    });
+                }
                 let itv = interval::ops::arithmetic::mod_interval(tx.interval(), ty.interval());
                 let t = union_types(tx, ty);
                 Ok(float_cast(t).promote_interval(itv))
@@ -455,6 +962,17 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Remainder(x, y) => {
                 let tx = self.infer(x)?;
                 let ty = self.infer(y)?;
+                if ty.variability() == Variability::Konst
+                    && ty.interval() == interval::singleton(0.0)
+                {
+                    return Err(InferenceError::MathDomain {
+                        signal: sig,
+                        operands: vec![x, y],
+                        operation: "remainder".into(),
+                        actual: vec![tx.interval(), ty.interval()],
+                        required: "denominator must be non-zero".into(),
+                    });
+                }
                 let t = union_types(tx, ty);
                 Ok(float_cast(t))
             }
@@ -483,7 +1001,7 @@ impl<'a> TypeAnnotator<'a> {
             }
 
             SigMatch::WrTbl(size, generator, wi, ws) => {
-                let ttbl = self.infer_write_table(size, generator)?;
+                let ttbl = self.infer_write_table(sig, size, generator)?;
                 let twi = self.infer(wi)?;
                 let tws = self.infer(ws)?;
                 infer_write_table_type(ttbl, twi, tws)
@@ -731,10 +1249,10 @@ impl<'a> TypeAnnotator<'a> {
             // infers `x`. Reaching it here means a traversal leaked it into
             // signal position — fail loudly instead of guessing a type
             // (roadmap P0: no silent state for the clocked machinery).
-            SigMatch::ClockEnvToken(id) => Err(TypeError(format!(
-                "clock-env token #{id} reached type inference in signal position; \
-                 it must stay an opaque annotation of Clocked(env, y)"
-            ))),
+            SigMatch::ClockEnvToken(id) => Err(InferenceError::ClockEnvironmentPosition {
+                signal: sig,
+                domain_id: id,
+            }),
 
             // C++: type each sub for side effects, then return
             //   makeSimpleType(kReal, kSamp, kExec, kScal, kNum, interval(-1, 1))
@@ -765,11 +1283,17 @@ impl<'a> TypeAnnotator<'a> {
                 let mut cur = sig;
                 while !self.arena.is_nil(cur) {
                     let head = self.arena.hd(cur).ok_or_else(|| {
-                        TypeError("malformed cons list during type inference".into())
+                        InferenceError::structure(
+                            Some(cur),
+                            "malformed cons list during type inference",
+                        )
                     })?;
                     components.push(self.infer(head)?);
                     cur = self.arena.tl(cur).ok_or_else(|| {
-                        TypeError("malformed cons list during type inference".into())
+                        InferenceError::structure(
+                            Some(cur),
+                            "malformed cons list during type inference",
+                        )
                     })?;
                 }
                 Ok(make_tuplet(components))
@@ -781,23 +1305,33 @@ impl<'a> TypeAnnotator<'a> {
     }
 
     /// Mirrors C++ `checkPartInterval(sig, t)` for soundfile part selectors.
-    fn check_soundfile_part_interval(&self, sig: SigId, ty: &SigType) -> Result<(), TypeError> {
+    fn check_soundfile_part_interval(
+        &self,
+        sig: SigId,
+        ty: &SigType,
+    ) -> Result<(), InferenceError> {
         let interval = ty.interval();
         if !interval.is_valid()
             || interval.lo() < 0.0
             || interval.hi() >= f64::from(MAX_SOUNDFILE_PARTS)
         {
-            return Err(TypeError(format!(
-                "ERROR : out of range soundfile part number ({} instead of interval(0,{})) in expression : {}",
-                interval,
-                MAX_SOUNDFILE_PARTS - 1,
-                dump_sig_readable(self.arena, sig)
-            )));
+            return Err(InferenceError::SoundfilePartInterval {
+                signal: sig,
+                selector: match match_sig(self.arena, sig) {
+                    SigMatch::SoundfileLength(_, part)
+                    | SigMatch::SoundfileRate(_, part)
+                    | SigMatch::SoundfileBuffer(_, _, part, _) => part,
+                    _ => sig,
+                },
+                actual: interval,
+                required_min: 0,
+                required_max: MAX_SOUNDFILE_PARTS - 1,
+            });
         }
         Ok(())
     }
 
-    fn solve_recursive_groups(&mut self, state: &mut RecTypingState) -> Result<(), TypeError> {
+    fn solve_recursive_groups(&mut self, state: &mut RecTypingState) -> Result<(), InferenceError> {
         for _ in std::iter::repeat_n((), RECURSIVE_NARROWING_LIMIT) {
             self.update_rec_types(&state.groups, &mut state.upper, true)?;
         }
@@ -834,7 +1368,7 @@ impl<'a> TypeAnnotator<'a> {
         groups: &[RecGroup],
         approximations: &mut [SigType],
         inter: bool,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), InferenceError> {
         self.env.clear();
         self.in_progress.clear();
         self.seed_rec_groups(groups, approximations);
@@ -885,7 +1419,7 @@ impl<'a> TypeAnnotator<'a> {
         &mut self,
         sig: SigId,
         visited: &mut HashSet<SigId>,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), InferenceError> {
         if !visited.insert(sig) {
             return Ok(());
         }
@@ -906,10 +1440,16 @@ impl<'a> TypeAnnotator<'a> {
 
         if self.arena.is_list(sig) {
             let head = self.arena.hd(sig).ok_or_else(|| {
-                TypeError("malformed list during reachable type population".into())
+                InferenceError::structure(
+                    Some(sig),
+                    "malformed list during reachable type population",
+                )
             })?;
             let tail = self.arena.tl(sig).ok_or_else(|| {
-                TypeError("malformed list during reachable type population".into())
+                InferenceError::structure(
+                    Some(sig),
+                    "malformed list during reachable type population",
+                )
             })?;
             self.populate_reachable_types(head, visited)?;
             self.populate_reachable_types(tail, visited)?;
@@ -922,10 +1462,13 @@ impl<'a> TypeAnnotator<'a> {
         }
 
         let node = self.arena.node(sig).ok_or_else(|| {
-            TypeError(format!(
-                "missing signal node {} during type population",
-                sig.as_u32()
-            ))
+            InferenceError::structure(
+                Some(sig),
+                format!(
+                    "missing signal node {} during type population",
+                    sig.as_u32()
+                ),
+            )
         })?;
         for child in node.children.as_slice() {
             self.populate_reachable_types(*child, visited)?;
@@ -941,7 +1484,7 @@ impl<'a> TypeAnnotator<'a> {
         &mut self,
         x: SigId,
         f: fn(Interval) -> Interval,
-    ) -> Result<SigType, TypeError> {
+    ) -> Result<SigType, InferenceError> {
         let tx = self.infer(x)?;
         let itv = f(tx.interval());
         // Pure math functions preserve the variability of their argument:
@@ -951,6 +1494,55 @@ impl<'a> TypeAnnotator<'a> {
         // transcendental results to Samp, preventing constant-folding of
         // expressions like sin(SR) into instanceConstants.
         Ok(float_cast(tx).promote_interval(itv))
+    }
+
+    /// Types one math primitive that is only defined on part of the reals.
+    ///
+    /// `domain` is the closed interval the operation accepts. Three outcomes:
+    ///
+    /// - a compile-time constant entirely outside the domain is an error, since
+    ///   the call can never be valid;
+    /// - an operand that merely straddles the domain boundary is a non-fatal
+    ///   observation, matching the C++ `WARNING : potential out of domain`
+    ///   class;
+    /// - an operand fully inside the domain is silent.
+    fn infer_domain_math(
+        &mut self,
+        signal: SigId,
+        operand: SigId,
+        operation: &'static str,
+        required: &'static str,
+        domain: Interval,
+        f: fn(Interval) -> Interval,
+    ) -> Result<SigType, InferenceError> {
+        let ty = self.infer(operand)?;
+        let actual = ty.interval();
+        let result = f(actual);
+        if ty.variability() == Variability::Konst && !actual.is_empty() && result.is_empty() {
+            return Err(InferenceError::MathDomain {
+                signal,
+                operands: vec![operand],
+                operation: operation.into(),
+                actual: vec![actual],
+                required: required.into(),
+            });
+        }
+        if !actual.is_empty() && (actual.lo() < domain.lo() || actual.hi() > domain.hi()) {
+            let warning = InferenceWarning::PotentialMathDomain {
+                signal,
+                operand,
+                operation: operation.into(),
+                actual,
+                required: required.into(),
+            };
+            // Shared sub-expressions are inferred once per reference; keeping
+            // the warning list a set of distinct observations stops one
+            // expression from producing N identical lines.
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        Ok(float_cast(ty).promote_interval(result))
     }
 
     fn infer_binop(&self, op: BinOp, tl: SigType, tr: SigType) -> SigType {
@@ -999,7 +1591,7 @@ impl<'a> TypeAnnotator<'a> {
     /// sample-rate values whose startup interval includes zero, just like the
     /// ordinary `Delay` rule. This helper mirrors that expanded expression
     /// enough for type annotation while keeping the compact carrier intact.
-    fn infer_fir_carrier(&mut self, coefs: &[SigId]) -> Result<SigType, TypeError> {
+    fn infer_fir_carrier(&mut self, coefs: &[SigId]) -> Result<SigType, InferenceError> {
         if coefs.len() < 2 {
             return Ok(make_maximal());
         }
@@ -1035,7 +1627,7 @@ impl<'a> TypeAnnotator<'a> {
     /// sample-rate recursive signal. In absence of the fully expanded recursive
     /// equation, the conservative structural type joins the independent input
     /// and feedback coefficient types, then raises variability to `Samp`.
-    fn infer_iir_carrier(&mut self, coefs: &[SigId]) -> Result<SigType, TypeError> {
+    fn infer_iir_carrier(&mut self, coefs: &[SigId]) -> Result<SigType, InferenceError> {
         if coefs.len() < 2 {
             return Ok(make_maximal());
         }
@@ -1114,7 +1706,7 @@ impl<'a> TypeAnnotator<'a> {
         )
     }
 
-    fn infer_bargraph(&mut self, _id: ControlId, x: SigId) -> Result<SigType, TypeError> {
+    fn infer_bargraph(&mut self, _id: ControlId, x: SigId) -> Result<SigType, InferenceError> {
         // C++: T(s1, env)->promoteVariability(kBlock)
         // The lo/hi bound signals are computed for side effects in C++ but their
         // values are NOT reflected in the returned type.  The returned type is the
@@ -1125,9 +1717,28 @@ impl<'a> TypeAnnotator<'a> {
 
     // ── Tables ───────────────────────────────────────────────────────────────
 
-    fn infer_write_table(&mut self, size: SigId, generator: SigId) -> Result<SigType, TypeError> {
-        let _tsize = self.infer(size)?;
+    fn infer_write_table(
+        &mut self,
+        signal: SigId,
+        size: SigId,
+        generator: SigId,
+    ) -> Result<SigType, InferenceError> {
+        let tsize = self.infer(size)?;
+        check_int_param(&tsize).map_err(|_| InferenceError::TableConstruction {
+            signal,
+            operand: size,
+            actual: tsize,
+            required: "compile-time integer table size".into(),
+        })?;
         let tgen = self.infer(generator)?;
+        if check_init(&tgen).is_err() && signal_forest_contains_input(self.arena, generator) {
+            return Err(InferenceError::TableConstruction {
+                signal,
+                operand: generator,
+                actual: tgen,
+                required: "closed generator with no free signal input".into(),
+            });
+        }
         Ok(make_table_type(tgen))
     }
 
@@ -1151,7 +1762,7 @@ impl<'a> TypeAnnotator<'a> {
     /// `fLo = std::numeric_limits<double>::lowest()`, `fHi = std::numeric_limits<double>::max()`.
     /// This is the fully-open interval `[f64::MIN, f64::MAX]` — not NaN/empty.
     /// Rust equivalent: `Interval::new_default()`.
-    fn infer_foreign_const_type(&self, kind: SigId) -> Result<SigType, TypeError> {
+    fn infer_foreign_const_type(&self, kind: SigId) -> Result<SigType, InferenceError> {
         Ok(make_simple(
             self.foreign_nature(kind),
             Variability::Konst,
@@ -1168,7 +1779,7 @@ impl<'a> TypeAnnotator<'a> {
     /// `makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())`
     ///
     /// Same interval semantics as `inferFConstType` — see that method's doc.
-    fn infer_foreign_var_type(&self, kind: SigId) -> Result<SigType, TypeError> {
+    fn infer_foreign_var_type(&self, kind: SigId) -> Result<SigType, InferenceError> {
         Ok(make_simple(
             self.foreign_nature(kind),
             Variability::Block,
@@ -1179,7 +1790,11 @@ impl<'a> TypeAnnotator<'a> {
         ))
     }
 
-    fn infer_foreign_fun_type(&mut self, ff: SigId, args: SigId) -> Result<SigType, TypeError> {
+    fn infer_foreign_fun_type(
+        &mut self,
+        ff: SigId,
+        args: SigId,
+    ) -> Result<SigType, InferenceError> {
         let ret_nature = self.foreign_fun_return_nature(ff);
         let arg_types = self.infer_list_items(args)?;
         let variability = arg_types
@@ -1214,7 +1829,7 @@ impl<'a> TypeAnnotator<'a> {
     ///   global `annotate(...)` driver before ordinary subtree typing runs,
     /// - this method is therefore only a seeded lookup / conservative fallback,
     ///   not a local recursive solver anymore.
-    fn infer_sym_rec(&mut self, sig: SigId) -> Result<SigType, TypeError> {
+    fn infer_sym_rec(&mut self, sig: SigId) -> Result<SigType, InferenceError> {
         let Some((var, body)) = match_sym_rec(self.arena, sig) else {
             return Ok(make_maximal());
         };
@@ -1232,7 +1847,7 @@ impl<'a> TypeAnnotator<'a> {
     /// `inferProjType(Type t, int i, int vec)` — called with `vec = kScal`.
     /// Each component is promoted by the group's variability/computability, and
     /// vectorability is promoted to kScal (the more conservative of the two).
-    fn infer_proj(&mut self, idx: i32, group: SigId) -> Result<SigType, TypeError> {
+    fn infer_proj(&mut self, idx: i32, group: SigId) -> Result<SigType, InferenceError> {
         let tg = self.infer(group)?;
         let (gv, gc) = (tg.variability(), tg.computability());
         let comp = match &tg {
@@ -1248,15 +1863,21 @@ impl<'a> TypeAnnotator<'a> {
             .promote_vectorability(Vectorability::Scal))
     }
 
-    fn infer_list_items(&mut self, list: SigId) -> Result<Vec<SigType>, TypeError> {
+    fn infer_list_items(&mut self, list: SigId) -> Result<Vec<SigType>, InferenceError> {
         let mut items = Vec::new();
         let mut cursor = list;
         while !self.arena.is_nil(cursor) {
             let head = self.arena.hd(cursor).ok_or_else(|| {
-                TypeError("malformed list payload during foreign function typing".to_owned())
+                InferenceError::structure(
+                    Some(cursor),
+                    "malformed list payload during foreign function typing",
+                )
             })?;
             let tail = self.arena.tl(cursor).ok_or_else(|| {
-                TypeError("malformed list payload during foreign function typing".to_owned())
+                InferenceError::structure(
+                    Some(cursor),
+                    "malformed list payload during foreign function typing",
+                )
             })?;
             items.push(self.infer(head)?);
             cursor = tail;
@@ -1273,6 +1894,23 @@ impl<'a> TypeAnnotator<'a> {
         };
         self.foreign_nature(ret_ty)
     }
+}
+
+fn signal_forest_contains_input(arena: &TreeArena, root: SigId) -> bool {
+    let mut stack = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(signal) = stack.pop() {
+        if !visited.insert(signal) {
+            continue;
+        }
+        if matches!(match_sig(arena, signal), SigMatch::Input(_)) {
+            return true;
+        }
+        if let Some(children) = arena.children(signal) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    false
 }
 
 fn match_ffunction_node(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, SigId)> {
@@ -1294,15 +1932,21 @@ fn match_ffunction_node(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, S
 /// Each recursive component starts as an integer sample/init scalar with a
 /// zero interval. The group carrier itself is a tuplet with one such component
 /// per body slot.
-fn initial_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError> {
+fn initial_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, InferenceError> {
     let mut items = Vec::new();
     let mut list = body;
     while !arena.is_nil(list) {
         let _head = arena.hd(list).ok_or_else(|| {
-            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+            InferenceError::recursion(
+                Some(list),
+                "malformed symbolic recursion body list during type inference",
+            )
         })?;
         let tail = arena.tl(list).ok_or_else(|| {
-            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+            InferenceError::recursion(
+                Some(list),
+                "malformed symbolic recursion body list during type inference",
+            )
         })?;
         items.push(make_simple(
             Nature::Int,
@@ -1324,15 +1968,21 @@ fn initial_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError
 /// interval to the default full range. In the C++ implementation this upper
 /// bound is used during recursive widening while all other type coordinates
 /// still come from the freshly inferred recursive body.
-fn maximal_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError> {
+fn maximal_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, InferenceError> {
     let mut items = Vec::new();
     let mut list = body;
     while !arena.is_nil(list) {
         let _head = arena.hd(list).ok_or_else(|| {
-            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+            InferenceError::recursion(
+                Some(list),
+                "malformed symbolic recursion body list during type inference",
+            )
         })?;
         let tail = arena.tl(list).ok_or_else(|| {
-            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+            InferenceError::recursion(
+                Some(list),
+                "malformed symbolic recursion body list during type inference",
+            )
         })?;
         items.push(make_simple(
             Nature::Int,
@@ -1347,10 +1997,11 @@ fn maximal_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError
     Ok(make_tuplet(items))
 }
 
-fn as_tuplet_type(ty: &SigType) -> Result<&crate::types::TupletType, TypeError> {
+fn as_tuplet_type(ty: &SigType) -> Result<&crate::types::TupletType, InferenceError> {
     let SigType::Tuplet(tuplet) = ty else {
-        return Err(TypeError(
-            "recursive type update expected tuplet approximations".to_owned(),
+        return Err(InferenceError::recursion(
+            None,
+            "recursive type update expected tuplet approximations",
         ));
     };
     Ok(tuplet)
@@ -1365,7 +2016,7 @@ fn apply_recursive_widening(
     upper: SigType,
     age_min: &mut [i32],
     age_max: &mut [i32],
-) -> Result<SigType, TypeError> {
+) -> Result<SigType, InferenceError> {
     let prev = as_tuplet_type(&prev)?;
     let next = as_tuplet_type(&next)?;
     let upper = as_tuplet_type(&upper)?;
@@ -1415,7 +2066,7 @@ fn apply_recursive_widening(
 ///
 /// # C++ source
 /// `inferReadTableType(Type tbl, Type ri)`
-fn infer_read_table(tbl: SigType, idx: SigType) -> Result<SigType, TypeError> {
+fn infer_read_table(tbl: SigType, idx: SigType) -> Result<SigType, InferenceError> {
     let content = match &tbl {
         SigType::Table(tt) => *tt.content.clone(),
         other => other.clone(),
@@ -1431,7 +2082,11 @@ fn infer_read_table(tbl: SigType, idx: SigType) -> Result<SigType, TypeError> {
 ///
 /// # C++ source
 /// `inferWriteTableType(Type tbl, Type wi, Type ws)`
-fn infer_write_table_type(tbl: SigType, _wi: SigType, _ws: SigType) -> Result<SigType, TypeError> {
+fn infer_write_table_type(
+    tbl: SigType,
+    _wi: SigType,
+    _ws: SigType,
+) -> Result<SigType, InferenceError> {
     // Return the table type unchanged — writes don't change the table's type.
     Ok(tbl)
 }
@@ -1459,7 +2114,7 @@ mod tests {
         ann.annotate(outputs).expect("annotation failed")
     }
 
-    fn annotate_err(arena: &TreeArena, outputs: &[SigId]) -> TypeError {
+    fn annotate_err(arena: &TreeArena, outputs: &[SigId]) -> InferenceError {
         let ui = empty_ui();
         let mut ann = TypeAnnotator::new(arena, &ui);
         ann.annotate(outputs).expect_err("annotation should fail")
@@ -1806,20 +2461,38 @@ mod tests {
 
         let err = annotate_err(&arena, &[length]);
 
-        assert!(
-            err.0.contains("out of range soundfile part number"),
-            "unexpected error: {}",
-            err.0
+        assert_eq!(err.rule(), InferenceRule::SoundfilePartInterval);
+        assert_eq!(err.signal(), Some(length));
+        assert_eq!(err.operands(), vec![part]);
+        assert_eq!(err.required_integer_interval(), Some((0, 255)));
+        assert_eq!(
+            err.actual_interval(),
+            Some(interval::Interval::new(-1.0, 1.0, -24))
         );
         assert!(
-            err.0.contains("interval(0,255)"),
-            "unexpected error: {}",
-            err.0
+            !err.message().contains("SIGSOUNDFILELENGTH"),
+            "public message must not expose raw Signal IR: {}",
+            err.message()
         );
-        assert!(
-            err.0.contains("SIGSOUNDFILELENGTH"),
-            "unexpected error: {}",
-            err.0
+    }
+
+    #[test]
+    fn delay_interval_failure_retains_rule_type_and_operands() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let input = b.input(0);
+        let amount = b.int(-1);
+        let delay = b.delay(input, amount);
+
+        let err = annotate_err(&arena, &[delay]);
+
+        assert_eq!(err.rule(), InferenceRule::DelayInterval);
+        assert_eq!(err.signal(), Some(delay));
+        assert_eq!(err.operands(), vec![amount]);
+        assert_eq!(
+            err.actual_type().map(SigType::interval),
+            Some(interval::singleton(-1.0))
         );
+        assert!(err.message().contains("non-negative upper bound"));
     }
 }

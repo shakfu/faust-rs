@@ -14,6 +14,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
                                                                 → AssemblyScript source
                                                                 → C source
                                                                 → C++ source
+                                                                → Codebox (RNBO) source
                                                                 → Rust source
                                                                 → .fbc bytecode
                                                                 → native C++ (AOT from .fbc)
@@ -30,6 +31,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `backends::asc` | `compiler/generator/asc/` |
 | `backends::c` | `compiler/generator/c/` |
 | `backends::cpp` | `compiler/generator/cpp/` |
+| `backends::codebox` | `compiler/generator/codebox/` |
 | `backends::cranelift` | *(new — no C++ equivalent)* |
 | `backends::interp` | `compiler/generator/interpreter/` |
 | `backends::julia` | `compiler/generator/julia/` |
@@ -52,8 +54,8 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `rust` | ✅ Implemented | `generate_rust_module` |
 | `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
 | `wasm` | 🔧 Bring-up | `generate_wasm_module` |
+| `codebox` | 🔧 Implemented; RNBO validation pending | `generate_codebox_module` |
 | `cmajor` | 🗂 Scaffolded | — |
-| `codebox` | 🗂 Scaffolded | — |
 | `csharp` | 🗂 Scaffolded | — |
 | `dlang` | 🗂 Scaffolded | — |
 | `jax` | 🗂 Scaffolded | — |
@@ -154,7 +156,9 @@ let cpp_source = generate_cpp_module(&store, root_id, &opts)?;
 
 JIT-compiles a FIR module to native machine code via Cranelift. Prioritizes
 compile-path coverage and diagnosability; falls back to a no-op `compute` stub
-for FIR nodes outside the current lowering subset.
+for FIR nodes outside the current lowering subset. This backend is available
+only on native targets; a WebAssembly-hosted compiler cannot create a native
+JIT.
 
 ```rust
 use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
@@ -483,6 +487,41 @@ cargo run -p compiler -- --lang wast my.dsp -o mydsp.wat
 
 ---
 
+### Codebox backend — `backends::codebox`
+
+Emits a flat RNBO `codebox~` source file from a FIR module. The output uses
+`dspsetup`, `control`, `update`, and a per-sample `compute` function; bargraphs
+are appended as extra output channels because codebox cannot report them as
+controls. The compiler facade forces the external-control and one-sample
+lowering modes this target requires, while vector mode is unsupported.
+
+`CodeboxOptions::test_labels` selects the `RB_` parameter-name convention used
+by `-lang codebox-test` and Faust's `rnbo-dsp.h` wrapper. It is intended for
+manual RNBO round-trip validation; RNBO itself is not bundled with the
+workspace.
+
+```rust
+use codegen::backends::codebox::{CodeboxOptions, generate_codebox_module};
+
+let source = generate_codebox_module(&store, root_id, &CodeboxOptions::default())?;
+```
+
+| Item | Description |
+|---|---|
+| `CodeboxOptions` | `double_precision`, `test_labels` |
+| `generate_codebox_module` | `(&FirStore, FirId, &CodeboxOptions) -> Result<String, CodegenError>` |
+| `CodegenError` | Codes `FRS-CGEN-CBOX-0001..0002` |
+| `eval::Program` | Parser/evaluator for the emitted subset, used by numeric backend tests |
+
+CLI entry points live in `compiler`:
+
+```sh
+cargo run -p compiler -- --lang codebox my.dsp -o mydsp.codebox
+cargo run -p compiler -- --lang codebox-test my.dsp -o mydsp.codebox
+```
+
+---
+
 ### Fixtures — `fixtures`
 
 Shared FIR modules for backend-agnostic parity testing. All backends are
@@ -516,5 +555,5 @@ The following backends expose a stable `backend_id()` identifier and are
 otherwise empty. They reserve a place in the roadmap and prevent accidental
 namespace collisions as parity work proceeds.
 
-`cmajor` · `codebox` · `csharp` · `dlang` · `jax` · `jsfx` · `llvm` · `sdf3`
+`cmajor` · `csharp` · `dlang` · `jax` · `jsfx` · `llvm` · `sdf3`
 · `vhdl`

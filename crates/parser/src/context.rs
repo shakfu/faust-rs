@@ -13,7 +13,9 @@
 //! - Waveform values are accumulated in parse order then drained by the corresponding action.
 //! - Parser diagnostics are explicitly scoped to one parser context (no global mutable singleton).
 
-use errors::DiagnosticCode;
+use std::collections::HashMap;
+
+use diagnostics::{DiagnosticCode, DiagnosticValue, LabelRole, Severity, codes};
 use tlib::{PropertyKey, PropertyStore, TreeId};
 
 /// Parser source location equivalent to `(filename, lineno)` in C++ parser globals,
@@ -26,6 +28,104 @@ pub struct SourceLocation {
     col: u32,
     end_line: u32,
     end_col: u32,
+}
+
+/// Stable parser-session identifier for one Box source occurrence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BoxOriginId(u32);
+
+impl BoxOriginId {
+    /// Returns the deterministic zero-based session id.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Parser action that created one Box occurrence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BoxOriginRole {
+    /// Definition-side occurrence.
+    Definition,
+    /// Use-side occurrence.
+    Use,
+}
+
+/// One source occurrence of a hash-consed Box node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoxOrigin {
+    /// Stable parser-session occurrence id.
+    pub id: BoxOriginId,
+    /// Semantic Box identity shared by structurally equal occurrences.
+    pub node: TreeId,
+    /// Exact source location observed by the grammar action.
+    pub location: SourceLocation,
+    /// Definition/use role at the parser boundary.
+    pub role: BoxOriginRole,
+}
+
+/// Exact Box occurrence selected at an ambiguity-sensitive boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LocatedBox {
+    /// Hash-consed semantic Box node.
+    pub node: TreeId,
+    /// Selected source occurrence.
+    pub origin: BoxOriginId,
+}
+
+/// Occurrence-aware provenance retained alongside parser Box nodes.
+///
+/// A semantic node maps to every candidate origin. [`LocatedBox`] selects one
+/// candidate without changing `TreeArena` hash-consing or semantic equality.
+#[derive(Clone, Debug, Default)]
+pub struct BoxProvenance {
+    origins: Vec<BoxOrigin>,
+    by_node: HashMap<TreeId, Vec<BoxOriginId>>,
+}
+
+impl BoxProvenance {
+    fn record(
+        &mut self,
+        node: TreeId,
+        location: SourceLocation,
+        role: BoxOriginRole,
+    ) -> LocatedBox {
+        let raw_id = u32::try_from(self.origins.len()).unwrap_or(u32::MAX);
+        let id = BoxOriginId(raw_id);
+        self.origins.push(BoxOrigin {
+            id,
+            node,
+            location,
+            role,
+        });
+        self.by_node.entry(node).or_default().push(id);
+        LocatedBox { node, origin: id }
+    }
+
+    /// Returns one recorded occurrence by id.
+    #[must_use]
+    pub fn get(&self, id: BoxOriginId) -> Option<&BoxOrigin> {
+        self.origins.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// Returns every candidate origin for one semantic node in parse order.
+    #[must_use]
+    pub fn origins_for(&self, node: TreeId) -> &[BoxOriginId] {
+        self.by_node.get(&node).map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns all occurrences in deterministic parse order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[BoxOrigin] {
+        &self.origins
+    }
+
+    /// Resolves an exact located occurrence and checks its semantic identity.
+    #[must_use]
+    pub fn resolve(&self, located: LocatedBox) -> Option<&BoxOrigin> {
+        self.get(located.origin)
+            .filter(|origin| origin.node == located.node)
+    }
 }
 
 impl SourceLocation {
@@ -84,25 +184,44 @@ impl SourceLocation {
     }
 }
 
-/// Diagnostic severity levels used during parsing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Remark,
+/// One additional declaration site attached to a parser diagnostic.
+///
+/// Conflicts such as a redefined symbol are only actionable when every
+/// participating declaration is shown, not just the one the cursor happened to
+/// sit on when the grammar action fired.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParserRelatedSite {
+    /// Location of the related declaration.
+    pub location: SourceLocation,
+    /// Label text describing this site's role in the conflict.
+    pub message: Box<str>,
+    /// Typed semantic role, independent from [`Self::message`].
+    pub role: LabelRole,
 }
 
 /// One parser diagnostic with optional source location.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParserDiagnostic {
+pub(crate) struct ParserDiagnostic {
     /// Severity of the diagnostic.
-    pub severity: DiagnosticSeverity,
-    /// Optional stable diagnostic code for CI/tooling use.
-    pub code: Option<DiagnosticCode>,
+    pub severity: Severity,
+    /// Stable diagnostic code assigned at the emission site.
+    pub code: DiagnosticCode,
     /// Human-readable diagnostic message.
     pub message: Box<str>,
     /// Source location, when available.
     pub location: Option<SourceLocation>,
+    /// Label text for the primary location.
+    pub primary_message: Box<str>,
+    /// Stable pass-local detail code.
+    pub detail_code: Option<Box<str>>,
+    /// Additional labeled declaration sites, in source order.
+    pub related_sites: Vec<ParserRelatedSite>,
+    /// Typed machine facts keyed by stable fact name.
+    pub facts: Vec<(Box<str>, DiagnosticValue)>,
+    /// Additional explanatory notes.
+    pub notes: Vec<Box<str>>,
+    /// Actionable help entries.
+    pub help: Vec<Box<str>>,
 }
 
 /// Parser-local mutable context replacing the parser-relevant subset of `gGlobal`.
@@ -133,6 +252,24 @@ pub struct ParserCtx {
     props: PropertyStore<SourceLocation>,
     def_prop_key: PropertyKey,
     use_prop_key: PropertyKey,
+    box_provenance: BoxProvenance,
+    definition_candidate_floor: HashMap<TreeId, usize>,
+    widget_declarations: Vec<WidgetDeclaration>,
+}
+
+/// One user-interface widget as written in source.
+///
+/// Widget boxes are rebuilt during evaluation, so the hash-consed node the UI
+/// builder sees is not the node the grammar produced and box provenance cannot
+/// be followed across that boundary. Recording the written declarations
+/// separately keeps a diagnostic about a control able to name the source it
+/// came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WidgetDeclaration {
+    /// Raw label exactly as written, metadata included.
+    pub raw_label: Box<str>,
+    /// Location of the widget keyword.
+    pub location: SourceLocation,
 }
 
 impl Default for ParserCtx {
@@ -172,6 +309,9 @@ impl ParserCtx {
             props,
             def_prop_key,
             use_prop_key,
+            box_provenance: BoxProvenance::default(),
+            widget_declarations: Vec::new(),
+            definition_candidate_floor: HashMap::new(),
         }
     }
 
@@ -400,9 +540,7 @@ impl ParserCtx {
     /// intentionally replace earlier ones, matching the property-store behavior
     /// used by the historical parser utilities.
     pub fn set_def_prop(&mut self, sym: TreeId, file: &str, line: u32) {
-        let _ = self
-            .props
-            .set_with_key(sym, self.def_prop_key, SourceLocation::new(file, line));
+        self.set_def_prop_location(sym, SourceLocation::new(file, line));
     }
 
     /// Sets definition property with full source span precision.
@@ -410,25 +548,80 @@ impl ParserCtx {
     /// Rust extends the C++ file/line payload with range information so later
     /// diagnostics can preserve `lrpar` span precision when available.
     pub fn set_def_prop_location(&mut self, sym: TreeId, location: SourceLocation) {
+        self.box_provenance
+            .record(sym, location.clone(), BoxOriginRole::Definition);
         let _ = self.props.set_with_key(sym, self.def_prop_key, location);
     }
 
     /// Equivalent to C++ `setUseProp(sym, file, line)`.
     pub fn set_use_prop(&mut self, sym: TreeId, file: &str, line: u32) {
-        let _ = self
-            .props
-            .set_with_key(sym, self.use_prop_key, SourceLocation::new(file, line));
+        self.set_use_prop_location(sym, SourceLocation::new(file, line));
     }
 
     /// Sets usage property with full source span precision.
     pub fn set_use_prop_location(&mut self, sym: TreeId, location: SourceLocation) {
+        self.box_provenance
+            .record(sym, location.clone(), BoxOriginRole::Use);
         let _ = self.props.set_with_key(sym, self.use_prop_key, location);
+    }
+
+    /// Returns occurrence-aware Box provenance for this parse session.
+    #[must_use]
+    pub fn box_provenance(&self) -> &BoxProvenance {
+        &self.box_provenance
+    }
+
+    /// Imports occurrences whose semantic nodes were cloned into this parse
+    /// arena.
+    pub(crate) fn import_box_provenance(
+        &mut self,
+        source: &ParserCtx,
+        node_map: &HashMap<TreeId, TreeId>,
+    ) {
+        for origin in source.box_provenance.as_slice() {
+            if let Some(&node) = node_map.get(&origin.node) {
+                self.box_provenance
+                    .record(node, origin.location.clone(), origin.role);
+            }
+        }
     }
 
     /// Convenience hook: set definition property from current parser cursor.
     pub fn set_def_prop_at_cursor(&mut self, sym: TreeId) {
-        let loc = self.cursor.clone();
+        let candidates = self.box_provenance.origins_for(sym);
+        let floor = self
+            .definition_candidate_floor
+            .get(&sym)
+            .copied()
+            .unwrap_or(0);
+        let loc = candidates
+            .get(floor..)
+            .and_then(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.box_provenance.get(*id))
+                    .find(|origin| origin.role == BoxOriginRole::Use)
+            })
+            .map_or_else(|| self.cursor.clone(), |origin| origin.location.clone());
+        self.definition_candidate_floor
+            .insert(sym, candidates.len());
         self.set_def_prop_location(sym, loc);
+    }
+
+    /// Records one written UI widget declaration at the current cursor.
+    ///
+    /// Called from the grammar with the cursor already moved to the widget
+    /// keyword, so the location covers the construct the programmer would edit.
+    pub fn record_widget_declaration(&mut self, raw_label: &str) {
+        self.widget_declarations.push(WidgetDeclaration {
+            raw_label: raw_label.into(),
+            location: self.cursor.clone(),
+        });
+    }
+
+    /// Returns every written UI widget declaration in parse order.
+    #[must_use]
+    pub fn widget_declarations(&self) -> &[WidgetDeclaration] {
+        &self.widget_declarations
     }
 
     /// Convenience hook: set usage property from current parser cursor.
@@ -483,8 +676,8 @@ impl ParserCtx {
     pub fn error(&mut self, message: &str) {
         self.parse_error_count = self.parse_error_count.saturating_add(1);
         self.push_diagnostic(
-            DiagnosticSeverity::Error,
-            None,
+            Severity::Error,
+            codes::PARSE_UNEXPECTED_TOKEN,
             message,
             Some(self.cursor.clone()),
         );
@@ -493,19 +686,20 @@ impl ParserCtx {
     /// Records a parser error at current cursor location with explicit stable diagnostic code.
     pub fn error_with_code(&mut self, code: DiagnosticCode, message: &str) {
         self.parse_error_count = self.parse_error_count.saturating_add(1);
-        self.push_diagnostic(
-            DiagnosticSeverity::Error,
-            Some(code),
-            message,
-            Some(self.cursor.clone()),
-        );
+        self.push_diagnostic(Severity::Error, code, message, Some(self.cursor.clone()));
+    }
+
+    /// Counts an engine-produced parse error whose structured diagnostic is
+    /// assembled directly by the parser facade.
+    pub(crate) fn note_engine_parse_error(&mut self) {
+        self.parse_error_count = self.parse_error_count.saturating_add(1);
     }
 
     /// Records a parser warning at current cursor location.
     pub fn warning(&mut self, message: &str) {
         self.push_diagnostic(
-            DiagnosticSeverity::Warning,
-            None,
+            Severity::Warning,
+            codes::PARSE_RECOVERY,
             message,
             Some(self.cursor.clone()),
         );
@@ -514,8 +708,8 @@ impl ParserCtx {
     /// Records a parser remark at current cursor location.
     pub fn remark(&mut self, message: &str) {
         self.push_diagnostic(
-            DiagnosticSeverity::Remark,
-            None,
+            Severity::Remark,
+            codes::PARSE_RECOVERY,
             message,
             Some(self.cursor.clone()),
         );
@@ -540,7 +734,7 @@ impl ParserCtx {
 
     /// All recorded diagnostics.
     #[must_use]
-    pub fn diagnostics(&self) -> &[ParserDiagnostic] {
+    pub(crate) fn diagnostics(&self) -> &[ParserDiagnostic] {
         &self.diagnostics
     }
 
@@ -550,10 +744,88 @@ impl ParserCtx {
         self.diagnostics.is_empty()
     }
 
+    /// Records a conflict between several declarations of the same symbol.
+    ///
+    /// `sites` must be in source order. The last one is the declaration that
+    /// introduced the conflict and becomes the primary location; the earlier
+    /// ones stay as labeled context, so the reader sees every participant
+    /// instead of only the token the cursor stopped on.
+    ///
+    /// Emitting nothing when `sites` is empty would lose the error entirely, so
+    /// the cursor remains the fallback location.
+    pub fn error_conflicting_declarations(
+        &mut self,
+        code: DiagnosticCode,
+        message: &str,
+        detail_code: &str,
+        symbol: &str,
+        sites: &[SourceLocation],
+        declarations: &[String],
+    ) {
+        self.parse_error_count = self.parse_error_count.saturating_add(1);
+        let (primary, earlier) = match sites.split_last() {
+            Some((last, rest)) => (Some(last.clone()), rest),
+            None => (Some(self.cursor.clone()), &[][..]),
+        };
+        self.diagnostics.push(ParserDiagnostic {
+            severity: Severity::Error,
+            code,
+            message: message.into(),
+            location: primary,
+            primary_message: "conflicting declaration".into(),
+            detail_code: Some(detail_code.into()),
+            related_sites: earlier
+                .iter()
+                .map(|location| ParserRelatedSite {
+                    location: location.clone(),
+                    message: "previous declaration".into(),
+                    role: LabelRole::ConflictsWith,
+                })
+                .collect(),
+            facts: vec![
+                ("symbol".into(), DiagnosticValue::String(symbol.into())),
+                (
+                    "declaration_sites".into(),
+                    DiagnosticValue::StringList(
+                        sites
+                            .iter()
+                            .map(|location| {
+                                format!(
+                                    "{}:{}:{}",
+                                    location.file(),
+                                    location.line(),
+                                    location.col()
+                                )
+                                .into_boxed_str()
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
+                    "declarations".into(),
+                    DiagnosticValue::StringList(
+                        declarations
+                            .iter()
+                            .map(|text| text.clone().into_boxed_str())
+                            .collect(),
+                    ),
+                ),
+            ],
+            notes: declarations
+                .iter()
+                .map(|text| format!("declaration: {text}").into_boxed_str())
+                .collect(),
+            help: vec![
+                format!("keep one `{symbol} = ...;` clause, or give the clauses distinct patterns")
+                    .into_boxed_str(),
+            ],
+        });
+    }
+
     fn push_diagnostic(
         &mut self,
-        severity: DiagnosticSeverity,
-        code: Option<DiagnosticCode>,
+        severity: Severity,
+        code: DiagnosticCode,
         message: &str,
         location: Option<SourceLocation>,
     ) {
@@ -562,6 +834,79 @@ impl ParserCtx {
             code,
             message: message.into(),
             location,
+            primary_message: "parser location".into(),
+            detail_code: None,
+            related_sites: Vec::new(),
+            facts: Vec::new(),
+            notes: Vec::new(),
+            help: Vec::new(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BoxOriginRole, ParserCtx, SourceLocation};
+    use diagnostics::{Severity, codes};
+    use tlib::TreeArena;
+
+    #[test]
+    fn diagnostic_codes_are_assigned_independently_of_message_wording() {
+        let mut ctx = ParserCtx::new();
+        ctx.error("invalid literal wording does not classify this error");
+        ctx.error_with_code(
+            codes::PARSE_INVALID_LITERAL,
+            "numeric token cannot be represented",
+        );
+        ctx.warning("recovered after one token");
+        ctx.remark("continuing parse");
+
+        let diagnostics = ctx.diagnostics();
+        assert_eq!(diagnostics[0].code, codes::PARSE_UNEXPECTED_TOKEN);
+        assert_eq!(diagnostics[1].code, codes::PARSE_INVALID_LITERAL);
+        assert_eq!(diagnostics[2].code, codes::PARSE_RECOVERY);
+        assert_eq!(diagnostics[3].code, codes::PARSE_RECOVERY);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert_eq!(diagnostics[2].severity, Severity::Warning);
+        assert_eq!(diagnostics[3].severity, Severity::Remark);
+        assert_eq!(ctx.parse_error_count(), 2);
+    }
+
+    #[test]
+    fn hash_consed_box_keeps_all_origins_and_located_selection() {
+        let mut arena = TreeArena::new();
+        let shared = arena.symbol("same");
+        assert_eq!(shared, arena.symbol("same"));
+
+        let mut ctx = ParserCtx::new();
+        ctx.set_use_prop_location(shared, SourceLocation::new_span("a.dsp", 1, 3, 1, 7));
+        ctx.set_use_prop_location(shared, SourceLocation::new_span("b.dsp", 9, 5, 9, 9));
+
+        let candidates = ctx.box_provenance().origins_for(shared);
+        assert_eq!(candidates.len(), 2);
+        let first = ctx
+            .box_provenance()
+            .resolve(super::LocatedBox {
+                node: shared,
+                origin: candidates[0],
+            })
+            .expect("first exact occurrence should resolve");
+        let second = ctx
+            .box_provenance()
+            .resolve(super::LocatedBox {
+                node: shared,
+                origin: candidates[1],
+            })
+            .expect("second exact occurrence should resolve");
+        assert_eq!(first.location.file(), "a.dsp");
+        assert_eq!(second.location.file(), "b.dsp");
+        assert_eq!(first.role, BoxOriginRole::Use);
+        assert_eq!(second.role, BoxOriginRole::Use);
+
+        assert_eq!(
+            ctx.use_prop(shared).map(SourceLocation::file),
+            Some("b.dsp"),
+            "the compatibility property remains last-write-wins"
+        );
     }
 }

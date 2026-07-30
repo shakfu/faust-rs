@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use boxes::{BoxMatch, dump_box, match_box};
+use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
+use diagnostics::{LabelRole, SourceKind};
 use parser::{
     CompilationMetadataKey, CompilationMetadataStore, SourceReaderError, VirtualSourceMap,
     parse_file_with_imports, parse_minimal, parse_program, parse_program_with_imports_and_metadata,
@@ -67,6 +68,69 @@ fn bridge_exposes_parse_program() {
         out.errors.is_empty(),
         "unexpected parse errors: {:?}",
         out.errors
+    );
+    let source = out
+        .diagnostics
+        .source_map()
+        .find_by_name(std::path::Path::new("bridge_program.dsp"))
+        .expect("memory source snapshot should be registered");
+    assert_eq!(source.kind(), SourceKind::Memory);
+    assert_eq!(source.text(), "process = _;");
+}
+
+#[test]
+fn parser_recovery_exposes_expected_tokens_and_semicolon_edit() {
+    let out = parse_program("process = _", "missing_semicolon.dsp");
+    let diagnostic = out
+        .diagnostics
+        .as_slice()
+        .iter()
+        .find(|diagnostic| diagnostic.code.0 == "FRS-PARSE-0001")
+        .expect("missing semicolon should produce a parser diagnostic");
+
+    assert_eq!(
+        diagnostic.detail_code.as_ref().map(|code| code.as_str()),
+        Some("unexpected-token")
+    );
+    assert!(
+        diagnostic
+            .facts
+            .keys()
+            .any(|key| key.as_str() == "expected_tokens"),
+        "expected token set must be machine-readable"
+    );
+    assert!(
+        diagnostic.fixes.iter().any(|fix| fix
+            .edits
+            .iter()
+            .any(|edit| edit.replacement.as_ref() == ";")),
+        "an unambiguous missing semicolon should offer an exact edit: {diagnostic:?}"
+    );
+}
+
+#[test]
+fn parser_recovery_links_a_missing_closer_to_its_opening_delimiter() {
+    let out = parse_program("process = (_;", "missing_closer.dsp");
+    let diagnostic = out
+        .diagnostics
+        .as_slice()
+        .iter()
+        .find(|diagnostic| diagnostic.code.0 == "FRS-PARSE-0001")
+        .expect("missing closer should produce a parser diagnostic");
+
+    assert!(
+        diagnostic.fixes.iter().any(|fix| fix
+            .edits
+            .iter()
+            .any(|edit| edit.replacement.as_ref() == ")")),
+        "an unambiguous missing closer should offer an exact edit: {diagnostic:?}"
+    );
+    assert!(
+        diagnostic
+            .labels
+            .iter()
+            .any(|label| label.role == LabelRole::MatchingDelimiter),
+        "the matching opening delimiter should be labeled"
     );
 }
 
@@ -208,6 +272,15 @@ fn bridge_exposes_file_import_parsing() {
         out.used_files[1],
         lib.canonicalize().expect("lib should canonicalize")
     );
+    let sources = out.diagnostics.source_map();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.kind())
+            .collect::<Vec<_>>(),
+        vec![SourceKind::File, SourceKind::ImportedFile]
+    );
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
@@ -322,6 +395,48 @@ fn parse_file_with_imports_preserves_imported_file_diagnostic_origin() {
 }
 
 #[test]
+fn parse_file_with_imports_reports_the_complete_cycle_and_each_edge() {
+    let root = make_temp_root("complete_import_cycle");
+    let first = root.join("first.dsp");
+    let second = root.join("second.lib");
+    let third = root.join("third.lib");
+    fs::write(&first, "import(\"second.lib\");\nprocess = _;\n").expect("write first");
+    fs::write(&second, "import(\"third.lib\");\n").expect("write second");
+    fs::write(&third, "import(\"first.dsp\");\n").expect("write third");
+
+    let error =
+        parse_file_with_imports(&first, std::slice::from_ref(&root)).expect_err("cycle must fail");
+    let SourceReaderError::ImportCycle { path, cycle } = error else {
+        panic!("expected import cycle");
+    };
+    let first = first.canonicalize().expect("first should canonicalize");
+    let second = second.canonicalize().expect("second should canonicalize");
+    let third = third.canonicalize().expect("third should canonicalize");
+    assert_eq!(path, first);
+    assert_eq!(cycle.len(), 3);
+    assert_eq!((&cycle[0].from, &cycle[0].to), (&first, &second));
+    assert_eq!((&cycle[1].from, &cycle[1].to), (&second, &third));
+    assert_eq!((&cycle[2].from, &cycle[2].to), (&third, &first));
+    assert!(cycle.iter().all(|edge| edge.site.is_some()));
+
+    let bundle = SourceReaderError::ImportCycle {
+        path,
+        cycle: cycle.clone(),
+    }
+    .to_diagnostics();
+    let diagnostic = &bundle.as_slice()[0];
+    assert_eq!(diagnostic.labels.len(), cycle.len());
+    assert!(
+        diagnostic
+            .facts
+            .keys()
+            .any(|key| key.as_str() == "import_cycle")
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
 fn parse_file_with_imports_keeps_remote_urls_out_of_scope() {
     let root = make_temp_root("remote_import_policy");
     let main = root.join("main.dsp");
@@ -387,6 +502,19 @@ fn parse_program_with_imports_deduplicates_transitive_virtual_imports() {
         ],
         "virtual-source used_files order should follow structural import visitation"
     );
+    assert_eq!(
+        out.diagnostics
+            .source_map()
+            .iter()
+            .map(|source| source.kind())
+            .collect::<Vec<_>>(),
+        vec![
+            SourceKind::Memory,
+            SourceKind::VirtualLibrary,
+            SourceKind::VirtualLibrary,
+            SourceKind::VirtualLibrary,
+        ]
+    );
 }
 
 #[test]
@@ -446,4 +574,63 @@ fn parse_program_with_imports_treats_inline_and_multiline_local_imports_equivale
         ],
         "multiline used_files should include entry then imported local source"
     );
+}
+
+#[test]
+fn repeated_hash_consed_identifier_uses_keep_distinct_parse_occurrences() {
+    let mut output = parse_program(
+        "a = missing;\nb = missing;\nprocess = a,b;\n",
+        "repeated.dsp",
+    );
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+    let shared = BoxBuilder::new(&mut output.state.arena).ident("missing");
+    let ids = output.state.ctx.box_provenance().origins_for(shared);
+    assert_eq!(
+        ids.len(),
+        2,
+        "both syntactic uses must survive hash-consing"
+    );
+    let origins = ids
+        .iter()
+        .map(|id| {
+            output
+                .state
+                .ctx
+                .box_provenance()
+                .get(*id)
+                .expect("recorded occurrence should resolve")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(origins[0].location.line(), 1);
+    assert_eq!(origins[1].location.line(), 2);
+    assert_eq!(origins[0].node, origins[1].node);
+}
+
+#[test]
+fn imported_box_occurrences_are_remapped_into_the_destination_arena() {
+    let bundle =
+        VirtualSourceMap::new([(PathBuf::from("child.lib"), "foo = missing;\n".to_owned())]);
+    let mut output = parse_program_with_imports_and_metadata(
+        "import(\"child.lib\");\nprocess = foo;\n",
+        "main.dsp",
+        &[],
+        &bundle,
+        CompilationMetadataStore::new("main.dsp"),
+    )
+    .expect("virtual import should parse");
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+    let missing = BoxBuilder::new(&mut output.state.arena).ident("missing");
+    let origins = output
+        .state
+        .ctx
+        .box_provenance()
+        .origins_for(missing)
+        .iter()
+        .filter_map(|id| output.state.ctx.box_provenance().get(*id))
+        .collect::<Vec<_>>();
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0].location.file(), "child.lib");
+    assert_eq!(origins[0].location.line(), 1);
 }

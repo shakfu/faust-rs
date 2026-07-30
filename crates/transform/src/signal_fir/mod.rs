@@ -70,6 +70,8 @@ mod delay;
 mod error;
 mod loop_graph;
 mod module;
+mod one_sample;
+mod origins;
 mod placement;
 mod planner;
 pub mod pv_slice;
@@ -89,6 +91,7 @@ pub use vector::state as vector_state;
 pub use vector::verify as vector_verify;
 
 pub use error::{SignalFirError, SignalFirErrorCode};
+pub use origins::{FirOrigins, FirSignalOrigin};
 
 use fir::{FirId, FirStore, FirType};
 use signals::SigId;
@@ -97,7 +100,9 @@ use tlib::TreeArena;
 use ui::UiProgram;
 
 use crate::schedule::SchedulingStrategy;
-use crate::signal_prepare::prepare_signals_for_fir_verified;
+use crate::signal_prepare::{
+    prepare_signals_for_fir_verified, prepare_signals_for_fir_verified_with_origins,
+};
 
 /// Internal DSP computation precision used when lowering signals to FIR.
 ///
@@ -170,6 +175,63 @@ impl ComputeMode {
     #[must_use]
     pub fn is_vector(self) -> bool {
         matches!(self, Self::Vector { .. })
+    }
+}
+
+/// Control-rate evaluation scheduling (`-ec` / `--external-control`), as an
+/// execution dimension orthogonal to [`ComputeMode`] and [`ProcessingApi`].
+///
+/// Mirrors C++ Faust `gExtControl`: with [`ControlRateMode::External`],
+/// block-rate control computations move out of the block/frame entry point
+/// into a separate public `control` entry point that the host schedules
+/// explicitly. Their results are promoted from stack locals to DSP-owned
+/// storage so sample-rate code can load them across the function boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ControlRateMode {
+    /// Control-rate work runs inline at the start of each block (or of each
+    /// frame in one-sample mode). This is the classic Faust contract and the
+    /// default.
+    #[default]
+    InlinePerBlock,
+    /// Control-rate work is emitted in a separate `control` entry point.
+    /// Neither initialization, `compute`, nor `frame` invokes it implicitly;
+    /// previously stored control values stay unchanged until the host calls
+    /// `control`.
+    External,
+}
+
+impl ControlRateMode {
+    /// Whether control-rate evaluation is externally scheduled (`-ec`).
+    #[must_use]
+    pub fn is_external(self) -> bool {
+        matches!(self, Self::External)
+    }
+}
+
+/// Public processing-API shape (`-os` / `--one-sample`), as an execution
+/// dimension orthogonal to [`ComputeMode`] and [`ControlRateMode`].
+///
+/// Mirrors C++ Faust `gOneSample`: with [`ProcessingApi::OneSample`], the
+/// module exposes a `frame(inputs, outputs)` entry point over flat channel
+/// arrays — no block count, no sample loop — and the canonical block
+/// `compute` is emitted empty (it never delegates to `frame`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessingApi {
+    /// Block processing through the canonical
+    /// `compute(count, inputs, outputs)` entry point. The default.
+    #[default]
+    Block,
+    /// One-sample processing through `frame(inputs, outputs)`; the canonical
+    /// `compute` is kept but emitted empty. Rejected in vector mode, matching
+    /// the C++ contract.
+    OneSample,
+}
+
+impl ProcessingApi {
+    /// Whether the one-sample `frame` API is requested (`-os`).
+    #[must_use]
+    pub fn is_one_sample(self) -> bool {
+        matches!(self, Self::OneSample)
     }
 }
 
@@ -301,6 +363,14 @@ pub struct SignalFirOptions {
     /// scalar lowering applies it to hierarchical signal regions and the
     /// checked vector path applies it to every induced loop epoch.
     pub scheduling_strategy: SchedulingStrategy,
+    /// Control-rate evaluation scheduling (`-ec`), orthogonal to
+    /// [`ComputeMode`] and [`ProcessingApi`]. Default: inline per block,
+    /// which reproduces the classic contract byte-for-byte.
+    pub control_rate_mode: ControlRateMode,
+    /// Public processing-API shape (`-os`), orthogonal to [`ComputeMode`]
+    /// and [`ControlRateMode`]. Default: block `compute`, which reproduces
+    /// the classic contract byte-for-byte.
+    pub processing_api: ProcessingApi,
 }
 
 /// Optional observer for internal signal-to-FIR compilation stages.
@@ -319,6 +389,8 @@ impl Default for SignalFirOptions {
             delay_line_threshold: u32::MAX,
             compute_mode: ComputeMode::Scalar,
             scheduling_strategy: SchedulingStrategy::DepthFirst,
+            control_rate_mode: ControlRateMode::InlinePerBlock,
+            processing_api: ProcessingApi::Block,
         }
     }
 }
@@ -334,6 +406,8 @@ pub struct SignalFirOutput {
     pub store: FirStore,
     /// Root node id of the generated FIR module.
     pub module: FirId,
+    /// Source-neutral Signal/Box derivations for reachable FIR nodes.
+    pub origins: FirOrigins,
     /// First-lowering order of every distinct materialized `SigId`. On the
     /// scalar forward path this is driven by the selected `Hsched`. Recursion
     /// carrier projections are omitted because they are not ordinary cached
@@ -402,6 +476,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
         options,
         None,
         None,
+        None,
         std::env::var_os("FAUST_RS_SHADOW_REPORT").is_some(),
     )
 }
@@ -427,6 +502,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui_and_shadow(
         num_outputs,
         ui,
         options,
+        None,
         None,
         None,
         true,
@@ -479,6 +555,36 @@ pub fn compile_signals_to_fir_fastlane_clocked_with_timing(
     options: &SignalFirOptions,
     timing_sink: Option<&SignalFirTimingSink>,
 ) -> Result<SignalFirOutput, SignalFirError> {
+    compile_signals_to_fir_fastlane_clocked_with_timing_and_origins(
+        arena,
+        signals,
+        num_inputs,
+        num_outputs,
+        ui,
+        clock_domains,
+        options,
+        timing_sink,
+        None,
+    )
+}
+
+/// Clocked/timed lowering with explicit propagated Signal origins.
+///
+/// This adapted Rust entry point keeps provenance outside the hash-consed
+/// Signal and FIR arenas. Callers that do not own provenance should use
+/// [`compile_signals_to_fir_fastlane_clocked_with_timing`].
+#[allow(clippy::too_many_arguments)]
+pub fn compile_signals_to_fir_fastlane_clocked_with_timing_and_origins(
+    arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    ui: &UiProgram,
+    clock_domains: &propagate::ClockDomainTable,
+    options: &SignalFirOptions,
+    timing_sink: Option<&SignalFirTimingSink>,
+    signal_origins: Option<&propagate::SignalOrigins>,
+) -> Result<SignalFirOutput, SignalFirError> {
     compile_fastlane_inner(
         arena,
         signals,
@@ -488,6 +594,7 @@ pub fn compile_signals_to_fir_fastlane_clocked_with_timing(
         options,
         Some(clock_domains),
         timing_sink,
+        signal_origins,
         std::env::var_os("FAUST_RS_SHADOW_REPORT").is_some(),
     )
 }
@@ -517,6 +624,7 @@ fn compile_fastlane_inner(
     options: &SignalFirOptions,
     clock_domains: Option<&propagate::ClockDomainTable>,
     timing_sink: Option<&SignalFirTimingSink>,
+    signal_origins: Option<&propagate::SignalOrigins>,
     build_shadow_report: bool,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = time_signal_fir_phase(timing_sink, "fir-plan", || {
@@ -526,13 +634,38 @@ fn compile_fastlane_inner(
     // normalizations.  Keep them as one atomic timing region so the measured
     // stage matches the verified preparation boundary consumed by lowering.
     let prepared = time_signal_fir_phase(timing_sink, "fir-prepare-normalize", || {
-        prepare_signals_for_fir_verified(arena, signals, ui).map_err(|err| {
-            SignalFirError::new(
+        let result = signal_origins.map_or_else(
+            || prepare_signals_for_fir_verified(arena, signals, ui),
+            |origins| prepare_signals_for_fir_verified_with_origins(arena, signals, ui, origins),
+        );
+        result.map_err(|err| {
+            let signal = err.signal();
+            let box_origins = err.box_origins().to_vec();
+            let error = SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!("signal preparation failed: {err}"),
             )
+            .with_box_origins(&box_origins);
+            if let Some(signal) = signal {
+                error.at_signal(signal)
+            } else {
+                error
+            }
         })
     })?;
+
+    // Execution-options port D2: `-os` has no meaning for block-sensitive
+    // reverse-AD carriers (block-scoped tape/carry state, reverse-order
+    // block traversal). Reject with a typed diagnostic instead of inventing
+    // a persistent one-sample semantics (plan §3.5).
+    if options.processing_api.is_one_sample()
+        && one_sample::contains_block_sensitive_operation(prepared.arena(), prepared.outputs())
+    {
+        return Err(SignalFirError::new(
+            SignalFirErrorCode::BlockSensitiveOneSample,
+            "'-os' is not supported for programs containing block reverse-mode              AD (BlockReverseAD/ReverseTimeRec): their semantics require the              block boundary",
+        ));
+    }
 
     // P3: build the hierarchical dependency graph, orient conflicting effects
     // independently of strategy, and schedule every prepared scalar forest.
@@ -703,6 +836,7 @@ fn compile_fastlane_inner(
                     max_copy_delay: options.max_copy_delay,
                     compute_mode: options.compute_mode,
                     strategy: options.scheduling_strategy,
+                    control_rate_mode: options.control_rate_mode,
                 },
             )
         }) {
@@ -725,10 +859,13 @@ fn compile_fastlane_inner(
             ui,
             prepared.types_map(),
             prepared.sig_types_map(),
+            prepared.origins(),
             options.real_type.as_fir_type(),
             options.max_copy_delay,
             options.delay_line_threshold,
             fallback_compute_mode,
+            options.control_rate_mode,
+            options.processing_api,
             clocked,
             if matches!(fallback_compute_mode, ComputeMode::Scalar) {
                 gate_graphs.as_ref().map(|(_, schedule)| schedule)
@@ -736,6 +873,10 @@ fn compile_fastlane_inner(
                 None
             },
         )
+    })
+    .map_err(|mut error| {
+        error.attach_origins(prepared.origins());
+        error
     })?;
 
     // The post-activation trace is intentionally off the hot path. When

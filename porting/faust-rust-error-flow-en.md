@@ -15,7 +15,7 @@
    - `eval::eval_process` (boxes resolution),
    - `propagate::box_arity` then `propagate::propagate` (signals and arity checks).
 4. `EvalError` / `PropagateError` are converted to structured diagnostics through
-   `errors::IntoDiagnostic`, then enriched in compiler with context:
+   `diagnostics::ToDiagnostic`, then enriched in compiler with context:
    - node id and compact expression previews,
    - owner definition / alias binding trace,
    - source labels resolved from parser properties.
@@ -26,7 +26,7 @@
 
 ## 2. Parser context contract
 
-`ParserCtx` (in `crates/parser-proto/src/context.rs`) is the parser-local replacement for
+`ParserCtx` (in `crates/parser/src/context.rs`) is the parser-local replacement for
 legacy parser globals:
 
 - source cursor (`file`, `line`, `col`, `end_line`, `end_col`),
@@ -42,7 +42,8 @@ Important boundary:
 
 ## 3. Error classes and code families
 
-Stable diagnostics identifiers are defined in `crates/errors/src/codes.rs`.
+Stable diagnostics identifiers are defined in
+`crates/diagnostics/src/codes.rs`.
 
 - Source reader/import: `FRS-SRC-*`
 - Lexer: `FRS-LEX-*`
@@ -66,14 +67,15 @@ Main phase-local error enums:
 
 ## 4. Diagnostic payload model
 
-All phases converge to `errors::Diagnostic`:
+All phases converge to `diagnostics::Diagnostic`:
 
 - `severity`, `stage`, `code`, `message`,
 - `labels` (primary/secondary source spans),
 - `notes` (cause/rule/computed/context),
 - `help` (actionable fixes).
 
-`DiagnosticBundle` is the transport object exposed by `CompilerError::diagnostics()`.
+`DiagnosticBundle` is the transport object exposed by
+`CompilerError::diagnostic_bundle()`.
 
 ## 5. Current source-label strategy
 

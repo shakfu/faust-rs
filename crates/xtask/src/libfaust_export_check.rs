@@ -2,14 +2,24 @@
 //!
 //! The check intentionally exercises the installed shape of the Rust port:
 //! build the unified `faust-ffi` dynamic library, compare exported symbols
-//! against maintained C headers, and syntax-check tiny C and C++ clients.
+//! against a checked-in baseline and maintained C headers, and syntax-check
+//! tiny C and C++ clients with callback-table layout assertions.
 
 use super::*;
 
+const EXPORT_BASELINE_REL_PATH: &str = "porting/generated/libfaust-rs-exported-symbols.txt";
+
 /// Builds `faust-ffi`, publishes the native `libfaust-rs` artifacts, checks
-/// exported C symbols against local headers, and syntax-checks tiny C/C++
-/// clients using the maintained wrapper headers.
-pub(crate) fn libfaust_export_check() -> Result<(), Box<dyn std::error::Error>> {
+/// exported C symbols against the checked-in baseline and local headers, and
+/// syntax-checks tiny C/C++ clients using the maintained wrapper headers,
+/// including `UIGlue`, `MetaGlue`, and `FAUSTFLOAT` layout assertions.
+///
+/// `--bless` refreshes the exported-symbol baseline after the header coverage
+/// check succeeds. Baseline refreshes are explicit because removing an export
+/// is an external ABI change even when no Rust caller observes it.
+pub(crate) fn libfaust_export_check(
+    args: LibfaustExportCheckArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let dynamic_library = build_libfaust_distribution(false)?;
 
     let workspace = workspace_root();
@@ -21,9 +31,9 @@ pub(crate) fn libfaust_export_check() -> Result<(), Box<dyn std::error::Error>> 
         .into());
     }
 
-    let expected = expected_header_symbols(&workspace)?;
+    let header_symbols = expected_header_symbols(&workspace)?;
     let exported = exported_dynamic_symbols(&dynamic_library)?;
-    let missing = expected
+    let missing = header_symbols
         .difference(&exported)
         .cloned()
         .collect::<Vec<String>>();
@@ -35,13 +45,99 @@ pub(crate) fn libfaust_export_check() -> Result<(), Box<dyn std::error::Error>> 
         .into());
     }
 
+    let baseline_path = workspace.join(EXPORT_BASELINE_REL_PATH);
+    if args.bless {
+        write_export_baseline(&baseline_path, &exported)?;
+        let non_header_exports = exported
+            .difference(&header_symbols)
+            .cloned()
+            .collect::<Vec<String>>();
+        println!(
+            "non-header exports captured by the baseline ({}): {}",
+            non_header_exports.len(),
+            display_symbol_diff(&non_header_exports)
+        );
+    } else {
+        let baseline = read_export_baseline(&baseline_path)?;
+        let removed = baseline
+            .difference(&exported)
+            .cloned()
+            .collect::<Vec<String>>();
+        let added = exported
+            .difference(&baseline)
+            .cloned()
+            .collect::<Vec<String>>();
+        if !removed.is_empty() || !added.is_empty() {
+            return Err(format!(
+                "libfaust-rs exports differ from {}:\nremoved: {}\nadded: {}\nrefresh intentionally with `cargo run -p xtask -- libfaust-export-check --bless`",
+                EXPORT_BASELINE_REL_PATH,
+                display_symbol_diff(&removed),
+                display_symbol_diff(&added)
+            )
+            .into());
+        }
+    }
+
     syntax_check_headers(&workspace)?;
 
     println!(
-        "libfaust-rs export check: {} header symbols exported by {}",
-        expected.len(),
+        "libfaust-rs export check: {} exports, {} header declarations, baseline {}{}",
+        exported.len(),
+        header_symbols.len(),
+        EXPORT_BASELINE_REL_PATH,
+        if args.bless { " refreshed" } else { " matched" }
+    );
+    println!(
+        "libfaust-rs export artifact: {}",
         workspace_relative_path(&dynamic_library)
     );
+    Ok(())
+}
+
+fn display_symbol_diff(symbols: &[String]) -> String {
+    if symbols.is_empty() {
+        "(none)".to_owned()
+    } else {
+        symbols.join(", ")
+    }
+}
+
+fn read_export_baseline(path: &Path) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "cannot read libfaust export baseline {}: {error}; create it with `cargo run -p xtask -- libfaust-export-check --bless`",
+            workspace_relative_path(path)
+        )
+    })?;
+    let symbols = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<BTreeSet<String>>();
+    if symbols.is_empty() {
+        return Err(format!(
+            "libfaust export baseline is empty: {}",
+            workspace_relative_path(path)
+        )
+        .into());
+    }
+    Ok(symbols)
+}
+
+fn write_export_baseline(
+    path: &Path,
+    symbols: &BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = String::from(
+        "# Unified libfaust-rs exported C symbol baseline.\n\
+         # Refresh intentionally with:\n\
+         # cargo run -p xtask -- libfaust-export-check --bless\n",
+    );
+    for symbol in symbols {
+        writeln!(output, "{symbol}")?;
+    }
+    fs::write(path, output)?;
     Ok(())
 }
 
@@ -71,21 +167,9 @@ pub(crate) fn build_libfaust_distribution(
 
 /// Parses and runs the explicit native C/C++ distribution workflow.
 pub(crate) fn build_libfaust_distribution_command(
-    args: impl Iterator<Item = String>,
+    args: BuildLibfaustArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut release = false;
-    for arg in args {
-        match arg.as_str() {
-            "--release" => release = true,
-            other => {
-                return Err(format!(
-                    "usage: cargo run -p xtask -- build-libfaust [--release]\nunknown option: {other}"
-                )
-                .into());
-            }
-        }
-    }
-    let dynamic_library = build_libfaust_distribution(release)?;
+    let dynamic_library = build_libfaust_distribution(args.release)?;
     println!(
         "libfaust-rs native distribution ready: {}",
         workspace_relative_path(&dynamic_library)
@@ -144,6 +228,8 @@ fn expected_header_symbols(
     let headers = [
         workspace.join("crates/box-ffi/include/libfaust-box-c.h"),
         workspace.join("crates/signal-ffi/include/libfaust-signal-c.h"),
+        workspace.join("crates/interp-ffi/include/interpreter-dsp-c.h"),
+        workspace.join("crates/cranelift-ffi/include/cranelift-dsp-c.h"),
     ];
     let mut symbols = BTreeSet::new();
     for header in headers {
@@ -157,6 +243,7 @@ fn expected_header_symbols(
 fn parse_c_header_function_symbols(header: &str) -> Vec<String> {
     let mut symbols = Vec::new();
     let mut pending = String::new();
+    let header = strip_c_comments(header);
 
     for raw_line in header.lines() {
         let line = raw_line.trim();
@@ -171,7 +258,11 @@ fn parse_c_header_function_symbols(header: &str) -> Vec<String> {
             continue;
         }
 
-        if pending.is_empty() && (line.starts_with("typedef ") || line.starts_with("enum ")) {
+        if pending.is_empty()
+            && (line.starts_with("typedef ")
+                || line.starts_with("enum ")
+                || line.starts_with("struct "))
+        {
             continue;
         }
 
@@ -195,6 +286,38 @@ fn parse_c_header_function_symbols(header: &str) -> Vec<String> {
     symbols.sort();
     symbols.dedup();
     symbols
+}
+
+fn strip_c_comments(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_block_comment = false;
+
+    while let Some(character) = chars.next() {
+        if in_block_comment {
+            if character == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            } else if character == '\n' {
+                output.push('\n');
+            }
+        } else if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
+        } else if character == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            for comment_character in chars.by_ref() {
+                if comment_character == '\n' {
+                    output.push('\n');
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+
+    output
 }
 
 fn exported_dynamic_symbols(path: &Path) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
@@ -235,18 +358,42 @@ fn parse_exported_symbol_lines(output: &str) -> BTreeSet<String> {
 }
 
 fn is_libfaust_c_symbol(name: &str) -> bool {
-    name.starts_with('C')
-        || matches!(
-            name,
-            "createLibContext" | "destroyLibContext" | "freeCMemory"
-        )
+    const PREFIXES: &[&str] = &[
+        "C",
+        "buildUserInterface",
+        "clear",
+        "clone",
+        "compute",
+        "create",
+        "delete",
+        "destroy",
+        "expand",
+        "free",
+        "generate",
+        "get",
+        "init",
+        "instance",
+        "metadata",
+        "read",
+        "register",
+        "start",
+        "stop",
+        "unregister",
+        "write",
+    ];
+
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+        && PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 fn syntax_check_headers(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = workspace.join("target/libfaust-export-check");
     fs::create_dir_all(&out_dir)?;
 
-    let c_file = out_dir.join("smoke.c");
+    let c_file = out_dir.join("smoke-core.c");
     fs::write(
         &c_file,
         r#"#include "libfaust-box-c.h"
@@ -256,6 +403,122 @@ int main(void) {
     Signal s = CsigInput(0);
     Box b = CboxWire();
     return (s == 0 || b == 0) ? 0 : 0;
+}
+"#,
+    )?;
+
+    let interpreter_c_file = out_dir.join("smoke-interpreter.c");
+    fs::write(
+        &interpreter_c_file,
+        r#"#include <stddef.h>
+#include "interpreter-dsp-c.h"
+
+int main(void) {
+    _Static_assert(sizeof(FAUSTFLOAT) == sizeof(float), "FAUSTFLOAT must default to float");
+    _Static_assert(sizeof(UIGlue) == 14 * sizeof(void*), "UIGlue size");
+    _Static_assert(_Alignof(UIGlue) == _Alignof(void*), "UIGlue alignment");
+    _Static_assert(offsetof(UIGlue, ui_interface) == 0 * sizeof(void*), "ui_interface offset");
+    _Static_assert(offsetof(UIGlue, open_tab_box) == 1 * sizeof(void*), "open_tab_box offset");
+    _Static_assert(offsetof(UIGlue, open_horizontal_box) == 2 * sizeof(void*), "open_horizontal_box offset");
+    _Static_assert(offsetof(UIGlue, open_vertical_box) == 3 * sizeof(void*), "open_vertical_box offset");
+    _Static_assert(offsetof(UIGlue, close_box) == 4 * sizeof(void*), "close_box offset");
+    _Static_assert(offsetof(UIGlue, add_button) == 5 * sizeof(void*), "add_button offset");
+    _Static_assert(offsetof(UIGlue, add_check_button) == 6 * sizeof(void*), "add_check_button offset");
+    _Static_assert(offsetof(UIGlue, add_vertical_slider) == 7 * sizeof(void*), "add_vertical_slider offset");
+    _Static_assert(offsetof(UIGlue, add_horizontal_slider) == 8 * sizeof(void*), "add_horizontal_slider offset");
+    _Static_assert(offsetof(UIGlue, add_num_entry) == 9 * sizeof(void*), "add_num_entry offset");
+    _Static_assert(offsetof(UIGlue, add_horizontal_bargraph) == 10 * sizeof(void*), "add_horizontal_bargraph offset");
+    _Static_assert(offsetof(UIGlue, add_vertical_bargraph) == 11 * sizeof(void*), "add_vertical_bargraph offset");
+    _Static_assert(offsetof(UIGlue, add_soundfile) == 12 * sizeof(void*), "add_soundfile offset");
+    _Static_assert(offsetof(UIGlue, declare) == 13 * sizeof(void*), "declare offset");
+    _Static_assert(sizeof(MetaGlue) == 2 * sizeof(void*), "MetaGlue size");
+    _Static_assert(_Alignof(MetaGlue) == _Alignof(void*), "MetaGlue alignment");
+    _Static_assert(offsetof(MetaGlue, meta_interface) == 0, "meta_interface offset");
+    _Static_assert(offsetof(MetaGlue, declare) == sizeof(void*), "meta declare offset");
+    UIGlue ui = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    MetaGlue meta = {0, 0};
+    interpreter_dsp_factory* factory = getCInterpreterDSPFactoryFromSHAKey("missing");
+    return (factory == 0 || ui.ui_interface == 0 || meta.meta_interface == 0) ? 0 : 0;
+}
+"#,
+    )?;
+
+    let cranelift_c_file = out_dir.join("smoke-cranelift.c");
+    fs::write(
+        &cranelift_c_file,
+        r#"#include <stddef.h>
+#include "cranelift-dsp-c.h"
+
+int main(void) {
+    _Static_assert(sizeof(FAUSTFLOAT) == sizeof(float), "FAUSTFLOAT must default to float");
+    _Static_assert(sizeof(UIGlue) == 14 * sizeof(void*), "UIGlue size");
+    _Static_assert(_Alignof(UIGlue) == _Alignof(void*), "UIGlue alignment");
+    _Static_assert(offsetof(UIGlue, ui_interface) == 0 * sizeof(void*), "ui_interface offset");
+    _Static_assert(offsetof(UIGlue, open_tab_box) == 1 * sizeof(void*), "open_tab_box offset");
+    _Static_assert(offsetof(UIGlue, open_horizontal_box) == 2 * sizeof(void*), "open_horizontal_box offset");
+    _Static_assert(offsetof(UIGlue, open_vertical_box) == 3 * sizeof(void*), "open_vertical_box offset");
+    _Static_assert(offsetof(UIGlue, close_box) == 4 * sizeof(void*), "close_box offset");
+    _Static_assert(offsetof(UIGlue, add_button) == 5 * sizeof(void*), "add_button offset");
+    _Static_assert(offsetof(UIGlue, add_check_button) == 6 * sizeof(void*), "add_check_button offset");
+    _Static_assert(offsetof(UIGlue, add_vertical_slider) == 7 * sizeof(void*), "add_vertical_slider offset");
+    _Static_assert(offsetof(UIGlue, add_horizontal_slider) == 8 * sizeof(void*), "add_horizontal_slider offset");
+    _Static_assert(offsetof(UIGlue, add_num_entry) == 9 * sizeof(void*), "add_num_entry offset");
+    _Static_assert(offsetof(UIGlue, add_horizontal_bargraph) == 10 * sizeof(void*), "add_horizontal_bargraph offset");
+    _Static_assert(offsetof(UIGlue, add_vertical_bargraph) == 11 * sizeof(void*), "add_vertical_bargraph offset");
+    _Static_assert(offsetof(UIGlue, add_soundfile) == 12 * sizeof(void*), "add_soundfile offset");
+    _Static_assert(offsetof(UIGlue, declare) == 13 * sizeof(void*), "declare offset");
+    _Static_assert(sizeof(MetaGlue) == 2 * sizeof(void*), "MetaGlue size");
+    _Static_assert(_Alignof(MetaGlue) == _Alignof(void*), "MetaGlue alignment");
+    _Static_assert(offsetof(MetaGlue, meta_interface) == 0, "meta_interface offset");
+    _Static_assert(offsetof(MetaGlue, declare) == sizeof(void*), "meta declare offset");
+    UIGlue ui = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    MetaGlue meta = {0, 0};
+    cranelift_dsp_factory* factory = getCCraneliftDSPFactoryFromSHAKey("missing");
+    return (factory == 0 || ui.ui_interface == 0 || meta.meta_interface == 0) ? 0 : 0;
+}
+"#,
+    )?;
+
+    let interpreter_cpp_file = out_dir.join("smoke-interpreter.cpp");
+    fs::write(
+        &interpreter_cpp_file,
+        r#"#include <cstddef>
+#include "interpreter-dsp-c.h"
+
+static_assert(sizeof(FAUSTFLOAT) == sizeof(float));
+static_assert(sizeof(UIGlue) == 14 * sizeof(void*));
+static_assert(alignof(UIGlue) == alignof(void*));
+static_assert(offsetof(UIGlue, declare) == 13 * sizeof(void*));
+static_assert(sizeof(MetaGlue) == 2 * sizeof(void*));
+static_assert(alignof(MetaGlue) == alignof(void*));
+
+int main() {
+    UIGlue ui{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    MetaGlue meta{nullptr, nullptr};
+    return (ui.ui_interface == nullptr || meta.meta_interface == nullptr) ? 0 : 0;
+}
+"#,
+    )?;
+
+    let cranelift_cpp_file = out_dir.join("smoke-cranelift.cpp");
+    fs::write(
+        &cranelift_cpp_file,
+        r#"#include <cstddef>
+#include "cranelift-dsp-c.h"
+
+static_assert(sizeof(FAUSTFLOAT) == sizeof(float));
+static_assert(sizeof(UIGlue) == 14 * sizeof(void*));
+static_assert(alignof(UIGlue) == alignof(void*));
+static_assert(offsetof(UIGlue, declare) == 13 * sizeof(void*));
+static_assert(sizeof(MetaGlue) == 2 * sizeof(void*));
+static_assert(alignof(MetaGlue) == alignof(void*));
+
+int main() {
+    UIGlue ui{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    MetaGlue meta{nullptr, nullptr};
+    return (ui.ui_interface == nullptr || meta.meta_interface == nullptr) ? 0 : 0;
 }
 "#,
     )?;
@@ -278,7 +541,11 @@ int main() {
     )?;
 
     syntax_check_c_like(&c_file, "c")?;
+    syntax_check_c_like(&interpreter_c_file, "c")?;
+    syntax_check_c_like(&cranelift_c_file, "c")?;
     syntax_check_c_like(&cpp_file, "c++")?;
+    syntax_check_c_like(&interpreter_cpp_file, "c++")?;
+    syntax_check_c_like(&cranelift_cpp_file, "c++")?;
     Ok(())
 }
 
@@ -287,6 +554,8 @@ fn syntax_check_c_like(path: &Path, language: &str) -> Result<(), Box<dyn std::e
     let include_dirs = [
         workspace.join("crates/box-ffi/include"),
         workspace.join("crates/signal-ffi/include"),
+        workspace.join("crates/interp-ffi/include"),
+        workspace.join("crates/cranelift-ffi/include"),
     ];
 
     let compiler_var = if language == "c" { "CC" } else { "CXX" };
@@ -349,7 +618,11 @@ mod tests {
             #ifdef __cplusplus
             extern "C" {
             #endif
+            /* Function-like text in comments must not be parsed:
+             * fakeFunction(the, words);
+             */
             typedef CTree* Signal;
+            typedef void (*callbackFn)(void* context);
             enum SType { kSInt, kSReal };
             void createLibContext(void);
             Signal CsigFFun(enum SType rtype, const char** names,
@@ -366,12 +639,32 @@ mod tests {
     }
 
     #[test]
+    fn strips_line_and_block_comments_without_joining_declarations() {
+        let header = r#"
+            /* fakeBlock(one); */
+            void realOne(void); // fakeLine(two);
+            /*
+             * fakeMultiline(
+             *     three);
+             */
+            void realTwo(void);
+        "#;
+
+        assert_eq!(
+            parse_c_header_function_symbols(header),
+            vec!["realOne".to_string(), "realTwo".to_string()]
+        );
+    }
+
+    #[test]
     fn parses_nm_and_dumpbin_symbol_lines() {
         let output = r#"
             0000000000012340 T _CsigInt
             0000000000012350 T _createLibContext
+            0000000000012358 T _getCInterpreterDSPFactoryFromSHAKey
               12    B 0000000180001230 CboxInt
             0000000000012360 T _rust_internal_helper
+            ordinal hint RVA      name
         "#;
 
         let symbols = parse_exported_symbol_lines(output);
@@ -379,6 +672,8 @@ mod tests {
         assert!(symbols.contains("CsigInt"));
         assert!(symbols.contains("CboxInt"));
         assert!(symbols.contains("createLibContext"));
+        assert!(symbols.contains("getCInterpreterDSPFactoryFromSHAKey"));
         assert!(!symbols.contains("rust_internal_helper"));
+        assert!(!symbols.contains("name"));
     }
 }

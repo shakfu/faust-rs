@@ -98,6 +98,7 @@
 //!   sweep can create compute-time uses that are not visible as parent edges in
 //!   the original signal DAG.
 
+use crate::signal_fir::{ControlRateMode, ProcessingApi};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fir::{
@@ -346,6 +347,8 @@ struct SignalToFirLower<'a> {
     types: &'a HashMap<SigId, SimpleSigType>,
     /// Full type-annotator map used for interval-based variable delay sizing.
     sig_types: &'a HashMap<SigId, SigType>,
+    /// Box derivations for the prepared Signal arena.
+    signal_origins: &'a propagate::SignalOrigins,
     /// Number of audio input channels for the module being compiled.
     num_inputs: usize,
     /// Internal DSP computation type (`Float32` or `Float64`).
@@ -372,6 +375,14 @@ struct SignalToFirLower<'a> {
     suppress_clocked_redirect: bool,
     /// Per-clock-domain `IOTA`/`DSCounter` field registry (roadmap P2.3).
     domain_counters: DomainCounters,
+    /// Control-rate evaluation scheduling (`-ec`). With `External`, the
+    /// foreign runtime variable `count` is rejected (no block count exists
+    /// in the `control` entry point).
+    control_rate_mode: ControlRateMode,
+    /// Public processing-API shape (`-os`). With `OneSample`, the foreign
+    /// runtime variable `count` is rejected (no block count exists in the
+    /// `frame` entry point).
+    processing_api: ProcessingApi,
     /// Maps each signal occurrence to its generated state-variable name.
     state_name_by_node: HashMap<(SigId, Option<u32>), String>,
     /// Owned recursion-group state: canonical carriers plus active-group stack.
@@ -406,6 +417,9 @@ struct SignalToFirLower<'a> {
     /// First-lowering order, recorded at the sole cache-insertion site and
     /// exported as the P3 schedule-conformance trace.
     emission_order: Vec<SigId>,
+    /// Direct Signal producers recorded during lowering and later propagated
+    /// across the assembled FIR graph.
+    fir_origins: super::FirOrigins,
     /// Deduplicates the first-lowering trace across sibling regions and loop
     /// slices without widening the lexical memoization scopes.
     emission_seen: HashSet<SigId>,

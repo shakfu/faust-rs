@@ -122,11 +122,8 @@ impl<'a> SignalToFirLower<'a> {
             };
             if info.size == 1 {
                 let mut b = FirBuilder::new(&mut self.store);
-                self.sections.control_statements.push(b.store_var(
-                    info.name,
-                    AccessType::Struct,
-                    init,
-                ));
+                let store = b.store_var(info.name, AccessType::Struct, init);
+                self.sections.push_compute_preamble(store);
             } else {
                 let loop_var = self.fresh_loop_var("lRevRec");
                 let upper = {
@@ -146,9 +143,8 @@ impl<'a> SignalToFirLower<'a> {
                     b.block(&[store])
                 };
                 let mut b = FirBuilder::new(&mut self.store);
-                self.sections
-                    .control_statements
-                    .push(b.simple_for_loop(loop_var, upper, body, false));
+                let reset_loop = b.simple_for_loop(loop_var, upper, body, false);
+                self.sections.push_compute_preamble(reset_loop);
             }
         }
     }
@@ -170,9 +166,8 @@ impl<'a> SignalToFirLower<'a> {
         for name in names {
             let zero = self.float_const(0.0);
             let mut b = FirBuilder::new(&mut self.store);
-            self.sections
-                .control_statements
-                .push(b.store_var(name, AccessType::Struct, zero));
+            let store = b.store_var(name, AccessType::Struct, zero);
+            self.sections.push_compute_preamble(store);
         }
         // Array Delay(c) carry resets: zero c elements via a small for-loop.
         let mut array_entries: Vec<(String, usize)> =
@@ -198,9 +193,8 @@ impl<'a> SignalToFirLower<'a> {
                 b.block(&[store])
             };
             let mut b = FirBuilder::new(&mut self.store);
-            self.sections
-                .control_statements
-                .push(b.simple_for_loop(loop_var, upper, body, false));
+            let reset_loop = b.simple_for_loop(loop_var, upper, body, false);
+            self.sections.push_compute_preamble(reset_loop);
         }
     }
 
@@ -570,6 +564,16 @@ impl<'a> SignalToFirLower<'a> {
             // ── Floor / Ceil / Rint / Round: zero gradient ──────────────────
             SigMatch::Floor(x) | SigMatch::Ceil(x) | SigMatch::Rint(x) | SigMatch::Round(x) => {
                 let _ = (x, y_bar); // Rounding ops: gradient is 0 almost everywhere.
+            }
+
+            // ── Attach(value, effect): transparent adjoint ─────────────────
+            //
+            // The forward lowering evaluates `effect` for its side effects and
+            // returns `value`. The attached branch is therefore intentionally
+            // absent from the adjoint graph: replaying or differentiating it
+            // would both duplicate effects and create a spurious gradient.
+            SigMatch::Attach(value, _effect) => {
+                Self::add_to_adjoint(&mut self.store, adj, value, y_bar, real_ty);
             }
 
             // ── Delay(c, x): anti-causal carry with circular buffer ──────────

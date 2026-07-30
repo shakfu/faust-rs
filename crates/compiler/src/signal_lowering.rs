@@ -15,6 +15,8 @@
 
 use super::*;
 
+use crate::execution::{ExecutionOptionsError, validate_execution_options};
+
 // ─── Signal-to-FIR lower errors ───────────────────────────────────────────────
 
 /// Generic lower-to-backend error for backends that follow the
@@ -24,16 +26,25 @@ use super::*;
 /// Specialised as [`LowerToCppError`] and [`LowerToCError`].
 #[derive(Debug)]
 pub(crate) enum LowerError<E> {
+    /// Execution-option request rejected by the capability model before
+    /// any parsing or lowering work.
+    ExecutionOptions(ExecutionOptionsError),
     /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
     /// Optional FIR verification rejected the lowered module.
-    Verify(FirVerifyReport),
+    Verify {
+        report: FirVerifyReport,
+        origins: transform::signal_fir::FirOrigins,
+    },
     /// Backend emission failed after successful FIR lowering.
-    Codegen(E),
+    Codegen {
+        error: E,
+        origins: transform::signal_fir::FirOrigins,
+    },
 }
 
 /// Lower error for the C++ backend.
-pub(crate) type LowerToCppError = LowerError<CodegenError>;
+pub(crate) type LowerToCppError = LowerError<CppCodegenError>;
 /// Lower error for the C backend.
 pub(crate) type LowerToCError = LowerError<CCodegenError>;
 /// Lower error for the Julia backend.
@@ -42,25 +53,82 @@ pub(crate) type LowerToJuliaError = LowerError<JuliaCodegenError>;
 pub(crate) type LowerToRustError = LowerError<RustCodegenError>;
 /// Lowering error surface for the AssemblyScript backend.
 pub(crate) type LowerToAscError = LowerError<AscCodegenError>;
+/// Lowering error surface for the codebox (RNBO) backend.
+pub(crate) type LowerToCodeboxError = LowerError<CodeboxCodegenError>;
 
 #[derive(Debug)]
 pub(crate) enum LowerToInterpError {
+    /// Execution-option request rejected by the capability model.
+    ExecutionOptions(ExecutionOptionsError),
     /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
     /// Optional FIR verification rejected the lowered module.
-    Verify(FirVerifyReport),
+    Verify {
+        report: FirVerifyReport,
+        origins: transform::signal_fir::FirOrigins,
+    },
     /// Interpreter backend emission failed after successful lowering.
-    Codegen(InterpCodegenError),
+    Codegen {
+        error: InterpCodegenError,
+        origins: transform::signal_fir::FirOrigins,
+    },
     /// Serialization of the factory to `.fbc` text failed.
     Serialize(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// Lowering error surface for the Cranelift backend report.
+///
+/// Not a [`LowerError<CraneliftBackendError>`]: the subset-gap diagnosis and
+/// the JIT emission are two fallible backend steps, and both fold into the
+/// single `Codegen` variant here.
 #[derive(Debug)]
-pub(crate) enum LowerToFirError {
+pub(crate) enum LowerToCraneliftError {
+    /// Execution-option request rejected by the capability model.
+    ExecutionOptions(ExecutionOptionsError),
     /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
     /// Optional FIR verification rejected the lowered module.
-    Verify(FirVerifyReport),
+    Verify {
+        report: FirVerifyReport,
+        origins: transform::signal_fir::FirOrigins,
+    },
+    /// Cranelift JIT emission (or its subset diagnosis) failed.
+    Codegen {
+        error: CraneliftBackendError,
+        origins: transform::signal_fir::FirOrigins,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum LowerToFirError {
+    /// Execution-option request rejected by the capability model.
+    ExecutionOptions(ExecutionOptionsError),
+    /// Fast-lane signal-to-FIR lowering failed.
+    Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
+    Verify {
+        report: FirVerifyReport,
+        origins: transform::signal_fir::FirOrigins,
+    },
+}
+
+impl<E> From<ExecutionOptionsError> for LowerError<E> {
+    fn from(error: ExecutionOptionsError) -> Self {
+        Self::ExecutionOptions(error)
+    }
+}
+
+impl From<ExecutionOptionsError> for LowerToInterpError {
+    fn from(error: ExecutionOptionsError) -> Self {
+        Self::ExecutionOptions(error)
+    }
+}
+
+impl From<ExecutionOptionsError> for LowerToFirError {
+    fn from(error: ExecutionOptionsError) -> Self {
+        Self::ExecutionOptions(error)
+    }
 }
 
 /// Runs `f`, optionally recording its wall-clock duration in `timing_sink`.
@@ -92,7 +160,16 @@ pub(crate) fn time_phase_with_sink<T>(
 /// construct one value and pass it to the chosen dispatch function.
 #[derive(Clone)]
 pub(crate) struct SignalLoweringContext {
-    /// Which signal→FIR lowering lane to use (currently only transform fast-lane).
+    /// Which signal→FIR lowering lane the caller selected.
+    ///
+    /// Never read: the transform fast lane is the only route, so every
+    /// dispatcher validates and delegates without consulting it. The field is
+    /// kept because the public entry points do take a lane, and recording it
+    /// here is what makes a second lane a change to the lowering rather than to
+    /// every signature. Before this was explicit, six `let _ = ctx.lane;`
+    /// statements scattered through the dispatchers silenced the same warning
+    /// and hid the fact.
+    #[allow(dead_code)]
     pub(crate) lane: SignalFirLane,
     /// Whether and how strictly to run FIR verification after lowering.
     pub(crate) fir_verify: FirVerifyOptions,
@@ -103,84 +180,22 @@ pub(crate) struct SignalLoweringContext {
     pub(crate) max_copy_delay: u32,
     /// Delay-line count threshold above which the lowerer switches strategy.
     pub(crate) delay_line_threshold: u32,
-    /// `compute()` codegen strategy (scalar / vector). Roadmap P6 (V1 plumbing).
+    /// `compute()` codegen strategy: scalar, or the checked vector pipeline
+    /// (`-vec`) that falls back to scalar for shapes it cannot certify.
     pub(crate) compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
-    /// `--scheduling-strategy`). Vectorization port plan phase P2: plumbing
-    /// only, threaded through to [`SignalFirOptions`] without activating
-    /// scheduling.
+    /// `--scheduling-strategy`) applied to the lowered dependency graph.
     pub(crate) scheduling_strategy: SchedulingStrategy,
+    /// Control-rate evaluation scheduling (`-ec`): whether block-rate work is
+    /// emitted inline or in a separate `control` entry point. The default
+    /// reproduces the classic contract.
+    pub(crate) control_rate_mode: ControlRateMode,
+    /// Public processing-API shape (`-os`): whether a one-sample `frame` entry
+    /// point is emitted alongside an empty canonical `compute`. The default
+    /// reproduces the classic contract.
+    pub(crate) processing_api: ProcessingApi,
     /// Optional per-phase timing callback; `None` disables timing.
     pub(crate) timing_sink: Option<TimingSink>,
-}
-
-/// Dispatches C++ lowering through the selected signal->FIR lane.
-///
-/// The backend itself always consumes FIR; the lane choice controls only how
-/// the intermediate FIR module is produced from the propagated signal list.
-pub(crate) fn lower_signals_to_cpp(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &CppOptions,
-    ctx: SignalLoweringContext,
-) -> Result<String, LowerToCppError> {
-    let _ = ctx.lane;
-    lower_signals_to_cpp_transform_fastlane(source_name, output, options, &ctx)
-}
-
-/// Dispatches C lowering through the selected signal->FIR lane.
-pub(crate) fn lower_signals_to_c(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &COptions,
-    ctx: SignalLoweringContext,
-) -> Result<String, LowerToCError> {
-    let _ = ctx.lane;
-    lower_signals_to_c_transform_fastlane(source_name, output, options, &ctx)
-}
-
-/// Dispatches Julia lowering through the selected signal->FIR lane.
-pub(crate) fn lower_signals_to_julia(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &JuliaOptions,
-    ctx: SignalLoweringContext,
-) -> Result<String, LowerToJuliaError> {
-    let _ = ctx.lane;
-    lower_signals_to_julia_transform_fastlane(source_name, output, options, &ctx)
-}
-
-/// Dispatches AssemblyScript lowering through the selected signal->FIR lane.
-pub(crate) fn lower_signals_to_asc(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &AscOptions,
-    ctx: SignalLoweringContext,
-) -> Result<String, LowerToAscError> {
-    let _ = ctx.lane;
-    lower_signals_to_asc_transform_fastlane(source_name, output, options, &ctx)
-}
-
-/// Dispatches Rust lowering through the selected signal->FIR lane.
-pub(crate) fn lower_signals_to_rust(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &RustOptions,
-    ctx: SignalLoweringContext,
-) -> Result<String, LowerToRustError> {
-    let _ = ctx.lane;
-    lower_signals_to_rust_transform_fastlane(source_name, output, options, &ctx)
-}
-
-/// Dispatches interpreter lowering through the selected signal->FIR lane.
-pub(crate) fn lower_signals_to_interp(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &InterpOptions,
-    ctx: SignalLoweringContext,
-) -> Result<String, LowerToInterpError> {
-    let _ = ctx.lane;
-    lower_signals_to_interp_transform_fastlane(source_name, output, options, &ctx)
 }
 
 /// Lowers signals through the transform fast lane then serializes an interpreter `.fbc`.
@@ -204,6 +219,8 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
             timing_sink,
         )
     })
@@ -211,14 +228,20 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
     time_phase_with_sink(timing_sink, "fir-verify", || {
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
-    .map_err(LowerToInterpError::Verify)?;
+    .map_err(|report| LowerToInterpError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     match ctx.real_type {
         RealType::Float32 => {
             let factory: FbcDspFactory<f32> =
                 time_phase_with_sink(timing_sink, "interp-codegen", || {
                     generate_interp_module(&lowered.store, lowered.module, options)
                 })
-                .map_err(LowerToInterpError::Codegen)?;
+                .map_err(|error| LowerToInterpError::Codegen {
+                    error,
+                    origins: lowered.origins.clone(),
+                })?;
             time_phase_with_sink(timing_sink, "interp-serialize", || {
                 serialize_factory(&factory)
             })
@@ -229,7 +252,10 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
                 time_phase_with_sink(timing_sink, "interp-codegen", || {
                     generate_interp_module(&lowered.store, lowered.module, options)
                 })
-                .map_err(LowerToInterpError::Codegen)?;
+                .map_err(|error| LowerToInterpError::Codegen {
+                    error,
+                    origins: lowered.origins.clone(),
+                })?;
             time_phase_with_sink(timing_sink, "interp-serialize", || {
                 serialize_factory(&factory)
             })
@@ -238,11 +264,291 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// Lowers propagated signals to FIR, JIT-compiles them with the Cranelift
+/// backend, and renders the resulting module as a text status report.
+///
+/// The `JitDspModule` is dropped before returning: the report is a snapshot of
+/// its shape (symbol names, entry address, `dsp` struct layout), never a
+/// handle to the finalized code. Callers that need to *run* the compiled DSP
+/// must own the module themselves and so cannot go through this function —
+/// see `crates/cranelift-ffi`.
+pub(crate) fn lower_signals_to_cranelift_report(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CraneliftOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToCraneliftError> {
+    validate_execution_options(
+        "cranelift",
+        ctx.control_rate_mode,
+        ctx.processing_api,
+        ctx.compute_mode,
+    )
+    .map_err(LowerToCraneliftError::ExecutionOptions)?;
+    // Same derivation as `lower_signals_to_fir`, not `resolve_module_name`
+    // (which is the class-name path and defaults to "mydsp"): the report names
+    // the FIR module, so it must match what the FIR dump would show for the
+    // same input.
+    let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane_with_timing(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+            ctx.compute_mode,
+            ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
+            timing_sink,
+        )
+    })
+    .map_err(LowerToCraneliftError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(|report| LowerToCraneliftError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
+
+    // A subset gap is a lowering *limitation* to report, not a failure: the
+    // module still compiles, with an unlowered compute body. Only a hard
+    // backend error stops the report.
+    let subset_gap = diagnose_cranelift_compute_subset_gap(&lowered.store, lowered.module)
+        .map_err(|error| LowerToCraneliftError::Codegen {
+            error,
+            origins: lowered.origins.clone(),
+        })?;
+    let compiled = time_phase_with_sink(timing_sink, "cranelift-codegen", || {
+        generate_cranelift_module(&lowered.store, lowered.module, options)
+    })
+    .map_err(|error| LowerToCraneliftError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })?;
+    Ok(render_cranelift_module_report(
+        &compiled,
+        subset_gap.as_deref(),
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Renders a compiled Cranelift module as the backend status report.
+///
+/// Shape and field order are the CLI's long-standing `--lang cranelift`
+/// output, kept byte-for-byte so the facade entry points and the CLI cannot
+/// drift apart.
+pub fn render_cranelift_module_report(compiled: &JitDspModule, subset_gap: Option<&str>) -> String {
+    let layout = compiled.struct_layout();
+    let mut out = String::new();
+    out.push_str("backend: cranelift (experimental)\n");
+    out.push_str(&format!("module: {}\n", compiled.module_name()));
+    out.push_str(&format!(
+        "compute_symbol: {}\n",
+        compiled.compute_symbol_name()
+    ));
+    out.push_str(&format!(
+        "compute_entry_addr: 0x{:x}\n",
+        compiled.compute_entry_addr()
+    ));
+    out.push_str(&format!(
+        "compute_body_lowered: {}\n",
+        compiled.compute_body_lowered()
+    ));
+    if let Some(reason) = subset_gap {
+        out.push_str(&format!("subset_gap: {reason}\n"));
+    }
+    out.push_str(&format!(
+        "dsp_struct_layout: size={} align={} fields={}\n",
+        layout.size_bytes(),
+        layout.align_bytes(),
+        layout.fields().len()
+    ));
+    for field in layout.fields() {
+        let kind = match &field.kind {
+            StructFieldKind::Scalar(typ) => format!("scalar:{typ:?}"),
+            StructFieldKind::Table { elem_type, len } => {
+                format!("table:{elem_type:?}[{len}]")
+            }
+        };
+        out.push_str(&format!(
+            "  - {} @{} size={} align={} {}\n",
+            field.name, field.offset_bytes, field.size_bytes, field.align_bytes, kind
+        ));
+    }
+    out
+}
+
 /// Serializes a [`FbcDspFactory`] to `.fbc` text format.
 pub(crate) fn serialize_factory<R: FbcReal>(factory: &FbcDspFactory<R>) -> Result<String, String> {
     let mut buf = Vec::new();
     write_fbc(factory, &mut buf, false).map_err(|e| e.to_string())?;
     String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
+/// Shared prologue of every backend dispatch: reject an execution-option
+/// request the backend cannot honor, then hand over to the fast-lane
+/// implementation.
+///
+/// `ctx.lane` is deliberately not consulted. The transform fast lane is the
+/// only route today, so these dispatchers exist to validate and delegate, not
+/// to choose — which is why each backend's wrapper below is three lines.
+fn lower_signals_with_validation<O, E>(
+    backend: &'static str,
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &O,
+    ctx: SignalLoweringContext,
+    fastlane: fn(&str, &SignalCompileOutput, &O, &SignalLoweringContext) -> Result<String, E>,
+) -> Result<String, E>
+where
+    E: From<ExecutionOptionsError>,
+{
+    validate_execution_options(
+        backend,
+        ctx.control_rate_mode,
+        ctx.processing_api,
+        ctx.compute_mode,
+    )?;
+    fastlane(source_name, output, options, &ctx)
+}
+
+/// Dispatches cpp lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_cpp(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CppOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToCppError> {
+    lower_signals_with_validation(
+        "cpp",
+        source_name,
+        output,
+        options,
+        ctx,
+        lower_signals_to_cpp_transform_fastlane,
+    )
+}
+
+/// Dispatches c lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_c(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &COptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToCError> {
+    lower_signals_with_validation(
+        "c",
+        source_name,
+        output,
+        options,
+        ctx,
+        lower_signals_to_c_transform_fastlane,
+    )
+}
+
+/// Dispatches julia lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_julia(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &JuliaOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToJuliaError> {
+    lower_signals_with_validation(
+        "julia",
+        source_name,
+        output,
+        options,
+        ctx,
+        lower_signals_to_julia_transform_fastlane,
+    )
+}
+
+/// Dispatches asc lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_asc(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &AscOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToAscError> {
+    lower_signals_with_validation(
+        "asc",
+        source_name,
+        output,
+        options,
+        ctx,
+        lower_signals_to_asc_transform_fastlane,
+    )
+}
+
+/// Dispatches codebox lowering through the selected signal->FIR lane, after
+/// forcing the two execution modes the target imposes.
+///
+/// Unlike every other dispatcher, this one *overrides* the caller's request
+/// instead of merely validating it. RNBO calls the generated code once per
+/// sample and sets controls through `@param` identifiers, so external control
+/// and the one-sample API are not modes codebox can be put into — they are
+/// what codebox is. The capability table records both as `Intrinsic`,
+/// meaning "accepted, and output-invariant"; this override is what makes that
+/// second half true, for the CLI and for programmatic callers alike.
+///
+/// Vector mode is the one request that cannot be absorbed this way, so it is
+/// rejected by name — see the `vector` column in [`crate::execution`].
+/// Validation runs on the *forced* modes, which is why it is called here
+/// rather than through `lower_signals_with_validation`.
+pub(crate) fn lower_signals_to_codebox(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CodeboxOptions,
+    mut ctx: SignalLoweringContext,
+) -> Result<String, LowerToCodeboxError> {
+    ctx.control_rate_mode = ControlRateMode::External;
+    ctx.processing_api = ProcessingApi::OneSample;
+    validate_execution_options(
+        "codebox",
+        ctx.control_rate_mode,
+        ctx.processing_api,
+        ctx.compute_mode,
+    )?;
+    lower_signals_to_codebox_transform_fastlane(source_name, output, options, &ctx)
+}
+
+/// Dispatches rust lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_rust(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &RustOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToRustError> {
+    lower_signals_with_validation(
+        "rust",
+        source_name,
+        output,
+        options,
+        ctx,
+        lower_signals_to_rust_transform_fastlane,
+    )
+}
+
+/// Dispatches interp lowering through the selected signal->FIR lane.
+pub(crate) fn lower_signals_to_interp(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &InterpOptions,
+    ctx: SignalLoweringContext,
+) -> Result<String, LowerToInterpError> {
+    lower_signals_with_validation(
+        "interp",
+        source_name,
+        output,
+        options,
+        ctx,
+        lower_signals_to_interp_transform_fastlane,
+    )
 }
 
 /// Lowers propagated signals to FIR without invoking a backend emitter.
@@ -263,7 +569,11 @@ pub(crate) fn lower_signals_to_fir(
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
     scheduling_strategy: SchedulingStrategy,
+    control_rate_mode: ControlRateMode,
+    processing_api: ProcessingApi,
 ) -> Result<FirCompileOutput, LowerToFirError> {
+    validate_execution_options("fir", control_rate_mode, processing_api, compute_mode)
+        .map_err(LowerToFirError::ExecutionOptions)?;
     let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
     let lowered = lower_signals_to_fir_transform_fastlane(
         output,
@@ -273,9 +583,14 @@ pub(crate) fn lower_signals_to_fir(
         delay_line_threshold,
         compute_mode,
         scheduling_strategy,
+        control_rate_mode,
+        processing_api,
     )
     .map_err(LowerToFirError::Transform)?;
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(|report| LowerToFirError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     Ok(lowered)
 }
 
@@ -287,6 +602,7 @@ pub(crate) fn resolve_module_name(class_name: Option<&str>, _source_name: &str) 
 }
 
 /// Transform fast-lane FIR lowering used by native backends and FIR dumps.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_signals_to_fir_transform_fastlane(
     output: &SignalCompileOutput,
     module_name: String,
@@ -295,6 +611,8 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
     scheduling_strategy: SchedulingStrategy,
+    control_rate_mode: ControlRateMode,
+    processing_api: ProcessingApi,
 ) -> Result<FirCompileOutput, SignalFirError> {
     lower_signals_to_fir_transform_fastlane_with_timing(
         output,
@@ -304,6 +622,8 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         delay_line_threshold,
         compute_mode,
         scheduling_strategy,
+        control_rate_mode,
+        processing_api,
         None,
     )
 }
@@ -321,6 +641,8 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
     scheduling_strategy: SchedulingStrategy,
+    control_rate_mode: ControlRateMode,
+    processing_api: ProcessingApi,
     timing_sink: Option<&TimingSink>,
 ) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
@@ -330,24 +652,32 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
         delay_line_threshold,
         compute_mode,
         scheduling_strategy,
+        control_rate_mode,
+        processing_api,
     };
-    let lowered = transform::signal_fir::compile_signals_to_fir_fastlane_clocked_with_timing(
-        &output.parse.state.arena,
-        &output.signals,
-        output.process_arity.inputs,
-        output.propagated_output_count(),
-        &output.ui,
-        &output.clock_domains,
-        &signal_fir_options,
-        timing_sink.map(|sink| sink.as_ref()),
-    )?;
+    let lowered =
+        transform::signal_fir::compile_signals_to_fir_fastlane_clocked_with_timing_and_origins(
+            &output.parse.state.arena,
+            &output.signals,
+            output.process_arity.inputs,
+            output.propagated_output_count(),
+            &output.ui,
+            &output.clock_domains,
+            &signal_fir_options,
+            timing_sink.map(|sink| sink.as_ref()),
+            Some(&output.signal_origins),
+        )?;
     // Canonicalize every FIR artifact before it reaches any backend or FIR
     // dump. This is deliberately independent of `--no-fir-verify`: pure Drop
     // roots are construction scaffolding, not an optional backend optimization.
-    let (store, module) = sweep_scaffolding_drop_roots(&lowered.store, lowered.module);
+    let (store, module, mapping) =
+        sweep_scaffolding_drop_roots_with_mapping(&lowered.store, lowered.module);
+    let mut origins = lowered.origins.remap_pairs(&mapping);
+    origins.derive_reachable(&store, module);
     Ok(FirCompileOutput {
         store,
         module,
+        origins,
         vector_pipeline_status: lowered.vector_pipeline_status,
         vector_effective_mode: lowered.vector_effective_mode,
         vector_pipeline_detail: lowered.vector_pipeline_detail,
@@ -372,6 +702,8 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
             timing_sink,
         )
     })
@@ -379,11 +711,17 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
     time_phase_with_sink(timing_sink, "fir-verify", || {
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
-    .map_err(LowerError::Verify)?;
+    .map_err(|report| LowerError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     time_phase_with_sink(timing_sink, "cpp-codegen", || {
         generate_cpp_module(&lowered.store, lowered.module, options)
     })
-    .map_err(LowerError::Codegen)
+    .map_err(|error| LowerError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })
 }
 
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C.
@@ -404,6 +742,8 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
             timing_sink,
         )
     })
@@ -411,11 +751,17 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
     time_phase_with_sink(timing_sink, "fir-verify", || {
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
-    .map_err(LowerError::Verify)?;
+    .map_err(|report| LowerError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     time_phase_with_sink(timing_sink, "c-codegen", || {
         generate_c_module(&lowered.store, lowered.module, options)
     })
-    .map_err(LowerError::Codegen)
+    .map_err(|error| LowerError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })
 }
 
 /// Lowers signals through the transform fast lane, verifies FIR, then emits Julia.
@@ -436,6 +782,8 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
             timing_sink,
         )
     })
@@ -443,7 +791,10 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
     time_phase_with_sink(timing_sink, "fir-verify", || {
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
-    .map_err(LowerError::Verify)?;
+    .map_err(|report| LowerError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     let mut codegen_options = options.clone();
     codegen_options.real_type = match ctx.real_type {
         RealType::Float32 => JuliaRealType::Float32,
@@ -452,7 +803,10 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
     time_phase_with_sink(timing_sink, "julia-codegen", || {
         generate_julia_module(&lowered.store, lowered.module, &codegen_options)
     })
-    .map_err(LowerError::Codegen)
+    .map_err(|error| LowerError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })
 }
 
 /// Lowers signals through the transform fast lane then emits Rust source.
@@ -476,6 +830,8 @@ pub(crate) fn lower_signals_to_rust_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
             timing_sink,
         )
     })
@@ -483,7 +839,10 @@ pub(crate) fn lower_signals_to_rust_transform_fastlane(
     time_phase_with_sink(timing_sink, "fir-verify", || {
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
-    .map_err(LowerError::Verify)?;
+    .map_err(|report| LowerError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     let mut codegen_options = options.clone();
     codegen_options.faust_float_type = match ctx.real_type {
         RealType::Float32 => RustRealType::Float32,
@@ -492,7 +851,10 @@ pub(crate) fn lower_signals_to_rust_transform_fastlane(
     time_phase_with_sink(timing_sink, "rust-codegen", || {
         generate_rust_module(&lowered.store, lowered.module, &codegen_options)
     })
-    .map_err(LowerError::Codegen)
+    .map_err(|error| LowerError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })
 }
 
 /// Lowers signals through the transform fast lane then emits AssemblyScript.
@@ -516,6 +878,8 @@ pub(crate) fn lower_signals_to_asc_transform_fastlane(
             ctx.delay_line_threshold,
             ctx.compute_mode,
             ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
             timing_sink,
         )
     })
@@ -523,13 +887,65 @@ pub(crate) fn lower_signals_to_asc_transform_fastlane(
     time_phase_with_sink(timing_sink, "fir-verify", || {
         maybe_verify_fir_module(&lowered, ctx.fir_verify)
     })
-    .map_err(LowerError::Verify)?;
+    .map_err(|report| LowerError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
     let mut codegen_options = options.clone();
     codegen_options.double_precision = ctx.real_type == RealType::Float64;
     time_phase_with_sink(timing_sink, "asc-codegen", || {
         generate_asc_module(&lowered.store, lowered.module, &codegen_options)
     })
-    .map_err(LowerError::Codegen)
+    .map_err(|error| LowerError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })
+}
+
+/// Lowers signals to FIR and emits codebox text.
+///
+/// Takes `ctx` with the modes already forced by [`lower_signals_to_codebox`];
+/// there is no `class_name` to resolve, because a codebox file is flat and
+/// names no class.
+pub(crate) fn lower_signals_to_codebox_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CodeboxOptions,
+    ctx: &SignalLoweringContext,
+) -> Result<String, LowerToCodeboxError> {
+    let module_name = resolve_module_name(None, source_name);
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane_with_timing(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+            ctx.compute_mode,
+            ctx.scheduling_strategy,
+            ctx.control_rate_mode,
+            ctx.processing_api,
+            timing_sink,
+        )
+    })
+    .map_err(LowerError::Transform)?;
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(|report| LowerError::Verify {
+        report,
+        origins: lowered.origins.clone(),
+    })?;
+    let mut codegen_options = options.clone();
+    codegen_options.double_precision = ctx.real_type == RealType::Float64;
+    time_phase_with_sink(timing_sink, "codebox-codegen", || {
+        generate_codebox_module(&lowered.store, lowered.module, &codegen_options)
+    })
+    .map_err(|error| LowerError::Codegen {
+        error,
+        origins: lowered.origins.clone(),
+    })
 }
 
 /// Runs optional FIR verification according to the compiler facade policy.

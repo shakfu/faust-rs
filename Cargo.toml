@@ -1,7 +1,7 @@
 [workspace]
 members = [
   "crates/tlib",
-  "crates/errors",
+  "crates/diagnostics",
   "crates/interval",
   "crates/algebra",
   "crates/graph",
@@ -19,7 +19,7 @@ members = [
   "crates/codegen",
   "crates/draw",
   "crates/doc",
-  "crates/utils",
+  "crates/ffi-common",
   "crates/tree-ffi",
   "crates/compiler",
   "crates/xtask",
@@ -41,6 +41,9 @@ edition = "2024"
 version = "0.5.0"
 license = "LGPL-2.1-or-later"
 authors = ["faust-rs contributors"]
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

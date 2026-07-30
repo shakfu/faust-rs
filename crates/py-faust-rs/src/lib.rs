@@ -14,7 +14,8 @@
 //! (`f64`) precision are supported via the `double=` flag on `compile`.
 
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use codegen::backends::interp::{
     FbcDspFactory, FbcOpcode, FbcReal, FbcUiInstruction, InterpOptions, OwnedFbcDspInstance,
@@ -573,9 +574,83 @@ impl Dsp {
 /// headroom keeps the binding within the same envelope as every other embedder.
 const COMPILE_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+/// Filesystem-safe basename derived from the caller-supplied module name.
+///
+/// `name` reaches us straight from Python and only ever named an in-memory
+/// buffer before, so it carries no filename guarantees. Anything outside
+/// `[A-Za-z0-9._-]` becomes `_`, and an empty result falls back to the API
+/// default, so the staged file below is always openable and never escapes its
+/// directory via `/` or `..`.
+fn sanitized_stem(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if stem.trim_matches('.').is_empty() {
+        "FaustDSP".to_owned()
+    } else {
+        stem
+    }
+}
+
+/// A private temp directory holding the staged `.dsp`, removed on drop.
+///
+/// The facade reaches import search paths only through its file-based entry
+/// points (`compile_file_to_interp_with_lane`); the source-string ones take no
+/// search paths. So compiling a Python-supplied string that does
+/// `import("stdfaust.lib")` means staging it on disk first.
+///
+/// It gets its own directory rather than a bare temp file because
+/// `compile_file_to_signals` merges the compiled file's parent into the import
+/// search path. A dedicated directory keeps that injected entry empty apart
+/// from our own file, so nothing unrelated in the system temp directory can
+/// satisfy an `import`.
+struct StagedSource {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl StagedSource {
+    fn new(name: &str, source: &str) -> std::io::Result<Self> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "faust-rs-py-{}-{:?}-{}",
+            std::process::id(),
+            std::thread::current().id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join(format!("{}.dsp", sanitized_stem(name)));
+        std::fs::write(&file, source)?;
+        Ok(Self { dir, file })
+    }
+
+    fn path(&self) -> &Path {
+        &self.file
+    }
+}
+
+impl Drop for StagedSource {
+    fn drop(&mut self) {
+        // Best-effort: a leaked temp directory must never mask a compile error.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// The pure-Rust compile pipeline: source string -> FBC bytecode -> precision-
 /// erased owning instance -> `Dsp`. Runs entirely off the GIL on the worker
 /// thread; errors come back as strings for the caller to wrap in `ValueError`.
+///
+/// The source is staged into a private temp directory (see [`StagedSource`]) so
+/// the compile can go through the facade's file-based entry point, the only one
+/// that honours import search paths. Diagnostics therefore name the staged path
+/// rather than a bare module name; its basename is derived from `name`.
 fn compile_pipeline(
     source: String,
     name: String,
@@ -593,11 +668,12 @@ fn compile_pipeline(
     } else {
         RealType::Float32
     };
+    let staged =
+        StagedSource::new(&name, &source).map_err(|e| format!("staging source failed: {e}"))?;
     let compiler = Compiler::new().with_real_type(real_type);
     let fbc = compiler
-        .compile_source_to_interp_with_lane_and_search_paths(
-            &name,
-            &source,
+        .compile_file_to_interp_with_lane(
+            staged.path(),
             &paths,
             &options,
             SignalFirLane::TransformFastLane,

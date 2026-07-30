@@ -19,8 +19,12 @@ cargo run -p xtask -- <command> [options]
 Show the command summary:
 
 ```bash
-cargo run -p xtask
+cargo run -p xtask -- --help
 ```
+
+Every subcommand also provides generated option help, for example
+`cargo run -p xtask -- interp-trace-dump --help`. Invalid command lines return
+status 2; help and version requests return status 0.
 
 ## Prerequisites
 
@@ -74,7 +78,13 @@ dot -V
 | `vector-compile-budget-check` | Measure the versioned release scalar/vector compile-time basket and reject unexplained regressions |
 | `vector-interp-opt-check` | Compare interpreter `opt_level=0` and max optimization on representative checked-vector cases |
 | `lockstep-simd-check` | Require Clang to emit four-wide LLVM floating-point operations for complex lockstep corpus cases |
+| `ffi-boundary-check` | Enforce one-way FFI dependency layers and the explicit unsafe-code allowlist |
+| `cli-parser-check` | Reject unclassified process parsers and handwritten CLI diagnostics |
+| `error-model-check` | Enforce typed operational-error and structured-diagnostic ownership |
+| `diagnostics-provenance-probe` | Compare origin-set and located-occurrence storage before diagnostics-v2 IR changes |
 | `structure-check` | Validate repository layout, checker isolation, and source-size contracts |
+| `cli-transcript-gen` | Record the local compiler CLI differential transcript |
+| `cli-transcript-check` | Compare the compiler CLI against the recorded local transcript |
 | `emission-determinism` | Repeat selected compilations and report nondeterministic output |
 
 ## Vector Coverage Retention
@@ -131,6 +141,33 @@ cargo run --release -p xtask -- vector-compile-budget-check
 - Repository-relative paths are preferred in generated documentation.
 - Runtime trace comparison uses exact metadata/shape checks and tolerant float
   sample comparison.
+- Cargo binary/example command lines use Clap. The compiler and two impulse
+  runners keep narrow legacy-token normalizers that immediately hand off to
+  Clap.
+- `ffi-common` argument parsing is an embedded C `argc`/`argv` protocol, not a
+  process CLI. The dependency-free generated impulse architecture at
+  `tests/impulse-tests/archs/impulserust.rs` is the sole standalone exception.
+
+`cargo run -p xtask -- cli-parser-check` obtains the workspace target inventory
+from Cargo metadata, scans package Rust sources, and enforces these ownership
+rules. New exceptions must be justified in
+`porting/cli-parser-consolidation-analysis-and-porting-plan-2026-07-28-en.md`
+and added narrowly to the check.
+
+`cargo run -p xtask -- error-model-check` verifies that `diagnostics` is the
+sole report-model package, phase errors use the borrowing `ToDiagnostic`
+contract, `CompilerError` retains typed sources plus total bundle access, and
+the parser does not regain a parallel severity or message-text classifier.
+The ownership policy is documented in
+`porting/error-diagnostics-separation-analysis-and-porting-plan-2026-07-28-en.md`.
+
+`cargo run -p xtask -- diagnostics-provenance-probe` is the Phase-G0
+measurement harness for compiler diagnostics v2. It reproduces the source
+occurrence loss caused by storing one property per hash-consed `TreeId`, then
+compares dense origin sets with explicit located occurrences. The command is a
+developer probe, not a CI performance gate; its recorded baseline and design
+decision live in
+`porting/compiler-diagnostics-v2-baseline-2026-07-28-en.md`.
 
 ## Golden Snapshots
 
@@ -467,12 +504,24 @@ API tests before being treated as final parity.
 
 `libfaust-export-check` validates the maintained local C/C++ distribution
 surface. It builds and packages `faust-ffi`, extracts dynamic exports from the
-produced `libfaust-rs` library, compares them against the Box and Signal C headers, and
-syntax-checks tiny C11 and C++17 clients using the maintained headers.
+produced `libfaust-rs` library, compares them against the checked-in symbol
+baseline and the Box, Signal, Interpreter, and Cranelift C headers, and
+syntax-checks tiny C11 and C++17 clients using the maintained headers. The
+backend clients also assert the `UIGlue`, `MetaGlue`, and default `FAUSTFLOAT`
+layouts and initialize every callback-table field.
 
 ```bash
 cargo run -p xtask -- libfaust-export-check
 ```
+
+Refresh the symbol baseline only for an intentional ABI change:
+
+```bash
+cargo run -p xtask -- libfaust-export-check --bless
+```
+
+The baseline is stored in
+`porting/generated/libfaust-rs-exported-symbols.txt`.
 
 To publish the C/C++ artifacts directly:
 

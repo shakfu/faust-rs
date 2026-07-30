@@ -301,6 +301,12 @@ faust-rs -lang asc foo.dsp
 # Generate C
 faust-rs -lang c foo.dsp
 
+# Generate RNBO codebox source
+faust-rs -lang codebox foo.dsp -o foo.codebox
+
+# Generate codebox with the RNBO wrapper's `RB_` parameter names
+faust-rs -lang codebox-test foo.dsp -o foo.codebox
+
 # Generate C++
 faust-rs -lang cpp foo.dsp
 
@@ -351,7 +357,21 @@ faust-rs -ss 3 foo.dsp                    # reverse breadth-first
 # Request checked vector lowering with 64-sample chunks.
 faust-rs -vec -vs 64 -lv 0 foo.dsp
 faust-rs -vec -vs 64 -lv 1 foo.dsp
+
+# Execution options (c/cpp/rust/fir/asc backends): external control and
+# one-sample processing, as C++ Faust.
+faust-rs -ec foo.dsp            # separate host-scheduled control() function
+faust-rs -os foo.dsp            # one-sample frame(inputs, outputs) API
+faust-rs -ec -os foo.dsp        # control() once, then frame() per sample
+faust-rs -ec -vec foo.dsp       # external control with vector compute
 ```
+
+The RNBO `codebox` target is inherently external-control and one-sample: its
+output is identical with or without `-ec` and `-os`. It rejects `-vec`.
+`-lang codebox-test` changes only parameter names to the `RB_` convention used
+by Faust's `rnbo-dsp.h` wrapper for manual RNBO round-trips. The backend has
+in-tree structural and numeric tests; the RNBO import/export validation remains
+manual because the RNBO SDK is not part of this workspace.
 
 `-ss` accepts non-negative integers: `0`, `1`, and `2` select the strategies
 shown above, while `3` and greater select reverse breadth-first. Missing,
@@ -380,6 +400,7 @@ faust-rs --fir-fixture gain_bias_ui_meta -lang cpp
 faust-rs --fir-fixture sine_phasor -lang interp
 faust-rs --fir-fixture gain_bias_ui_meta -lang cranelift
 faust-rs --fir-fixture sine_phasor -lang julia
+faust-rs --fir-fixture gain_bias_ui_meta -lang codebox
 faust-rs --fir-fixture gain_bias_ui_meta -lang wasm
 ```
 
@@ -396,6 +417,8 @@ the same model applies:
 ```bash
 faust -lang asc foo.dsp
 faust -lang c foo.dsp
+faust -lang codebox foo.dsp
+faust -lang codebox-test foo.dsp
 faust -lang cpp foo.dsp
 faust -lang cranelift foo.dsp
 faust -lang fir foo.dsp
@@ -411,6 +434,8 @@ Without installation (equivalent):
 ```bash
 cargo run -p compiler -- -lang asc foo.dsp
 cargo run -p compiler -- -lang c foo.dsp
+cargo run -p compiler -- -lang codebox foo.dsp
+cargo run -p compiler -- -lang codebox-test foo.dsp
 cargo run -p compiler -- -lang cpp foo.dsp
 cargo run -p compiler -- -lang cranelift foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
@@ -515,10 +540,18 @@ concise, factual, and implementation-oriented.
 
 ## Workspace crates
 
+The workspace follows a one-way dependency rule:
+`compiler core <- FFI adapters <- distribution`. Run
+`cargo run -p xtask -- ffi-boundary-check` to verify that no dependency points
+rightward and that unsafe-code opt-ins remain confined to the explicit FFI
+boundary plus the `foreign-call` runtime bridge.
+
+### Compiler core
+
 | Crate | Role |
 |---|---|
 | `tlib` | Hash-consed tree arena, symbols, lists, recursive tree helpers |
-| `errors` | Structured diagnostics model |
+| `diagnostics` | Structured diagnostic reports, stable codes, labels, and bundles |
 | `interval` | Interval arithmetic |
 | `algebra` | Shared algebra/rewrite scaffold |
 | `graph` | Shared graph algorithms scaffold |
@@ -533,18 +566,28 @@ concise, factual, and implementation-oriented.
 | `transform` | Signal preparation and signal-to-FIR lowering |
 | `fir` | Faust Intermediate Representation |
 | `foreign-call` | Raw C ABI foreign-function invocation bridge |
-| `codegen` | AssemblyScript, C, C++, Rust, interpreter, Cranelift, WASM, and Julia backend generation |
+| `codegen` | AssemblyScript, C, C++, Codebox (RNBO), Rust, interpreter, Cranelift, WASM, and Julia backend generation |
 | `draw` | SVG block-diagram rendering |
 | `doc` | Documentation/reporting scaffold |
-| `utils` | Shared FFI utilities |
-| `tree-ffi` | Shared opaque tree-handle support for Box and Signal C APIs |
 | `compiler` | Top-level compiler facade and CLI |
-| `impulse-runner` | Interpreter-backed scalar impulse-test runner |
-| `xtask` | Developer and CI automation |
-| `interp-ffi` | Interpreter backend C/C++ API |
-| `cranelift-ffi` | Experimental Cranelift backend C/C++ API |
+
+### FFI adapters
+
+| Crate | Role |
+|---|---|
+| `ffi-common` | Shared ABI, marshalling, allocation, and factory-cache support for FFI adapters |
+| `tree-ffi` | Shared opaque tree-handle support for Box and Signal C APIs |
 | `box-ffi` | Box manipulation C/C++ API |
 | `signal-ffi` | Signal manipulation C/C++ API |
+| `interp-ffi` | Interpreter backend C/C++ API |
+| `cranelift-ffi` | Experimental Cranelift backend C/C++ API |
+
+### Distribution and tooling
+
+| Crate | Role |
+|---|---|
+| `impulse-runner` | Interpreter-backed scalar impulse-test runner |
+| `xtask` | Developer and CI automation |
 | `faust-ffi` | Unified `libfaust-rs` distribution crate |
 | `wasm-ffi` | Raw WASM ABI for `faustwasm` embedded compiler mode |
 

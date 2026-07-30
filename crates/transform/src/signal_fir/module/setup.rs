@@ -44,6 +44,7 @@ use crate::signal_fir::module::rad_binary_contributions;
 use crate::signal_fir::module::rad_unary_contribution;
 use crate::signal_fir::placement::Bucket;
 use crate::signal_fir::recursion::RecursionState;
+use crate::signal_fir::{ControlRateMode, ProcessingApi};
 use crate::signal_prepare::SimpleSigType;
 
 /// Monotonic counters for all generated variable names.
@@ -106,6 +107,7 @@ impl<'a> SignalToFirLower<'a> {
         ui_program: &'a UiProgram,
         types: &'a HashMap<SigId, SimpleSigType>,
         sig_types: &'a HashMap<SigId, SigType>,
+        signal_origins: &'a propagate::SignalOrigins,
         num_inputs: usize,
         real_ty: FirType,
         placement: PlacementInfo,
@@ -116,6 +118,7 @@ impl<'a> SignalToFirLower<'a> {
             ui_program,
             types,
             sig_types,
+            signal_origins,
             num_inputs,
             real_ty,
             store: FirStore::new(),
@@ -125,6 +128,8 @@ impl<'a> SignalToFirLower<'a> {
             clocked: None,
             suppress_clocked_redirect: false,
             domain_counters: DomainCounters::default(),
+            control_rate_mode: ControlRateMode::InlinePerBlock,
+            processing_api: ProcessingApi::Block,
             state_name_by_node: HashMap::new(),
             recursion: RecursionState::default(),
             scheduled_state_updates: HashSet::new(),
@@ -138,6 +143,7 @@ impl<'a> SignalToFirLower<'a> {
             rad_reverse: build::RadReverseState::default(),
             bra: bra::BraState::default(),
             emission_order: Vec::new(),
+            fir_origins: crate::signal_fir::FirOrigins::new(),
             emission_seen: HashSet::new(),
             scalar_schedule: None,
             clocked_payload_signals: HashSet::new(),
@@ -411,6 +417,11 @@ impl<'a> SignalToFirLower<'a> {
         let n = self.next_materialized_counter(prefix);
         let access = match bucket {
             Bucket::Constants if self.konst_escapes(sig) => AccessType::Struct,
+            // Execution-options port §4.4: under external control the store
+            // moves to `control`, so the value must live in DSP-owned storage
+            // for sample-rate code to read it across the function boundary —
+            // the same escape promotion the Konst arm above already applies.
+            Bucket::Control if self.control_rate_mode.is_external() => AccessType::Struct,
             Bucket::Constants | Bucket::Control => AccessType::Stack,
         };
         let name = format!("{prefix}{n}");
@@ -434,14 +445,16 @@ impl<'a> SignalToFirLower<'a> {
                     Some(value),
                 ));
             }
+            Bucket::Control if access == AccessType::Struct => {
+                self.ensure_named_struct_var(&name, typ.clone(), None);
+                let mut b = FirBuilder::new(&mut self.store);
+                let store = b.store_var(&name, AccessType::Struct, value);
+                self.sections.push_externalizable_control(store);
+            }
             Bucket::Control => {
                 let mut b = FirBuilder::new(&mut self.store);
-                self.sections.control_statements.push(b.declare_var(
-                    &name,
-                    typ.clone(),
-                    AccessType::Stack,
-                    Some(value),
-                ));
+                let decl = b.declare_var(&name, typ.clone(), AccessType::Stack, Some(value));
+                self.sections.push_externalizable_control(decl);
             }
         }
 

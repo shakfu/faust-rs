@@ -67,9 +67,14 @@ etc.) failed to resolve. Only self-contained sources compiled.
 
 - **Resolution:** `compile(..., search_paths=[...])` resolves imports against
   the given directories; directories in the `FAUST_LIB_PATH` environment
-  variable are appended automatically. This is backed by a new compiler method,
-  `compile_source_to_interp_with_lane_and_search_paths`. The faust-rs workspace
-  does not bundle the full Faust standard library, so point `search_paths` (or
+  variable are appended automatically. The compiler facade exposes search paths
+  only on its file-based entry points, so the binding stages the source string
+  into a private temp directory (removed on drop) and compiles it via
+  `compile_file_to_interp_with_lane`. The directory is private so that the
+  parent path the facade injects into the import search path cannot resolve
+  anything but the staged file; the cost is that diagnostics name the staged
+  path rather than the `name=` argument. The faust-rs workspace does not bundle
+  the full Faust standard library, so point `search_paths` (or
   `FAUST_LIB_PATH`) at an existing stdlib install; the import test suite skips
   when none is discoverable.
 

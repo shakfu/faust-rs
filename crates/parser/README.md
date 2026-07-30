@@ -15,7 +15,8 @@ Production Faust parser — `lrpar`/`lrlex` grammar-generated crate.
 Tokenizes and parses Faust source text into a box tree (`boxes::BoxId`) stored
 in a `TreeArena`. Handles `import("...")` expansion, top-level metadata
 (`declare key "value";`), waveform accumulation, and definition/use property
-tracking. Emits structured `errors::Diagnostic` values for all parse errors.
+tracking. Emits structured `diagnostics::Diagnostic` values for all parse
+errors.
 
 ## Public API
 
@@ -47,8 +48,7 @@ tracking. Emits structured `errors::Diagnostic` values for all parse errors.
 
 | Item | Description |
 |---|---|
-| `ParserDiagnostic` | One parser diagnostic with severity, code, message, location |
-| `DiagnosticSeverity` | `Error` / `Warning` / `Remark` |
+| parser diagnostics | Private pending records with canonical `Severity` and required `DiagnosticCode`; exported parse results use `DiagnosticBundle` |
 | `SourceLocation` | Source cursor position (file, line, col) |
 
 ### Metadata

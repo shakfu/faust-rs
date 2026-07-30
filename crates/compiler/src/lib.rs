@@ -18,7 +18,12 @@
 //! - Provide one orchestrator type ([`Compiler`]) for file-based compilation.
 //! - Aggregate typed stage errors into one top-level [`CompilerError`] surface.
 //! - Provide test/golden-oriented helper outputs (box dump, signal dump, FIR dump).
-//! - Route backend generation to C/C++ emitters with consistent options.
+//! - Route backend generation, with consistent options, to every emitter:
+//!   C++, C, Rust, Julia, AssemblyScript, interpreter `.fbc`, WASM, the JSON
+//!   description, and the Cranelift JIT status report. Every entry point
+//!   returns source text or bytes; a caller that needs to *run* JIT-compiled
+//!   code must own the generated module itself and so lowers through the FIR
+//!   entry points instead (see `crates/cranelift-ffi`).
 //!
 //! # API mapping status
 //! - External facade API is `adapted`: it targets behavior compatibility with
@@ -28,23 +33,40 @@
 //! - The active signal->FIR lowering route is [`SignalFirLane::TransformFastLane`],
 //!   owned by `crates/transform`.
 
+// Every public item carries documentation, as in `crates/transform`. The
+// workspace CI gate (`cargo clippy --workspace --all-targets -- -D warnings`)
+// turns this into a hard failure, so the surface cannot silently drift back to
+// undocumented.
+#![warn(missing_docs)]
+
+pub mod diagnostics_json;
 pub mod enrobage;
 
 mod box_preview;
-mod diagnostics;
+mod diagnostic_enrichment;
+mod emitters;
 mod error_mapping;
+mod eval_guidance;
 mod golden;
 mod json_naming;
 mod paths;
+mod service;
 mod signal_lowering;
+mod ui_paths;
+
+pub mod execution;
 
 use box_preview::*;
-use diagnostics::*;
+use diagnostic_enrichment::*;
 use error_mapping::*;
+use eval_guidance::*;
 pub use golden::*;
 pub use json_naming::*;
 pub use paths::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use signal_lowering::render_cranelift_module_report;
 use signal_lowering::*;
+use ui_paths::check_ui_control_paths;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
@@ -55,7 +77,15 @@ use std::time::{Duration, Instant};
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use codegen::backends::asc::{AscOptions, CodegenError as AscCodegenError, generate_asc_module};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
-use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
+use codegen::backends::codebox::{
+    CodeboxOptions, CodegenError as CodeboxCodegenError, generate_codebox_module,
+};
+use codegen::backends::cpp::{CodegenError as CppCodegenError, CppOptions, generate_cpp_module};
+#[cfg(not(target_arch = "wasm32"))]
+use codegen::backends::cranelift::{
+    CraneliftBackendError, CraneliftOptions, JitDspModule, StructFieldKind,
+    diagnose_cranelift_compute_subset_gap, generate_cranelift_module,
+};
 use codegen::backends::interp::{
     CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
     FbcReal, InterpOptions, generate_interp_module, write_fbc,
@@ -67,30 +97,34 @@ use codegen::backends::rust::{
     CodegenError as RustCodegenError, RustOptions, RustRealType, generate_rust_module,
 };
 use codegen::backends::wasm::layout::WasmMemoryLayout;
-use codegen::backends::wasm::{
-    WasmBackendError, WasmJsonContext, WasmModule, WasmOptions, generate_wasm_module_with_context,
-};
+use codegen::backends::wasm::{WasmBackendError, WasmJsonContext, WasmModule, WasmOptions};
 use codegen::json::{
     JsonBuildOptions, JsonDescription, JsonMetaEntry, build_json_description_from_fir,
 };
-use errors::codes::COMP_TYPE_FAILED;
-use errors::{
-    Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, Severity, SourceSpan, Stage,
+pub use diagnostics::{
+    Applicability, ContentHash, DebugContext, DetailCode, Diagnostic, DiagnosticBundle,
+    DiagnosticCategory, DiagnosticCode, DiagnosticTrace, DiagnosticValue, FactKey, HumanPosition,
+    IrReference, Label, LabelRole, LabelStyle, LspPosition, RelatedDiagnostic, Severity,
+    SourceCoordinateError, SourceFile, SourceId, SourceKind, SourceMap, SourceMapBuilder,
+    SourceRange, SourceSpan, Stage, SuggestedFix, TextEdit, TraceFrame, TraceKind,
 };
+use diagnostics::{ToDiagnostic, codes::COMP_TYPE_FAILED};
 use fir::{
     FirId, FirStore,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
-    inliner::sweep_scaffolding_drop_roots,
+    inliner::sweep_scaffolding_drop_roots_with_mapping,
 };
 use parser::VirtualSourceMap;
 use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};
 use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
 use signals::SigId;
+pub use sigtype::InferenceError;
 use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::schedule::SchedulingStrategy;
 pub use transform::signal_fir::{
-    ComputeMode, RealType, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
+    ComputeMode, ControlRateMode, ProcessingApi, RealType, VectorEffectiveMode,
+    VectorFallbackReason, VectorPipelineStatus,
 };
 use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
 use ui::UiProgram;
@@ -116,6 +150,10 @@ pub struct SignalCompileOutput {
     pub loaded_files: Vec<PathBuf>,
     /// Evaluated `process` box expression after `eval`.
     pub process_box: BoxId,
+    /// Definition-list root used for occurrence-aware diagnostic ownership.
+    pub definitions_root: BoxId,
+    /// Selected Faust entrypoint name for binding/source traces.
+    pub entrypoint_name: Box<str>,
     /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity_typed`.
     pub process_arity: BoxArity,
     /// Final propagated output signal list.
@@ -127,6 +165,12 @@ pub struct SignalCompileOutput {
     ///   `primal outputs + tangent outputs`, so `signals.len()` may be greater
     ///   than `process_arity.outputs`.
     pub signals: Vec<SigId>,
+    /// Box-to-Signal provenance accumulated during propagation.
+    ///
+    /// This remains source-neutral; join it with
+    /// [`parser::ParserCtx::box_provenance`] when rendering a source
+    /// diagnostic.
+    pub signal_origins: propagate::SignalOrigins,
     /// Canonical grouped UI artifact owned after the propagation boundary.
     ///
     /// Downstream FIR lowering/backends must treat this as the source of truth
@@ -145,6 +189,13 @@ pub struct SignalCompileOutput {
     /// Empty for programs without clocked wrappers. In-graph `SIGCLOCKENV`
     /// tokens index into this table.
     pub clock_domains: propagate::ClockDomainTable,
+    /// Non-blocking diagnostics produced by a successful compilation.
+    ///
+    /// Empty unless the caller opted in through
+    /// [`Compiler::with_semantic_warnings`]. Warnings never change the
+    /// compilation result: a caller that ignores this field gets exactly the
+    /// behavior it had before the field existed.
+    pub warnings: DiagnosticBundle,
 }
 
 impl SignalCompileOutput {
@@ -168,6 +219,8 @@ pub struct FirCompileOutput {
     pub store: FirStore,
     /// FIR module root id.
     pub module: FirId,
+    /// Signal/Box derivations remapped into the canonical FIR store.
+    pub origins: transform::signal_fir::FirOrigins,
     /// Checked signal-level vector activation or named fallback status.
     pub vector_pipeline_status: VectorPipelineStatus,
     /// Effective scalar or checked-vector compute shape in the returned FIR.
@@ -177,7 +230,7 @@ pub struct FirCompileOutput {
 }
 
 /// Request payload for the artifact-centric WASM compile service used by the
-/// planned `faustwasm` Rust integration.
+/// `faustwasm` Rust integration.
 ///
 /// # Role
 /// This request intentionally avoids the historical C++ `cfactory` model.
@@ -249,8 +302,8 @@ impl WasmArtifactRequest {
 /// - preserved semantics: owned WASM bytes plus companion JSON;
 /// - adapted: compile provenance is exposed as a dedicated field in addition to
 ///   the JSON payload;
-/// - deferred: warnings and aux files until the corresponding Rust services are
-///   ported.
+/// - adapted: opted-in warnings are retained beside the successful artifacts;
+/// - deferred: auxiliary files until the corresponding Rust service is ported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmArtifactBundle {
     /// Binary WebAssembly module bytes.
@@ -259,12 +312,19 @@ pub struct WasmArtifactBundle {
     pub dsp_json: String,
     /// High-level compilation provenance mirrored from the JSON payload.
     pub compile_options: String,
+    /// Non-blocking diagnostics retained from a successful compilation.
+    ///
+    /// This is empty unless the compiler was configured with
+    /// [`Compiler::with_semantic_warnings`]. Its presence never changes
+    /// success/failure semantics.
+    pub warnings: DiagnosticBundle,
 }
 
-/// Auxiliary file payload planned for future `generateAuxFiles` support in the
-/// Rust `faustwasm` service surface.
+/// One auxiliary file produced by [`Compiler::generate_aux_files`].
 ///
-/// Mapping status: `deferred`.
+/// Mapping status: `adapted` — the C++ API writes the files to disk, while
+/// this surface returns them in memory so wasm32 hosts without a writable
+/// filesystem can consume them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuxFileArtifact {
     /// Logical relative output path.
@@ -275,20 +335,41 @@ pub struct AuxFileArtifact {
     pub binary: bool,
 }
 
-/// Request payload reserved for future `expandDSP(...)` parity support.
+impl AuxFileArtifact {
+    /// One generated text file, named `<stem>.<extension>`.
+    fn text(stem: &str, extension: &str, content: String) -> Self {
+        Self {
+            path: format!("{stem}.{extension}"),
+            content: content.into_bytes(),
+            binary: false,
+        }
+    }
+
+    /// One generated binary file, named `<stem>.<extension>`.
+    fn binary(stem: &str, extension: &str, content: Vec<u8>) -> Self {
+        Self {
+            path: format!("{stem}.{extension}"),
+            content,
+            binary: true,
+        }
+    }
+}
+
+/// Request payload for [`Compiler::expand_dsp`].
 ///
-/// Mapping status: `deferred`.
+/// Mapping status: `adapted` — see that method for the one behavioral gap
+/// (no box→DSP serializer yet, so the expansion returns the input verbatim).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandDspRequest {
     /// Logical source name reported in diagnostics.
     pub source_name: String,
     /// Faust DSP source text to expand.
     pub source: String,
-    /// Raw argument string as passed by `faustwasm`.
+    /// Raw Faust-CLI-style argument string; only `-I <dir>` is read here.
     pub args: String,
 }
 
-/// Request payload for `generateAuxFiles(...)`.
+/// Request payload for [`Compiler::generate_aux_files`].
 ///
 /// Mapping status: `adapted`.
 #[derive(Debug, Clone, Default)]
@@ -297,7 +378,9 @@ pub struct GenerateAuxFilesRequest {
     pub source_name: String,
     /// Faust DSP source text used to generate the outputs.
     pub source: String,
-    /// Raw argument string as passed by `faustwasm`.
+    /// Raw Faust-CLI-style argument string selecting the outputs and the
+    /// compilation options; see [`Compiler::generate_aux_files`] for the
+    /// flags that are read.
     pub args: String,
     /// Optional in-memory library sources (e.g. embedded standard library
     /// bundle from the `wasm-ffi` build).  When non-empty these take
@@ -306,8 +389,14 @@ pub struct GenerateAuxFilesRequest {
     pub virtual_sources: VirtualSourceMap,
 }
 
-/// Structured error returned by the `faustwasm`-oriented compiler service
-/// methods when the requested helper surface is not implemented yet.
+/// Structured error returned by the helper-service methods of this facade
+/// ([`Compiler::get_faustwasm_info`], [`Compiler::expand_dsp`],
+/// [`Compiler::generate_aux_files`]).
+///
+/// These methods carry a service-shaped error instead of [`CompilerError`]
+/// because their callers are host bindings (the `wasm-ffi` exports, and
+/// through them `faustwasm`) that propagate a code plus a message rather
+/// than a typed stage error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaustwasmServiceError {
     /// Stable machine-readable reason code.
@@ -316,32 +405,38 @@ pub struct FaustwasmServiceError {
     pub message: String,
 }
 
-/// Stable error codes for the `faustwasm` helper-service surface.
+/// Stable error codes for the helper-service surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaustwasmServiceErrorCode {
-    /// The requested operation/key exists conceptually but is not implemented
-    /// yet in the Rust service layer.
+    /// The request could not be fulfilled: either the DSP failed to compile
+    /// (the common case — the message carries the rendered diagnostic), or
+    /// the requested operation is recognized but not implemented yet.
     Unsupported,
     /// The caller passed an unknown query key.
     InvalidArgument,
 }
 
 impl FaustwasmServiceError {
-    /// Builds an error tagged [`FaustwasmServiceErrorCode::Unsupported`] for a
-    /// query that is recognized but not yet implemented in the Rust service.
-    fn unsupported(message: impl Into<String>) -> Self {
+    /// Builds an error tagged [`FaustwasmServiceErrorCode::Unsupported`].
+    ///
+    /// Takes any [`Display`](std::fmt::Display) value so a fallible stage can
+    /// be mapped without a closure: `.map_err(FaustwasmServiceError::unsupported)?`
+    /// works for [`CompilerError`], backend codegen errors, and `draw` errors
+    /// alike. Every compile failure on this surface renders through here, so
+    /// one rendered diagnostic shape reaches the host for all of them.
+    fn unsupported(message: impl std::fmt::Display) -> Self {
         Self {
             code: FaustwasmServiceErrorCode::Unsupported,
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 
     /// Builds an error tagged [`FaustwasmServiceErrorCode::InvalidArgument`] for
     /// an unknown query key.
-    fn invalid_argument(message: impl Into<String>) -> Self {
+    fn invalid_argument(message: impl std::fmt::Display) -> Self {
         Self {
             code: FaustwasmServiceErrorCode::InvalidArgument,
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 }
@@ -371,8 +466,12 @@ pub struct FirVerifyOptions {
 ///
 /// Current canonical flow:
 /// `parse -> eval -> propagate -> (optional signal->FIR lowering) -> codegen`.
+#[derive(Clone)]
 pub struct Compiler {
     fir_verify: FirVerifyOptions,
+    /// Whether a successful compilation reports non-blocking semantic
+    /// observations such as potential out-of-domain math.
+    semantic_warnings: bool,
     entrypoint_name: Box<str>,
     /// Floating-point precision used for internal DSP computation in the
     /// transform fast lane. `Float32` (single precision) is the default;
@@ -388,16 +487,32 @@ pub struct Compiler {
     /// Mirrors Faust `-dlt N`. Default: `u32::MAX` (disabled).
     delay_line_threshold: u32,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
-    /// (`-vec`/`-vs`/`-lv`). Roadmap P6 (V1 plumbing only — `Vector` still
-    /// lowers as `Scalar` until the `LoopGraph` slices land).
+    /// (`-vec`/`-vs`/`-lv`).
+    ///
+    /// `Vector` runs the checked vector pipeline, which either certifies the
+    /// chunked-loop module or fails closed to scalar lowering; the outcome is
+    /// reported per compilation through [`FirCompileOutput`]'s
+    /// [`VectorPipelineStatus`] / [`VectorEffectiveMode`], so a caller never
+    /// has to guess which shape was emitted.
     compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
-    /// `--scheduling-strategy`). Vectorization port plan phase P2: plumbing
-    /// only — stored and threaded through to [`SignalFirOptions`], but no
-    /// compile path invokes [`transform::schedule::schedule`] yet.
+    /// `--scheduling-strategy`), threaded through to [`SignalFirOptions`] and
+    /// applied to the lowered dependency graph — the four documented values
+    /// generally emit different (equivalent) statement orders.
+    ///
     /// Independent of [`ComputeMode`]; defaults to
     /// [`SchedulingStrategy::DepthFirst`] in scalar and vector modes alike.
     scheduling_strategy: SchedulingStrategy,
+    /// Control-rate evaluation scheduling (`-ec` / `--external-control`):
+    /// [`ControlRateMode::External`] emits a separate `control` entry point.
+    /// The default reproduces the classic inline-per-block contract.
+    control_rate_mode: ControlRateMode,
+    /// Public processing-API shape (`-os` / `--one-sample`):
+    /// [`ProcessingApi::OneSample`] emits a `frame` entry point and keeps the
+    /// canonical block `compute` empty. Scalar mode only, and subject to
+    /// per-backend capability validation. The default reproduces the classic
+    /// block contract.
+    processing_api: ProcessingApi,
     /// Optional cooperative cancellation flag.
     ///
     /// When set, the evaluator checks this flag on every recursive call and
@@ -432,11 +547,16 @@ fn parser_float_size(real_type: RealType) -> u8 {
 impl WasmArtifactBundle {
     /// Repackages a compiled [`WasmModule`] into the public artifact bundle,
     /// pairing its binary and JSON with the formatted `compile_options` string.
-    fn from_wasm_module(module: WasmModule, compile_options: String) -> Self {
+    fn from_wasm_module(
+        module: WasmModule,
+        compile_options: String,
+        warnings: DiagnosticBundle,
+    ) -> Self {
         Self {
             wasm_bytes: module.wasm_binary,
             dsp_json: module.dsp_json,
             compile_options,
+            warnings,
         }
     }
 }
@@ -453,9 +573,24 @@ impl Compiler {
             delay_line_threshold: u32::MAX,
             compute_mode: ComputeMode::Scalar,
             scheduling_strategy: SchedulingStrategy::DepthFirst,
+            control_rate_mode: ControlRateMode::InlinePerBlock,
+            processing_api: ProcessingApi::Block,
             cancel: None,
             timing_sink: None,
+            semantic_warnings: false,
         }
+    }
+
+    /// Returns a compiler facade that collects non-blocking semantic warnings.
+    ///
+    /// Off by default, mirroring the C++ policy where the potential
+    /// out-of-domain class is reported only when the caller asks for it. When
+    /// enabled, warnings land in [`SignalCompileOutput::warnings`]; they never
+    /// affect whether compilation succeeds.
+    #[must_use]
+    pub fn with_semantic_warnings(mut self, enabled: bool) -> Self {
+        self.semantic_warnings = enabled;
+        self
     }
 
     /// Returns a compiler facade configured with FIR verifier settings.
@@ -506,12 +641,38 @@ impl Compiler {
 
     /// Selects the `compute()` codegen strategy (`-vec` / scalar).
     ///
-    /// Roadmap P6 (V1). Vector mode is currently plumbing-only: selecting it
-    /// records the option but still emits scalar code until the `LoopGraph`
-    /// lowering (V2+) lands.
+    /// [`ComputeMode::Vector`] restructures `compute` into an outer chunk loop
+    /// (`-vs` size, `-lv` driver variant). Selection is checked, not blind: a
+    /// shape the vector pipeline cannot certify falls back to scalar lowering
+    /// rather than emitting unverified code, and either way the result is
+    /// bit-exact against scalar output for the same program. Inspect
+    /// [`FirCompileOutput::vector_effective_mode`] to see which shape was
+    /// emitted.
     #[must_use]
     pub fn with_compute_mode(mut self, mode: ComputeMode) -> Self {
         self.compute_mode = mode;
+        self
+    }
+
+    /// Selects the control-rate evaluation scheduling (`-ec`).
+    ///
+    /// [`ControlRateMode::External`] moves block-rate control work into a
+    /// separate `control` entry point that the host schedules explicitly.
+    /// Subject to per-backend capability validation at compile time.
+    #[must_use]
+    pub fn with_control_rate_mode(mut self, mode: ControlRateMode) -> Self {
+        self.control_rate_mode = mode;
+        self
+    }
+
+    /// Selects the public processing-API shape (`-os`).
+    ///
+    /// [`ProcessingApi::OneSample`] requests the flat-array `frame` entry
+    /// point with an empty canonical `compute`. Rejected in vector mode and
+    /// subject to per-backend capability validation at compile time.
+    #[must_use]
+    pub fn with_processing_api(mut self, api: ProcessingApi) -> Self {
+        self.processing_api = api;
         self
     }
 
@@ -574,6 +735,8 @@ impl Compiler {
             delay_line_threshold: self.delay_line_threshold,
             compute_mode: self.compute_mode,
             scheduling_strategy: self.scheduling_strategy,
+            control_rate_mode: self.control_rate_mode,
+            processing_api: self.processing_api,
             timing_sink: self.timing_sink.clone(),
         }
     }
@@ -597,8 +760,10 @@ impl Compiler {
             self.delay_line_threshold,
             self.compute_mode,
             self.scheduling_strategy,
+            self.control_rate_mode,
+            self.processing_api,
         )
-        .map_err(|error| lower_fir_error_to_compiler(source, error))
+        .map_err(|error| lower_fir_error_to_compiler(source, signals, error))
     }
 
     #[must_use]
@@ -824,1151 +989,6 @@ impl Compiler {
         self.pipeline_to_signals(source_name, output, None)
     }
 
-    /// Parses + evaluates + propagates one source, then emits C++ text.
-    pub fn compile_source_to_cpp(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &CppOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_cpp_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits C text.
-    pub fn compile_source_to_c(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &COptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_c_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits Julia text.
-    pub fn compile_source_to_julia(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &JuliaOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_julia_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits C text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_source_to_c_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &COptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_c(source_name, &signals, options, ctx)
-            .map_err(|e| lower_c_error_to_compiler(source_name, e))
-    }
-
-    /// Parses + evaluates + propagates one source, then emits AssemblyScript.
-    pub fn compile_source_to_asc(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &AscOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_asc_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits AssemblyScript
-    /// using the selected signal->FIR lowering lane.
-    pub fn compile_source_to_asc_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &AscOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_asc(source_name, &signals, options, ctx)
-            .map_err(|e| lower_asc_error_to_compiler(source_name, e))
-    }
-
-    /// Parses + evaluates + propagates one source, then emits Rust text.
-    pub fn compile_source_to_rust(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &RustOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_rust_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits Rust text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_source_to_rust_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &RustOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_rust(source_name, &signals, options, ctx)
-            .map_err(|e| lower_rust_error_to_compiler(source_name, e))
-    }
-
-    /// Parses + evaluates + propagates one source, then emits Julia text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_source_to_julia_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &JuliaOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_julia(source_name, &signals, options, ctx)
-            .map_err(|e| lower_julia_error_to_compiler(source_name, e))
-    }
-
-    /// Parses + evaluates + propagates one source, then emits C++ text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_source_to_cpp_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &CppOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_cpp(source_name, &signals, options, ctx)
-            .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
-    }
-
-    /// Parses + evaluates + propagates one source, then lowers to FIR using
-    /// the selected signal->FIR lane.
-    pub fn compile_source_to_fir_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        lane: SignalFirLane,
-    ) -> Result<FirCompileOutput, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        self.lower_to_fir(source_name, &signals, lane)
-    }
-
-    /// Parses + evaluates + propagates one source, then emits a WASM module
-    /// plus its matched companion JSON.
-    ///
-    /// This API defaults to [`SignalFirLane::TransformFastLane`] because the
-    /// WASM/JSON-facing artifact surfaces need the canonical lowered FIR module
-    /// with working `metadata`/`buildUserInterface` bodies.
-    pub fn compile_source_to_wasm(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &WasmOptions,
-    ) -> Result<WasmModule, CompilerError> {
-        self.compile_source_to_wasm_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits a WASM module
-    /// through the selected signal->FIR lane.
-    pub fn compile_source_to_wasm_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &WasmOptions,
-        lane: SignalFirLane,
-    ) -> Result<WasmModule, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered = self.lower_to_fir(source_name, &signals, lane)?;
-        let json_context = wasm_json_context_for_memory_source(
-            source_name,
-            &signals,
-            compile_options_json_string(Some("wasm"), options.double_precision),
-        );
-        generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
-            .map_err(|error| CompilerError::codegen_wasm(source_name, error))
-    }
-
-    /// Compiles one in-memory DSP source into an owned artifact bundle
-    /// containing both the WASM bytes and the companion JSON.
-    ///
-    /// This is the pure-Rust compile-service entry point intended for the
-    /// future `faustwasm` embedded-compiler mode. The returned
-    /// [`WasmArtifactBundle`] avoids any explicit compiler-side object lifetime
-    /// and can be cached directly by higher-level hosts.
-    ///
-    /// Requests default to [`SignalFirLane::TransformFastLane`] for the same
-    /// reason as [`Compiler::compile_source_to_wasm`]: JSON/WASM artifact
-    /// consumers need preserved UI and metadata fidelity.
-    pub fn compile_wasm_artifact(
-        &self,
-        request: &WasmArtifactRequest,
-    ) -> Result<WasmArtifactBundle, CompilerError> {
-        let compile_options =
-            compile_options_json_string(Some("wasm"), request.wasm_options.double_precision);
-        let signals = self.compile_source_to_signals_with_import_context(
-            &request.source_name,
-            &request.source,
-            &request.import_dirs,
-            &request.virtual_sources,
-        )?;
-        let lowered = self.lower_to_fir(&request.source_name, &signals, request.lane)?;
-        let mut json_context = wasm_json_context_for_memory_source(
-            &request.source_name,
-            &signals,
-            compile_options.clone(),
-        );
-        json_context.include_pathnames = request
-            .import_dirs
-            .iter()
-            .map(|dir| dir.to_string_lossy().into_owned())
-            .collect();
-        json_context.library_list = collect_library_list(&signals);
-        let module = generate_wasm_module_with_context(
-            &lowered.store,
-            lowered.module,
-            &request.wasm_options,
-            &json_context,
-        )
-        .map_err(|error| CompilerError::codegen_wasm(&request.source_name, error))?;
-        Ok(WasmArtifactBundle::from_wasm_module(
-            module,
-            compile_options,
-        ))
-    }
-
-    /// Parses + evaluates + propagates one source, then emits strict C++-style JSON.
-    ///
-    /// Like the WASM artifact entry points, this API defaults to
-    /// [`SignalFirLane::TransformFastLane`] so the reconstructed JSON sees the
-    /// canonical FIR `metadata` and `buildUserInterface` bodies.
-    pub fn compile_source_to_json(
-        &self,
-        source_name: &str,
-        source: &str,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_json_with_lane(source_name, source, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one source, then emits strict C++-style JSON
-    /// through the selected signal->FIR lane.
-    pub fn compile_source_to_json_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_json_with_lane_and_compile_options(
-            source_name,
-            source,
-            lane,
-            compile_options_json_string(None, self.real_type == RealType::Float64),
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits strict C++-style JSON
-    /// through the selected signal->FIR lane with explicit `compile_options`.
-    pub fn compile_source_to_json_with_lane_and_compile_options(
-        &self,
-        source_name: &str,
-        source: &str,
-        lane: SignalFirLane,
-        compile_options: String,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered = self.lower_to_fir(source_name, &signals, lane)?;
-        let json = build_strict_json_description(
-            &lowered.store,
-            lowered.module,
-            StrictJsonContext {
-                filename: source_name_to_filename(source_name),
-                include_pathnames: Vec::new(),
-                library_list: Vec::new(),
-                top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
-                compile_options,
-                double_precision: self.real_type == RealType::Float64,
-            },
-        )
-        .map_err(|error| CompilerError::codegen_wasm(source_name, error))?;
-        Ok(json.render())
-    }
-
-    /// Parses + evaluates + propagates one file, then emits C++ text.
-    pub fn compile_file_to_cpp(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &CppOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_cpp_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits C text.
-    pub fn compile_file_to_c(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &COptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_c_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits Julia text.
-    pub fn compile_file_to_julia(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &JuliaOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_julia_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits AssemblyScript.
-    pub fn compile_file_to_asc(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &AscOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_asc_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits AssemblyScript using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_file_to_asc_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &AscOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_asc(&source, &signals, options, ctx)
-            .map_err(|e| lower_asc_error_to_compiler(&source, e))
-    }
-
-    /// Parses + evaluates + propagates one file, then emits Rust text.
-    pub fn compile_file_to_rust(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &RustOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_rust_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits Rust text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_file_to_rust_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &RustOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_rust(&source, &signals, options, ctx)
-            .map_err(|e| lower_rust_error_to_compiler(&source, e))
-    }
-
-    /// Parses + evaluates + propagates one file, then emits C text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_file_to_c_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &COptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_c(&source, &signals, options, ctx)
-            .map_err(|e| lower_c_error_to_compiler(&source, e))
-    }
-
-    /// Parses + evaluates + propagates one file, then emits Julia text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_file_to_julia_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &JuliaOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_julia(&source, &signals, options, ctx)
-            .map_err(|e| lower_julia_error_to_compiler(&source, e))
-    }
-
-    /// Parses + evaluates + propagates one file, then emits C++ text using
-    /// the selected signal->FIR lowering lane.
-    pub fn compile_file_to_cpp_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &CppOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_cpp(&source, &signals, options, ctx)
-            .map_err(|e| lower_cpp_error_to_compiler(&source, e))
-    }
-
-    /// Parses + evaluates + propagates one file, then lowers to FIR using
-    /// the selected signal->FIR lane.
-    pub fn compile_file_to_fir_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        lane: SignalFirLane,
-    ) -> Result<FirCompileOutput, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        self.lower_to_fir(&source, &signals, lane)
-    }
-
-    /// Parses + evaluates + propagates one file, then emits a WASM module
-    /// plus its matched companion JSON through the selected signal->FIR lane.
-    pub fn compile_file_to_wasm(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &WasmOptions,
-    ) -> Result<WasmModule, CompilerError> {
-        self.compile_file_to_wasm_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits a WASM module
-    /// through the selected signal->FIR lane.
-    pub fn compile_file_to_wasm_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &WasmOptions,
-        lane: SignalFirLane,
-    ) -> Result<WasmModule, CompilerError> {
-        let source = path.display().to_string();
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered = self.lower_to_fir(&source, &signals, lane)?;
-        let json_context = wasm_json_context_for_file(
-            path,
-            search_paths,
-            &signals,
-            compile_options_json_string(Some("wasm"), options.double_precision),
-        );
-        generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
-            .map_err(|error| CompilerError::codegen_wasm(&source, error))
-    }
-
-    /// Compiles one file-backed DSP source into an owned artifact bundle.
-    ///
-    /// Compared with [`Self::compile_file_to_wasm_with_lane`], this packages the
-    /// result in the artifact-centric shape expected by the `faustwasm`
-    /// dual-mode integration plan, so downstream code can treat compile mode
-    /// and precompiled-artifact mode uniformly.
-    pub fn compile_file_to_wasm_artifact_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &WasmOptions,
-        lane: SignalFirLane,
-    ) -> Result<WasmArtifactBundle, CompilerError> {
-        let compile_options = compile_options_json_string(Some("wasm"), options.double_precision);
-        let module = self.compile_file_to_wasm_with_lane(path, search_paths, options, lane)?;
-        Ok(WasmArtifactBundle::from_wasm_module(
-            module,
-            compile_options,
-        ))
-    }
-
-    /// Compiles one file-backed DSP source into an owned artifact bundle using
-    /// the production default signal->FIR lane.
-    pub fn compile_file_to_wasm_artifact(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &WasmOptions,
-    ) -> Result<WasmArtifactBundle, CompilerError> {
-        self.compile_file_to_wasm_artifact_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits strict C++-style JSON.
-    pub fn compile_file_to_json(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_json_with_compile_options(
-            path,
-            search_paths,
-            lane,
-            compile_options_json_string(None, self.real_type == RealType::Float64),
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits strict C++-style JSON
-    /// with explicit `compile_options` provenance.
-    pub fn compile_file_to_json_with_compile_options(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        lane: SignalFirLane,
-        compile_options: String,
-    ) -> Result<String, CompilerError> {
-        let source = path.display().to_string();
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered = self.lower_to_fir(&source, &signals, lane)?;
-        let library_list = collect_library_list(&signals);
-        let json = build_strict_json_description(
-            &lowered.store,
-            lowered.module,
-            StrictJsonContext {
-                filename: path
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-                include_pathnames: merge_import_search_paths(path, search_paths)
-                    .into_iter()
-                    .map(|dir| dir.to_string_lossy().into_owned())
-                    .collect(),
-                library_list,
-                top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
-                compile_options,
-                double_precision: self.real_type == RealType::Float64,
-            },
-        )
-        .map_err(|error| CompilerError::codegen_wasm(&source, error))?;
-        Ok(json.render())
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits C++ text.
-    pub fn compile_file_default_to_cpp(
-        &self,
-        path: &Path,
-        options: &CppOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_cpp_with_lane(path, options, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits C text.
-    pub fn compile_file_default_to_c(
-        &self,
-        path: &Path,
-        options: &COptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_c_with_lane(path, options, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits Julia text.
-    pub fn compile_file_default_to_julia(
-        &self,
-        path: &Path,
-        options: &JuliaOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_julia_with_lane(
-            path,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits AssemblyScript.
-    pub fn compile_file_default_to_asc(
-        &self,
-        path: &Path,
-        options: &AscOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_asc_with_lane(path, options, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits AssemblyScript using the selected signal->FIR lowering lane.
-    pub fn compile_file_default_to_asc_with_lane(
-        &self,
-        path: &Path,
-        options: &AscOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_asc_with_lane(path, &[], options, lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits Rust text.
-    pub fn compile_file_default_to_rust(
-        &self,
-        path: &Path,
-        options: &RustOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_rust_with_lane(path, options, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits Rust text using the selected signal->FIR lowering lane.
-    pub fn compile_file_default_to_rust_with_lane(
-        &self,
-        path: &Path,
-        options: &RustOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_rust_with_lane(path, &[], options, lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits C text using the selected signal->FIR lowering lane.
-    pub fn compile_file_default_to_c_with_lane(
-        &self,
-        path: &Path,
-        options: &COptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_c_with_lane(path, &[], options, lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits Julia text using the selected signal->FIR lowering lane.
-    pub fn compile_file_default_to_julia_with_lane(
-        &self,
-        path: &Path,
-        options: &JuliaOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_julia_with_lane(path, &[], options, lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits C++ text using the selected signal->FIR lowering lane.
-    pub fn compile_file_default_to_cpp_with_lane(
-        &self,
-        path: &Path,
-        options: &CppOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_cpp_with_lane(path, &[], options, lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then lowers to FIR using the selected signal->FIR lane.
-    pub fn compile_file_default_to_fir_with_lane(
-        &self,
-        path: &Path,
-        lane: SignalFirLane,
-    ) -> Result<FirCompileOutput, CompilerError> {
-        self.compile_file_to_fir_with_lane(path, &[], lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits a WASM module scaffold.
-    ///
-    /// This file-backed convenience wrapper follows the same default-lane
-    /// policy as [`Compiler::compile_source_to_wasm`]: artifact-oriented WASM
-    /// entry points default to [`SignalFirLane::TransformFastLane`].
-    pub fn compile_file_default_to_wasm(
-        &self,
-        path: &Path,
-        options: &WasmOptions,
-    ) -> Result<WasmModule, CompilerError> {
-        self.compile_file_default_to_wasm_with_lane(path, options, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits a WASM module through the selected signal->FIR lane.
-    pub fn compile_file_default_to_wasm_with_lane(
-        &self,
-        path: &Path,
-        options: &WasmOptions,
-        lane: SignalFirLane,
-    ) -> Result<WasmModule, CompilerError> {
-        self.compile_file_to_wasm_with_lane(path, &[], options, lane)
-    }
-
-    /// Compiles one file-backed DSP source with the default import search model
-    /// into an owned artifact bundle.
-    ///
-    /// This is the file-backed companion to [`Compiler::compile_wasm_artifact`]
-    /// and therefore also defaults to [`SignalFirLane::TransformFastLane`].
-    pub fn compile_file_default_to_wasm_artifact(
-        &self,
-        path: &Path,
-        options: &WasmOptions,
-    ) -> Result<WasmArtifactBundle, CompilerError> {
-        self.compile_file_to_wasm_artifact(path, &[], options)
-    }
-
-    /// Returns one `faustwasm` helper-info string.
-    ///
-    /// Current compatibility policy mirrors C++ `libFaustWasm::getInfos` for
-    /// `version`, `help`, `libdir`, `includedir`, `archdir`, `dspdir`, and
-    /// `pathslist`; unknown keys remain invalid.
-    pub fn get_faustwasm_info(&self, what: &str) -> Result<String, FaustwasmServiceError> {
-        match what {
-            "version" => Ok(Self::version().to_owned()),
-            "help" => Ok(faustwasm_info_help_text()),
-            "libdir" => Ok(FaustInstallPaths::from_environment().render_lib_dir()),
-            "includedir" => Ok(FaustInstallPaths::from_environment().render_include_dir()),
-            "archdir" => Ok(FaustInstallPaths::from_environment().render_arch_dir()),
-            "dspdir" => Ok(FaustInstallPaths::from_environment().render_dsp_dir()),
-            "pathslist" => Ok(FaustInstallPaths::from_environment().render_paths_list()),
-            _ => Err(FaustwasmServiceError::invalid_argument(format!(
-                "incorrect argument passed to getInfos: {what}"
-            ))),
-        }
-    }
-
-    /// Validate and expand one Faust DSP source.
-    ///
-    /// Parses and evaluates the program using any `-I` search paths carried in
-    /// `request.args`.  If compilation succeeds the original source text is
-    /// returned verbatim; the Rust compiler currently has no box→DSP serializer
-    /// analogous to C++ `printBox`, so the expanded form equals the input.
-    ///
-    /// Mirrors: `expandDSPFromString` / `expandDSPFromFile` (C++ Faust API).
-    pub fn expand_dsp(&self, request: &ExpandDspRequest) -> Result<String, FaustwasmServiceError> {
-        let argv: Vec<String> = request.args.split_whitespace().map(str::to_owned).collect();
-        let search_paths = parse_search_paths_from_argv(&argv);
-        self.compile_source_to_signals_with_search_paths(
-            &request.source_name,
-            &request.source,
-            &search_paths,
-        )
-        .map(|_| request.source.clone())
-        .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))
-    }
-
-    /// Generate auxiliary output files from a Faust DSP source.
-    ///
-    /// Inspects `request.args` for output-format flags (`-cpp`, `-c`, `-wasm`,
-    /// `-json`, `-svg`) and returns one [`AuxFileArtifact`] per generated file.
-    /// When no output flag is present an empty list is returned (no error).
-    ///
-    /// SVG generation writes to a temporary directory and collects all produced
-    /// `.svg` files into the result.  The other formats are emitted in memory.
-    ///
-    /// Mirrors: `generateAuxFilesFromString` / `generateAuxFilesFromFile`
-    /// (C++ Faust API).
-    ///
-    /// Additionally, faustwasm-style transpile requests using `-lang asc`
-    /// produce one AssemblyScript source artifact (honoring `-cn` and `-o`).
-    pub fn generate_aux_files(
-        &self,
-        request: &GenerateAuxFilesRequest,
-    ) -> Result<Vec<AuxFileArtifact>, FaustwasmServiceError> {
-        let argv: Vec<String> = request.args.split_whitespace().map(str::to_owned).collect();
-        let search_paths = parse_search_paths_from_argv(&argv);
-        let double = argv.iter().any(|a| a == "-double");
-
-        // faustwasm-style transpile request: `-lang asc` produces one
-        // AssemblyScript source artifact instead of the flag-driven outputs.
-        if let Some(position) = argv.iter().position(|arg| arg == "-lang")
-            && argv.get(position + 1).map(String::as_str) == Some("asc")
-        {
-            return self.generate_asc_aux_file(request, &argv, &search_paths);
-        }
-
-        let wants_cpp = argv.iter().any(|a| a == "-cpp");
-        let wants_c = argv.iter().any(|a| a == "-c");
-        let wants_wasm = argv.iter().any(|a| a == "-wasm");
-        let wants_json = argv.iter().any(|a| a == "-json");
-        let wants_svg = argv.iter().any(|a| a == "-svg");
-
-        let mut artifacts: Vec<AuxFileArtifact> = Vec::new();
-        let stem = std::path::Path::new(&request.source_name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("process");
-
-        if wants_cpp {
-            let cpp = self
-                .compile_source_to_cpp(
-                    &request.source_name,
-                    &request.source,
-                    &CppOptions::default(),
-                )
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            artifacts.push(AuxFileArtifact {
-                path: format!("{stem}.cpp"),
-                content: cpp.into_bytes(),
-                binary: false,
-            });
-        }
-
-        if wants_c {
-            let c = self
-                .compile_source_to_c(&request.source_name, &request.source, &COptions::default())
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            artifacts.push(AuxFileArtifact {
-                path: format!("{stem}.c"),
-                content: c.into_bytes(),
-                binary: false,
-            });
-        }
-
-        if wants_wasm {
-            let opts = WasmOptions {
-                double_precision: double,
-                ..Default::default()
-            };
-            let wasm = self
-                .compile_source_to_wasm(&request.source_name, &request.source, &opts)
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            artifacts.push(AuxFileArtifact {
-                path: format!("{stem}.wasm"),
-                content: wasm.wasm_binary,
-                binary: true,
-            });
-            artifacts.push(AuxFileArtifact {
-                path: format!("{stem}.json"),
-                content: wasm.dsp_json.into_bytes(),
-                binary: false,
-            });
-        } else if wants_json {
-            let json = self
-                .compile_source_to_json(&request.source_name, &request.source)
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            artifacts.push(AuxFileArtifact {
-                path: format!("{stem}.json"),
-                content: json.into_bytes(),
-                binary: false,
-            });
-        }
-
-        if wants_svg {
-            let signals = self
-                .compile_source_to_signals_with_import_context(
-                    &request.source_name,
-                    &request.source,
-                    &search_paths,
-                    &request.virtual_sources,
-                )
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            let draw_config = draw::DrawConfig::default();
-            // Use "process" as the diagram name so the root SVG file is
-            // always process.svg, matching the C++ compiler convention and
-            // the faustwasm FaustSvgDiagrams.from(...) expectation.
-            // draw_schema_to_memory avoids any filesystem access so this
-            // path is safe on wasm32-unknown-unknown targets.
-            let svg_pairs = draw::draw_schema_to_memory(
-                &signals.parse.state.arena,
-                signals.process_box,
-                "process",
-                &draw_config,
-                &signals.def_names,
-            )
-            .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            artifacts.extend(
-                svg_pairs
-                    .into_iter()
-                    .map(|(path, content)| AuxFileArtifact {
-                        path,
-                        content,
-                        binary: false,
-                    }),
-            );
-        }
-
-        Ok(artifacts)
-    }
-
-    /// Generates the AssemblyScript source artifact for a `-lang asc`
-    /// `generateAuxFiles` request (`-cn` selects the class name, `-o` the
-    /// artifact path; `request.virtual_sources` supplies in-memory libraries).
-    fn generate_asc_aux_file(
-        &self,
-        request: &GenerateAuxFilesRequest,
-        argv: &[String],
-        search_paths: &[PathBuf],
-    ) -> Result<Vec<AuxFileArtifact>, FaustwasmServiceError> {
-        let arg_value = |flag: &str| {
-            argv.iter()
-                .position(|arg| arg == flag)
-                .and_then(|position| argv.get(position + 1))
-                .cloned()
-        };
-        let signals = self
-            .compile_source_to_signals_with_import_context(
-                &request.source_name,
-                &request.source,
-                search_paths,
-                &request.virtual_sources,
-            )
-            .map_err(|error| FaustwasmServiceError::invalid_argument(error.to_string()))?;
-        let lowered = self
-            .lower_to_fir(
-                &request.source_name,
-                &signals,
-                SignalFirLane::TransformFastLane,
-            )
-            .map_err(|error| FaustwasmServiceError::invalid_argument(error.to_string()))?;
-
-        let class_name = arg_value("-cn").unwrap_or_else(|| {
-            sanitize_cpp_ident(source_name_to_class(&request.source_name).as_str())
-        });
-
-        // Strict C++-style JSON snapshot, embedded as getJSON() in the output —
-        // downstream tooling parses it for inputs/outputs and the UI tree
-        // (mirrors the C++ asc backend's getJSON()).
-        let json = build_strict_json_description(
-            &lowered.store,
-            lowered.module,
-            StrictJsonContext {
-                filename: source_name_to_filename(&request.source_name),
-                include_pathnames: Vec::new(),
-                library_list: Vec::new(),
-                top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
-                compile_options: compile_options_json_string(
-                    Some("asc"),
-                    self.real_type == RealType::Float64,
-                ),
-                double_precision: self.real_type == RealType::Float64,
-            },
-        )
-        .ok()
-        .map(|json| json.render());
-
-        let options = AscOptions {
-            class_name: Some(class_name.clone()),
-            double_precision: self.real_type == RealType::Float64,
-            json,
-            ..AscOptions::default()
-        };
-        let asc = generate_asc_module(&lowered.store, lowered.module, &options)
-            .map_err(|error| FaustwasmServiceError::invalid_argument(error.to_string()))?;
-
-        let path = arg_value("-o").unwrap_or_else(|| format!("{class_name}.ts"));
-        Ok(vec![AuxFileArtifact {
-            path,
-            content: asc.into_bytes(),
-            binary: false,
-        }])
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits strict C++-style JSON.
-    ///
-    /// This file-backed convenience wrapper follows the same default-lane
-    /// policy as [`Compiler::compile_source_to_json`].
-    pub fn compile_file_default_to_json(&self, path: &Path) -> Result<String, CompilerError> {
-        self.compile_file_default_to_json_with_lane(path, SignalFirLane::TransformFastLane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits strict C++-style JSON through the selected signal->FIR lane.
-    pub fn compile_file_default_to_json_with_lane(
-        &self,
-        path: &Path,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_json(path, &[], lane)
-    }
-
-    /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits strict C++-style JSON through the selected signal->FIR lane
-    /// with explicit `compile_options` provenance.
-    pub fn compile_file_default_to_json_with_lane_and_compile_options(
-        &self,
-        path: &Path,
-        lane: SignalFirLane,
-        compile_options: String,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_json_with_compile_options(path, &[], lane, compile_options)
-    }
-
-    /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
-    /// text via the interpreter backend using the transform fast lane.
-    pub fn compile_source_to_interp(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &InterpOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_source_to_interp_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
-    /// text using the selected signal->FIR lowering lane.
-    pub fn compile_source_to_interp_with_lane(
-        &self,
-        source_name: &str,
-        source: &str,
-        options: &InterpOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_source_to_signals(source_name, source)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_interp(source_name, &signals, options, ctx)
-            .map_err(|e| lower_interp_error_to_compiler(source_name, e))
-    }
-
-    /// Like [`compile_source_to_interp_with_lane`](Self::compile_source_to_interp_with_lane)
-    /// but resolves `import("...")` directives against `search_paths`.
-    ///
-    /// Passing an empty `search_paths` is equivalent to
-    /// [`compile_source_to_interp_with_lane`]. Supply directories holding the
-    /// Faust standard libraries (e.g. containing `stdfaust.lib`) to compile
-    /// sources that depend on them.
-    pub fn compile_source_to_interp_with_lane_and_search_paths(
-        &self,
-        source_name: &str,
-        source: &str,
-        search_paths: &[PathBuf],
-        options: &InterpOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals =
-            self.compile_source_to_signals_with_search_paths(source_name, source, search_paths)?;
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_interp(source_name, &signals, options, ctx)
-            .map_err(|e| lower_interp_error_to_compiler(source_name, e))
-    }
-
-    /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
-    /// text via the interpreter backend using the transform fast lane.
-    pub fn compile_file_to_interp(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &InterpOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_interp_with_lane(
-            path,
-            search_paths,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
-    /// text using the selected signal->FIR lowering lane.
-    pub fn compile_file_to_interp_with_lane(
-        &self,
-        path: &Path,
-        search_paths: &[PathBuf],
-        options: &InterpOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        let signals = self.compile_file_to_signals(path, search_paths)?;
-        let source = path.display().to_string();
-        let ctx = self.lowering_ctx(lane);
-        lower_signals_to_interp(&source, &signals, options, ctx)
-            .map_err(|e| lower_interp_error_to_compiler(&source, e))
-    }
-
-    /// Parses + evaluates + propagates one file with default import search
-    /// path, then emits `.fbc` bytecode text via the interpreter backend.
-    pub fn compile_file_default_to_interp(
-        &self,
-        path: &Path,
-        options: &InterpOptions,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_interp_with_lane(
-            path,
-            options,
-            SignalFirLane::TransformFastLane,
-        )
-    }
-
-    /// Parses + evaluates + propagates one file with default import search
-    /// path, then emits `.fbc` bytecode text using the selected lane.
-    pub fn compile_file_default_to_interp_with_lane(
-        &self,
-        path: &Path,
-        options: &InterpOptions,
-        lane: SignalFirLane,
-    ) -> Result<String, CompilerError> {
-        self.compile_file_to_interp_with_lane(path, &[], options, lane)
-    }
-
     /// Runs the shared `parse output -> eval -> arity -> propagate` pipeline.
     ///
     /// This is the semantic heart of the facade. All higher-level helpers
@@ -1984,9 +1004,10 @@ impl Compiler {
         mut output: ParseOutput,
         eval_source_context: Option<eval::EvalSourceContext>,
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let root = output
-            .root
-            .ok_or_else(|| CompilerError::missing_root(source))?;
+        let source_map = output.diagnostics.source_map().clone();
+        let root = output.root.ok_or_else(|| {
+            CompilerError::missing_root(source).with_source_map(source_map.clone())
+        })?;
 
         let eval_result = self.time_phase("evaluation", || {
             match (&eval_source_context, &self.cancel) {
@@ -2016,9 +1037,15 @@ impl Compiler {
         });
         let (process_box, eval_stats) = eval_result.map_err(|error| {
             let node = eval_error_node(&error);
-            let owner =
-                node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
-            let mut diagnostic = error.clone().into_diagnostic();
+            let owner = node.and_then(|n| {
+                reachable_owner_definition_name_for_node(
+                    &output.state.arena,
+                    root,
+                    n,
+                    self.entrypoint_name.as_ref(),
+                )
+            });
+            let mut diagnostic = error.to_diagnostic();
             if let Some(n) = node {
                 diagnostic = enrich_diagnostic_with_node(
                     diagnostic,
@@ -2038,10 +1065,32 @@ impl Compiler {
                     self.entrypoint_name.as_ref(),
                 );
             }
+            // Guidance runs after labeling: a rename edit needs the primary
+            // label that `maybe_add_eval_source_labels` just resolved.
+            diagnostic = add_eval_guidance(
+                diagnostic,
+                &error,
+                &output.state.ctx,
+                &output.state.arena,
+                &source_map,
+            );
+            let mut diagnostics =
+                if let eval::EvalError::SourceParseFailure { diagnostics, .. } = &error {
+                    let mut preserved = diagnostics.clone();
+                    preserved.push(diagnostic);
+                    preserved
+                } else {
+                    let mut bundle = bundle_from_diagnostic(diagnostic);
+                    bundle.set_source_map(source_map.clone());
+                    bundle
+                };
+            if diagnostics.source_map().is_empty() {
+                diagnostics.set_source_map(source_map.clone());
+            }
             CompilerError::Eval {
                 source: source.into(),
                 error: Box::new(error),
-                diagnostics: bundle_from_diagnostic(diagnostic),
+                diagnostics,
             }
         })?;
 
@@ -2060,6 +1109,7 @@ impl Compiler {
                     ep,
                     false,
                 )
+                .with_source_map(source_map.clone())
             })?;
 
         let mut arity_cache = ArityCache::new();
@@ -2077,6 +1127,7 @@ impl Compiler {
                     ep,
                     true,
                 )
+                .with_source_map(source_map.clone())
             })?;
 
         let compilation_metadata = eval_source_context.as_ref().map_or_else(
@@ -2106,28 +1157,46 @@ impl Compiler {
                     ep,
                     true,
                 )
+                .with_source_map(source_map.clone())
             })?;
-        self.time_phase("signal-type-validation", || {
-            validate_signal_types(
-                source,
-                &output.state.arena,
-                &propagated.signals,
-                &propagated.ui,
-            )
+        self.time_phase("ui-path-check", || {
+            check_ui_control_paths(source, &propagated.ui, &output.state.ctx, &source_map)
         })?;
+        let mut warnings = self
+            .time_phase("signal-type-validation", || {
+                validate_signal_types(
+                    source,
+                    &output.state.arena,
+                    &propagated.signals,
+                    &propagated.ui,
+                    &propagated.signal_origins,
+                    &output.state.ctx,
+                    root,
+                    ep,
+                    self.semantic_warnings,
+                )
+            })
+            .map_err(|error| error.with_source_map(source_map.clone()))?;
+        if self.semantic_warnings {
+            warnings.set_source_map(source_map);
+        }
 
         Ok(SignalCompileOutput {
             compilation_metadata,
             parse: output,
+            definitions_root: root,
+            entrypoint_name: ep.into(),
             loaded_files: eval_source_context
                 .as_ref()
                 .map_or_else(Vec::new, eval::EvalSourceContext::loaded_files),
             process_box,
             process_arity,
             signals: propagated.signals,
+            signal_origins: propagated.signal_origins,
             ui: propagated.ui,
             def_names: eval_stats.def_names,
             clock_domains: propagated.clock_domains,
+            warnings,
         })
     }
 }
@@ -2158,8 +1227,29 @@ fn collect_library_list(signals: &SignalCompileOutput) -> Vec<String> {
     library_list
 }
 
-/// Compiler facade errors for parser-stage orchestration.
-/// Top-level compiler error surface aggregating all stage failures.
+/// Top-level compiler error surface aggregating every stage failure.
+///
+/// # Shared field convention
+///
+/// Almost every variant carries the same three pieces, so they are documented
+/// once here rather than restated at each field:
+///
+/// - `source` — provenance for messages only: the display path for the
+///   file-based entry points, or the caller-supplied logical source name for
+///   the in-memory ones. It is not a key and not guaranteed to name a file that
+///   exists on disk.
+/// - `error` — the typed error from the stage that failed, kept so callers can
+///   inspect the failure instead of parsing a string. `FirVerify` has no such
+///   field (the verifier reports through the bundle) and carries `strict`
+///   instead.
+/// - `diagnostics` — the rendered [`DiagnosticBundle`] for that same failure.
+///
+/// The invariant that matters: `diagnostics` is *derived from* `error`, so the
+/// two can never describe different failures. Variants whose bundle takes real
+/// work to build expose a constructor ([`CompilerError::import`],
+/// [`CompilerError::missing_root`], [`CompilerError::codegen_wasm`]) — prefer
+/// them over building the variant by hand, which is how the two fields drift
+/// apart.
 #[derive(Debug)]
 pub enum CompilerError {
     /// Import resolution/read failure before parse completion.
@@ -2168,91 +1258,178 @@ pub enum CompilerError {
     /// [`SourceReaderError::to_diagnostics`]; build it with
     /// [`CompilerError::import`] rather than constructing the variant directly,
     /// so the bundle and the error can never disagree.
-    Import(SourceReaderError, DiagnosticBundle),
+    ///
+    /// The reader error is boxed because it is by far the widest payload in
+    /// this enum, and `CompilerError` is returned by value from every facade
+    /// entry point — see `compiler_error_stays_narrow_enough_for_every_platform`.
+    Import(Box<SourceReaderError>, DiagnosticBundle),
     /// Parse output did not expose a root node.
     ///
     /// Build with [`CompilerError::missing_root`] so the bundle is attached.
     MissingRoot {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Parse failed (`errors` or `recoveries` present).
     Parse {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Number of hard parse errors reported by the parser.
         parse_errors: usize,
+        /// Number of error recoveries the parser performed.
         recoveries: u32,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Eval stage failed while reducing boxes.
     Eval {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: Box<eval::EvalError>,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Propagate stage failed while lowering boxes to signals.
     Propagate {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: PropagateError,
+        /// Rendered diagnostics for this failure.
+        diagnostics: DiagnosticBundle,
+    },
+    /// Two or more UI controls claim the same runtime address.
+    ///
+    /// Built by `ui_paths::check_ui_control_paths`, which derives the bundle
+    /// from the same conflict list it stores here so the two cannot disagree.
+    UiLayout {
+        /// Program provenance; see the shared field convention.
+        source: Box<str>,
+        /// Every address claimed more than once, ordered by address.
+        conflicts: Vec<ui::DuplicateControlPath>,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Signal type validation failed after propagation.
     Type {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
-        error: Box<str>,
+        /// Typed error from the stage that failed.
+        error: Box<InferenceError>,
+        /// Rendered diagnostics for this failure.
+        diagnostics: DiagnosticBundle,
+    },
+    /// Execution-option request (`-ec`/`-os`) rejected by the backend
+    /// capability model before any parsing or lowering work.
+    ExecutionOptions {
+        /// Program provenance; see the shared field convention.
+        source: Box<str>,
+        /// Typed error from the stage that failed.
+        error: crate::execution::ExecutionOptionsError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Transform stage failed while lowering signals to FIR.
     Transform {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
-        error: SignalFirError,
+        /// Typed error from the stage that failed.
+        error: Box<SignalFirError>,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// FIR verifier rejected a lowered FIR module before backend codegen.
     FirVerify {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Whether warnings were fatal (`--fir-verify-strict`).
         strict: bool,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// C++ backend emission failed from FIR.
-    Codegen {
+    CodegenCpp {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
-        error: CodegenError,
+        /// Typed error from the stage that failed.
+        error: CppCodegenError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// C backend emission failed from FIR.
     CodegenC {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: CCodegenError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Julia backend emission failed from FIR.
     CodegenJulia {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: JuliaCodegenError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// AssemblyScript backend emission failed from FIR.
     CodegenAsc {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: AscCodegenError,
+        /// Rendered diagnostics for this failure.
+        diagnostics: DiagnosticBundle,
+    },
+    /// Codebox (RNBO) backend emission failed from FIR.
+    CodegenCodebox {
+        /// Program provenance; see the shared field convention.
+        source: Box<str>,
+        /// Typed error from the stage that failed.
+        error: CodeboxCodegenError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Rust backend emission failed from FIR.
     CodegenRust {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: RustCodegenError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// Interpreter backend emission failed from FIR.
     CodegenInterp {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: InterpCodegenError,
+        /// Rendered diagnostics for this failure.
+        diagnostics: DiagnosticBundle,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Cranelift JIT backend emission failed from FIR.
+    CodegenCranelift {
+        /// Program provenance; see the shared field convention.
+        source: Box<str>,
+        /// Typed error from the stage that failed.
+        error: CraneliftBackendError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
     /// WASM backend emission failed from FIR.
     CodegenWasm {
+        /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Typed error from the stage that failed.
         error: WasmBackendError,
+        /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
 }
@@ -2272,12 +1449,22 @@ impl std::fmt::Display for CompilerError {
                 "parse failed for {source}: errors={parse_errors}, recoveries={recoveries}, diagnostics={}",
                 diagnostics.len()
             ),
+            Self::ExecutionOptions { source, error, .. } => {
+                write!(f, "execution options rejected for {source}: {error}")
+            }
             Self::Eval { source, error, .. } => {
                 write!(f, "evaluation failed for {source}: {error}")
             }
             Self::Propagate { source, error, .. } => {
                 write!(f, "propagation failed for {source}: {error}")
             }
+            Self::UiLayout {
+                source, conflicts, ..
+            } => write!(
+                f,
+                "UI layout rejected for {source}: {} duplicated control path(s)",
+                conflicts.len()
+            ),
             Self::Type { source, error, .. } => {
                 write!(f, "type validation failed for {source}: {error}")
             }
@@ -2294,7 +1481,7 @@ impl std::fmt::Display for CompilerError {
                 if *strict { " (strict mode)" } else { "" },
                 diagnostics.len()
             ),
-            Self::Codegen { source, error, .. } => {
+            Self::CodegenCpp { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenC { source, error, .. } => {
@@ -2306,10 +1493,17 @@ impl std::fmt::Display for CompilerError {
             Self::CodegenAsc { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
+            Self::CodegenCodebox { source, error, .. } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
             Self::CodegenRust { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenInterp { source, error, .. } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::CodegenCranelift { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenWasm { source, error, .. } => {
@@ -2319,15 +1513,69 @@ impl std::fmt::Display for CompilerError {
     }
 }
 
-impl std::error::Error for CompilerError {}
+impl std::error::Error for CompilerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Import(error, _) => Some(error.as_ref()),
+            Self::Eval { error, .. } => Some(error.as_ref()),
+            Self::Propagate { error, .. } => Some(error),
+            Self::Type { error, .. } => Some(error.as_ref()),
+            Self::ExecutionOptions { error, .. } => Some(error),
+            Self::Transform { error, .. } => Some(error.as_ref()),
+            Self::CodegenCpp { error, .. } => Some(error),
+            Self::CodegenC { error, .. } => Some(error),
+            Self::CodegenJulia { error, .. } => Some(error),
+            Self::CodegenAsc { error, .. } => Some(error),
+            Self::CodegenCodebox { error, .. } => Some(error),
+            Self::CodegenRust { error, .. } => Some(error),
+            Self::CodegenInterp { error, .. } => Some(error),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::CodegenCranelift { error, .. } => Some(error),
+            Self::CodegenWasm { error, .. } => Some(error),
+            Self::MissingRoot { .. }
+            | Self::Parse { .. }
+            | Self::UiLayout { .. }
+            | Self::FirVerify { .. } => None,
+        }
+    }
+}
 
 impl CompilerError {
+    /// Attaches the immutable compilation snapshots to an already classified
+    /// pipeline failure without changing its typed error or v1 JSON fields.
+    fn with_source_map(mut self, source_map: SourceMap) -> Self {
+        let diagnostics = match &mut self {
+            Self::Import(_, diagnostics)
+            | Self::Parse { diagnostics, .. }
+            | Self::Eval { diagnostics, .. }
+            | Self::Propagate { diagnostics, .. }
+            | Self::UiLayout { diagnostics, .. }
+            | Self::Type { diagnostics, .. }
+            | Self::Transform { diagnostics, .. }
+            | Self::ExecutionOptions { diagnostics, .. }
+            | Self::CodegenCpp { diagnostics, .. }
+            | Self::CodegenC { diagnostics, .. }
+            | Self::CodegenJulia { diagnostics, .. }
+            | Self::CodegenAsc { diagnostics, .. }
+            | Self::CodegenCodebox { diagnostics, .. }
+            | Self::CodegenRust { diagnostics, .. }
+            | Self::CodegenInterp { diagnostics, .. }
+            | Self::CodegenWasm { diagnostics, .. }
+            | Self::MissingRoot { diagnostics, .. }
+            | Self::FirVerify { diagnostics, .. } => diagnostics,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::CodegenCranelift { diagnostics, .. } => diagnostics,
+        };
+        diagnostics.set_source_map(source_map);
+        self
+    }
+
     /// Builds an [`CompilerError::Import`] with its structured `FRS-SRC-*`
     /// bundle attached.
     #[must_use]
     pub fn import(err: SourceReaderError) -> Self {
         let diagnostics = err.to_diagnostics();
-        Self::Import(err, diagnostics)
+        Self::Import(Box::new(err), diagnostics)
     }
 
     /// Builds the `FRS-CODEGEN-0001` bundle for one backend emission failure.
@@ -2336,30 +1584,39 @@ impl CompilerError {
     /// `backend_code` the backend's own stable `FRS-CGEN-<LANG>-NNNN` code, and
     /// `message` its text without the bracketed code prefix.
     ///
-    /// The backend code travels as a note rather than becoming its own `FRS-*`
-    /// code, mirroring `FRS-FIR-0002` + `fir_code=...`: the backends already
-    /// own that taxonomy and duplicating it here would create two competing
-    /// schemes for the same events.
+    /// The backend code travels as the typed `detail_code` and `codegen_code`
+    /// fact rather than becoming its own top-level `FRS-*` code. Backends
+    /// already own that taxonomy, and duplicating it here would create two
+    /// competing schemes for the same events.
     fn codegen_diagnostics(
         source: &str,
         backend: &str,
         backend_code: &str,
         message: &str,
+        category: DiagnosticCategory,
     ) -> DiagnosticBundle {
         let mut bundle = DiagnosticBundle::new();
-        bundle.push(
-            Diagnostic::new(
-                Severity::Error,
-                Stage::Codegen,
-                errors::codes::CODEGEN_EMISSION_FAILED,
-                format!("{backend} backend code generation failed: {message}"),
-            )
-            .with_note(format!("backend: {backend}"))
-            .with_note(format!("codegen_code={backend_code}"))
-            .with_note(format!("source: {source}"))
-            .with_help("this is a backend limitation or a compiler bug, not a DSP syntax error")
-            .with_help("try another `-lang` backend to confirm the front-end result is sound"),
-        );
+        let mut diagnostic = Diagnostic::new(
+            Severity::Error,
+            Stage::Codegen,
+            diagnostics::codes::CODEGEN_EMISSION_FAILED,
+            format!("{backend} backend code generation failed: {message}"),
+        )
+        .with_category(category)
+        .with_detail_code(backend_code)
+        .with_fact("backend", backend)
+        .with_fact("source", source)
+        .with_fact("codegen_code", backend_code);
+        diagnostic = match category {
+            DiagnosticCategory::UnsupportedFeature => diagnostic
+                .with_help("this backend does not support the generated construct")
+                .with_help("try another `-lang` backend or rewrite the reported Faust construct"),
+            DiagnosticCategory::CompilerBug => diagnostic
+                .with_help("this is an internal compiler invariant failure, not a DSP syntax error")
+                .with_help("report a minimal reproducer with the backend and detail code"),
+            _ => diagnostic,
+        };
+        bundle.push(diagnostic);
         bundle
     }
 
@@ -2367,8 +1624,13 @@ impl CompilerError {
     /// bundle attached.
     #[must_use]
     pub fn codegen_wasm(source: &str, error: WasmBackendError) -> Self {
-        let diagnostics =
-            Self::codegen_diagnostics(source, "wasm", error.code().as_str(), error.message());
+        let diagnostics = Self::codegen_diagnostics(
+            source,
+            "wasm",
+            error.code().as_str(),
+            error.message(),
+            DiagnosticCategory::UnsupportedFeature,
+        );
         Self::CodegenWasm {
             source: source.into(),
             error,
@@ -2388,7 +1650,7 @@ impl CompilerError {
             Diagnostic::new(
                 Severity::Error,
                 Stage::Compiler,
-                errors::codes::COMP_MISSING_ROOT,
+                diagnostics::codes::COMP_MISSING_ROOT,
                 format!("parse returned no root for {source}"),
             )
             .with_note("the parser reported no errors yet exposed no root node")
@@ -2403,30 +1665,40 @@ impl CompilerError {
 
     /// Returns the structured diagnostics carried by this error.
     ///
-    /// Every variant now carries a bundle, so this never returns `None` — the
-    /// `Option` is kept for source compatibility with existing callers. The
-    /// exhaustive match below is deliberate: it makes the compiler reject a new
-    /// variant that forgets its bundle, which is how the `code: null` fallback
-    /// crept in for import and backend failures in the first place.
+    /// The exhaustive match is deliberate: adding a variant without a bundle
+    /// becomes a compile error instead of silently reaching an unstructured
+    /// renderer fallback.
+    #[must_use]
+    pub fn diagnostic_bundle(&self) -> &DiagnosticBundle {
+        match self {
+            Self::Parse { diagnostics, .. } => diagnostics,
+            Self::Eval { diagnostics, .. } => diagnostics,
+            Self::Propagate { diagnostics, .. } => diagnostics,
+            Self::UiLayout { diagnostics, .. } => diagnostics,
+            Self::Type { diagnostics, .. } => diagnostics,
+            Self::Transform { diagnostics, .. } => diagnostics,
+            Self::ExecutionOptions { diagnostics, .. } => diagnostics,
+            Self::FirVerify { diagnostics, .. } => diagnostics,
+            Self::Import(_, diagnostics) => diagnostics,
+            Self::CodegenCpp { diagnostics, .. } => diagnostics,
+            Self::CodegenC { diagnostics, .. } => diagnostics,
+            Self::CodegenJulia { diagnostics, .. } => diagnostics,
+            Self::CodegenAsc { diagnostics, .. } => diagnostics,
+            Self::CodegenCodebox { diagnostics, .. } => diagnostics,
+            Self::CodegenRust { diagnostics, .. } => diagnostics,
+            Self::CodegenInterp { diagnostics, .. } => diagnostics,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::CodegenCranelift { diagnostics, .. } => diagnostics,
+            Self::CodegenWasm { diagnostics, .. } => diagnostics,
+            Self::MissingRoot { diagnostics, .. } => diagnostics,
+        }
+    }
+
+    /// Compatibility wrapper for callers that still expect an optional bundle.
+    #[deprecated(since = "0.5.0", note = "use diagnostic_bundle()")]
     #[must_use]
     pub fn diagnostics(&self) -> Option<&DiagnosticBundle> {
-        match self {
-            Self::Parse { diagnostics, .. } => Some(diagnostics),
-            Self::Eval { diagnostics, .. } => Some(diagnostics),
-            Self::Propagate { diagnostics, .. } => Some(diagnostics),
-            Self::Type { diagnostics, .. } => Some(diagnostics),
-            Self::Transform { diagnostics, .. } => Some(diagnostics),
-            Self::FirVerify { diagnostics, .. } => Some(diagnostics),
-            Self::Import(_, diagnostics) => Some(diagnostics),
-            Self::Codegen { diagnostics, .. } => Some(diagnostics),
-            Self::CodegenC { diagnostics, .. } => Some(diagnostics),
-            Self::CodegenJulia { diagnostics, .. } => Some(diagnostics),
-            Self::CodegenAsc { diagnostics, .. } => Some(diagnostics),
-            Self::CodegenRust { diagnostics, .. } => Some(diagnostics),
-            Self::CodegenInterp { diagnostics, .. } => Some(diagnostics),
-            Self::CodegenWasm { diagnostics, .. } => Some(diagnostics),
-            Self::MissingRoot { diagnostics, .. } => Some(diagnostics),
-        }
+        Some(self.diagnostic_bundle())
     }
 }
 

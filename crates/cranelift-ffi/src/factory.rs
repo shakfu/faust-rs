@@ -28,19 +28,18 @@ use compiler::{
     GenerateAuxFilesRequest, RealType, SchedulingStrategy, SignalFirLane,
     default_import_search_paths,
 };
-use fir::{FirMatch, match_fir};
-use utils::{
+use ffi_common::{
     decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
-    optional_c_str_arg, parse_ffi_compile_args, required_c_str_arg, write_error_4096,
+    optional_c_string_arg, parse_ffi_compile_args, required_c_string_arg, write_error_4096,
 };
+use fir::{FirMatch, match_fir};
 
 use crate::cache::{
-    cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
-    stop_mt,
+    cache_all_sha_keys, cache_clear, cache_insert, cache_lookup, cache_release, start_mt, stop_mt,
 };
 use crate::clif::{CLIF_MAGIC, decode_factory_clif, encode_factory_clif};
 use crate::runtime::build_runtime_descriptor;
-use crate::types::{CraneliftDspFactory, alloc_c_string, alloc_factory, free_factory};
+use crate::types::{CraneliftDspFactory, alloc_c_string};
 
 /// Stable version string returned by [`getCLibFaustVersion`].
 const CRANELIFT_FFI_VERSION: &str = concat!("faust-rs-cranelift-ffi/", env!("CARGO_PKG_VERSION"));
@@ -168,7 +167,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
     opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let filename = match required_c_str_arg(filename, "filename") {
+        let filename = match required_c_string_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -184,12 +183,12 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let compiled =
-                preflight_compile_file_to_cranelift(Path::new(filename), args, opt_level)?;
-            let dsp_source = std::fs::read_to_string(filename)
+                preflight_compile_file_to_cranelift(Path::new(&filename), args, opt_level)?;
+            let dsp_source = std::fs::read_to_string(&filename)
                 .map_err(|e| format!("cannot read DSP source '{filename}': {e}"))?;
             build_scaffold_factory_from_file(
                 FileFactoryBuildSpec {
-                    filename,
+                    filename: &filename,
                     dsp_source: &dsp_source,
                     argv: args,
                     opt_level,
@@ -219,15 +218,15 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
     opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let name_app = match optional_c_str_arg(name_app, "name_app") {
+        let name_app = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        let dsp_content = match required_c_str_arg(dsp_content, "dsp_content") {
+        let dsp_content = match required_c_string_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -243,11 +242,11 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let compiled =
-                preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level, args)?;
+                preflight_compile_source_to_cranelift(&name_app, &dsp_content, opt_level, args)?;
             build_scaffold_factory_common(
                 FactoryBuildSpec {
-                    name: name_app,
-                    dsp_code: dsp_content,
+                    name: &name_app,
+                    dsp_code: &dsp_content,
                     argv: args,
                     opt_level,
                     foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
@@ -281,9 +280,9 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
     opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let source_name = match optional_c_str_arg(name_app, "name_app") {
+        let source_name = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
@@ -301,7 +300,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
             return std::ptr::null_mut();
         }
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
-            let fir = export_fir_from_signal_array_handle(source_name, signals)?;
+            let fir = export_fir_from_signal_array_handle(&source_name, signals)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let double = parse_ffi_compile_args(args)
                 .map(|a| a.double)
@@ -310,7 +309,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
-                    name: source_name,
+                    name: &source_name,
                     dsp_code: &fir_dump,
                     argv: args,
                     opt_level,
@@ -341,9 +340,9 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
     opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let source_name = match optional_c_str_arg(name_app, "name_app") {
+        let source_name = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
@@ -361,7 +360,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
             return std::ptr::null_mut();
         }
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
-            let fir = export_fir_from_box_handle(source_name, box_expr)?;
+            let fir = export_fir_from_box_handle(&source_name, box_expr)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let double = parse_ffi_compile_args(args)
                 .map(|a| a.double)
@@ -370,7 +369,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
-                    name: source_name,
+                    name: &source_name,
                     dsp_code: &fir_dump,
                     argv: args,
                     opt_level,
@@ -393,46 +392,37 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryFromSHAKey(
     sha_key: *const c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let sha_key = match required_c_str_arg(sha_key, "sha_key") {
+        let sha_key = match required_c_string_arg(sha_key, "sha_key") {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
-        cache_lookup(sha_key)
+        cache_lookup(&sha_key)
     }
 }
 
-/// Delete a Cranelift DSP factory.
+/// Release one Cranelift DSP factory reference.
 ///
-/// Returns `true` when a non-null factory pointer was freed.
+/// Returns `true` only when this was the last reference. Final release also
+/// deletes any DSP instances that were not deleted manually.
 ///
 /// # Safety
 /// `factory` must be a valid pointer previously returned by a Cranelift factory
 /// creation function, and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn deleteCCraneliftDSPFactory(factory: *mut CraneliftDspFactory) -> bool {
-    unsafe {
-        if factory.is_null() {
-            return false;
-        }
-        cache_remove_by_ptr(factory);
-        free_factory(factory);
-        true
+    if factory.is_null() {
+        return false;
     }
+    cache_release(factory)
 }
 
-/// Delete all cached Cranelift factories.
+/// Delete all cached Cranelift factories and their remaining DSP instances.
 ///
-/// # Safety
-/// Callers must ensure no live DSP instances still reference these factories.
+/// Every outstanding factory and instance pointer is invalid after this call,
+/// regardless of its acquired reference count.
 #[unsafe(no_mangle)]
 pub extern "C" fn deleteAllCCraneliftDSPFactories() {
-    for ptr in cache_drain() {
-        unsafe {
-            if !ptr.is_null() {
-                free_factory(ptr);
-            }
-        }
-    }
+    cache_clear();
 }
 
 /// Return all cached Cranelift factory SHA keys as a null-terminated array.
@@ -584,18 +574,17 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
     error_msg: *mut c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let text = match required_c_str_arg(bit_code, "bitcode") {
+        let text = match required_c_string_arg(bit_code, "bitcode") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        match decode_factory_bitcode(text) {
+        match decode_factory_bitcode(&text) {
             Ok(factory) => {
-                let ptr = alloc_factory(factory);
-                cache_insert(&(*ptr).sha_key, ptr);
-                ptr
+                let sha = factory.sha_key.clone();
+                cache_insert(&sha, factory)
             }
             Err(e) => {
                 write_error(error_msg, &e);
@@ -637,14 +626,14 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
     error_msg: *mut c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        let path = match required_c_str_arg(bit_code_path, "path") {
+        let path = match required_c_string_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        let text = match std::fs::read_to_string(path) {
+        let text = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
                 write_error(
@@ -656,9 +645,8 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
         };
         match decode_factory_bitcode(&text) {
             Ok(factory) => {
-                let ptr = alloc_factory(factory);
-                cache_insert(&(*ptr).sha_key, ptr);
-                ptr
+                let sha = factory.sha_key.clone();
+                cache_insert(&sha, factory)
             }
             Err(e) => {
                 write_error(error_msg, &e);
@@ -681,7 +669,7 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
         if factory.is_null() || bit_code_path.is_null() {
             return false;
         }
-        let path = match required_c_str_arg(bit_code_path, "path") {
+        let path = match required_c_string_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -1267,12 +1255,8 @@ where
 {
     match build(argv) {
         Ok(factory) => {
-            let ptr = alloc_factory(factory);
-            // SAFETY: `ptr` was just allocated and is non-null.
-            unsafe {
-                cache_insert(&(*ptr).sha_key, ptr);
-            }
-            ptr
+            let sha = factory.sha_key.clone();
+            cache_insert(&sha, factory)
         }
         Err(e) => {
             unsafe { write_error(error_msg, &e) };
@@ -1304,7 +1288,7 @@ pub unsafe extern "C" fn expandCCraneliftDSPFromFile(
     error_msg: *mut c_char,
 ) -> *mut c_char {
     unsafe {
-        let filename = match required_c_str_arg(filename, "filename") {
+        let filename = match required_c_string_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -1318,7 +1302,7 @@ pub unsafe extern "C" fn expandCCraneliftDSPFromFile(
                 return std::ptr::null_mut();
             }
         };
-        let source = match std::fs::read_to_string(filename) {
+        let source = match std::fs::read_to_string(&filename) {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &format!("cannot read '{filename}': {e}"));
@@ -1366,15 +1350,15 @@ pub unsafe extern "C" fn expandCCraneliftDSPFromString(
     error_msg: *mut c_char,
 ) -> *mut c_char {
     unsafe {
-        let name_app = match optional_c_str_arg(name_app, "name_app") {
+        let name_app = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        let source = match required_c_str_arg(dsp_content, "dsp_content") {
+        let source = match required_c_string_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -1425,7 +1409,7 @@ pub unsafe extern "C" fn generateCCraneliftAuxFilesFromFile(
     error_msg: *mut c_char,
 ) -> bool {
     unsafe {
-        let filename = match required_c_str_arg(filename, "filename") {
+        let filename = match required_c_string_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -1439,7 +1423,7 @@ pub unsafe extern "C" fn generateCCraneliftAuxFilesFromFile(
                 return false;
             }
         };
-        let source = match std::fs::read_to_string(filename) {
+        let source = match std::fs::read_to_string(&filename) {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &format!("cannot read '{filename}': {e}"));
@@ -1483,15 +1467,15 @@ pub unsafe extern "C" fn generateCCraneliftAuxFilesFromString(
     error_msg: *mut c_char,
 ) -> bool {
     unsafe {
-        let name_app = match optional_c_str_arg(name_app, "name_app") {
+        let name_app = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return false;
             }
         };
-        let source = match required_c_str_arg(dsp_content, "dsp_content") {
+        let source = match required_c_string_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -1588,7 +1572,7 @@ fn json_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
 
     use super::{
         canonicalize_cache_identity_argv, clearCCraneliftForeignFunctions,
@@ -1602,6 +1586,7 @@ mod tests {
         registerCCraneliftForeignFunction, unregisterCCraneliftForeignFunction,
         writeCCraneliftDSPFactoryToBitcode, writeCCraneliftDSPFactoryToBitcodeFile,
     };
+    use crate::instance::createCCraneliftDSPInstance;
 
     extern "C" fn ffi_test_foreign_gain(x: f32) -> f32 {
         x * 0.25
@@ -1748,11 +1733,12 @@ mod tests {
             // argv token — drives the identity.
             assert_eq!((*f_ss3).sha_key, (*f_ss42).sha_key);
             assert_eq!((*f_ss3).compile_options, (*f_ss42).compile_options);
+            assert_eq!(f_ss3, f_ss42);
 
-            deleteCCraneliftDSPFactory(f_ss0);
-            deleteCCraneliftDSPFactory(f_ss1);
-            deleteCCraneliftDSPFactory(f_ss3);
-            deleteCCraneliftDSPFactory(f_ss42);
+            assert!(deleteCCraneliftDSPFactory(f_ss0));
+            assert!(deleteCCraneliftDSPFactory(f_ss1));
+            assert!(!deleteCCraneliftDSPFactory(f_ss3));
+            assert!(deleteCCraneliftDSPFactory(f_ss42));
         }
     }
 
@@ -1820,6 +1806,8 @@ mod tests {
         assert!(!sha_ptr.is_null());
         let looked_up = unsafe { getCCraneliftDSPFactoryFromSHAKey(sha_ptr.cast_const()) };
         assert_eq!(looked_up, factory);
+        let instance = unsafe { createCCraneliftDSPInstance(factory) };
+        assert!(!instance.is_null());
 
         let all_ptr = getAllCCraneliftDSPFactories();
         assert!(!all_ptr.is_null());
@@ -1827,11 +1815,52 @@ mod tests {
         assert!(!first.is_null());
 
         unsafe {
-            freeCMemory(sha_ptr.cast());
             // free returned strings (outer array is intentionally not freed in scaffold).
             freeCMemory(first.cast());
             deleteAllCCraneliftDSPFactories();
+            assert!(getCCraneliftDSPFactoryFromSHAKey(sha_ptr.cast_const()).is_null());
+            freeCMemory(sha_ptr.cast());
         }
+        // `factory`, `looked_up`, and `instance` were invalidated by clear.
+    }
+
+    #[test]
+    fn factory_cache_lifecycle_matches_reference_counted_cpp_contract() {
+        let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
+        let name = c"cranelift_factory_lifecycle";
+        let source = c"process = _;";
+        let mut error = [0_i8; 4096];
+
+        let mut create = || unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                source.as_ptr(),
+                0,
+                std::ptr::null(),
+                error.as_mut_ptr(),
+                0,
+            )
+        };
+        let first = create();
+        let repeated = create();
+        assert!(!first.is_null());
+        assert_eq!(repeated, first);
+
+        let sha = unsafe { CString::new((*first).sha_key.clone()).unwrap() };
+        let looked_up = unsafe { getCCraneliftDSPFactoryFromSHAKey(sha.as_ptr()) };
+        assert_eq!(looked_up, first);
+
+        let instance = unsafe { createCCraneliftDSPInstance(first) };
+        assert!(!instance.is_null());
+
+        unsafe {
+            assert!(!deleteCCraneliftDSPFactory(repeated));
+            assert!(!deleteCCraneliftDSPFactory(looked_up));
+            assert!(deleteCCraneliftDSPFactory(first));
+            assert!(getCCraneliftDSPFactoryFromSHAKey(sha.as_ptr()).is_null());
+        }
+        // `instance` was owned by the cache and became invalid on final release.
     }
 
     #[test]
@@ -1938,8 +1967,9 @@ mod tests {
             assert_eq!((*restored).num_outputs, (*factory).num_outputs);
             assert_eq!((*restored).sha_key, (*factory).sha_key);
             assert_eq!((*restored).compile_options, (*factory).compile_options);
+            assert_eq!(restored, factory);
             freeCMemory(payload.cast());
-            assert!(deleteCCraneliftDSPFactory(factory));
+            assert!(!deleteCCraneliftDSPFactory(factory));
             assert!(deleteCCraneliftDSPFactory(restored));
         }
     }
@@ -2029,11 +2059,12 @@ mod tests {
             assert_eq!((*restored).num_outputs, (*factory).num_outputs);
             assert_eq!((*restored).sha_key, (*factory).sha_key);
             assert_eq!((*restored).compile_options, (*factory).compile_options);
+            assert_eq!(restored, factory);
         }
 
         let _ = std::fs::remove_file(path);
         unsafe {
-            assert!(deleteCCraneliftDSPFactory(factory));
+            assert!(!deleteCCraneliftDSPFactory(factory));
             assert!(deleteCCraneliftDSPFactory(restored));
         }
     }
@@ -2199,8 +2230,12 @@ mod tests {
                     (*factory).compile_options,
                     "compile_options mismatch for {rel}"
                 );
+                assert_eq!(
+                    restored, factory,
+                    "restore must coalesce with the cached factory for {rel}"
+                );
                 freeCMemory(payload.cast());
-                assert!(deleteCCraneliftDSPFactory(factory));
+                assert!(!deleteCCraneliftDSPFactory(factory));
                 assert!(deleteCCraneliftDSPFactory(restored));
             }
         }
@@ -2268,14 +2303,16 @@ mod tests {
             .into_owned();
         assert_eq!(sha_box, sha_signals);
         assert_eq!(sha_box, sha_string);
+        assert_eq!(from_box, from_signals);
+        assert_eq!(from_box, from_string);
 
         unsafe {
             freeCMemory(sha_box_ptr.cast());
             freeCMemory(sha_signals_ptr.cast());
             freeCMemory(sha_string_ptr.cast());
             box_ffi::freeCMemory(signals.cast());
-            assert!(deleteCCraneliftDSPFactory(from_box));
-            assert!(deleteCCraneliftDSPFactory(from_signals));
+            assert!(!deleteCCraneliftDSPFactory(from_box));
+            assert!(!deleteCCraneliftDSPFactory(from_signals));
             assert!(deleteCCraneliftDSPFactory(from_string));
         }
         box_ffi::destroyLibContext();

@@ -33,7 +33,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::{
-    AccessType, FirBuilder, FirId, FirMatch, FirStore, FirType, NamedType, SliderRange, match_fir,
+    AccessType, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, SliderRange,
+    match_fir,
 };
 
 const RESERVED_DSP_API_FUNCTIONS: &[&str] = &[
@@ -1976,6 +1977,20 @@ impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
 /// Local names are deliberately preserved so textual output remains stable.
 #[must_use]
 pub fn sweep_scaffolding_drop_roots(src_store: &FirStore, module: FirId) -> (FirStore, FirId) {
+    let (store, module, _) = sweep_scaffolding_drop_roots_with_mapping(src_store, module);
+    (store, module)
+}
+
+/// Provenance-aware variant of [`sweep_scaffolding_drop_roots`].
+///
+/// The returned `(source, destination)` pairs cover every cloned node. A
+/// source may occur more than once because lexical cloning can duplicate a
+/// shared FIR node; callers must therefore treat the mapping as one-to-many.
+#[must_use]
+pub fn sweep_scaffolding_drop_roots_with_mapping(
+    src_store: &FirStore,
+    module: FirId,
+) -> (FirStore, FirId, Vec<(FirId, FirId)>) {
     let mut dst_store = FirStore::new();
     let mut state = FirHygienicCloneState::default();
     let mut cloner = HygienicCloner::new(src_store, &mut dst_store, &mut state);
@@ -1986,10 +2001,18 @@ pub fn sweep_scaffolding_drop_roots(src_store: &FirStore, module: FirId) -> (Fir
         .clone_node(module)
         .expect("verified FIR must contain only cloneable node kinds");
     cloner.pop_scope();
-    (dst_store, module)
+    let mapping = std::mem::take(&mut cloner.clone_pairs);
+    (dst_store, module, mapping)
 }
 
-fn is_obviously_side_effect_free_value(store: &FirStore, value: FirId) -> bool {
+/// Returns whether evaluating `value` has no observable side effect.
+///
+/// This predicate is deliberately conservative: ordinary foreign calls are
+/// retained, while FIR's canonical math calls are pure when all arguments are
+/// pure. It is shared by FIR canonicalization, verification, and vector-root
+/// materialization so all three agree on when a [`FirMatch::Drop`] is dead.
+#[must_use]
+pub fn is_obviously_side_effect_free_value(store: &FirStore, value: FirId) -> bool {
     match match_fir(store, value) {
         FirMatch::Int32 { .. }
         | FirMatch::Int64 { .. }
@@ -2027,6 +2050,12 @@ fn is_obviously_side_effect_free_value(store: &FirStore, value: FirId) -> bool {
                 && is_obviously_side_effect_free_value(store, then_value)
                 && is_obviously_side_effect_free_value(store, else_value)
         }
+        FirMatch::FunCall { name, args, .. } => {
+            FirMathOp::from_symbol(&name).is_some()
+                && args
+                    .iter()
+                    .all(|&arg| is_obviously_side_effect_free_value(store, arg))
+        }
         _ => false,
     }
 }
@@ -2040,6 +2069,7 @@ struct HygienicCloner<'a, 'b> {
     local_renames: Vec<FirLocalRename>,
     preserve_local_names: bool,
     sweep_scaffolding_drop_roots: bool,
+    clone_pairs: Vec<(FirId, FirId)>,
 }
 
 impl<'a, 'b> HygienicCloner<'a, 'b> {
@@ -2054,6 +2084,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             local_renames: Vec::new(),
             preserve_local_names: false,
             sweep_scaffolding_drop_roots: false,
+            clone_pairs: Vec::new(),
         }
     }
 
@@ -2647,6 +2678,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 )
             }
         };
+        self.clone_pairs.push((id, out));
         Ok(out)
     }
 }

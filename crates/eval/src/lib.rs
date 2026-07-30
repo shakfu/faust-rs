@@ -174,6 +174,7 @@ mod modulation;
 mod pattern_matcher;
 mod simplify;
 pub(crate) mod source_context;
+pub mod suggestions;
 mod ui_widgets;
 
 use environment::{ClosureValue, EvalCacheKey, EvalValue, PatternMatcherValue};
@@ -192,6 +193,7 @@ pub use environment::Environment;
 pub use error::{EvalError, EvalStats};
 pub use loop_detector::LoopDetector;
 pub use source_context::{EvalSourceContext, SamplePrecision};
+pub use suggestions::{SymbolSuggestion, rank_similar_names, unambiguous_suggestion};
 
 pub const CRATE_NAME: &str = "eval";
 
@@ -676,6 +678,7 @@ fn lower_pattern_matcher_to_symbolic(
         }
         return Err(EvalError::PatternMatchFailed {
             node: pm.original_rules,
+            arguments: pm.rev_param_list.clone(),
         });
     }
     let total = case_expected_arity(arena, pm.original_rules)?;
@@ -752,15 +755,7 @@ fn eval_value(
     if let Some(cached) = loop_detector.eval_cache.get(&cache_key) {
         return Ok(cached.clone());
     }
-    // Bound syntactic recursion depth: a deeply nested acyclic expression
-    // recurses through `eval_value` without pushing a `call_stack` frame, so it
-    // would overflow the OS stack before the `max_depth` budget trips. The
-    // keyless `enter_eval` counter caps that depth, converting the crash into a
-    // `RecursionDepthExceeded` error (balanced by `leave_eval` below).
-    loop_detector.enter_eval()?;
-    let result = eval_value_uncached(arena, expr, env, loop_detector);
-    loop_detector.leave_eval();
-    let result = result?;
+    let result = eval_value_uncached(arena, expr, env, loop_detector)?;
     if should_cache_eval_value(&result) {
         loop_detector.eval_cache.insert(cache_key, result.clone());
     }
@@ -1365,11 +1360,11 @@ fn eval_loaded_source_value(
             (
                 path.to_path_buf(),
                 arena.clone_subtree_from(&loaded.arena, loaded.root),
-                loaded.parse_errors.clone(),
+                loaded.parse_diagnostics.clone(),
             )
         })
     });
-    let (resolved_path, cloned_defs, parse_errors) = match cached {
+    let (resolved_path, cloned_defs, parse_diagnostics) = match cached {
         Some(hit) => hit,
         None => {
             let resolved_path = candidate_paths
@@ -1438,25 +1433,25 @@ fn eval_loaded_source_value(
                     node,
                     construct,
                     path: resolved_path.clone(),
-                    errors: parse_output.errors.clone(),
+                    diagnostics: parse_output.diagnostics.clone(),
                 })?;
             let cached_source = CachedLoadedSource {
                 root: loaded_root,
                 arena: parse_output.state.arena,
-                parse_errors: parse_output.errors,
+                parse_diagnostics: parse_output.diagnostics,
             };
             let cloned_defs = arena.clone_subtree_from(&cached_source.arena, cached_source.root);
-            let parse_errors = cached_source.parse_errors.clone();
+            let parse_diagnostics = cached_source.parse_diagnostics.clone();
             source_context.insert_loaded_source(resolved_path.clone(), cached_source);
-            (resolved_path, cloned_defs, parse_errors)
+            (resolved_path, cloned_defs, parse_diagnostics)
         }
     };
-    if !parse_errors.is_empty() {
+    if parse_diagnostics.error_count() != 0 {
         return Err(EvalError::SourceParseFailure {
             node,
             construct,
             path: resolved_path.clone(),
-            errors: parse_errors,
+            diagnostics: parse_diagnostics,
         });
     }
     let mut loaded_env =

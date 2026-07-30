@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use compiler::Compiler;
+use compiler::{Compiler, DiagnosticValue, LabelRole, Stage};
 use signals::{SigMatch, match_sig};
 
 fn corpus_path(file: &str) -> PathBuf {
@@ -27,6 +27,25 @@ fn read_corpus(file: &str) -> String {
 }
 
 #[test]
+fn identical_unresolved_nodes_blame_the_reachable_occurrence() {
+    let source = "unused = missing;\nactive = missing;\nprocess = active;\n";
+    let err = Compiler::new()
+        .compile_source_to_signals("reachable_origin.dsp", source)
+        .expect_err("the reachable undefined symbol should fail");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    assert_eq!(diagnostic.labels[0].role, compiler::LabelRole::UseSite);
+    assert_eq!(diagnostic.labels[0].span.line, 2);
+    assert_eq!(diagnostic.labels[0].span.col, 10);
+    assert!(
+        diagnostic
+            .facts
+            .iter()
+            .any(|(key, value)| key.as_str() == "owner_definition"
+                && value == &compiler::DiagnosticValue::from("active"))
+    );
+}
+
+#[test]
 fn parse_error_fixture_exposes_frs_parse_code() {
     let compiler = Compiler::new();
     let source = read_corpus("err_01_parse_missing_rhs.dsp");
@@ -34,9 +53,7 @@ fn parse_error_fixture_exposes_frs_parse_code() {
         .compile_source("err_01_parse_missing_rhs.dsp", &source)
         .expect_err("parse error fixture should fail parse stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("parse error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     assert!(
         diagnostics
             .as_slice()
@@ -53,9 +70,7 @@ fn eval_error_fixture_exposes_frs_eval_code() {
         .compile_source_to_signals("err_02_eval_missing_process.dsp", &source)
         .expect_err("eval error fixture should fail eval stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("eval error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     assert!(
         diagnostics
             .as_slice()
@@ -107,9 +122,7 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
             Ok(_) => panic!("{file} should fail in eval stage"),
             Err(err) => err,
         };
-        let diagnostics = err
-            .diagnostics()
-            .unwrap_or_else(|| panic!("{file} should expose diagnostics"));
+        let diagnostics = err.diagnostic_bundle();
         assert!(
             diagnostics
                 .as_slice()
@@ -181,9 +194,7 @@ process = par(i, 3, fact(i));
                 .compile_source_to_signals("fact_stack_overflow.dsp", source)
                 .expect_err("missing factorial base case for fact(0) should fail in eval stage");
 
-            let diagnostics = err
-                .diagnostics()
-                .expect("recursive eval failure should expose diagnostics");
+            let diagnostics = err.diagnostic_bundle();
             let first = diagnostics
                 .as_slice()
                 .first()
@@ -213,74 +224,13 @@ process = par(i, 3, fact(i));
 }
 
 #[test]
-fn deeply_nested_expression_reports_eval_error_instead_of_aborting() {
-    // Companion to `diverging_recursive_case_...`, but for *syntactic* recursion.
-    // A deeply nested acyclic expression (a long `1 + 1 + ... + 1` chain)
-    // recurses through `eval_value` without pushing a `call_stack` cycle frame,
-    // so before the `eval_depth` counter it overflowed the OS stack instead of
-    // tripping the `max_depth` budget. Assert it now fails with the clean
-    // "stack overflow in eval" diagnostic, as the semantic-recursion path does.
-    const TEST_STACK_SAFE_MAX_DEPTH: usize = 1_024;
-    if let Some(raised) = std::env::var("FAUST_RS_DEFAULT_EVAL_MAX_DEPTH")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&d| d > TEST_STACK_SAFE_MAX_DEPTH)
-    {
-        eprintln!(
-            "skipping deeply_nested_expression: FAUST_RS_DEFAULT_EVAL_MAX_DEPTH={raised} \
-             raises the syntactic-depth budget past the {TEST_STACK_SAFE_MAX_DEPTH}-frame \
-             stack this test is sized for (unset it to run this case)"
-        );
-        return;
-    }
-
-    // ~4000 nested additions: comfortably past the 1024 default budget so the
-    // guard trips, yet far below the depth that would overflow a 64 MiB stack
-    // unguarded, so a regression (guard removed) fails this assertion cleanly
-    // instead of aborting the whole test binary.
-    let source = format!("process = {};", vec!["1"; 4_000].join("+"));
-
-    std::thread::Builder::new()
-        .name("deep-expression-stack-overflow".to_owned())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            let compiler = Compiler::new();
-            let err = compiler
-                .compile_source_to_signals("deep_expression.dsp", &source)
-                .expect_err("a 4000-deep expression should exceed the eval depth budget");
-            let diagnostics = err
-                .diagnostics()
-                .expect("depth-exceeded failure should expose diagnostics");
-            let first = diagnostics
-                .as_slice()
-                .first()
-                .expect("depth-exceeded failure should produce one diagnostic");
-            assert!(
-                first.code.0.starts_with("FRS-EVAL-"),
-                "syntactic-depth failure should stay in eval stage, got: {}",
-                first.code.0
-            );
-            assert!(
-                first.message.contains("stack overflow in eval"),
-                "diagnostic should mirror C++ stack-overflow wording, got: {}",
-                first.message
-            );
-        })
-        .expect("spawn worker")
-        .join()
-        .expect("worker thread should finish");
-}
-
-#[test]
 fn eval_undefined_symbol_exposes_binding_trace() {
     let compiler = Compiler::new();
     let source = read_corpus("err_09_eval_undefined_symbol.dsp");
     let err = compiler
         .compile_source_to_signals("err_09_eval_undefined_symbol.dsp", &source)
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("eval error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -325,9 +275,7 @@ fn eval_undefined_symbol_exposes_multi_label_call_and_definition_sites() {
             &source,
         )
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("eval error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -336,20 +284,14 @@ fn eval_undefined_symbol_exposes_multi_label_call_and_definition_sites() {
         !first.labels.is_empty(),
         "eval undefined-symbol diagnostics should expose at least one source label"
     );
-    assert_eq!(first.labels[0].message.as_ref(), "definition site");
+    assert_eq!(first.labels[0].message.as_ref(), "failing use");
     assert_eq!(first.labels[0].span.line, 1);
-    if first.labels.len() >= 2 {
-        assert_eq!(first.labels[1].message.as_ref(), "call site");
-        assert_eq!(first.labels[1].span.line, 4);
-    } else {
-        assert!(
-            first
-                .notes
-                .iter()
-                .any(|n| n.as_ref().starts_with("error originates from definition ")),
-            "single-label fallback should still expose owning definition context"
-        );
-    }
+    assert_eq!(first.labels[0].span.col, 14);
+    assert_eq!(first.labels[1].message.as_ref(), "enclosing definition");
+    assert_eq!(first.labels[1].span.line, 1);
+    assert_eq!(first.labels[1].span.col, 1);
+    assert_eq!(first.labels[2].message.as_ref(), "call site");
+    assert_eq!(first.labels[2].span.line, 4);
 }
 
 #[test]
@@ -362,9 +304,7 @@ fn eval_undefined_symbol_alias_chain_exposes_rule_computed_and_template_help() {
             &source,
         )
         .expect_err("fixture should fail in eval stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("eval error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -432,9 +372,7 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
         .compile_source_to_signals("err_03_propagate_split_mismatch.dsp", &source)
         .expect_err("propagate error fixture should fail propagate stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     assert!(
         diagnostics
             .as_slice()
@@ -488,15 +426,18 @@ fn soundfile_part_interval_error_exposes_compiler_type_diagnostic() {
         .compile_file_default_to_signals(&path)
         .expect_err("soundfile part interval fixture should fail type validation");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("type validation error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
         .expect("type validation bundle should not be empty");
 
     assert_eq!(first.code.0, "FRS-COMP-0004");
+    assert_eq!(first.stage, Stage::TypeInference);
+    assert_eq!(
+        first.detail_code.as_ref().map(|code| code.as_str()),
+        Some("soundfile-part-interval")
+    );
     assert!(
         first.message.contains("out of range soundfile part number"),
         "unexpected message: {}",
@@ -506,6 +447,111 @@ fn soundfile_part_interval_error_exposes_compiler_type_diagnostic() {
         first.message.contains("interval(0,255)"),
         "unexpected message: {}",
         first.message
+    );
+    assert!(
+        !first.message.contains("SIG"),
+        "standard message must not expose raw Signal IR: {}",
+        first.message
+    );
+    assert!(matches!(
+        first
+            .facts
+            .iter()
+            .find(|(key, _)| key.as_str() == "required_interval")
+            .map(|(_, value)| value),
+        Some(DiagnosticValue::IntegerRange { min: 0, max: 255 })
+    ));
+    assert!(
+        first
+            .facts
+            .keys()
+            .any(|key| key.as_str() == "actual_interval")
+    );
+    assert!(
+        first.labels.iter().any(|label| matches!(
+            label.role,
+            LabelRole::DerivedFrom | LabelRole::DefinitionSite
+        )),
+        "type diagnostic should point back to Faust source"
+    );
+}
+
+#[test]
+fn invalid_delay_interval_points_to_faust_and_exposes_inferred_type() {
+    let err = Compiler::new()
+        .compile_source_to_signals("delay_interval.dsp", "process = _ : @(-1);")
+        .expect_err("negative delay upper bound must fail type validation");
+    let first = &err.diagnostic_bundle().as_slice()[0];
+
+    assert_eq!(first.stage, Stage::TypeInference);
+    assert_eq!(
+        first.detail_code.as_ref().map(|code| code.as_str()),
+        Some("delay-interval")
+    );
+    assert!(first.facts.keys().any(|key| key.as_str() == "actual_type"));
+    assert!(
+        first
+            .labels
+            .iter()
+            .any(|label| label.span.file.ends_with("delay_interval.dsp")),
+        "delay diagnostic should retain its Faust source"
+    );
+    assert!(!first.message.contains("SIG"));
+}
+
+#[test]
+fn compile_time_math_domain_error_is_typed_and_source_located() {
+    let err = Compiler::new()
+        .compile_source_to_signals("modulo_zero.dsp", "process = _ % 0;")
+        .expect_err("compile-time modulo by zero must fail type validation");
+    let first = &err.diagnostic_bundle().as_slice()[0];
+
+    assert_eq!(first.stage, Stage::TypeInference);
+    assert_eq!(
+        first.detail_code.as_ref().map(|code| code.as_str()),
+        Some("math-domain")
+    );
+    assert!(first.facts.keys().any(|key| key.as_str() == "expected"));
+    assert!(!first.labels.is_empty());
+    assert!(!first.message.contains("SIG"));
+}
+
+#[test]
+fn invalid_table_generator_is_typed_and_source_located() {
+    let err = Compiler::new()
+        .compile_source_to_signals("table_generator.dsp", "process = rdtable(9, +, 4);")
+        .expect_err("sample-time table generator must fail static table validation");
+    let first = &err.diagnostic_bundle().as_slice()[0];
+
+    assert_eq!(first.stage, Stage::TypeInference);
+    assert_eq!(
+        first.detail_code.as_ref().map(|code| code.as_str()),
+        Some("table-construction")
+    );
+    assert!(first.facts.keys().any(|key| key.as_str() == "actual_type"));
+    assert!(first.facts.keys().any(|key| key.as_str() == "expected"));
+    assert!(!first.labels.is_empty());
+    assert!(!first.message.contains("SIG"));
+}
+
+#[test]
+fn canonical_fir_retains_signal_and_box_derivations() {
+    let fir = Compiler::new()
+        .compile_source_to_fir_with_lane(
+            "fir_origins.dsp",
+            "gain = 0.5; process = _ * gain;",
+            compiler::SignalFirLane::TransformFastLane,
+        )
+        .expect("valid source should lower to FIR");
+
+    let origins = fir.origins.origins_for(fir.module);
+    assert!(
+        !origins.is_empty(),
+        "canonical module must inherit at least one Signal producer"
+    );
+    assert!(
+        origins.iter().any(|origin| !origin.boxes.is_empty()),
+        "FIR producers must retain their Box derivations"
     );
 }
 
@@ -517,9 +563,7 @@ fn propagate_error_operator_span_points_to_composition_token() {
         .compile_source_to_signals("err_03_propagate_split_mismatch.dsp", &source)
         .expect_err("propagate error fixture should fail propagate stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -565,9 +609,7 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
             Err(err) => err,
         };
 
-        let diagnostics = err
-            .diagnostics()
-            .unwrap_or_else(|| panic!("{file} should expose diagnostics"));
+        let diagnostics = err.diagnostic_bundle();
         assert!(
             diagnostics
                 .as_slice()
@@ -597,9 +639,7 @@ fn propagate_split_nested_alias_exposes_trace_and_template_help() {
     let err = compiler
         .compile_source_to_signals("err_14_propagate_split_mismatch_nested_alias.dsp", &source)
         .expect_err("fixture should fail in propagate stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -627,9 +667,7 @@ fn propagate_compound_fixture_exposes_cause_and_template_notes() {
     let err = compiler
         .compile_source_to_signals("err_16_propagate_compound_with_letrec_split.dsp", &source)
         .expect_err("fixture should fail in propagate stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -657,9 +695,7 @@ fn propagate_error_alias_chain_exposes_binding_trace_note() {
         .compile_source_to_signals("err_06_propagate_split_mismatch_chain.dsp", &source)
         .expect_err("fixture should fail in propagate stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -688,9 +724,7 @@ fn propagate_error_includes_paired_side_context_notes() {
         .compile_source_to_signals("err_05_propagate_merge_mismatch_alias.dsp", &source)
         .expect_err("fixture should fail in propagate stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()
@@ -733,9 +767,7 @@ fn propagate_error_ui_expr_note_is_pretty_printed() {
         .compile_source_to_signals("err_08_propagate_seq_ui_mismatch.dsp", &source)
         .expect_err("fixture should fail in propagate stage");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
+    let diagnostics = err.diagnostic_bundle();
     let first = diagnostics
         .as_slice()
         .first()

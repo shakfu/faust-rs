@@ -2,6 +2,8 @@
 //! wrapper, the lowering context, and the error taxonomy.
 
 use crate::schedule::SchedulingStrategy;
+use crate::signal_fir::ControlRateMode;
+use crate::signal_fir::FirOrigins;
 use crate::signal_fir::vector::analysis::EffectAtom;
 use crate::signal_fir::vector::route::{VectorRegion, VectorRouteError, VerifiedRoutedFir};
 use crate::signal_fir::vector::verify::ValueType;
@@ -36,12 +38,20 @@ impl PureVectorRegionBody {
 /// pure.
 pub struct VerifiedPureVectorProgram {
     pub(super) store: FirStore,
+    pub(super) origins: FirOrigins,
     pub(super) static_declarations: Vec<FirId>,
     pub(super) table_declarations: Vec<FirId>,
     pub(super) table_init_statements: Vec<FirId>,
     pub(super) mutable_tables: BTreeMap<u64, (String, usize, FirType)>,
     pub(super) transport_declarations: Vec<FirId>,
     pub(super) control_statements: Vec<FirId>,
+    /// Externalizable control-rate statements (UI snapshots, promoted
+    /// control-root stores, control-scope UI effect stores). Empty in the
+    /// classic inline mode; the body of `control(dsp)` under `-ec`.
+    pub(super) external_control_statements: Vec<FirId>,
+    /// DSP struct fields created by `-ec` promotion (snapshots + promoted
+    /// control temporaries).
+    pub(super) control_state_fields: Vec<(String, FirType)>,
     pub(super) regions: Vec<PureVectorRegionBody>,
     pub(super) routed: VerifiedRoutedFir,
     pub(super) math_ops: HashSet<FirMathOp>,
@@ -59,9 +69,14 @@ impl VerifiedPureVectorProgram {
         &mut self.store
     }
 
-    /// Consumes the checked program after final module assembly.
-    pub(crate) fn into_store(self) -> FirStore {
-        self.store
+    /// Consumes the checked program and returns its FIR store plus provenance.
+    pub(crate) fn into_store_and_origins(self) -> (FirStore, FirOrigins) {
+        (self.store, self.origins)
+    }
+
+    /// Propagates direct Signal producers through the assembled module.
+    pub(crate) fn derive_origins(&mut self, module: FirId) {
+        self.origins.derive_reachable(&self.store, module);
     }
 
     /// Canonical transport declarations emitted before region bodies.
@@ -98,6 +113,18 @@ impl VerifiedPureVectorProgram {
     #[must_use]
     pub fn control_statements(&self) -> &[FirId] {
         &self.control_statements
+    }
+
+    /// Externalizable control statements (the `control` body under `-ec`).
+    #[must_use]
+    pub fn external_control_statements(&self) -> &[FirId] {
+        &self.external_control_statements
+    }
+
+    /// Struct fields created by external-control promotion.
+    #[must_use]
+    pub fn control_state_fields(&self) -> &[(String, FirType)] {
+        &self.control_state_fields
     }
 
     /// Loop bodies in the selected strategy-dependent schedule order.
@@ -289,4 +316,9 @@ pub struct VectorLoweringContext<'a> {
     pub real_type: FirType,
     /// Number of audio inputs exposed by the module contract.
     pub num_inputs: usize,
+    /// Control-rate evaluation scheduling (`-ec`). With `External`, UI zone
+    /// reads are snapshotted into promoted DSP fields, control-root
+    /// temporaries are struct-promoted, and the whole externalizable control
+    /// section moves to a `control` entry point (plan phase 5).
+    pub control_rate_mode: ControlRateMode,
 }

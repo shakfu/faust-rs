@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [lints.rust]
-unsafe_code = "allow"
+unsafe_code = "allow" # Exported Box C API dereferences opaque pointers and C strings.
 unused_attributes = "warn"
 unused_lifetimes = "warn"
 
@@ -24,7 +24,7 @@ standalone-capi-globals = []
 [dependencies]
 boxes = { path = "../boxes" }
 tlib = { path = "../tlib" }
-utils = { path = "../utils" }
+ffi-common = { path = "../ffi-common" }
 tree-ffi = { path = "../tree-ffi" }
 compiler = { path = "../compiler" }
 propagate = { path = "../propagate" }

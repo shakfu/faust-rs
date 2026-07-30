@@ -16,6 +16,16 @@ pub enum CliLang {
     Asc,
     #[value(alias = "c99")]
     C,
+    /// RNBO codebox. Emits one sample at a time with external control,
+    /// whether or not `-ec`/`-os` were passed; rejects `-vec`.
+    Codebox,
+    /// RNBO codebox with `RB_`-prefixed parameter names.
+    ///
+    /// A separate `-lang` value rather than a modifier flag, matching C++
+    /// Faust. The prefix is what lets `rnbo-dsp.h` recover the Faust UI from a
+    /// round-tripped patch, so it is the spelling used for manual validation.
+    #[value(name = "codebox-test")]
+    CodeboxTest,
     #[value(alias = "cxx", alias = "c++")]
     Cpp,
     #[value(alias = "clif")]
@@ -37,15 +47,65 @@ pub enum CliLang {
 pub enum ErrorFormat {
     #[default]
     Human,
+    /// Typed, versioned diagnostics JSON contract.
     Json,
 }
 
+/// How source paths are spelled in rendered human diagnostics.
+///
+/// Only presentation: the JSON channel always reports the compiled source name
+/// verbatim, because a tool resolving a range needs the path the compiler
+/// actually used.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum DiagnosticPathStyle {
+    /// The path exactly as the compiler recorded it.
+    #[default]
+    Absolute,
+    /// Relative to the working directory when that is shorter.
+    ///
+    /// Keeps CI logs and shared transcripts readable without hiding which file
+    /// is meant.
+    Relative,
+    /// File name only.
+    ///
+    /// For sharing a diagnostic without disclosing directory structure.
+    Basename,
+}
+
 /// Diagnostic verbosity level for CLI rendering.
+///
+/// The levels form a ladder of progressive disclosure: each one shows
+/// everything the previous one did, plus more. `Standard` is the contract for
+/// a terminal user — the complete actionable cause and nothing else — while
+/// `Debug` and `Full` add compiler-internal evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum ErrorVerbosity {
+    /// Header, primary location, and the shortest safe fix.
+    ///
+    /// For callers that only route the reader to the failing line.
+    Concise,
+    /// Everything needed to act: all relevant labels, rule and computed facts,
+    /// traces, and fixes.
     #[default]
     Standard,
+    /// Standard plus internal ids and typed debug context.
     Debug,
+    /// Debug plus untruncated traces and related diagnostics.
+    Full,
+}
+
+impl ErrorVerbosity {
+    /// Whether compiler-internal evidence is shown.
+    #[must_use]
+    pub fn shows_internals(self) -> bool {
+        self >= Self::Debug
+    }
+
+    /// Whether traces and related diagnostics are shown untruncated.
+    #[must_use]
+    pub fn shows_everything(self) -> bool {
+        self == Self::Full
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -120,10 +180,12 @@ pub struct CliArgs {
     /// Emit strict C++-style JSON description.
     #[arg(long = "json", action = ArgAction::SetTrue)]
     pub dump_json: bool,
-    /// Select backend language (Faust-style): `-lang asc`, `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, `-lang julia`, `-lang rust`, `-lang wasm`, or `-lang wast`.
+    /// Select backend language (Faust-style), e.g. `-lang cpp`.
     ///
-    /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`
-    /// / `--dump-interp` / `--dump-cranelift` / `-lang asc` / `-lang julia` / `-lang rust` / `-lang wasm` / `-lang wast`.
+    /// For the backends that also have a dedicated flag, `-lang c`,
+    /// `-lang cpp`, `-lang fir`, `-lang interp` and `-lang cranelift` are
+    /// equivalent to `--dump-c`, `--dump-cpp`, `--dump-fir`, `--dump-interp`
+    /// and `--dump-cranelift`. The rest are reachable only through `-lang`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     pub lang: Option<CliLang>,
     /// Print version information and exit.
@@ -201,6 +263,13 @@ pub struct CliArgs {
         default_value_t = ErrorVerbosity::Standard
     )]
     pub error_verbosity: ErrorVerbosity,
+    /// How source paths are spelled in human diagnostics.
+    #[arg(
+        long = "diagnostic-paths",
+        value_enum,
+        default_value_t = DiagnosticPathStyle::Absolute
+    )]
+    pub diagnostic_paths: DiagnosticPathStyle,
     /// Signal->FIR compilation lane.
     #[arg(long = "signal-fir-lane", value_enum)]
     pub signal_fir_lane: Option<CliSignalFirLane>,
@@ -210,6 +279,17 @@ pub struct CliArgs {
     /// Treat FIR verifier warnings as fatal.
     #[arg(long = "fir-verify-strict", action = ArgAction::SetTrue)]
     pub fir_verify_strict: bool,
+    /// Report non-blocking semantic warnings, such as a math operation whose
+    /// operand may leave its domain at run time.
+    ///
+    /// Covers the class the reference compiler reports under `-wall` / `-me`.
+    /// Off by default: these warnings describe values that only exist at run
+    /// time, so they are advisory and would otherwise be noise on programs that
+    /// clamp their operands in ways interval inference cannot see. Warnings go
+    /// to stderr in the selected `--error-format` and never change the exit
+    /// status.
+    #[arg(long = "warn", action = ArgAction::SetTrue)]
+    pub warn: bool,
     /// Use double-precision (64-bit) floating-point for internal DSP computation.
     ///
     /// By default, single-precision (32-bit) `float` is used for internal
@@ -236,8 +316,10 @@ pub struct CliArgs {
     /// Vector mode (`-vec`): restructure `compute()` into an outer chunk loop
     /// so the C compiler can auto-vectorize the inner loops (SIMD).
     ///
-    /// Roadmap P6 (V1): plumbing only — selecting it records the option but
-    /// still emits scalar code until the `LoopGraph` lowering (V2+) lands.
+    /// Selection is checked: a program shape the vector pipeline cannot
+    /// certify falls back to scalar lowering instead of emitting unverified
+    /// code, and certified vector output is bit-exact against scalar output
+    /// for the same program. Use `-vs`/`-lv` to size and shape the chunk loop.
     #[arg(long = "vec", action = ArgAction::SetTrue)]
     pub vec: bool,
     /// Vector size for `-vec` (`-vs N`). Default: 32.
@@ -262,6 +344,24 @@ pub struct CliArgs {
     /// silently falling back to `0`.
     #[arg(long = "scheduling-strategy", default_value_t = 0)]
     pub scheduling_strategy: u32,
+    /// External control (`-ec` / `--external-control`, as Faust C++; the
+    /// legacy `--ext-control` spelling is also accepted): emit control-rate
+    /// computations in a separate `control` entry point scheduled by the
+    /// host instead of inline at the start of each block. Subject to
+    /// per-backend capability validation.
+    #[arg(
+        long = "ec",
+        alias = "external-control",
+        alias = "ext-control",
+        action = ArgAction::SetTrue
+    )]
+    pub external_control: bool,
+    /// One-sample processing (`-os` / `--one-sample`, as Faust C++): emit a
+    /// one-sample `frame(inputs, outputs)` entry point over flat channel
+    /// arrays; the canonical block `compute` is kept but emitted empty.
+    /// Scalar mode only; subject to per-backend capability validation.
+    #[arg(long = "os", alias = "one-sample", action = ArgAction::SetTrue)]
+    pub one_sample: bool,
     /// Display compilation phases timing information (`-time`).
     #[arg(long = "compilation-time", action = ArgAction::SetTrue)]
     pub compilation_time: bool,
@@ -400,6 +500,14 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
             if let Some(value) = it.next() {
                 normalized.push(value);
             }
+            continue;
+        }
+        if arg == "-ec" {
+            normalized.push("--ec".to_owned());
+            continue;
+        }
+        if arg == "-os" {
+            normalized.push("--os".to_owned());
             continue;
         }
         if arg == "-time" {

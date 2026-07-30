@@ -16,7 +16,7 @@
 //! mode. Two namespaces have no natural corpus fixture:
 //!
 //! - **SRC**: `FRS-SRC-*` codes are unused dead code (see
-//!   `docs/diagnostics-codes-en.md`); the real-world failure tied to that
+//!   `docs/diagnostics-codes-reference-en.md`); the real-world failure tied to that
 //!   pipeline stage (an unresolved `import`) surfaces through the D1
 //!   no-bundle fallback (`code: null`) instead -- see
 //!   `fixtures/cli_diagnostics/src_missing_import.dsp`.
@@ -144,6 +144,96 @@ fn first_message(result: &CheckResult) -> &str {
         })
 }
 
+/// Checks the structural constraints shared with
+/// `docs/diagnostics-v2.schema.json`.
+fn assert_diagnostics_v2_shape(value: &serde_json::Value, case: &Path) {
+    assert_eq!(
+        value["schema_version"],
+        2,
+        "schema version for {}",
+        case.display()
+    );
+    assert!(
+        matches!(value["status"].as_str(), Some("success" | "failed")),
+        "status for {}",
+        case.display()
+    );
+    assert!(
+        value["compiler"].is_object(),
+        "compiler for {}",
+        case.display()
+    );
+    assert!(
+        value["request"].is_object(),
+        "request for {}",
+        case.display()
+    );
+    let sources = value["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sources for {}", case.display()));
+    for source in sources {
+        assert!(source["id"].is_u64(), "source id for {}", case.display());
+        assert!(
+            source["name"].is_string(),
+            "source name for {}",
+            case.display()
+        );
+        assert_eq!(
+            source["content_hash"].as_str().map(str::len),
+            Some(64),
+            "source hash for {}",
+            case.display()
+        );
+    }
+    let diagnostics = value["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics for {}", case.display()));
+    for diagnostic in diagnostics {
+        for key in [
+            "severity", "stage", "code", "category", "message", "labels", "facts", "traces",
+            "fixes", "related", "notes", "help",
+        ] {
+            assert!(
+                diagnostic.get(key).is_some(),
+                "missing {key} for {}: {diagnostic}",
+                case.display()
+            );
+        }
+        assert!(
+            diagnostic["code"]
+                .as_str()
+                .is_some_and(|code| code.starts_with("FRS-")),
+            "stable code for {}",
+            case.display()
+        );
+        assert!(
+            diagnostic["labels"].is_array(),
+            "labels for {}",
+            case.display()
+        );
+        assert!(
+            diagnostic["facts"].is_object(),
+            "facts for {}",
+            case.display()
+        );
+        assert!(
+            diagnostic["traces"].is_array(),
+            "traces for {}",
+            case.display()
+        );
+        assert!(
+            diagnostic["fixes"].is_array(),
+            "fixes for {}",
+            case.display()
+        );
+        assert!(
+            diagnostic["related"].is_array(),
+            "related for {}",
+            case.display()
+        );
+    }
+}
+
 // ─── D2: success shares the same schema as failure ────────────────────────
 
 #[test]
@@ -166,6 +256,60 @@ fn check_json_success_has_empty_diagnostics_no_leading_bytes_exit_0() {
         "stdout must start with '{{' with no leading bytes, got: {:?}",
         String::from_utf8_lossy(&result.stdout_raw)
     );
+}
+
+#[test]
+fn json_schema_and_every_negative_corpus_entry_are_structurally_valid() {
+    let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("docs")
+        .join("diagnostics-v2.schema.json");
+    let schema_text = std::fs::read_to_string(&schema_path).expect("v2 schema should be readable");
+    let schema: serde_json::Value =
+        serde_json::from_str(&schema_text).expect("v2 schema should be valid JSON");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+
+    let corpus_dir = corpus_path("")
+        .canonicalize()
+        .expect("negative corpus directory should canonicalize");
+    let mut cases = std::fs::read_dir(&corpus_dir)
+        .expect("negative corpus should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("err_") && name.ends_with(".dsp"))
+        })
+        .collect::<Vec<_>>();
+    cases.sort();
+    assert!(!cases.is_empty());
+
+    for case in cases {
+        let output = run_check_json(&case, &[]);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+            panic!(
+                "v2 output for {} is not one JSON document: {e}\n{}",
+                case.display(),
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+        assert_diagnostics_v2_shape(&value, &case);
+        if !output.status.success() {
+            assert!(
+                !value["diagnostics"]
+                    .as_array()
+                    .expect("diagnostics array")
+                    .is_empty(),
+                "failed negative case has no diagnostic: {}",
+                case.display()
+            );
+        }
+    }
 }
 
 // ─── D1 x D2: one failure case per stage-family namespace ──────────────────
@@ -207,7 +351,7 @@ fn check_json_propagate_family_failure_is_clean() {
 #[test]
 fn check_json_compiler_type_family_failure_is_clean() {
     // FRS-COMP-0004 (signal type / sigtype validation); the only reachable
-    // FRS-COMP-* code today (see docs/diagnostics-codes-en.md).
+    // FRS-COMP-* code today (see docs/diagnostics-codes-reference-en.md).
     let result = run_and_assert_clean_json(&corpus_path("rep_74_soundfile_basic.dsp"), &[]);
     assert!(
         !result.success,
@@ -237,6 +381,12 @@ fn check_json_sfir_family_failure_is_clean() {
         !message.contains(first_code(&result)),
         "the message must not repeat the code the diagnostic already carries, got: {message}"
     );
+    assert!(
+        result.stdout["diagnostics"][0]["labels"]
+            .as_array()
+            .is_some_and(|labels| !labels.is_empty()),
+        "unsupported lowering must point to the originating Faust construct"
+    );
 }
 
 #[test]
@@ -254,25 +404,63 @@ fn check_json_fir_family_failure_is_clean() {
         "expected a FRS-FIR-* code, got {}",
         first_code(&result)
     );
+    let diagnostic = &result.stdout["diagnostics"][0];
+    assert_eq!(
+        diagnostic["facts"]["fir_code"]["value"],
+        diagnostic["detail_code"]
+    );
+    assert!(
+        diagnostic["labels"]
+            .as_array()
+            .is_some_and(|labels| !labels.is_empty()),
+        "FIR failure must trace back to Faust source: {diagnostic}"
+    );
+    assert!(
+        diagnostic["notes"]
+            .as_array()
+            .is_some_and(|notes| notes.iter().all(|note| !note
+                .as_str()
+                .is_some_and(|note| note.starts_with("fir_code=")))),
+        "legacy fir_code note protocol must be absent"
+    );
 }
 
 /// A backend emission failure must carry `FRS-CODEGEN-0001` plus the backend
-/// and its own `FRS-CGEN-*` code as notes.
+/// and its own `FRS-CGEN-*` code as typed fields.
 ///
 /// Until 2026-07-21 all five codegen variants returned `None` from
-/// `CompilerError::diagnostics()`, so a backend failure reached the user
+/// `CompilerError::diagnostic_bundle()`, so a backend failure reached the user
 /// through the `code: null` envelope. One `FRS-CODEGEN-*` code covers every
 /// backend on purpose: the backends already own a 27-code
-/// `FRS-CGEN-<LANG>-NNNN` taxonomy, carried here as a note exactly as
-/// `FRS-FIR-0002` carries `fir_code=...`.
+/// `FRS-CGEN-<LANG>-NNNN` taxonomy, carried as `detail_code` and a fact.
+///
+/// # Choice of fixture
+///
+/// This test needs a program the WASM backend rejects *at emission*, and the
+/// choice matters more than it looks. It used to use
+/// `err_rad_delay_temporal_unsupported.dsp`, which the backend rejected only
+/// because its RAD reverse-time loop was outside the WASM subset — a gap we
+/// always intended to close, and closing it (2026-07-26) silently removed this
+/// test's premise: the program compiled, exit status became 0, and the test
+/// failed in CI for a reason unrelated to what it checks.
+///
+/// `rep_77_foreign_variable.dsp` is anchored differently. A foreign variable is
+/// a symbol resolved by the host C toolchain; a WASM module has no such thing,
+/// so the rejection is structural rather than a to-do. Prefer that kind of
+/// anchor when a test needs a backend to fail: an unimplemented feature is a
+/// moving target, an impossible one is not.
 #[test]
 fn codegen_backend_failure_is_structured() {
     let output = Command::new(bin_path())
-        .arg(corpus_path("err_rad_delay_temporal_unsupported.dsp"))
+        .arg(corpus_path("rep_77_foreign_variable.dsp"))
         .args(["-lang", "wasm", "--error-format", "json"])
         .output()
         .expect("failed to spawn faust-rs");
-    assert!(!output.status.success(), "expected exit 1");
+    assert!(
+        !output.status.success(),
+        "expected exit 1 — if this program now compiles to WASM, the test needs \
+         a different fixture, not a relaxed assertion (see the doc comment)"
+    );
 
     let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
@@ -281,19 +469,27 @@ fn codegen_backend_failure_is_structured() {
 
     assert_eq!(diag["code"], "FRS-CODEGEN-0001");
     assert_eq!(diag["stage"], "codegen");
-    let notes: Vec<&str> = diag["notes"]
-        .as_array()
-        .expect("notes must be an array")
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect();
+    assert_eq!(diag["facts"]["backend"]["value"], "wasm");
     assert!(
-        notes.iter().any(|n| n.contains("backend: wasm")),
-        "the failing backend must be named, got {notes:?}"
+        diag["detail_code"]
+            .as_str()
+            .is_some_and(|code| code.starts_with("FRS-CGEN-WASM-")),
+        "backend detail code must be typed, got {diag}"
+    );
+    assert_eq!(diag["facts"]["codegen_code"]["value"], diag["detail_code"]);
+    assert!(
+        diag["notes"]
+            .as_array()
+            .is_some_and(|notes| notes.iter().all(|note| !note
+                .as_str()
+                .is_some_and(|note| note.starts_with("codegen_code=")))),
+        "legacy codegen_code note protocol must be absent"
     );
     assert!(
-        notes.iter().any(|n| n.contains("codegen_code=FRS-CGEN-")),
-        "the backend's own stable code must travel as a note, got {notes:?}"
+        diag["labels"]
+            .as_array()
+            .is_some_and(|labels| !labels.is_empty()),
+        "backend failure must retain a source → Signal → FIR trace"
     );
 }
 
@@ -312,7 +508,7 @@ fn division_by_zero_is_a_clean_diagnostic_not_a_panic() {
         !result.success,
         "expected exit 1 on a constant division by zero, matching C++"
     );
-    assert_eq!(first_code(&result), "FRS-SFIR-0004");
+    assert_eq!(first_code(&result), "FRS-COMP-0004");
     assert!(
         first_message(&result).contains("division by 0"),
         "expected the message to name the division by zero, got {}",
@@ -354,8 +550,24 @@ fn check_json_src_family_unresolved_import_is_structured() {
         "expected one label pointing at the import directive, got: {}",
         result.stdout["diagnostics"][0]
     );
-    let line = labels[0]["line"].as_u64().expect("label must carry a line");
+    assert_eq!(labels[0]["role"], "import_site");
+    let line = labels[0]["compatibility_span"]["line"]
+        .as_u64()
+        .expect("label must carry a compatibility line");
     assert!(line >= 1, "label line must be 1-based, got {line}");
+
+    let facts = &result.stdout["diagnostics"][0]["facts"];
+    assert_eq!(
+        facts["import_name"]["value"],
+        "this_library_does_not_exist_frs_src_test.lib"
+    );
+    assert_eq!(facts["searched_directories"]["type"], "string_list");
+    assert!(
+        facts["searched_directories"]["value"]
+            .as_array()
+            .is_some_and(|paths| !paths.is_empty()),
+        "searched paths must be available without parsing notes: {facts}"
+    );
 
     let notes: Vec<&str> = result.stdout["diagnostics"][0]["notes"]
         .as_array()

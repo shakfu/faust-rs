@@ -3,9 +3,11 @@
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
-use errors::codes;
-use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
+use diagnostics::codes;
+use diagnostics::{Diagnostic, DiagnosticBundle, Severity, Stage, ToDiagnostic};
 use tlib::TreeId;
+
+use crate::suggestions::{SymbolSuggestion, rank_similar_names};
 
 /// Performance statistics collected during evaluation.
 ///
@@ -68,7 +70,7 @@ pub struct EvalStats {
 /// Evaluator error.
 ///
 /// Each variant corresponds to a distinct failure mode of the evaluation phase. All variants
-/// carry enough context to produce rich diagnostics via [`IntoDiagnostic`].
+/// carry enough context to produce rich diagnostics via [`ToDiagnostic`].
 ///
 /// # C++ correspondence
 ///
@@ -142,6 +144,12 @@ pub enum EvalError {
     PatternMatchFailed {
         /// Case-rules root node where no rule matched provided arguments.
         node: TreeId,
+        /// Arguments consumed by the matcher, in application order.
+        ///
+        /// These are the already-simplified argument boxes the matcher actually
+        /// dispatched on. They let the compiler facade render a rule/attempt
+        /// trace without exposing evaluator environments or automaton state.
+        arguments: Vec<TreeId>,
     },
     /// Non-closure application received more arguments than the function input arity.
     TooManyArguments {
@@ -183,7 +191,8 @@ pub enum EvalError {
         node: TreeId,
         construct: &'static str,
         path: PathBuf,
-        errors: Vec<String>,
+        /// Original parser diagnostics, including imported source snapshots.
+        diagnostics: DiagnosticBundle,
     },
     ExpectedClosureValue {
         node: TreeId,
@@ -247,6 +256,64 @@ pub enum EvalError {
     },
     /// Cooperative cancellation: the external cancel flag was set (e.g., timeout).
     Cancelled,
+}
+
+impl EvalError {
+    /// Ranked near-name candidates for an unresolved identifier.
+    ///
+    /// Candidates are drawn only from the scopes this error already recorded,
+    /// so a suggestion can never name a symbol the programmer cannot reach from
+    /// the failing site. Returns an empty vector for every other variant.
+    ///
+    /// The compiler facade uses this to decide whether a rename edit is safe to
+    /// propose; see [`crate::suggestions::unambiguous_suggestion`].
+    #[must_use]
+    pub fn symbol_suggestions(&self) -> Vec<SymbolSuggestion> {
+        match self {
+            Self::UndefinedSymbol {
+                symbol,
+                local_scope,
+                visible_scope,
+                top_level_scope,
+                ..
+            } => rank_similar_names(
+                symbol,
+                local_scope
+                    .iter()
+                    .chain(visible_scope)
+                    .chain(top_level_scope)
+                    .map(String::as_str),
+            ),
+            Self::MissingProcessDefinition {
+                entrypoint,
+                available_defs,
+                ..
+            } => rank_similar_names(entrypoint, available_defs.iter().map(String::as_str)),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Attaches ranked near-name guidance without ever widening the visible scope.
+///
+/// Suggestions become a typed `suggested_symbols` fact plus one note. No fix is
+/// created here: an exact rename edit needs the use-site source range, which
+/// only the compiler facade owns.
+fn with_symbol_suggestions(diagnostic: Diagnostic, suggestions: &[SymbolSuggestion]) -> Diagnostic {
+    if suggestions.is_empty() {
+        return diagnostic;
+    }
+    let names = suggestions
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    diagnostic
+        .with_note(format!("did you mean: {}?", names.join(", ")))
+        .with_fact("suggested_symbols", names)
+        .with_fact(
+            "suggestion_distance",
+            u64::try_from(suggestions[0].distance).unwrap_or(u64::MAX),
+        )
 }
 
 impl Display for EvalError {
@@ -389,19 +456,22 @@ impl std::error::Error for EvalError {}
 ///
 /// This keeps `EvalError` as the local phase error type while exposing
 /// stable stage/code metadata for compiler-level aggregation and CLI rendering.
-impl IntoDiagnostic for EvalError {
-    fn into_diagnostic(self) -> Diagnostic {
+impl ToDiagnostic for EvalError {
+    fn to_diagnostic(&self) -> Diagnostic {
         let message = self.to_string();
         match self {
             Self::MissingProcessDefinition {
                 entrypoint,
                 available_defs,
                 ..
-            } => Diagnostic::new(
-                Severity::Error,
-                Stage::Eval,
-                codes::EVAL_MISSING_PROCESS,
-                message,
+            } => with_symbol_suggestions(
+                Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_MISSING_PROCESS,
+                    message,
+                ),
+                &self.symbol_suggestions(),
             )
             .with_note(format!(
                 "cause: required top-level `{entrypoint}` definition is missing"
@@ -417,6 +487,9 @@ impl IntoDiagnostic for EvalError {
                     available_defs.join(", ")
                 }
             ))
+            .with_detail_code("missing-entrypoint")
+            .with_fact("entrypoint", entrypoint.clone())
+            .with_fact("available_definitions", available_defs.clone())
             .with_help(format!(
                 "define `{entrypoint} = ...;` in the top-level definitions"
             ))
@@ -427,11 +500,14 @@ impl IntoDiagnostic for EvalError {
                 visible_scope,
                 top_level_scope,
                 ..
-            } => Diagnostic::new(
-                Severity::Error,
-                Stage::Eval,
-                codes::EVAL_UNDEFINED_SYMBOL,
-                message,
+            } => with_symbol_suggestions(
+                Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_UNDEFINED_SYMBOL,
+                    message,
+                ),
+                &self.symbol_suggestions(),
             )
             .with_note("cause: unresolved identifier in current lexical scope")
             .with_note("rule: referenced identifier must be present in visible lexical scope")
@@ -462,6 +538,11 @@ impl IntoDiagnostic for EvalError {
                     top_level_scope.join(", ")
                 }
             ))
+            .with_detail_code("undefined-binding")
+            .with_fact("symbol", symbol.clone())
+            .with_fact("scope_local", local_scope.clone())
+            .with_fact("scope_visible", visible_scope.clone())
+            .with_fact("scope_top_level", top_level_scope.clone())
             .with_help("define the symbol in scope or fix the identifier name")
             .with_help(format!("template: {symbol} = ...; // define before use"))
             .with_help("for top-level aliases: define target before first use"),
@@ -475,7 +556,7 @@ impl IntoDiagnostic for EvalError {
             .with_note("rule: case rule arity must match provided argument tuple arity")
             .with_note(format!(
                 "computed: expected={expected}, provided={got}, delta={}",
-                got as i128 - expected as i128
+                *got as i128 - *expected as i128
             ))
             .with_note(format!(
                 "suggested target: call case function with exactly {expected} argument(s)"
@@ -494,11 +575,11 @@ impl IntoDiagnostic for EvalError {
             )
             .with_note(format!(
                 "computed: provided={got}, expected_max={expected}, overflow={}",
-                got.saturating_sub(expected)
+                got.saturating_sub(*expected)
             ))
             .with_note(format!(
                 "suggested target: remove {} extra argument(s)",
-                got.saturating_sub(expected)
+                got.saturating_sub(*expected)
             ))
             .with_help("remove extra arguments or expand the function input arity")
             .with_help("template: f(a, b); // keep provided args <= function input arity"),
@@ -585,17 +666,19 @@ impl IntoDiagnostic for EvalError {
                 message,
             )
             .with_note(format!("source reader failure in `{construct}`: {detail}")),
-            Self::SourceParseFailure { errors, .. } => {
-                let mut diagnostic = Diagnostic::new(
+            Self::SourceParseFailure { diagnostics, .. } => {
+                Diagnostic::new(
                     Severity::Error,
                     Stage::Eval,
                     codes::EVAL_GENERIC_FAILURE,
                     message,
-                );
-                for parse_error in errors {
-                    diagnostic = diagnostic.with_note(format!("loaded parse error: {parse_error}"));
-                }
-                diagnostic
+                )
+                .with_detail_code("nested-source-parse-failure")
+                .with_fact(
+                    "nested_error_count",
+                    u64::try_from(diagnostics.error_count()).unwrap_or(u64::MAX),
+                )
+                .with_note("the original parser diagnostics follow unchanged")
             }
             Self::ExpectedClosureValue { context, .. } => Diagnostic::new(
                 Severity::Error,
@@ -682,9 +765,9 @@ impl IntoDiagnostic for EvalError {
                 max_bits,
             } => {
                 let (init, min, max) = (
-                    f64::from_bits(init_bits),
-                    f64::from_bits(min_bits),
-                    f64::from_bits(max_bits),
+                    f64::from_bits(*init_bits),
+                    f64::from_bits(*min_bits),
+                    f64::from_bits(*max_bits),
                 );
                 Diagnostic::new(
                     Severity::Error,

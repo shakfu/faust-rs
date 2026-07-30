@@ -15,10 +15,11 @@ standalone-capi-globals = []
 
 [dependencies]
 box_ffi = { package = "box-ffi", path = "../box-ffi", default-features = false }
+clap.workspace = true
 codegen = { path = "../codegen" }
 compiler = { path = "../compiler" }
 fir = { path = "../fir" }
-utils = { path = "../utils" }
+ffi-common = { path = "../ffi-common" }
 
 [dev-dependencies]
 interp_ffi = { package = "interp-ffi", path = "../interp-ffi" }
@@ -26,7 +27,7 @@ interp_ffi = { package = "interp-ffi", path = "../interp-ffi" }
 # FFI crate will require raw pointers/unsafe in later phases; allow is local to
 # this crate so the workspace default can remain strict.
 [lints.rust]
-unsafe_code = "allow"
+unsafe_code = "allow" # Cranelift C/C++ API owns raw factories, instances, and callback tables.
 unused_attributes = "warn"
 unused_lifetimes = "warn"
 

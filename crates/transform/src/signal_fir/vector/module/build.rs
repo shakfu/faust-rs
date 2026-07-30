@@ -10,6 +10,7 @@ use super::lifecycle::{FinalModuleContext, assemble_module};
 use super::model::VectorModuleFailure;
 use super::outputs::{OutputMaterialization, materialize_outputs};
 use crate::schedule::SchedulingStrategy;
+use crate::signal_fir::ControlRateMode;
 use crate::signal_fir::vector::analysis::DepKind;
 use crate::signal_fir::vector::assemble::{
     VectorFirAssembly, VectorLoopFirInput, assemble_vector_fir,
@@ -30,7 +31,8 @@ use crate::signal_fir::{
     ComputeMode, SignalFirOutput, VectorEffectiveMode, VectorFallbackReason, VectorPipelineStatus,
 };
 use crate::signal_prepare::VerifiedPreparedSignals;
-use fir::{FirId, FirType};
+use fir::inliner::is_obviously_side_effect_free_value;
+use fir::{FirId, FirMatch, FirStore, FirType, match_fir};
 use propagate::ClockDomainTable;
 
 /// Runs the complete checked vector path for the supported P6.5 subset and
@@ -45,16 +47,30 @@ pub(crate) struct VectorModuleContext<'a> {
     pub max_copy_delay: u32,
     pub compute_mode: ComputeMode,
     pub strategy: SchedulingStrategy,
+    /// Control-rate evaluation scheduling (`-ec`), plan phase 5.
+    pub control_rate_mode: ControlRateMode,
 }
 pub(crate) fn build_verified_vector_module(
     prepared: &VerifiedPreparedSignals,
     context: &VectorModuleContext<'_>,
 ) -> Result<SignalFirOutput, VectorModuleFailure> {
     let built = build_verified_vector_module_with_evidence(prepared, context)?;
+    // Phase 5 evidence coherence: classic mode must not carry any
+    // external-control evidence. (Under external control an empty list is
+    // legitimate: a program with no control-rate values externalizes
+    // nothing and emits no `control` function.)
+    if !context.control_rate_mode.is_external()
+        && (!built.external_control_statements.is_empty() || !built.control_state_fields.is_empty())
+    {
+        return Err(module_shape(
+            "classic mode must not carry external-control evidence",
+        ));
+    }
     let BuiltVectorModule {
         output,
         assembly,
         output_stores,
+        ..
     } = built;
     if assembly.schema_version != crate::signal_fir::vector::assemble::VECTOR_FIR_ASSEMBLY_VERSION
         || output_stores.len() != context.num_outputs
@@ -67,6 +83,10 @@ pub(super) struct BuiltVectorModule {
     pub(super) output: SignalFirOutput,
     pub(super) assembly: VectorFirAssembly,
     pub(super) output_stores: Vec<FirId>,
+    /// Externalized control statements (`control` body) under `-ec`.
+    pub(super) external_control_statements: Vec<FirId>,
+    /// DSP struct fields created by external-control promotion.
+    pub(super) control_state_fields: Vec<(String, FirType)>,
 }
 pub(super) fn build_verified_vector_module_with_evidence(
     prepared: &VerifiedPreparedSignals,
@@ -159,6 +179,7 @@ pub(super) fn build_verified_vector_module_with_evidence(
             strategy,
             real_type: real_type.clone(),
             num_inputs,
+            control_rate_mode: context.control_rate_mode,
         },
     )
     .map_err(|error| {
@@ -204,6 +225,10 @@ pub(super) fn build_verified_vector_module_with_evidence(
         },
     )?;
     trace_stage("output-materialization");
+    remove_pure_drop_roots(program.store(), &mut control_statements);
+    for input in &mut loop_inputs {
+        remove_pure_drop_roots(program.store(), &mut input.statements);
+    }
     let assembly = assemble_vector_fir(
         &routed,
         Some(&state_plan),
@@ -225,6 +250,9 @@ pub(super) fn build_verified_vector_module_with_evidence(
     let static_declarations = program.static_declarations().to_vec();
     let table_declarations = program.table_declarations().to_vec();
     let table_init_statements = program.table_init_statements().to_vec();
+    let mut external_control_statements = program.external_control_statements().to_vec();
+    remove_pure_drop_roots(program.store(), &mut external_control_statements);
+    let control_state_fields = program.control_state_fields().to_vec();
     let module_context = FinalModuleContext {
         module_name,
         num_inputs,
@@ -241,6 +269,8 @@ pub(super) fn build_verified_vector_module_with_evidence(
         control_output_stores: &control_output_stores,
         ui_fir: &ui_fir,
         static_declarations: &static_declarations,
+        external_control_statements: &external_control_statements,
+        control_state_fields: &control_state_fields,
     };
     let module = assemble_module(program.store_mut(), &module_context)?;
     verify_final_module(
@@ -254,14 +284,19 @@ pub(super) fn build_verified_vector_module_with_evidence(
             table_declarations: &table_declarations,
             ui,
             plan: routed.plan(),
+            external_control_statements: &external_control_statements,
+            control_state_fields: &control_state_fields,
         },
     )?;
     trace_stage("module-assembly-verification");
 
+    program.derive_origins(module);
+    let (store, origins) = program.into_store_and_origins();
     Ok(BuiltVectorModule {
         output: SignalFirOutput {
-            store: program.into_store(),
+            store,
             module,
+            origins,
             emission_order: Vec::new(),
             shadow_report: None,
             vector_pipeline_status: VectorPipelineStatus::Certified,
@@ -270,8 +305,22 @@ pub(super) fn build_verified_vector_module_with_evidence(
         },
         assembly,
         output_stores,
+        external_control_statements,
+        control_state_fields,
     })
 }
+
+/// Removes the pure `Drop` roots used to seed CSE after the checked lowering
+/// evidence and concrete output stores have consumed them.
+pub(super) fn remove_pure_drop_roots(store: &FirStore, statements: &mut Vec<FirId>) {
+    statements.retain(|&statement| {
+        !matches!(
+            match_fir(store, statement),
+            FirMatch::Drop(value) if is_obviously_side_effect_free_value(store, value)
+        )
+    });
+}
+
 pub(super) fn reject_cross_loop_delay_read_transports(
     decorations: &VerifiedDecorationCertificate,
     plan: &VectorPlan,

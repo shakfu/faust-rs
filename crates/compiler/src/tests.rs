@@ -3,9 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::CraneliftBackendError;
 use super::{
-    Compiler, CompilerError, ComputeMode, ExpandDspRequest, GenerateAuxFilesRequest, RealType,
-    SchedulingStrategy, SignalFirLane, WasmArtifactRequest, build_import_search_paths,
+    AscCodegenError, CCodegenError, CodeboxCodegenError, Compiler, CompilerError, ComputeMode,
+    CppCodegenError, DiagnosticBundle, ExpandDspRequest, GenerateAuxFilesRequest, InferenceError,
+    InterpCodegenError, InterpCodegenErrorCode, JuliaCodegenError, PropagateError, RealType,
+    RustCodegenError, SchedulingStrategy, SignalFirError, SignalFirErrorCode, SignalFirLane,
+    SourceReaderError, WasmArtifactRequest, WasmBackendError, build_import_search_paths,
     compile_options_json_string, default_import_search_paths, golden_snapshot, resolve_module_name,
     resolve_ui_root_label,
 };
@@ -191,12 +196,12 @@ fn resolve_ui_root_label_falls_back_to_source_stem() {
 
 // ── Compiler::with_scheduling_strategy (vectorization port plan P2) ──────────
 //
-// P2 threads `-ss` / `--scheduling-strategy` through the `Compiler` builder
-// into `SignalLoweringContext` (and, from there, into `SignalFirOptions`;
-// see `transform::signal_fir::tests::signal_fir_options_default_scheduling_strategy_is_depth_first`
-// for the receiving end). Scheduling stays behaviorally inactive: these tests
-// only check that the selected strategy reaches the lowering context, not
-// that it changes any compiled output.
+// `-ss` / `--scheduling-strategy` travels through the `Compiler` builder into
+// `SignalLoweringContext` (and, from there, into `SignalFirOptions`; see
+// `transform::signal_fir::tests::signal_fir_options_default_scheduling_strategy_is_depth_first`
+// for the receiving end). Scope: these tests check only that the selected
+// strategy reaches the lowering context. That it then reorders emitted
+// statements is covered by the transform-level scheduling tests.
 
 #[test]
 fn compiler_default_scheduling_strategy_is_depth_first() {
@@ -330,6 +335,34 @@ fn compiler_compile_file_to_signals_loads_component_through_eval_context() {
 
     assert_eq!(output.process_arity.inputs, 1);
     assert_eq!(output.process_arity.outputs, 1);
+}
+
+#[test]
+fn compiler_preserves_parser_diagnostics_from_a_loaded_component() {
+    let root = temp_root("component_parse_diagnostics");
+    let entry = root.join("main.dsp");
+    let child = root.join("child.dsp");
+    fs::write(&entry, "process = component(\"child.dsp\");\n").expect("write entry");
+    fs::write(&child, "process = _\n").expect("write malformed child");
+
+    let error = Compiler::new()
+        .compile_file_default_to_signals(&entry)
+        .expect_err("malformed component must fail");
+    let diagnostics = error.diagnostic_bundle();
+    let child = child.canonicalize().expect("child should canonicalize");
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "FRS-PARSE-0001"
+                && diagnostic
+                    .labels
+                    .iter()
+                    .any(|label| label.span.file == child)),
+        "the original parser code and child-source label must survive: {diagnostics:?}"
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
 }
 
 #[test]
@@ -702,6 +735,42 @@ fn compiler_expand_dsp_fails_for_invalid_source() {
 }
 
 #[test]
+fn compiler_cranelift_report_matches_the_cli_contract() {
+    // The facade entry point must reproduce the report the CLI has always
+    // printed for `--lang cranelift`, including the module name derived from
+    // the source (NOT the "mydsp" class-name default) — the FIR dump and the
+    // report name the same module, so the two must agree.
+    let compiler = Compiler::new();
+    let report = compiler
+        .compile_source_to_cranelift_report(
+            "gain.dsp",
+            "process = _ * 0.5;",
+            &codegen::backends::cranelift::CraneliftOptions::default(),
+        )
+        .expect("cranelift report generation should succeed");
+
+    assert!(report.starts_with("backend: cranelift (experimental)\n"));
+    assert!(report.contains("\nmodule: gain\n"), "{report}");
+    assert!(
+        report.contains("\ncompute_symbol: gain::compute\n"),
+        "{report}"
+    );
+    assert!(report.contains("\ncompute_entry_addr: 0x"), "{report}");
+    assert!(report.contains("\ndsp_struct_layout: "), "{report}");
+
+    // A DSP source that does not compile surfaces as a normal CompilerError,
+    // not a panic out of the JIT layer.
+    let err = compiler
+        .compile_source_to_cranelift_report(
+            "bad.dsp",
+            "process = undefined_thing;",
+            &codegen::backends::cranelift::CraneliftOptions::default(),
+        )
+        .expect_err("an undefined symbol must fail the cranelift report");
+    assert!(err.to_string().contains("undefined symbol"), "{err}");
+}
+
+#[test]
 fn compiler_generate_aux_files_no_flags_returns_empty() {
     let compiler = Compiler::new();
     let artifacts = compiler
@@ -747,6 +816,70 @@ fn compiler_generate_aux_files_cpp_flag_produces_cpp_artifact() {
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].path, "zero.cpp");
     assert!(!artifacts[0].binary);
+}
+
+#[test]
+fn compiler_generate_aux_files_never_emits_two_artifacts_at_one_path() {
+    // Every requested output owns a distinct path. `-wasm` already emits the
+    // companion `<stem>.json` matched to the module, so combining it with
+    // `-json` must NOT produce a second `zero.json`: a host writing the
+    // artifacts out in order would otherwise silently overwrite one file.
+    let artifacts = Compiler::new()
+        .generate_aux_files(&GenerateAuxFilesRequest {
+            source_name: "zero.dsp".to_owned(),
+            source: "process = 0;".to_owned(),
+            args: "-cpp -c -wasm -json".to_owned(),
+            ..Default::default()
+        })
+        .expect("generate_aux_files with every output flag should succeed");
+
+    let mut paths: Vec<&str> = artifacts.iter().map(|a| a.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["zero.c", "zero.cpp", "zero.json", "zero.wasm"]);
+
+    // The one JSON present is the wasm companion, so it must describe a wasm
+    // build rather than the standalone strict-JSON output.
+    let json = artifacts
+        .iter()
+        .find(|a| a.path == "zero.json")
+        .expect("json artifact");
+    let text = std::str::from_utf8(&json.content).expect("json must be utf-8");
+    assert!(
+        text.contains("\"compile_options\": \"-lang wasm"),
+        "expected the wasm companion JSON, got:\n{text}"
+    );
+}
+
+#[test]
+fn compiler_generate_aux_files_applies_long_double_flag_to_the_wasm_backend() {
+    // `--double` is the CLI-normalized spelling of `-double`. It must reach
+    // the WASM backend options too, not only the internal real type, or the
+    // emitted module would compute in double while its JSON advertises
+    // single precision.
+    let json_of = |args: &str| {
+        let artifacts = Compiler::new()
+            .generate_aux_files(&GenerateAuxFilesRequest {
+                source_name: "zero.dsp".to_owned(),
+                source: "process = 0;".to_owned(),
+                args: args.to_owned(),
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("generate_aux_files({args}) must succeed: {e}"));
+        let json = artifacts
+            .into_iter()
+            .find(|a| a.path == "zero.json")
+            .expect("wasm companion json");
+        String::from_utf8(json.content).expect("json must be utf-8")
+    };
+
+    assert!(json_of("-wasm").contains("-single"));
+    for spelling in ["-wasm -double", "-wasm --double"] {
+        let json = json_of(spelling);
+        assert!(
+            json.contains("-double") && !json.contains("-single"),
+            "{spelling} must select double precision:\n{json}"
+        );
+    }
 }
 
 #[test]
@@ -861,5 +994,176 @@ fn ad_seed_references_unify_to_one_control() {
     assert!(
         !cpp.contains("FAUSTFLOAT fHslider1;"),
         "fad seed reference forked into a second control:\n{cpp}"
+    );
+}
+
+#[test]
+fn compiler_error_source_classification_covers_every_variant() {
+    fn assert_source_is<T>(error: CompilerError)
+    where
+        T: std::error::Error + 'static,
+    {
+        let source = std::error::Error::source(&error).expect("typed variant must expose a source");
+        assert!(
+            source.is::<T>(),
+            "unexpected source type for compiler error: {error:?}"
+        );
+        let _ = error.diagnostic_bundle();
+    }
+
+    fn assert_has_no_source(error: CompilerError) {
+        assert!(
+            std::error::Error::source(&error).is_none(),
+            "aggregate-only variant must not invent a source: {error:?}"
+        );
+        let _ = error.diagnostic_bundle();
+    }
+
+    let empty = || DiagnosticBundle::new();
+    assert_source_is::<SourceReaderError>(CompilerError::import(SourceReaderError::ImportCycle {
+        path: PathBuf::from("cycle.dsp"),
+        cycle: Vec::new(),
+    }));
+    assert_source_is::<eval::EvalError>(CompilerError::Eval {
+        source: "eval.dsp".into(),
+        error: Box::new(eval::EvalError::NegativeIterationCount { value: -1 }),
+        diagnostics: empty(),
+    });
+    assert_source_is::<PropagateError>(CompilerError::Propagate {
+        source: "propagate.dsp".into(),
+        error: PropagateError::NegativeIntegerValue {
+            field: "index",
+            value: -1,
+        },
+        diagnostics: empty(),
+    });
+    assert_source_is::<InferenceError>(CompilerError::Type {
+        source: "type.dsp".into(),
+        error: Box::new(InferenceError::SignalStructure {
+            signal: None,
+            context: "type failure".into(),
+        }),
+        diagnostics: empty(),
+    });
+    assert_source_is::<crate::execution::ExecutionOptionsError>(CompilerError::ExecutionOptions {
+        source: "options.dsp".into(),
+        error: crate::execution::ExecutionOptionsError::OneSampleWithVectorMode,
+        diagnostics: empty(),
+    });
+    assert_source_is::<SignalFirError>(CompilerError::Transform {
+        source: "transform.dsp".into(),
+        error: Box::new(SignalFirError::new(
+            SignalFirErrorCode::EmptySignalList,
+            "empty",
+        )),
+        diagnostics: empty(),
+    });
+    assert_source_is::<CppCodegenError>(CompilerError::CodegenCpp {
+        source: "cpp.dsp".into(),
+        error: CppCodegenError::new(
+            codegen::backends::cpp::CodegenErrorCode::RootNotModule,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+    assert_source_is::<CCodegenError>(CompilerError::CodegenC {
+        source: "c.dsp".into(),
+        error: CCodegenError::new(
+            codegen::backends::c::CodegenErrorCode::RootNotModule,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+    assert_source_is::<JuliaCodegenError>(CompilerError::CodegenJulia {
+        source: "julia.dsp".into(),
+        error: JuliaCodegenError::new(
+            codegen::backends::julia::CodegenErrorCode::RootNotModule,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+    assert_source_is::<AscCodegenError>(CompilerError::CodegenAsc {
+        source: "asc.dsp".into(),
+        error: AscCodegenError::new(
+            codegen::backends::asc::CodegenErrorCode::RootNotModule,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+    assert_source_is::<CodeboxCodegenError>(CompilerError::CodegenCodebox {
+        source: "codebox.dsp".into(),
+        error: CodeboxCodegenError::new(
+            codegen::backends::codebox::CodegenErrorCode::RootNotModule,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+    assert_source_is::<RustCodegenError>(CompilerError::CodegenRust {
+        source: "rust.dsp".into(),
+        error: RustCodegenError::new(
+            codegen::backends::rust::CodegenErrorCode::RootNotModule,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+    assert_source_is::<InterpCodegenError>(CompilerError::CodegenInterp {
+        source: "interp.dsp".into(),
+        error: InterpCodegenError {
+            code: InterpCodegenErrorCode::RootNotModule,
+            message: "root".to_owned(),
+        },
+        diagnostics: empty(),
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    assert_source_is::<CraneliftBackendError>(CompilerError::CodegenCranelift {
+        source: "cranelift.dsp".into(),
+        error: CraneliftBackendError {
+            code: codegen::backends::cranelift::CraneliftBackendErrorCode::UnsupportedModuleShape,
+            message: "root".to_owned(),
+        },
+        diagnostics: empty(),
+    });
+    assert_source_is::<WasmBackendError>(CompilerError::CodegenWasm {
+        source: "wasm.dsp".into(),
+        error: WasmBackendError::new(
+            codegen::backends::wasm::WasmBackendErrorCode::UnsupportedModuleShape,
+            "root",
+        ),
+        diagnostics: empty(),
+    });
+
+    assert_has_no_source(CompilerError::missing_root("missing.dsp"));
+    assert_has_no_source(CompilerError::Parse {
+        source: "parse.dsp".into(),
+        parse_errors: 1,
+        recoveries: 0,
+        diagnostics: empty(),
+    });
+    assert_has_no_source(CompilerError::FirVerify {
+        source: "fir.dsp".into(),
+        strict: false,
+        diagnostics: empty(),
+    });
+}
+
+/// `CompilerError` is returned by value from every facade entry point, so its
+/// width is a real cost and `clippy::result_large_err` rejects it past 128
+/// bytes. That check runs per platform, and `PathBuf` is eight bytes wider on
+/// Windows than on Unix — which is how this enum once passed CI on Linux and
+/// macOS while failing on Windows at exactly the threshold.
+///
+/// The bound below leaves headroom for that difference so the failure surfaces
+/// here, on any developer machine, instead of only on one CI runner. If a new
+/// variant trips it, box the payload rather than raising the number: the
+/// diagnostic bundle every variant already carries is the floor, and widening
+/// past it costs every `Result` in the pipeline.
+#[test]
+fn compiler_error_stays_narrow_enough_for_every_platform() {
+    const MAX_BYTES: usize = 112;
+    let actual = std::mem::size_of::<CompilerError>();
+    assert!(
+        actual <= MAX_BYTES,
+        "CompilerError grew to {actual} bytes (budget {MAX_BYTES}); \
+         box the widest variant's payload instead of raising the budget"
     );
 }

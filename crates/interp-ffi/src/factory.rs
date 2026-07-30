@@ -24,20 +24,17 @@ use compiler::{
     AuxFileArtifact, Compiler as FaustCompiler, ExpandDspRequest, GenerateAuxFilesRequest,
     RealType, SignalFirLane, default_import_search_paths,
 };
-use utils::{
+use ffi_common::{
     FfiCompileArgs, decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only,
-    null_c_string_array, optional_c_str_arg,
-    parse_ffi_compile_args as parse_ffi_compile_args_shared, required_c_str_arg, write_error_4096,
+    null_c_string_array, optional_c_string_arg,
+    parse_ffi_compile_args as parse_ffi_compile_args_shared, required_c_string_arg,
+    write_error_4096,
 };
 
 use crate::cache::{
-    cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
-    stop_mt,
+    cache_all_sha_keys, cache_clear, cache_insert, cache_lookup, cache_release, start_mt, stop_mt,
 };
-use crate::types::{
-    FbcDspFactoryAny, InterpreterDspFactory, alloc_c_string, alloc_factory, free_factory,
-    write_fbc_any,
-};
+use crate::types::{FbcDspFactoryAny, InterpreterDspFactory, alloc_c_string, write_fbc_any};
 
 // ── Version ───────────────────────────────────────────────────────────────────
 
@@ -132,9 +129,7 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcode(
         match read_fbc_any(&mut reader) {
             Ok(factory) => {
                 let sha = factory.sha_key().to_owned();
-                let ptr = alloc_factory(factory);
-                cache_insert(&sha, ptr);
-                ptr
+                cache_insert(&sha, InterpreterDspFactory { inner: factory })
             }
             Err(e) => {
                 write_error(error_msg, &e.to_string());
@@ -182,14 +177,14 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcodeFile(
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        let path = match required_c_str_arg(bit_code_path, "path") {
+        let path = match required_c_string_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        let file = match std::fs::File::open(path) {
+        let file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
                 write_error(error_msg, &format!("cannot open file '{path}': {e}"));
@@ -200,9 +195,7 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcodeFile(
         match read_fbc_any(&mut reader) {
             Ok(factory) => {
                 let sha = factory.sha_key().to_owned();
-                let ptr = alloc_factory(factory);
-                cache_insert(&sha, ptr);
-                ptr
+                cache_insert(&sha, InterpreterDspFactory { inner: factory })
             }
             Err(e) => {
                 write_error(error_msg, &e.to_string());
@@ -228,11 +221,11 @@ pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcodeFile(
         if factory.is_null() || bit_code_path.is_null() {
             return false;
         }
-        let path = match required_c_str_arg(bit_code_path, "path") {
+        let path = match required_c_string_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let file = match std::fs::File::create(path) {
+        let file = match std::fs::File::create(&path) {
             Ok(f) => f,
             Err(_) => return false,
         };
@@ -257,7 +250,7 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        let filename = match required_c_str_arg(filename, "filename") {
+        let filename = match required_c_string_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -272,7 +265,7 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
             }
         };
         create_interp_factory_with_argv(&argv, error_msg, |argv| {
-            compile_factory_from_file_fastlane(Path::new(filename), argv)
+            compile_factory_from_file_fastlane(Path::new(&filename), argv)
         })
     }
 }
@@ -296,15 +289,15 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
             write_error(error_msg, "null dsp_content pointer");
             return std::ptr::null_mut();
         }
-        let source_name = match optional_c_str_arg(name_app, "name_app") {
+        let source_name = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        let dsp_content = match required_c_str_arg(dsp_content, "dsp_content") {
+        let dsp_content = match required_c_string_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -319,7 +312,7 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
             }
         };
         create_interp_factory_with_argv(&argv, error_msg, |argv| {
-            compile_factory_from_string_fastlane(source_name, dsp_content, argv)
+            compile_factory_from_string_fastlane(&source_name, &dsp_content, argv)
         })
     }
 }
@@ -335,41 +328,36 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryFromSHAKey(
     sha_key: *const c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        let sha = match required_c_str_arg(sha_key, "sha_key") {
+        let sha = match required_c_string_arg(sha_key, "sha_key") {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
-        cache_lookup(sha)
+        cache_lookup(&sha)
     }
 }
 
-/// Delete a DSP factory (frees the Rust allocation).
+/// Release one DSP factory reference.
+///
+/// Returns `true` only when this was the last reference. Final release also
+/// deletes any DSP instances that were not deleted manually.
 ///
 /// # Safety
 /// `factory` must be a valid non-null factory pointer or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn deleteCInterpreterDSPFactory(factory: *mut InterpreterDspFactory) -> bool {
-    unsafe {
-        if factory.is_null() {
-            return false;
-        }
-        cache_remove_by_ptr(factory);
-        free_factory(factory);
-        true
+    if factory.is_null() {
+        return false;
     }
+    cache_release(factory)
 }
 
-/// Delete all factories held in the global cache.
+/// Delete all factories and their remaining instances from the global cache.
 ///
-/// # Safety
-/// Callers must ensure no live instances still reference the deleted factories.
+/// Every outstanding factory and instance pointer is invalid after this call,
+/// regardless of its acquired reference count.
 #[unsafe(no_mangle)]
 pub extern "C" fn deleteAllCInterpreterDSPFactories() {
-    for ptr in cache_drain() {
-        unsafe {
-            free_factory(ptr);
-        }
-    }
+    cache_clear();
 }
 
 /// Return all factory SHA keys as a null-terminated array of C strings.
@@ -499,9 +487,7 @@ where
     match compile(argv) {
         Ok(factory) => {
             let sha = factory.sha_key().to_owned();
-            let ptr = alloc_factory(factory);
-            cache_insert(&sha, ptr);
-            ptr
+            cache_insert(&sha, InterpreterDspFactory { inner: factory })
         }
         Err(e) => {
             unsafe { write_error(error_msg, &e) };
@@ -705,7 +691,7 @@ pub unsafe extern "C" fn expandCInterpreterDSPFromFile(
     error_msg: *mut c_char,
 ) -> *mut c_char {
     unsafe {
-        let filename = match required_c_str_arg(filename, "filename") {
+        let filename = match required_c_string_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -719,7 +705,7 @@ pub unsafe extern "C" fn expandCInterpreterDSPFromFile(
                 return std::ptr::null_mut();
             }
         };
-        let source = match std::fs::read_to_string(filename) {
+        let source = match std::fs::read_to_string(&filename) {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &format!("cannot read '{filename}': {e}"));
@@ -767,15 +753,15 @@ pub unsafe extern "C" fn expandCInterpreterDSPFromString(
     error_msg: *mut c_char,
 ) -> *mut c_char {
     unsafe {
-        let name_app = match optional_c_str_arg(name_app, "name_app") {
+        let name_app = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
-        let source = match required_c_str_arg(dsp_content, "dsp_content") {
+        let source = match required_c_string_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -826,7 +812,7 @@ pub unsafe extern "C" fn generateCInterpreterAuxFilesFromFile(
     error_msg: *mut c_char,
 ) -> bool {
     unsafe {
-        let filename = match required_c_str_arg(filename, "filename") {
+        let filename = match required_c_string_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -840,7 +826,7 @@ pub unsafe extern "C" fn generateCInterpreterAuxFilesFromFile(
                 return false;
             }
         };
-        let source = match std::fs::read_to_string(filename) {
+        let source = match std::fs::read_to_string(&filename) {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &format!("cannot read '{filename}': {e}"));
@@ -884,15 +870,15 @@ pub unsafe extern "C" fn generateCInterpreterAuxFilesFromString(
     error_msg: *mut c_char,
 ) -> bool {
     unsafe {
-        let name_app = match optional_c_str_arg(name_app, "name_app") {
+        let name_app = match optional_c_string_arg(name_app, "name_app") {
             Ok(Some(s)) if !s.is_empty() => s,
-            Ok(_) => "FaustDSP",
+            Ok(_) => "FaustDSP".to_owned(),
             Err(e) => {
                 write_error(error_msg, &e);
                 return false;
             }
         };
-        let source = match required_c_str_arg(dsp_content, "dsp_content") {
+        let source = match required_c_string_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
                 write_error(error_msg, &e);
@@ -982,11 +968,21 @@ fn extract_output_dir(argv: &[String]) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::{
         clearCInterpreterForeignFunctions, compile_factory_from_string_fastlane,
-        parse_ffi_compile_args, registerCInterpreterForeignFunction,
-        unregisterCInterpreterForeignFunction,
+        createCInterpreterDSPFactoryFromString, deleteAllCInterpreterDSPFactories,
+        deleteCInterpreterDSPFactory, getCInterpreterDSPFactoryFromSHAKey, parse_ffi_compile_args,
+        registerCInterpreterForeignFunction, unregisterCInterpreterForeignFunction,
     };
+    use crate::instance::createCInterpreterDSPInstance;
+    use crate::types::{FbcDspFactoryAny, InterpreterDspFactory};
+
+    fn cache_test_factory(factory: FbcDspFactoryAny) -> *mut InterpreterDspFactory {
+        let sha = factory.sha_key().to_owned();
+        crate::cache::cache_insert(&sha, InterpreterDspFactory { inner: factory })
+    }
 
     extern "C" fn ffi_interp_test_gain(x: f32) -> f32 {
         x * 2.0
@@ -1048,12 +1044,11 @@ mod tests {
     /// f32 buffer; all output samples must be non-zero.
     #[test]
     fn float_factory_execute_produces_nonzero_output() {
+        let _guard = crate::test_serial_guard();
         use crate::instance::{
             computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
             deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
         };
-        use crate::types::alloc_factory;
-
         let factory_any = compile_factory_from_string_fastlane(
             "ExecFloat",
             "process = _;",
@@ -1063,8 +1058,7 @@ mod tests {
 
         assert!(!factory_any.is_double(), "must be an f32 factory");
 
-        // Box the factory and create an instance.
-        let factory_ptr = alloc_factory(factory_any);
+        let factory_ptr = cache_test_factory(factory_any);
         let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
         assert!(!dsp.is_null(), "instance creation must succeed");
 
@@ -1098,7 +1092,7 @@ mod tests {
 
         // Cleanup.
         unsafe { deleteCInterpreterDSPInstance(dsp) };
-        unsafe { crate::types::free_factory(factory_ptr) };
+        assert!(unsafe { deleteCInterpreterDSPFactory(factory_ptr) });
     }
 
     /// Verify that a f64 factory can actually execute and produce non-zero
@@ -1107,12 +1101,11 @@ mod tests {
     /// f32→f64→f32 conversion path.
     #[test]
     fn double_factory_execute_produces_nonzero_output() {
+        let _guard = crate::test_serial_guard();
         use crate::instance::{
             computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
             deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
         };
-        use crate::types::alloc_factory;
-
         let factory_any = compile_factory_from_string_fastlane(
             "ExecDouble",
             "process = _;",
@@ -1126,8 +1119,7 @@ mod tests {
 
         assert!(factory_any.is_double(), "must be a double factory");
 
-        // Box the factory and create an instance.
-        let factory_ptr = alloc_factory(factory_any);
+        let factory_ptr = cache_test_factory(factory_any);
         let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
         assert!(!dsp.is_null(), "instance creation must succeed");
 
@@ -1161,17 +1153,16 @@ mod tests {
 
         // Cleanup.
         unsafe { deleteCInterpreterDSPInstance(dsp) };
-        unsafe { crate::types::free_factory(factory_ptr) };
+        assert!(unsafe { deleteCInterpreterDSPFactory(factory_ptr) });
     }
 
     #[test]
     fn registered_foreign_function_executes_in_interp_ffi() {
+        let _guard = crate::test_serial_guard();
         use crate::instance::{
             computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
             deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
         };
-        use crate::types::alloc_factory;
-
         clearCInterpreterForeignFunctions();
         unsafe {
             registerCInterpreterForeignFunction(
@@ -1187,7 +1178,7 @@ mod tests {
         )
         .expect("interp ffunction compilation should succeed once registered");
 
-        let factory_ptr = alloc_factory(factory_any);
+        let factory_ptr = cache_test_factory(factory_any);
         let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
         assert!(!dsp.is_null(), "instance creation must succeed");
 
@@ -1220,7 +1211,72 @@ mod tests {
         }
         clearCInterpreterForeignFunctions();
         unsafe { deleteCInterpreterDSPInstance(dsp) };
-        unsafe { crate::types::free_factory(factory_ptr) };
+        assert!(unsafe { deleteCInterpreterDSPFactory(factory_ptr) });
+    }
+
+    #[test]
+    fn factory_cache_lifecycle_matches_reference_counted_cpp_contract() {
+        let _guard = crate::test_serial_guard();
+        let name = c"interp_factory_lifecycle";
+        let source = c"process = _;";
+        let mut error = [0_i8; 4096];
+
+        let mut create = || unsafe {
+            createCInterpreterDSPFactoryFromString(
+                name.as_ptr(),
+                source.as_ptr(),
+                0,
+                std::ptr::null(),
+                error.as_mut_ptr(),
+            )
+        };
+        let first = create();
+        let repeated = create();
+        assert!(!first.is_null());
+        assert_eq!(repeated, first);
+
+        let sha = unsafe { (*first).inner.sha_key().to_owned() };
+        let sha = CString::new(sha).unwrap();
+        let looked_up = unsafe { getCInterpreterDSPFactoryFromSHAKey(sha.as_ptr()) };
+        assert_eq!(looked_up, first);
+
+        let instance = unsafe { createCInterpreterDSPInstance(first) };
+        assert!(!instance.is_null());
+
+        unsafe {
+            assert!(!deleteCInterpreterDSPFactory(repeated));
+            assert!(!deleteCInterpreterDSPFactory(looked_up));
+            assert!(deleteCInterpreterDSPFactory(first));
+            assert!(getCInterpreterDSPFactoryFromSHAKey(sha.as_ptr()).is_null());
+        }
+        // `instance` was owned by the cache and became invalid on final release.
+    }
+
+    #[test]
+    fn delete_all_factories_invalidates_references_and_instances() {
+        let _guard = crate::test_serial_guard();
+        let name = c"interp_factory_clear";
+        let source = c"process = _;";
+        let mut error = [0_i8; 4096];
+        let factory = unsafe {
+            createCInterpreterDSPFactoryFromString(
+                name.as_ptr(),
+                source.as_ptr(),
+                0,
+                std::ptr::null(),
+                error.as_mut_ptr(),
+            )
+        };
+        assert!(!factory.is_null());
+        let sha = unsafe { CString::new((*factory).inner.sha_key()).unwrap() };
+        let looked_up = unsafe { getCInterpreterDSPFactoryFromSHAKey(sha.as_ptr()) };
+        assert_eq!(looked_up, factory);
+        let instance = unsafe { createCInterpreterDSPInstance(factory) };
+        assert!(!instance.is_null());
+
+        deleteAllCInterpreterDSPFactories();
+        assert!(unsafe { getCInterpreterDSPFactoryFromSHAKey(sha.as_ptr()) }.is_null());
+        // `factory`, `looked_up`, and `instance` were all invalidated by clear.
     }
 
     #[test]

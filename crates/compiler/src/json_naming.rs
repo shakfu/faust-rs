@@ -24,21 +24,23 @@ pub(crate) fn fir_verify_bundle_from_report(report: &FirVerifyReport) -> Diagnos
     let mut bundle = DiagnosticBundle::new();
     for d in &report.diagnostics {
         let code = match d.severity {
-            FirVerifySeverity::Error => errors::codes::FIR_VERIFY_ERROR,
-            FirVerifySeverity::Warning => errors::codes::FIR_VERIFY_WARNING,
+            FirVerifySeverity::Error => diagnostics::codes::FIR_VERIFY_ERROR,
+            FirVerifySeverity::Warning => diagnostics::codes::FIR_VERIFY_WARNING,
         };
         let severity = match d.severity {
-            FirVerifySeverity::Error => errors::Severity::Error,
-            FirVerifySeverity::Warning => errors::Severity::Warning,
+            FirVerifySeverity::Error => diagnostics::Severity::Error,
+            FirVerifySeverity::Warning => diagnostics::Severity::Warning,
         };
-        let mut diag = Diagnostic::new(severity, errors::Stage::Fir, code, d.message.clone())
-            .with_note(format!("fir_code={}", d.code))
-            .with_note(format!("fir_node_id={}", d.node.as_u32()));
+        let mut diag = Diagnostic::new(severity, diagnostics::Stage::Fir, code, d.message.clone())
+            .with_detail_code(d.code)
+            .with_fact("fir_code", d.code)
+            .with_fact("fir_node_id", u64::from(d.node.as_u32()))
+            .with_debug_fact("fir_node_id", u64::from(d.node.as_u32()));
         if let Some(fun) = d.context.function_name.as_deref() {
-            diag = diag.with_note(format!("fir_function={fun}"));
+            diag = diag.with_fact("fir_function", fun);
         }
         if let Some(var) = d.context.variable_name.as_deref() {
-            diag = diag.with_note(format!("fir_variable={var}"));
+            diag = diag.with_fact("fir_variable", var);
         }
         bundle.push(diag);
     }
@@ -48,25 +50,58 @@ pub(crate) fn fir_verify_bundle_from_report(report: &FirVerifyReport) -> Diagnos
 /// Converts a `signal_fir` lowering error into a structured compiler diagnostic.
 pub(crate) fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
     let code = match error.code() {
-        SignalFirErrorCode::InvalidOptions => errors::codes::SFIR_INVALID_OPTIONS,
-        SignalFirErrorCode::EmptySignalList => errors::codes::SFIR_EMPTY_SIGNAL_LIST,
-        SignalFirErrorCode::OutputArityMismatch => errors::codes::SFIR_OUTPUT_ARITY_MISMATCH,
-        SignalFirErrorCode::UnsupportedSignalNode => errors::codes::SFIR_UNSUPPORTED_SIGNAL_NODE,
-        SignalFirErrorCode::UnsupportedBinOp => errors::codes::SFIR_UNSUPPORTED_BINOP,
-        SignalFirErrorCode::InputIndexOutOfRange => errors::codes::SFIR_INPUT_INDEX_OUT_OF_RANGE,
-        SignalFirErrorCode::ClockedNotLowered => errors::codes::SFIR_CLOCKED_NOT_LOWERED,
-        SignalFirErrorCode::ClockAnalysis => errors::codes::SFIR_CLOCK_ANALYSIS,
+        SignalFirErrorCode::InvalidOptions => diagnostics::codes::SFIR_INVALID_OPTIONS,
+        SignalFirErrorCode::EmptySignalList => diagnostics::codes::SFIR_EMPTY_SIGNAL_LIST,
+        SignalFirErrorCode::OutputArityMismatch => diagnostics::codes::SFIR_OUTPUT_ARITY_MISMATCH,
+        SignalFirErrorCode::UnsupportedSignalNode => {
+            diagnostics::codes::SFIR_UNSUPPORTED_SIGNAL_NODE
+        }
+        SignalFirErrorCode::UnsupportedBinOp => diagnostics::codes::SFIR_UNSUPPORTED_BINOP,
+        SignalFirErrorCode::InputIndexOutOfRange => {
+            diagnostics::codes::SFIR_INPUT_INDEX_OUT_OF_RANGE
+        }
+        SignalFirErrorCode::ClockedNotLowered => diagnostics::codes::SFIR_CLOCKED_NOT_LOWERED,
+        SignalFirErrorCode::ClockAnalysis => diagnostics::codes::SFIR_CLOCK_ANALYSIS,
+        SignalFirErrorCode::ForeignCountInExecutionMode => {
+            diagnostics::codes::SFIR_FOREIGN_COUNT_IN_EXECUTION_MODE
+        }
+        SignalFirErrorCode::BlockSensitiveOneSample => {
+            diagnostics::codes::SFIR_BLOCK_SENSITIVE_ONE_SAMPLE
+        }
     };
     // `error.to_string()` renders as "[<the SFIR code>] <message>", and the
     // `Diagnostic` already carries the code, so using Display here printed it
     // twice: "error [FRS-SFIR-0004] [FRS-SFIR-0004] signal preparation
     // failed: ...". Take the bare message and let the diagnostic own the code.
-    Diagnostic::new(
-        errors::Severity::Error,
-        errors::Stage::Transform,
+    let category = match error.code() {
+        SignalFirErrorCode::InvalidOptions => DiagnosticCategory::InvalidOptions,
+        SignalFirErrorCode::ClockAnalysis => DiagnosticCategory::UserCode,
+        SignalFirErrorCode::UnsupportedSignalNode
+        | SignalFirErrorCode::UnsupportedBinOp
+        | SignalFirErrorCode::ClockedNotLowered
+        | SignalFirErrorCode::ForeignCountInExecutionMode
+        | SignalFirErrorCode::BlockSensitiveOneSample => DiagnosticCategory::UnsupportedFeature,
+        SignalFirErrorCode::EmptySignalList
+        | SignalFirErrorCode::OutputArityMismatch
+        | SignalFirErrorCode::InputIndexOutOfRange => DiagnosticCategory::CompilerBug,
+    };
+    let mut diagnostic = Diagnostic::new(
+        diagnostics::Severity::Error,
+        diagnostics::Stage::Transform,
         code,
         error.message(),
     )
+    .with_category(category)
+    .with_detail_code(error.code().as_str());
+    if category == DiagnosticCategory::UnsupportedFeature {
+        diagnostic = diagnostic
+            .with_help("the selected lowering path does not support this Faust construct")
+            .with_help("try a supported rewrite or another backend when available");
+    } else if category == DiagnosticCategory::CompilerBug {
+        diagnostic = diagnostic
+            .with_help("this is an internal lowering invariant; report a minimal reproducer");
+    }
+    diagnostic
 }
 
 // ─── Name utilities ───────────────────────────────────────────────────────────
@@ -314,6 +349,27 @@ pub(crate) fn json_meta_entries_from_snapshot(
     out
 }
 
+/// Returns the value following the first occurrence of any of `names` in a
+/// whitespace-tokenized argv slice, e.g. `argv_value(argv, &["-cn"])` on
+/// `["-cn", "Probe"]` returns `Some("Probe")`.
+pub(crate) fn argv_value<'a>(argv: &'a [String], names: &[&str]) -> Option<&'a str> {
+    argv.iter()
+        .position(|arg| names.contains(&arg.as_str()))
+        .and_then(|position| argv.get(position + 1))
+        .map(String::as_str)
+}
+
+/// Like [`argv_value`], parsed as `T`. Returns `None` for a missing flag and
+/// for an unparsable value alike: a hand-parsed argv string decodes on a
+/// best-effort basis, since — unlike the CLI's `clap` parsing — these
+/// helpers have no channel for reporting a hard error to the caller.
+pub(crate) fn argv_value_parsed<T: std::str::FromStr>(
+    argv: &[String],
+    names: &[&str],
+) -> Option<T> {
+    argv_value(argv, names).and_then(|v| v.parse().ok())
+}
+
 /// Extracts `-I <path>` search paths from a whitespace-tokenized argv slice.
 pub(crate) fn parse_search_paths_from_argv(argv: &[String]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -396,7 +452,7 @@ pub(crate) fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
         | eval::EvalError::NonIdentifierIterationVariable { node }
         | eval::EvalError::IterationCountNotInt { node }
         | eval::EvalError::PatternArityMismatch { node, .. }
-        | eval::EvalError::PatternMatchFailed { node }
+        | eval::EvalError::PatternMatchFailed { node, .. }
         | eval::EvalError::TooManyArguments { node, .. }
         | eval::EvalError::LoopDetected { node } => Some(*node),
         _ => None,

@@ -17,6 +17,7 @@ use ahash::AHashMap;
 
 use super::region;
 use super::setup;
+use super::state;
 use crate::signal_fir::ComputeMode;
 use crate::signal_fir::FirId;
 use crate::signal_fir::FirStore;
@@ -44,6 +45,7 @@ use crate::signal_fir::module::dump_sig_readable;
 use crate::signal_fir::module::fixed_ad_internal_signals;
 use crate::signal_fir::placement::analyze_signal_sharing;
 use crate::signal_fir::planner::SignalFirPlan;
+use crate::signal_fir::{ControlRateMode, ProcessingApi};
 use crate::signal_prepare::SimpleSigType;
 
 /// RAD reverse-time scheduling state, populated post-construction in `build_module`.
@@ -430,10 +432,13 @@ pub(crate) fn build_module<'a>(
     ui: &'a UiProgram,
     types: &'a HashMap<SigId, SimpleSigType>,
     sig_types: &'a HashMap<SigId, SigType>,
+    signal_origins: &'a propagate::SignalOrigins,
     real_ty: FirType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
     compute_mode: ComputeMode,
+    control_rate_mode: ControlRateMode,
+    processing_api: ProcessingApi,
     clocked: Option<clocked::ClockedPlan<'a>>,
     scalar_schedule: Option<&crate::hgraph::Hsched>,
 ) -> Result<SignalFirOutput, SignalFirError> {
@@ -449,11 +454,14 @@ pub(crate) fn build_module<'a>(
         ui,
         types,
         sig_types,
+        signal_origins,
         plan.num_inputs,
         real_ty,
         placement,
         delay_opts,
     );
+    lower.control_rate_mode = control_rate_mode;
+    lower.processing_api = processing_api;
     lower.clocked = clocked.map(clocked::ClockedState::new);
     lower.scalar_schedule = scalar_schedule.cloned();
     lower.fixed_ad_internal_signals = fixed_ad_internal_signals(lower.arena, signals);
@@ -478,18 +486,15 @@ pub(crate) fn build_module<'a>(
 
     {
         let mut b = FirBuilder::new(&mut lower.store);
-        lower
-            .sections
-            .control_statements
-            .push(b.label("signal_fir_fastlane_step2a: executable base slice"));
-        lower.sections.control_statements.push(b.label(format!(
+        let label = b.label("signal_fir_fastlane_step2a: executable base slice");
+        lower.sections.push_compute_preamble(label);
+        let label = b.label(format!(
             "io: inputs={} outputs={}",
             plan.num_inputs, plan.num_outputs
-        )));
-        lower
-            .sections
-            .control_statements
-            .push(b.label(format!("signals: {}", plan.signal_count)));
+        ));
+        lower.sections.push_compute_preamble(label);
+        let label = b.label(format!("signals: {}", plan.signal_count));
+        lower.sections.push_compute_preamble(label);
     }
 
     let has_forward_outputs = reverse_time_outputs.iter().any(|is_reverse| !*is_reverse);
@@ -572,17 +577,20 @@ pub(crate) fn build_module<'a>(
         sample_loops.push((true, lower.regions.current_flattened()));
         lower.reset_sample_loop_state(region::RegionKind::SampleLoop);
     }
-    for index in 0..plan.num_outputs {
-        let mut b = FirBuilder::new(&mut lower.store);
-        let chan = b.int32(i32::try_from(index).expect("validated output index fits i32"));
-        let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
-        let load_chan_ptr = b.load_table("outputs", AccessType::FunArgs, chan, ptr_ty.clone());
-        lower.sections.control_statements.push(b.declare_var(
-            format!("output{index}"),
-            ptr_ty,
-            AccessType::Stack,
-            Some(load_chan_ptr),
-        ));
+    if !processing_api.is_one_sample() {
+        for index in 0..plan.num_outputs {
+            let mut b = FirBuilder::new(&mut lower.store);
+            let chan = b.int32(i32::try_from(index).expect("validated output index fits i32"));
+            let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+            let load_chan_ptr = b.load_table("outputs", AccessType::FunArgs, chan, ptr_ty.clone());
+            let decl = b.declare_var(
+                format!("output{index}"),
+                ptr_ty,
+                AccessType::Stack,
+                Some(load_chan_ptr),
+            );
+            lower.sections.push_compute_preamble(decl);
+        }
     }
     if has_reverse_outputs {
         lower.emit_reverse_time_rec_compute_resets();
@@ -616,14 +624,40 @@ pub(crate) fn build_module<'a>(
             lower.name_gen.iconst_counter,
         );
 
+        // CSE operates on the flat statement list; re-derive the ownership
+        // tags afterwards. Statements that survive keep their tag; newly
+        // inserted declarations are shared fSlow/iSlow values, which are
+        // control-rate by construction, hence externalizable.
+        let prior_ownership: HashMap<FirId, state::ControlOwnership> = lower
+            .sections
+            .control_statements
+            .iter()
+            .map(|entry| (entry.statement, entry.ownership))
+            .collect();
+        let mut flat: Vec<FirId> = lower
+            .sections
+            .control_statements
+            .iter()
+            .map(|entry| entry.statement)
+            .collect();
         cse::materialize_shared_values(
             &mut lower.store,
-            &mut lower.sections.control_statements,
+            &mut flat,
             "fSlow",
             lower.name_gen.fslow_counter,
             "iSlow",
             lower.name_gen.islow_counter,
         );
+        lower.sections.control_statements = flat
+            .into_iter()
+            .map(|statement| state::ControlStatement {
+                ownership: prior_ownership
+                    .get(&statement)
+                    .copied()
+                    .unwrap_or(state::ControlOwnership::Externalizable),
+                statement,
+            })
+            .collect();
 
         for (_, sample_loop_statements) in &mut sample_loops {
             cse::materialize_shared_values(
@@ -764,6 +798,38 @@ pub(crate) fn build_module<'a>(
         )
     };
 
+    // Execution-options port §4.3/§4.6: split the tagged compute-preamble
+    // list by ownership. In classic mode everything stays in the block entry
+    // point in original interleaved order; under external control the
+    // externalizable statements move — in their original relative order —
+    // into the separate `control` function.
+    let external_control = control_rate_mode.is_external();
+    let one_sample = processing_api.is_one_sample();
+    debug_assert!(
+        !(one_sample && has_reverse_outputs),
+        "D2 rejects -os for block-sensitive reverse-AD programs before lowering"
+    );
+    let control_fn_statements: Vec<FirId> = if external_control {
+        lower
+            .sections
+            .control_statements
+            .iter()
+            .filter(|entry| entry.ownership == state::ControlOwnership::Externalizable)
+            .map(|entry| entry.statement)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let entry_preamble: Vec<FirId> = lower
+        .sections
+        .control_statements
+        .iter()
+        .filter(|entry| {
+            !external_control || entry.ownership == state::ControlOwnership::ComputePreamble
+        })
+        .map(|entry| entry.statement)
+        .collect();
+
     let compute_statements = {
         use crate::signal_fir::loop_graph::{LoopGraph, LoopKind, slice_has_persistent_state};
 
@@ -798,7 +864,7 @@ pub(crate) fn build_module<'a>(
             .expect("scalar sample loop graph has no dependency edges, so no cycle");
 
         let mut all = Vec::new();
-        all.extend(lower.sections.control_statements.iter().copied());
+        all.extend(entry_preamble.iter().copied());
         for id in order {
             let node = graph.node(id);
             let is_reverse = node.is_reverse;
@@ -808,18 +874,76 @@ pub(crate) fn build_module<'a>(
             let post = node.post.clone();
             all.extend(pre);
             if !exec.is_empty() {
-                let sample_loop =
-                    emit_sample_loop(&mut lower.store, &exec, is_reverse, kind, compute_mode);
-                all.extend(sample_loop);
+                if one_sample {
+                    // §4.6: `frame` processes exactly one sample — the slice
+                    // body is emitted directly, with no enclosing loop and no
+                    // `count`. I/O accesses were lowered as direct channel
+                    // loads/stores above.
+                    all.extend(exec.iter().copied());
+                } else {
+                    let sample_loop =
+                        emit_sample_loop(&mut lower.store, &exec, is_reverse, kind, compute_mode);
+                    all.extend(sample_loop);
+                }
             }
             all.extend(post);
         }
         all
     };
+    // §2.3: in one-sample mode the canonical `compute` is kept but emitted
+    // empty — it never delegates to `frame`.
     let compute_body = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&compute_statements)
+        if one_sample {
+            b.block(&[])
+        } else {
+            b.block(&compute_statements)
+        }
     };
+    let frame = one_sample.then(|| {
+        let mut b = FirBuilder::new(&mut lower.store);
+        let frame_body = b.block(&compute_statements);
+        let flat_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let frame_args = [
+            dsp_arg.clone(),
+            NamedType {
+                name: "inputs".to_string(),
+                typ: flat_ty.clone(),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: flat_ty.clone(),
+            },
+        ];
+        b.declare_fun(
+            "frame",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    flat_ty.clone(),
+                    flat_ty,
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &frame_args,
+            Some(frame_body),
+            false,
+        )
+    });
+    let control = external_control.then(|| {
+        let mut b = FirBuilder::new(&mut lower.store);
+        let control_body = b.block(&control_fn_statements);
+        b.declare_fun(
+            "control",
+            FirType::Fun {
+                args: vec![FirType::Ptr(Box::new(FirType::Obj))],
+                ret: Box::new(FirType::Void),
+            },
+            std::slice::from_ref(&dsp_arg),
+            Some(control_body),
+            false,
+        )
+    });
     let compute_args = [
         dsp_arg.clone(),
         NamedType {
@@ -946,14 +1070,18 @@ pub(crate) fn build_module<'a>(
     math_prototypes.extend(lower.sections.global_declarations.iter().copied());
     let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
-        let function_items = [
+        let mut function_items = vec![
             metadata,
             instance_constants,
             instance_reset_ui,
             instance_clear,
             build_ui,
-            compute,
         ];
+        // C++ emission order (§2.3): `control` then `frame` precede the
+        // canonical `compute`.
+        function_items.extend(control);
+        function_items.extend(frame);
+        function_items.push(compute);
         b.block(&function_items)
     };
     let dsp_struct = {
@@ -981,9 +1109,11 @@ pub(crate) fn build_module<'a>(
         )
     };
 
+    lower.fir_origins.derive_reachable(&lower.store, module);
     Ok(SignalFirOutput {
         store: lower.store,
         module,
+        origins: lower.fir_origins,
         emission_order: lower.emission_order,
         // Filled in by `compile_fastlane_inner`, which owns the causality
         // gate's `Hgraph`/`Hsched`; `build_module` has no schedule to
