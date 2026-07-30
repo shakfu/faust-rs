@@ -216,27 +216,80 @@ pub struct PropagateOutput {
 #[derive(Clone, Debug)]
 pub struct SignalOrigins {
     by_signal: AHashMap<SigId, Vec<BoxId>>,
+    /// When `false`, every recording operation is a no-op and the table stays
+    /// empty. See [`SignalOrigins::disabled`].
+    recording: bool,
 }
 
 impl Default for SignalOrigins {
     fn default() -> Self {
         Self {
             by_signal: AHashMap::new(),
+            recording: true,
         }
     }
 }
 
 impl SignalOrigins {
+    /// Returns a table that records nothing.
+    ///
+    /// Provenance exists to build a diagnostic. A caller that discards the
+    /// table cannot observe it, so building it is pure cost: every recording
+    /// entry point below returns early, and in particular
+    /// [`Self::record_derived_forest`] skips its DFS over the reachable signal
+    /// forest, which propagation performs once per box node.
+    ///
+    /// This is what `propagate_typed` uses: it returns only the signal list, so
+    /// the origins it used to accumulate were dropped unread. `eval` calls it
+    /// for every constant fold (the C++ `boxPropagateSig` path), which made
+    /// evaluation pay a full provenance walk per folded expression.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            by_signal: AHashMap::new(),
+            recording: false,
+        }
+    }
+
+    /// Returns `true` when this table accumulates recordings.
+    #[must_use]
+    pub const fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    /// Maximum Box candidates retained per signal.
+    ///
+    /// Origins are bounded diagnostic evidence, not an exhaustive occurrence
+    /// index. Hash-consed signals are shared by many boxes, so without a cap
+    /// the per-pass `inherit_forest` unions accumulate candidate lists that
+    /// grow with program size, and the linear-scan dedup in [`Self::record`]
+    /// turns preparation super-quadratic. Diagnostic-time occurrence choice
+    /// only ever consults the leading candidates.
+    ///
+    /// Matches the bound proposed in `faust-rs#15`, which targets `main`; this
+    /// branch needs it too, and the correction plan's later steps cannot be
+    /// measured until it is in place.
+    pub const MAX_ORIGINS_PER_SIGNAL: usize = 8;
+
     /// Records that `signal` was produced while propagating `box_node`.
+    ///
+    /// Retains at most [`Self::MAX_ORIGINS_PER_SIGNAL`] candidates per signal,
+    /// in first-recorded order.
     pub fn record(&mut self, signal: SigId, box_node: BoxId) {
+        if !self.recording {
+            return;
+        }
         let origins = self.by_signal.entry(signal).or_default();
-        if !origins.contains(&box_node) {
+        if origins.len() < Self::MAX_ORIGINS_PER_SIGNAL && !origins.contains(&box_node) {
             origins.push(box_node);
         }
     }
 
     /// Records the same Box derivation for every signal in one output bus.
     pub fn record_outputs(&mut self, signals: &[SigId], box_node: BoxId) {
+        if !self.recording {
+            return;
+        }
         for signal in signals {
             self.record(*signal, box_node);
         }
@@ -245,16 +298,36 @@ impl SignalOrigins {
     /// Records a Box origin for newly created nodes reachable from an output
     /// bus while preserving more specific origins already assigned by child
     /// propagation calls.
+    /// Propagation calls this once per box node, innermost first, so the walk
+    /// must stay proportional to what that box actually added rather than to
+    /// everything below it.
+    ///
+    /// **Attribution closure.** When this returns, every node reachable from
+    /// `signals` carries an origin. An already-attributed node was therefore
+    /// covered by the inner call that attributed it, together with its whole
+    /// reachable subgraph — and Signal nodes are hash-consed and immutable, so
+    /// that subgraph cannot have grown since. Descending past such a node can
+    /// only re-confirm origins that already exist.
+    ///
+    /// Pruning there is what keeps the cost linear. Without it, a node deep in
+    /// the graph is re-walked once per enclosing box, which is the quadratic
+    /// factor that made `dx.algorithm(5)` and its corpus neighbours regress.
+    /// The resulting table is unchanged: this prunes redundant traversal, not
+    /// recording.
     pub fn record_derived_forest(&mut self, arena: &TreeArena, signals: &[SigId], box_node: BoxId) {
+        if !self.recording {
+            return;
+        }
         let mut stack = signals.to_vec();
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = AHashSet::new();
         while let Some(signal) = stack.pop() {
             if !visited.insert(signal) {
                 continue;
             }
-            if self.origins_for(signal).is_empty() {
-                self.record(signal, box_node);
+            if !self.origins_for(signal).is_empty() {
+                continue;
             }
+            self.record(signal, box_node);
             if let Some(children) = arena.children(signal) {
                 stack.extend(children.iter().copied());
             }
@@ -273,6 +346,9 @@ impl SignalOrigins {
     /// Normalization, recursion conversion, and AD rewrites can use this
     /// operation without depending on parser types.
     pub fn inherit(&mut self, derived: SigId, sources: &[SigId]) {
+        if !self.recording {
+            return;
+        }
         let inherited = sources
             .iter()
             .flat_map(|source| self.origins_for(*source))
@@ -289,16 +365,33 @@ impl SignalOrigins {
     /// retains the source of an operator even when the replacement node no
     /// longer contains the old node as a structural child.
     pub fn inherit_replacements(&mut self, before: &[SigId], after: &[SigId]) {
+        if !self.recording {
+            return;
+        }
         for (source, derived) in before.iter().zip(after) {
             self.inherit(*derived, &[*source]);
         }
     }
 
     /// Remaps this table after a Signal forest is cloned to another arena.
+    ///
+    /// Sources are visited in ascending `SigId` order rather than in the hash
+    /// order of `node_map`. The clone mapping is expected to be injective, in
+    /// which case order is irrelevant — but nothing in the type enforces that,
+    /// and if two sources ever share a destination, [`Self::record`] keeps only
+    /// the first [`Self::MAX_ORIGINS_PER_SIGNAL`] candidates it sees. Hash order
+    /// would then decide *which* candidates a diagnostic can name, and vary from
+    /// run to run. Sorting makes the result a function of the inputs alone,
+    /// which is cheap here: `remap` runs once per compilation.
     #[must_use]
     pub fn remap(&self, node_map: &std::collections::HashMap<SigId, SigId>) -> Self {
+        if !self.recording {
+            return Self::disabled();
+        }
+        let mut pairs = node_map.iter().collect::<Vec<_>>();
+        pairs.sort_unstable_by_key(|(source, _)| source.as_u32());
         let mut remapped = Self::default();
-        for (source, destination) in node_map {
+        for (source, destination) in pairs {
             for origin in self.origins_for(*source) {
                 remapped.record(*destination, *origin);
             }
@@ -313,6 +406,9 @@ impl SignalOrigins {
     /// reachable child origins. This is conservative by design: exact
     /// occurrence choice remains a diagnostic-time operation.
     pub fn inherit_forest(&mut self, arena: &TreeArena, roots: &[SigId]) {
+        if !self.recording {
+            return;
+        }
         fn visit(
             origins: &mut SignalOrigins,
             arena: &TreeArena,

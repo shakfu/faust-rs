@@ -50,7 +50,8 @@ pub(crate) enum XtaskCommand {
     VectorCoverageMerge(VectorCoverageMergeArgs),
     VectorCoverageCheck(VectorCoverageCheckArgs),
     VectorInterpOptCheck,
-    VectorCompileBudgetCheck(VectorCompileBudgetArgs),
+    #[command(alias = "vector-compile-budget-check")]
+    CompileBudgetCheck(CompileBudgetArgs),
     LockstepSimdCheck,
     FfiBoundaryCheck,
     CliParserCheck,
@@ -301,9 +302,13 @@ pub(crate) struct VectorCoverageCheckArgs {
 
 /// Options for validating release compilation budgets.
 #[derive(Clone, Debug, Args)]
-pub(crate) struct VectorCompileBudgetArgs {
+pub(crate) struct CompileBudgetArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) baseline: Option<PathBuf>,
+    /// Rewrite the front-end baseline units from this run instead of enforcing
+    /// them. Every increase must be justified in the commit message.
+    #[arg(long)]
+    pub(crate) update: bool,
 }
 
 /// Options for run-to-run emission determinism.
