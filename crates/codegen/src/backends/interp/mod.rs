@@ -82,6 +82,12 @@ pub struct InterpOptions {
     /// Override module/class name.  When `None`, the name embedded in the FIR
     /// module is used.
     pub module_name: Option<String>,
+    /// Compilation options string written into the `.fbc` header's
+    /// `compile_options` field.
+    ///
+    /// `None` falls back to a minimal `-lang interp` line, for callers
+    /// (mostly tests) that do not thread the real CLI flags through.
+    pub compile_options: Option<String>,
 }
 
 // ─── Error types ────────────────────────────────────────────────────────────
@@ -180,6 +186,36 @@ pub fn generate_interp_module<R: real::FbcReal>(
     use fir::match_fir;
     use std::collections::HashMap;
 
+    // 0. Flatten generated-table sub-modules.
+    //
+    // The interpreter has no notion of a nested container: it has one int heap
+    // and one real heap per instance, and a flat list of code blocks. So a
+    // table generator is inlined the way upstream inlines it for the flat
+    // backends, with its state merged into the DSP's own storage
+    // (`porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md` §5.9).
+    //
+    // The table itself needs no promotion out of `static_decls`: unlike C++'s
+    // file-scope `static`, interpreter static storage is already per instance —
+    // `class_init_instance` runs `static_init_block` on the instance's own
+    // executor — so leaving it there gives per-instance tables for free.
+    let flattened = if fir::subcontainer::has_sub_modules(store, module) {
+        let (owned, root) = fir::subcontainer::flatten_sub_modules_owned(
+            store,
+            module,
+            fir::subcontainer::SubModuleStatePolicy::MergedStructFields,
+        )
+        .map_err(|err| {
+            CodegenError::new(
+                CodegenErrorCode::CompilationFailed,
+                format!("flattening generated tables failed: {err}"),
+            )
+        })?;
+        Some((owned, root))
+    } else {
+        None
+    };
+    let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+
     // 1. Decode module root.
     let (
         module_num_inputs,
@@ -189,6 +225,7 @@ pub fn generate_interp_module<R: real::FbcReal>(
         globals,
         functions,
         static_decls,
+        sub_modules,
     ) = match match_fir(store, module) {
         fir::FirMatch::Module {
             num_inputs,
@@ -198,6 +235,7 @@ pub fn generate_interp_module<R: real::FbcReal>(
             globals,
             functions,
             static_decls,
+            sub_modules,
         } => (
             num_inputs,
             num_outputs,
@@ -206,6 +244,7 @@ pub fn generate_interp_module<R: real::FbcReal>(
             globals,
             functions,
             static_decls,
+            sub_modules,
         ),
         _ => {
             return Err(CodegenError::new(
@@ -214,6 +253,20 @@ pub fn generate_interp_module<R: real::FbcReal>(
             ));
         }
     };
+
+    // Step 0 flattened them away; anything left is a flattening bug, not an
+    // unsupported feature, and must not reach the factory — a table declared
+    // and never filled reads as zeros.
+    let sub_module_names = crate::backends::sub_module_names(store, sub_modules);
+    if !sub_module_names.is_empty() {
+        return Err(CodegenError::new(
+            CodegenErrorCode::CompilationFailed,
+            format!(
+                "sub-modules survived flattening ({}); this is an internal error",
+                sub_module_names.join(", ")
+            ),
+        ));
+    }
 
     let module_name = options.module_name.clone().unwrap_or(module_name_fir);
 
@@ -394,10 +447,14 @@ pub fn generate_interp_module<R: real::FbcReal>(
     let num_outputs = module_num_outputs as i32;
 
     // 8. Build and optionally optimize the factory.
+    let compile_options = options
+        .compile_options
+        .clone()
+        .unwrap_or_else(|| "-lang interp".to_owned());
     let mut factory = FbcDspFactory::new(
         module_name,
         "", // sha_key: not computed at this layer
-        "", // compile_options: not set at this layer
+        compile_options,
         INTERP_FILE_VERSION,
         num_inputs,
         num_outputs,

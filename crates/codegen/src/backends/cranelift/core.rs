@@ -174,6 +174,7 @@ pub struct JitDspModule {
     pub(crate) module_name: String,
     pub(crate) compute_symbol_name: String,
     pub(crate) compute_entry_addr: usize,
+    pub(crate) static_init_entry_addr: usize,
     pub(crate) instance_constants_entry_addr: usize,
     pub(crate) instance_clear_entry_addr: usize,
     pub(crate) compute_body_lowered: bool,
@@ -234,6 +235,15 @@ impl JitDspModule {
     #[must_use]
     pub fn instance_constants_entry_addr(&self) -> usize {
         self.instance_constants_entry_addr
+    }
+
+    /// Returns the finalized `staticInit` entry address when emitted.
+    ///
+    /// Non-zero only when the module has a `staticInit` function, which is the
+    /// case whenever a generated table needs filling.
+    #[must_use]
+    pub fn static_init_entry_addr(&self) -> usize {
+        self.static_init_entry_addr
     }
 
     /// Returns the finalized `instanceClear` entry address when emitted.
@@ -478,6 +488,10 @@ pub(crate) fn find_module_and_function(
     Ok((module_name, compute_id))
 }
 
+/// Shorthand for [`find_module_and_function`] looking up `compute` specifically.
+///
+/// This is the lookup used by the main [`generate_cranelift_module`] entry
+/// point, since every backend compilation revolves around lowering `compute`.
 pub(crate) fn find_module_and_compute(
     store: &FirStore,
     module: FirId,
@@ -520,6 +534,13 @@ pub(crate) fn fir_type_layout_scalar(
     Ok(s)
 }
 
+/// Maps a FIR scalar/storage type to the Cranelift IR (CLIF) register type
+/// used to hold it during `compute` lowering.
+///
+/// This is distinct from [`fir_type_layout_scalar`]: that helper computes
+/// byte size/alignment for the `dsp*` memory layout, while this one picks
+/// the Cranelift SSA value type (`I32`, `F32`, `F64`, pointer type, ...) used
+/// once a value is loaded into a register during lowering.
 pub(crate) fn fir_type_to_clif_type(
     ptr_ty: Type,
     typ: &FirType,

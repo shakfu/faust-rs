@@ -14,6 +14,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
                                                                 → AssemblyScript source
                                                                 → C source
                                                                 → C++ source
+                                                                → Cmajor source
                                                                 → Codebox (RNBO) source
                                                                 → Rust source
                                                                 → .fbc bytecode
@@ -31,6 +32,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `backends::asc` | `compiler/generator/asc/` |
 | `backends::c` | `compiler/generator/c/` |
 | `backends::cpp` | `compiler/generator/cpp/` |
+| `backends::cmajor` | `compiler/generator/cmajor/` |
 | `backends::codebox` | `compiler/generator/codebox/` |
 | `backends::cranelift` | *(new — no C++ equivalent)* |
 | `backends::interp` | `compiler/generator/interpreter/` |
@@ -55,7 +57,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
 | `wasm` | 🔧 Bring-up | `generate_wasm_module` |
 | `codebox` | 🔧 Implemented; RNBO validation pending | `generate_codebox_module` |
-| `cmajor` | 🗂 Scaffolded | — |
+| `cmajor` | ✅ Scalar backend; poly/SDK tools deferred | `generate_cmajor_module` |
 | `csharp` | 🗂 Scaffolded | — |
 | `dlang` | 🗂 Scaffolded | — |
 | `jax` | 🗂 Scaffolded | — |
@@ -63,6 +65,42 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `llvm` | 🗂 Scaffolded | — |
 | `sdf3` | 🗂 Scaffolded | — |
 | `vhdl` | 🗂 Scaffolded | — |
+
+---
+
+## Generated-table sub-modules
+
+A `rdtable`/`rwtable` whose content is computed at initialization time arrives
+as a `SubModule` on the FIR module's `sub_modules` block — a nested program with
+its own state, an `instanceInit<Sub>` and a `fill<Sub>(count, table)`. Every
+implemented backend emits them as of 2026-08-06; `--table-init const` folds the
+content at compile time instead and is a permanent supported mode.
+
+Backends split into two shapes, matching what upstream does per target:
+
+| Shape | Backends | How |
+|---|---|---|
+| Native nested container | `cpp`, `c`, `rust`, `asc`, `cmajor` | Emit the sub-module as a nested class/struct with its two entry points, and render `staticInit` as the body of `classInit` |
+| Flattened | `interp`, `wasm`, `cranelift`, `codebox`, `julia` | `fir::subcontainer::flatten_sub_modules_owned` inlines the generator before decoding, under a `SubModuleStatePolicy` |
+
+Three obligations a backend must meet, each of which was violated at least once
+during the port:
+
+1. **Never skip a fill.** A table declared and never written reads as zeros —
+   a wrong answer, not a missing feature. `backends::sub_module_names` exists so
+   a backend can detect the case; `FIR-SM01`/`FIR-SM06` make it a hard error.
+2. **Never emit a lifecycle function verbatim.** `staticInit` becomes the
+   backend's own `classInit`/`dspsetup`; emitting it again from the `functions`
+   walk produces a second, never-called definition. Consult
+   `backends::is_lifecycle_function`; `compiler`'s `lifecycle_leak_guard` test
+   is what catches a backend that forgets.
+3. **Emit the sub-module's own `static_decls` and `globals`.** A `waveform`
+   generator reads a constant array declared there. Destructuring `SubModule`
+   with `..` silently drops them, and the fill body then references an
+   undeclared symbol.
+
+Design and phase history:
+`porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md`.
 
 ---
 
@@ -522,6 +560,47 @@ cargo run -p compiler -- --lang codebox-test my.dsp -o mydsp.codebox
 
 ---
 
+### Cmajor backend — `backends::cmajor`
+
+Emits a Cmajor `processor` from FIR lowered for external control and the
+one-sample API. The scalar core owns Cmajor streams, fields, lifecycle methods,
+math spelling, scalar control flow, delay arrays, and the forever-running
+`main` loop. Its lifecycle follows the shared faust-rs contract:
+`init = classInit -> instanceInit`; direct `instanceInit` does not call
+`classInit`.
+
+The scalar backend includes compiler-facade and `-lang cmajor` CLI routes,
+single/double precision, UI events and metadata, 50 Hz bargraphs, concrete
+read/write/waveform/generated tables, architecture wrapping, and opt-in syntax
+validation through `CMAJ_BIN`. Cmajor's polyphonic, DSP lifecycle-event, hybrid,
+and SDK application layers remain explicitly deferred. Unsupported types and
+nodes return stable typed errors rather than partial source.
+
+```rust
+use codegen::backends::cmajor::{CmajorOptions, generate_cmajor_module};
+
+let source = generate_cmajor_module(&store, root_id, &CmajorOptions::default())?;
+```
+
+```sh
+cargo run -p compiler -- -lang cmajor my.dsp -o mydsp.cmajor
+CMAJ_BIN=/path/to/cmaj cargo test -p compiler --test cmajor_backend
+FAUST_CPP_BIN=/path/to/pinned/faust cargo test -p compiler --test cmajor_backend
+CMAJ_BIN=/path/to/cmaj CMAJ_CXX=/path/to/c++ \
+  cargo test -p compiler --test cmajor_backend
+```
+
+| Item | Description |
+|---|---|
+| `CmajorOptions` | public processor name and `CmajorRealType` |
+| `generate_cmajor_module` | `(&FirStore, FirId, &CmajorOptions) -> Result<String, CodegenError>` |
+| `CodegenError` | Codes `FRS-CGEN-CMAJ-0001..0005` |
+
+Port and test contract:
+`porting/cmajor-backend-port-and-test-plan-2026-08-04-en.md`.
+
+---
+
 ### Fixtures — `fixtures`
 
 Shared FIR modules for backend-agnostic parity testing. All backends are
@@ -555,5 +634,4 @@ The following backends expose a stable `backend_id()` identifier and are
 otherwise empty. They reserve a place in the roadmap and prevent accidental
 namespace collisions as parity work proceeds.
 
-`cmajor` · `csharp` · `dlang` · `jax` · `jsfx` · `llvm` · `sdf3`
-· `vhdl`
+`csharp` · `dlang` · `jax` · `jsfx` · `llvm` · `sdf3` · `vhdl`

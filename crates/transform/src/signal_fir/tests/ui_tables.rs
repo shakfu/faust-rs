@@ -3,11 +3,27 @@
 
 use super::fixtures::*;
 use crate::signal_fir::{
-    SignalFirOptions, compile_signals_to_fir_fastlane_with_ui, siggen::interpret_generator_for_test,
+    SignalFirOptions, SignalFirOutput, TableInitMode, compile_signals_to_fir_fastlane_with_ui,
+    siggen::interpret_generator_for_test,
 };
+
+/// Options pinning the folded `const` table-init mode.
+///
+/// The default flipped to `runtime` in plan phase S7, so a test that asserts
+/// the folded shape — a literal `DeclareTable` in `static_decls`, no
+/// sub-module, no `staticInit` — has to say so. `const` is a permanent
+/// supported mode, so these assertions stay meaningful; they just no longer
+/// describe the default.
+fn const_table_init_options() -> SignalFirOptions {
+    SignalFirOptions {
+        table_init_mode: TableInitMode::Const,
+        ..SignalFirOptions::default()
+    }
+}
+
 use fir::{AccessType, FirMatch, FirType, match_fir};
-use signals::{BinOp, SigBuilder};
-use tlib::TreeArena;
+use signals::{BinOp, SigBuilder, SigId};
+use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
 use ui::{ControlKind, ControlRange};
 
 #[test]
@@ -167,7 +183,7 @@ fn section_routing_places_table_initialization_in_instance_constants() {
         let ridx = b.input(0);
         b.read_only_table(size, init, ridx)
     };
-    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &const_table_init_options())
         .expect("table section routing should compile");
 
     let FirMatch::Module {
@@ -319,7 +335,7 @@ fn wrtbl_readonly_generator_constant_lowers_to_declared_table() {
         let ridx = b.input(0);
         b.read_only_table(size, init, ridx)
     };
-    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &const_table_init_options())
         .expect("Step 2H should support readonly wrtbl with constant generator");
 
     let FirMatch::Module { static_decls, .. } = match_fir(&out.store, out.module) else {
@@ -350,7 +366,7 @@ fn wrtbl_runtime_write_emits_store_table_update() {
         let ridx = b.input(0);
         b.write_read_table(size, init, widx, wsig, ridx)
     };
-    let out = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &const_table_init_options())
         .expect("Step 2H should support wrtbl runtime write/read shape");
 
     let FirMatch::Module {
@@ -440,7 +456,7 @@ fn wrtbl_generator_expansion_preserves_integer_table_types() {
         let mut b = SigBuilder::new(&mut arena);
         b.read_only_table(size, init, ridx)
     };
-    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &const_table_init_options())
         .expect("readonly wrtbl with computed int generator should lower");
 
     let FirMatch::Module { static_decls, .. } = match_fir(&out.store, out.module) else {
@@ -517,8 +533,267 @@ fn int_waveform_declares_int32_table() {
                 name,
                 elem_type: FirType::Int32,
                 ..
-            } if name.starts_with("iTbl")
+            } if name.starts_with('i')
         )),
-        "integer waveform tables should declare Int32 element type and use the iTbl prefix"
+        "integer generated tables should declare Int32 element type and take the \
+         upstream `i` type prefix (§5.6)"
+    );
+}
+
+// ─── Generated-table sub-modules (`--table-init runtime`) ───────────────────
+//
+// S2 gate for `porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md`.
+// These assert the *shape* the producer emits, which is what S4/S5 backends
+// consume. They run in `Runtime` mode explicitly, since `Const` stays the
+// effective default until S7.
+
+/// Compiles `signals` with the sub-module producer enabled.
+fn compile_runtime_table_init(
+    arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+) -> SignalFirOutput {
+    let options = SignalFirOptions {
+        table_init_mode: TableInitMode::Runtime,
+        ..SignalFirOptions::default()
+    };
+    compile_fastlane_without_ui(arena, signals, num_inputs, num_outputs, &options)
+        .expect("runtime table init should lower")
+}
+
+/// Returns the sub-module names carried by a module, in declaration order.
+fn sub_module_names(out: &SignalFirOutput) -> Vec<String> {
+    let FirMatch::Module { sub_modules, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(items) = match_fir(&out.store, sub_modules) else {
+        panic!("sub_modules block expected");
+    };
+    items
+        .into_iter()
+        .filter_map(|id| match match_fir(&out.store, id) {
+            FirMatch::SubModule { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns the names of functions declared by a module.
+fn declared_function_names(out: &SignalFirOutput) -> Vec<String> {
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(items) = match_fir(&out.store, functions) else {
+        panic!("functions block expected");
+    };
+    items
+        .into_iter()
+        .filter_map(|id| match match_fir(&out.store, id) {
+            FirMatch::DeclareFun { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Builds `rdtable(size, content, 0)` over a caller-supplied content signal.
+fn readonly_table_signal(b: &mut SigBuilder<'_>, size: i32, content: SigId) -> SigId {
+    let size_sig = b.int(size);
+    let idx = b.int(0);
+    b.read_only_table(size_sig, content, idx)
+}
+
+#[test]
+fn runtime_mode_emits_one_sub_module_and_an_uninitialized_static_table() {
+    let mut arena = TreeArena::new();
+    let sig = {
+        let mut b = SigBuilder::new(&mut arena);
+        // Not foldable to a single constant: a real expression over the
+        // table index, the shape a table generator actually has.
+        let two = b.real(2.0);
+        let half = b.real(0.5);
+        let content = b.binop(BinOp::Mul, two, half);
+        readonly_table_signal(&mut b, 8, content)
+    };
+    let out = compile_runtime_table_init(&arena, &[sig], 0, 1);
+
+    assert_eq!(
+        sub_module_names(&out),
+        vec!["mydspSIG0".to_string()],
+        "one generator must produce exactly one sub-module"
+    );
+    assert!(
+        declared_function_names(&out).contains(&"staticInit".to_string()),
+        "a file-scope generated table must be filled from staticInit"
+    );
+
+    // The table itself is declared with a size and no initializer list: the
+    // whole point of the port is that its content does not exist at compile
+    // time.
+    let FirMatch::Module { static_decls, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(items) = match_fir(&out.store, static_decls) else {
+        panic!("static_decls block expected");
+    };
+    let declared: Vec<_> = items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name, typ, init, ..
+            } => Some((name, typ, init)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        declared.len(),
+        1,
+        "expected one generated table declaration"
+    );
+    let (name, typ, init) = &declared[0];
+    assert!(
+        init.is_none(),
+        "a runtime-filled table must carry no initializer"
+    );
+    assert!(
+        matches!(typ, FirType::Array(_, 8)),
+        "table must declare its length, got {typ:?}"
+    );
+    assert!(
+        name.ends_with("mydspSIG0"),
+        "a read-only generated table takes the filling sub-module as a name \
+         suffix (§5.6 rule 2), got {name}"
+    );
+}
+
+#[test]
+fn runtime_mode_gives_a_constant_generator_a_sub_module_too() {
+    // Option B (§5.7): no folded fast path in runtime mode. A constant payload
+    // would otherwise emit `size` identical literals — 127x the reference on a
+    // 65536-entry table.
+    let mut arena = TreeArena::new();
+    let sig = {
+        let mut b = SigBuilder::new(&mut arena);
+        let half = b.real(0.5);
+        readonly_table_signal(&mut b, 16, half)
+    };
+    let out = compile_runtime_table_init(&arena, &[sig], 0, 1);
+    assert_eq!(
+        sub_module_names(&out),
+        vec!["mydspSIG0".to_string()],
+        "a constant generator must still get a sub-module in runtime mode"
+    );
+}
+
+#[test]
+fn runtime_mode_gives_a_waveform_generator_a_sub_module_too() {
+    // Same rule for the waveform payload, which upstream also encapsulates.
+    let mut arena = TreeArena::new();
+    let sig = {
+        let mut b = SigBuilder::new(&mut arena);
+        let v0 = b.real(10.0);
+        let v1 = b.real(20.0);
+        let wave = b.waveform(&[v0, v1]);
+        readonly_table_signal(&mut b, 2, wave)
+    };
+    let out = compile_runtime_table_init(&arena, &[sig], 0, 1);
+    assert_eq!(
+        sub_module_names(&out),
+        vec!["mydspSIG0".to_string()],
+        "a waveform generator must still get a sub-module in runtime mode"
+    );
+}
+
+#[test]
+fn const_mode_keeps_folding_and_emits_no_sub_module() {
+    // The permanent `const` mode (§5.10) must keep its current shape.
+    let mut arena = TreeArena::new();
+    let sig = {
+        let mut b = SigBuilder::new(&mut arena);
+        let half = b.real(0.5);
+        readonly_table_signal(&mut b, 16, half)
+    };
+    let out = compile_fastlane_without_ui(&arena, &[sig], 0, 1, &const_table_init_options())
+        .expect("const table init should lower");
+    assert!(
+        sub_module_names(&out).is_empty(),
+        "const mode must not produce sub-modules"
+    );
+    assert!(
+        !declared_function_names(&out).contains(&"staticInit".to_string()),
+        "const mode has nothing to fill, so it must not declare staticInit"
+    );
+}
+
+#[test]
+fn a_generator_reading_its_recursion_through_a_delay_still_updates_the_carrier() {
+    // Regression: a generator whose recursion carrier is read *only* through a
+    // delay produced a fill loop that read the carrier and never advanced it,
+    // so every table entry kept the initial value. The cause was structural —
+    // `build_module` drives recursion-group emission through
+    // `lower_scheduled_graph`, which no-ops without a schedule, and the
+    // sub-module lowering passed none.
+    //
+    // The fixtures checked numerically before this either read their recursion
+    // directly (`os.osc`) or had none at all (`ma.SR`), so none of them
+    // exercised the delayed-only shape.
+    let mut arena = TreeArena::new();
+    // `ba.time * 2`: a counter read one sample late, which is the shape whose
+    // carrier update went missing.
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let one = b.int(1);
+        let feedback = b.proj(0, self_ref);
+        b.binop(BinOp::Add, feedback, one)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig = {
+        let mut b = SigBuilder::new(&mut arena);
+        let counter = b.proj(0, group);
+        let delayed = b.delay1(counter);
+        let two = b.int(2);
+        let content = b.binop(BinOp::Mul, delayed, two);
+        readonly_table_signal(&mut b, 8, content)
+    };
+    let out = compile_runtime_table_init(&arena, &[sig], 0, 1);
+
+    let FirMatch::Module { sub_modules, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(subs) = match_fir(&out.store, sub_modules) else {
+        panic!("sub_modules block expected");
+    };
+    assert_eq!(subs.len(), 1, "expected one generator sub-module");
+
+    // The fill body must both read and write the carrier. Reading without
+    // writing is the defect; the store is what advances it.
+    let FirMatch::SubModule { functions, .. } = match_fir(&out.store, subs[0]) else {
+        panic!("sub-module expected");
+    };
+    let FirMatch::Block(items) = match_fir(&out.store, functions) else {
+        panic!("functions block expected");
+    };
+    let fill_body = items
+        .iter()
+        .find_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareFun { name, body, .. } if name.starts_with("fill") => body,
+            _ => None,
+        })
+        .expect("fill function with a body");
+
+    let mut stores = 0usize;
+    let mut stack = vec![fill_body];
+    while let Some(id) = stack.pop() {
+        if matches!(match_fir(&out.store, id), FirMatch::StoreVar { .. }) {
+            stores += 1;
+        }
+        stack.extend(fir::fir_match_children(&out.store, id));
+    }
+    assert!(
+        stores > 0,
+        "the fill body reads the generator's recursion carrier but never \
+         advances it, so every table entry would keep its initial value"
     );
 }

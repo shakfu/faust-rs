@@ -10,8 +10,12 @@ See the design write-up in
 
 ## What it does
 
-1. **Reference (the oracle).** `make reference` compiles every `dsp/*.dsp` with
-   the C++ Faust compiler wrapped in the original 4-pass impulse architecture
+1. **Reference (the oracle).** `make reference` first preflights every
+   `dsp/*.dsp` with the configured C++ Faust compiler. DSPs it rejects are
+   recorded as unavailable C++ oracles, with one diagnostic log per DSP; they
+   are excluded from differential targets without being classified as faust-rs
+   failures. It then compiles each supported DSP with the C++ Faust compiler
+   wrapped in the original 4-pass impulse architecture
    (`impulsearch.cpp` + `controlTools.h`), builds a native binary, and runs it
    for 60000 frames: impulse pass + random-split pass + polyphonic 4-voice pass
    + polyphonic 1-voice pass. Output goes to `reference/*.ir`.
@@ -41,6 +45,11 @@ See the design write-up in
    - `make julia` — the faust-rs Julia backend is appended to a self-contained
      Julia impulse runtime, run by `julia`, and compared on the scalar prefix
      with `filesCompare -part` in 64-bit (`-double`) mode.
+   - `make cmajor` — faust-rs emits scalar-double Cmajor, `cmaj generate
+     --target=cpp` produces a native class, and the pinned C++ Faust
+     `cmajor_cpp_dsp` adapter runs the upstream impulse protocol. Each DSP uses
+     a private build directory, so this external lane supports `make -j`. It is
+     intentionally outside `make all` and the vector/scheduling matrix.
    - `make <backend>-vec0` / `make <backend>-vec1` — run the same backend with
      `-vec -lv 0` or `-vec -lv 1` respectively. Available for `cpp`, `c`,
      `interp`, `cranelift`, `wasm`, `assemblyscript`, `rust`, and `julia`; `make all-vec` runs
@@ -85,6 +94,8 @@ See the design write-up in
 - Node.js for the WASM and AssemblyScript impulse runners.
 - `rustc` (already required to build the workspace) for the Rust backend gate.
 - Julia with the `StaticArrays` package for the Julia backend gate.
+- Cmajor's `cmaj` command for the optional Cmajor backend gate; override its
+  path with `CMAJ_BIN=/path/to/cmaj` and its C++ compiler with `CMAJ_CXX`.
 - `asc` (AssemblyScript compiler) on `PATH`, or `ASC=/path/to/asc`.
 - The Node runners use a 600-second compiler timeout so heavily parallel
   backend-matrix runs do not inherit the interactive CLI's 120-second limit.
@@ -97,6 +108,7 @@ See the design write-up in
 cd tests/impulse-tests
 make build         # build the faust-rs binaries the harness drives
 make reference     # generate the reference .ir oracle  (run once)
+make reference-report # show C++-oracle-supported and rejected DSPs
 make interp        # check the interpreter backend
 make cpp           # check the C++ backend
 make c             # check the C backend
@@ -105,6 +117,7 @@ make wasm          # check the WASM backend (64-bit scalar prefix)
 make assemblyscript # check the AssemblyScript backend (scalar prefix)
 make rust          # check the Rust backend (scalar prefix, rustc)
 make julia         # check the Julia backend (scalar prefix, Julia)
+make cmajor        # check scalar Cmajor via cmaj-generated C++
 make cpp-vec0      # check the C++ backend with -vec -lv 0
 make cpp-vec1      # check the C++ backend with -vec -lv 1
 make all-vec       # check -vec -lv 0 and -vec -lv 1 across all backends
@@ -114,6 +127,7 @@ make backend-matrix-smoke # run the representative backend matrix corpus
 make backend-matrix       # run all 96 backend/mode/strategy combinations
 make -j8 backend-matrix-full # fresh full matrix plus the audited report
 make bench         # compare C++ Faust and faust-rs performance with faustbench -single
+make bench-self-test # validate benchmark ordering, statuses, and aggregate calculations
 make vec-bench     # compare scalar/vec0/vec1 C++ throughput under -ss 0..3 for checked vector DSPs
 make compile-bench # compare C++ Faust and faust-rs compile time
 make all           # cpp + c + interp + cranelift + wasm + assemblyscript + rust
@@ -122,8 +136,11 @@ make help          # list targets and variables
 make clean         # remove ir/ and build/
 ```
 
-There is no `reference` rebuild on every run: delete `reference/` (or
-`make distclean`) to regenerate.
+Differential backend targets invoke `make reference` first. The C++ oracle
+preflight is cached and only reruns when the selected corpus or oracle
+configuration changes; ordinary reference responses still follow normal Make
+timestamp rules. Delete `reference/` (or `make distclean`) to regenerate all
+supported responses.
 
 ## Layout
 
@@ -131,8 +148,9 @@ There is no `reference` rebuild on every run: delete `reference/` (or
 |---|---|
 | `dsp/` | 132 test DSP programs (93 baseline + 21 ondemand + 18 multirate) |
 | `common.mk` | shared, overridable configuration |
-| `known.mk` | per-DSP tolerances + known-failure exclusion lists |
-| `KNOWN_FAILURES.md` | documented gaps/tolerances with causes |
+| `known.mk` | per-DSP tolerances + faust-rs known-failure exclusion lists |
+| `build/ref/cpp-oracle-manifest.mk` | generated C++ oracle support classification |
+| `KNOWN_FAILURES.md` | documented gaps, tolerances, and oracle exclusions |
 | `Make.ref` | genuine C++ 4-pass reference generation |
 | `Make.gcc` | faust-rs C / C++ backends (full 4-pass, exact compare) |
 | `Make.interp` | faust-rs interpreter backend (scalar prefix, `-part`) |
@@ -207,21 +225,49 @@ backend/mode/strategy combination.
 
 ## Performance Bench
 
-`make bench` runs the impulse DSP corpus through `faustbench -single` twice:
-once with `FAUST_CPP` and once with `FAUST_RS`. Because `faustbench` finds a
-binary named `faust` on `PATH`, the target creates temporary wrappers under
-`build/bench/` and writes:
+`make bench` runs every impulse DSP through `faustbench -single` with both
+`FAUST_CPP` and `FAUST_RS`. It alternates which compiler runs first for each
+successive DSP, avoiding a corpus-wide thermal or frequency bias. Because
+`faustbench` finds a binary named `faust` on `PATH`, the target creates
+temporary wrappers under `build/bench/` and writes:
 
 - `build/bench/summary.csv` — DSP name, C++ Faust throughput, faust-rs
-  throughput, and relative delta.
+  throughput, relative delta, explicit status, and run order.
+- `build/bench/aggregate.csv` — comparable count, win/loss counts, geometric
+  mean, median, regression count, and counts for every non-comparable status.
 - `build/bench/logs/*.log` — full `faustbench` output for each compiler.
 
-The default precision option is `BENCH_OPTIONS=-double`; the recipe also passes
-`-I dsp -I $(FAUSTLIBS)`. Override as needed:
+Only pairs of finite positive measurements with status `ok` enter the
+performance aggregates. The corpus itself is not silently reduced:
+
+- `unsupported_cpp` identifies a C++ Faust `undefined symbol` diagnostic when
+  faust-rs produced a measurement;
+- `failed_cpp`, `failed_faust_rs`, and `failed_both` identify missing
+  measurements;
+- `nonfinite_cpp`, `nonfinite_faust_rs`, and `nonfinite_both` retain explicit
+  `inf` or `nan` results without treating them as numeric performance.
+
+The first five columns of `summary.csv` retain their previous order; the
+`run_order` audit column is appended. `BENCH_DIR`, `BENCH_CSV`, and
+`BENCH_AGGREGATE_CSV` are all overridable.
+
+The default `BENCH_OPTIONS=-double` is convenient for a quick exploratory
+pass, but it does not provide the repeated measurements expected for a normal
+performance comparison. For the usual benchmark workflow, use five runs and a
+fixed 512-sample block:
 
 ```bash
-make bench BENCH_OPTIONS="-double -run 3" BENCH_WARN_MIN=10
+make bench BENCH_OPTIONS="-double -run 5 -bs 512"
 ```
+
+This is the recommended command for results intended to guide optimization or
+report a regression. The recipe also passes `-I dsp -I $(FAUSTLIBS)`.
+`BENCH_WARN_MIN` remains independently overridable when a different reporting
+threshold is wanted.
+
+`make bench-self-test` uses a synthetic `faustbench` fixture to verify
+alternating order, all principal statuses, geometric-mean/median calculation,
+and the CSV contracts without requiring either compiler.
 
 `make vec-bench` keeps the `faust-rs` compiler and native C++ build settings
 fixed and measures the 12 combinations formed by scalar, `-vec -lv 0`, and

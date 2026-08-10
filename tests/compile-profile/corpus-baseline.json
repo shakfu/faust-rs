@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "corpus_root": "tests/impulse-tests/dsp",
+  "compiled": 133,
+  "failed": [],
+  "total_seconds": 3.9601282440000003,
+  "stages": [
+    {
+      "stage": "signal-fir",
+      "seconds": 1.8681410429999998,
+      "share_pct": 47.173751148852936
+    },
+    {
+      "stage": "evaluation",
+      "seconds": 1.563451875,
+      "share_pct": 39.47982940625192
+    },
+    {
+      "stage": "fir-prepare-normalize",
+      "seconds": 1.4028176729999995,
+      "share_pct": 35.42354152609607
+    },
+    {
+      "stage": "parser",
+      "seconds": 0.24335024099999983,
+      "share_pct": 6.145009100871931
+    },
+    {
+      "stage": "propagation",
+      "seconds": 0.22579966999999998,
+      "share_pct": 5.701827215876395
+    },
+    {
+      "stage": "fir-clock-analysis",
+      "seconds": 0.19839766499999997,
+      "share_pct": 5.009879801256253
+    },
+    {
+      "stage": "fir-lowering",
+      "seconds": 0.157297957,
+      "share_pct": 3.9720419973348715
+    },
+    {
+      "stage": "fir-effect-orientation",
+      "seconds": 0.058040414,
+      "share_pct": 1.4656195563347516
+    },
+    {
+      "stage": "fir-verify",
+      "seconds": 0.028329003000000002,
+      "share_pct": 0.715355696950505
+    },
+    {
+      "stage": "cpp-codegen",
+      "seconds": 0.021183957999999996,
+      "share_pct": 0.534931110680465
+    },
+    {
+      "stage": "fir-hgraph",
+      "seconds": 0.021052536999999993,
+      "share_pct": 0.5316125060317615
+    },
+    {
+      "stage": "arity",
+      "seconds": 0.018121288000000003,
+      "share_pct": 0.4575934637332922
+    },
+    {
+      "stage": "fir-scheduling",
+      "seconds": 0.018037503999999996,
+      "share_pct": 0.45547777467380407
+    },
+    {
+      "stage": "signal-type-validation",
+      "seconds": 0.015568708,
+      "share_pct": 0.39313646025449267
+    },
+    {
+      "stage": "fir-scalar-effects",
+      "seconds": 0.014326744,
+      "share_pct": 0.36177474862604475
+    },
+    {
+      "stage": "box-flatten",
+      "seconds": 0.004144706,
+      "share_pct": 0.10466090350179072
+    },
+    {
+      "stage": "ui-path-check",
+      "seconds": 0.00036675499999999975,
+      "share_pct": 0.009261189976755705
+    },
+    {
+      "stage": "fir-plan",
+      "seconds": 0.00005383899999999997,
+      "share_pct": 0.0013595266790051956
+    }
+  ],
+  "slowest": [
+    {
+      "dsp": "spectral_level",
+      "seconds": 0.574199208
+    },
+    {
+      "dsp": "reverb_designer",
+      "seconds": 0.432510666
+    },
+    {
+      "dsp": "parametric_eq",
+      "seconds": 0.35195200000000004
+    },
+    {
+      "dsp": "phaser_flanger",
+      "seconds": 0.332193874
+    },
+    {
+      "dsp": "virtual_analog_oscillators",
+      "seconds": 0.298529957
+    },
+    {
+      "dsp": "vcf_wah_pedals",
+      "seconds": 0.29373420899999997
+    },
+    {
+      "dsp": "spectral_tilt",
+      "seconds": 0.256828626
+    },
+    {
+      "dsp": "gate_compressor",
+      "seconds": 0.251544375
+    }
+  ]
+}

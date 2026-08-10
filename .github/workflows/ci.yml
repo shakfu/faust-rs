@@ -38,7 +38,17 @@ jobs:
       # resolves it from FAUST_LIB_PATH first. Point it at the pinned Faust
       # standard-library checkout added below. Unlike `apt-get install faust`,
       # a git checkout works on all three runner OSes.
-      FAUST_LIB_PATH: ${{ github.workspace }}/faustlibraries
+      #
+      # `faustlibraries/old` carries deprecated pre-reorganization names
+      # (`oscillator.lib`, `filter.lib`, `effect.lib`, ...) that some impulse-tests
+      # corpus DSPs (e.g. `spectral_tilt.dsp`) still import directly — the same
+      # reason `vector_retention` below includes it. A real Faust install's
+      # `/usr/local/share/faust` bundles these as compatibility shims, masking
+      # the gap on a dev machine; a plain `faustlibraries` checkout does not.
+      # `std::env::split_paths` wants the platform separator, hence the
+      # per-OS `;`/`:` here rather than a literal one like `vector_retention`
+      # (Ubuntu-only) uses.
+      FAUST_LIB_PATH: ${{ github.workspace }}/faustlibraries${{ matrix.os == 'windows-latest' && ';' || ':' }}${{ github.workspace }}/faustlibraries/old
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +115,16 @@ jobs:
     name: Checked vector retention (Ubuntu)
     needs: check
     runs-on: ubuntu-latest
+    env:
+      # Keep the performance corpus on the same pinned standard-library
+      # revision as the cross-platform lint-and-test job. The Ubuntu package
+      # can lag that revision and does not provide dx.algorithm used by the
+      # dx7_alg5 front-end budget case.
+      # `stdfaust.lib` itself imports dx7.lib from the checkout's dx7/
+      # directory.
+      # The vector corpus also contains historical DSPs that import legacy
+      # names such as math.lib from the checkout's old/ directory.
+      FAUST_LIB_PATH: ${{ github.workspace }}/faustlibraries:${{ github.workspace }}/faustlibraries/dx7:${{ github.workspace }}/faustlibraries/old
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -115,10 +135,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Faust standard libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y faust
+      - name: Check out the Faust standard libraries
+        uses: actions/checkout@v4
+        with:
+          repository: grame-cncm/faustlibraries
+          ref: ecf2fdc238148c44c18352102333a1229ca7a8d3
+          path: faustlibraries
 
       - name: Checked vector coverage retention
         run: cargo run -p xtask -- vector-coverage-check

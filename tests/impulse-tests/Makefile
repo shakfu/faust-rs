@@ -13,6 +13,7 @@
 #   make c              # check the faust-rs C backend
 #   make wasm           # check the faust-rs WASM backend
 #   make assemblyscript # check the faust-rs AssemblyScript backend
+#   make cmajor         # check scalar Cmajor through cmaj-generated C++
 #   make bench          # compare C++ Faust vs faust-rs generated-code speed
 #   make compile-bench  # compare C++ Faust vs faust-rs compile time
 #   make all            # interp + c + cpp + cranelift
@@ -35,7 +36,7 @@ SCALAR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach ss,$(SS_VALUES),$(b
 VECTOR_SS_TARGETS := $(foreach backend,$(BACKENDS),$(foreach lv,0 1,$(foreach ss,$(SS_VALUES),$(backend)-vec$(lv)-ss$(ss))))
 BACKEND_MATRIX_SMOKE_DSPFILES ?= dsp/APF.dsp dsp/delays.dsp dsp/select2.dsp
 
-.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss backend-matrix backend-matrix-smoke backend-matrix-clean backend-matrix-report backend-matrix-full reference interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 rust rust-vec0 rust-vec1 julia julia-vec0 julia-vec1 cpp-ec cpp-os cpp-ec-os c-ec c-os c-ec-os rust-ec rust-os rust-ec-os all-execopts bench vec-bench compile-bench build tools help clean distclean
+.PHONY: all all-vec0 all-vec1 all-vec all-ss all-vec-ss backend-matrix backend-matrix-smoke backend-matrix-clean backend-matrix-report backend-matrix-full reference reference-report interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 assemblyscript assemblyscript-vec0 assemblyscript-vec1 rust rust-vec0 rust-vec1 julia julia-vec0 julia-vec1 cmajor cpp-ec cpp-os cpp-ec-os c-ec c-os c-ec-os rust-ec rust-os rust-ec-os all-execopts bench bench-self-test vec-bench compile-bench build tools help clean distclean
 
 all: cpp c interp cranelift wasm assemblyscript rust julia
 
@@ -79,13 +80,13 @@ backend-matrix-full:
 # Each matrix outdir is unique so combinations can run in
 # parallel without sharing generated artifacts.
 define DEFINE_SCHEDULE_TARGETS
-$(1)-ss%:
+$(1)-ss%: reference
 	$$(MAKE) -f $(2) all outdir=$$@ $(3) COMPILER_OPTS="-ss $$*"
 
-$(1)-vec0-ss%:
+$(1)-vec0-ss%: reference
 	$$(MAKE) -f $(2) all outdir=$$@ $(3) COMPILER_OPTS="-vec -lv 0 -ss $$*"
 
-$(1)-vec1-ss%:
+$(1)-vec1-ss%: reference
 	$$(MAKE) -f $(2) all outdir=$$@ $(3) COMPILER_OPTS="-vec -lv 1 -ss $$*"
 endef
 
@@ -100,6 +101,20 @@ $(eval $(call DEFINE_SCHEDULE_TARGETS,julia,Make.julia,))
 
 reference:
 	$(MAKE) -f Make.ref reference
+
+reference-report:
+	$(MAKE) -f Make.ref reference-report
+
+# Every ordinary differential target first refreshes the C++ oracle manifest.
+# This lets a new C++ compiler rejection exclude only the affected DSPs before
+# any faust-rs backend asks for a missing `reference/<dsp>.ir` file.
+CPP_ORACLE_CHECK_TARGETS := all all-vec0 all-vec1 all-vec all-ss all-vec-ss backend-matrix \
+	interp interp-vec0 interp-vec1 c c-vec0 c-vec1 cpp cpp-vec0 cpp-vec1 \
+	cranelift cranelift-vec0 cranelift-vec1 wasm wasm-vec0 wasm-vec1 \
+	assemblyscript assemblyscript-vec0 assemblyscript-vec1 rust rust-vec0 rust-vec1 \
+	julia julia-vec0 julia-vec1 cmajor cpp-ec cpp-os cpp-ec-os c-ec c-os c-ec-os \
+	rust-ec rust-os rust-ec-os all-execopts
+$(CPP_ORACLE_CHECK_TARGETS): reference
 
 # ── RAD lane ─────────────────────────────────────────────────────────────────
 #
@@ -242,6 +257,12 @@ julia-vec0:
 julia-vec1:
 	$(MAKE) -f Make.julia all outdir=julia-vec1 VECOPTS="-vec -lv 1"
 
+# Cmajor is an opt-in external lane: it needs the Cmajor command-line tool and
+# the pinned C++ Faust adapter, so it is intentionally absent from `all` and the
+# scalar/vector scheduling matrix.
+cmajor:
+	$(MAKE) -f Make.cmajor all outdir=cmajor
+
 assemblyscript:
 	$(MAKE) -f Make.assemblyscript all outdir=assemblyscript
 
@@ -253,6 +274,9 @@ assemblyscript-vec1:
 
 bench:
 	@$(MAKE) -f Make.bench bench
+
+bench-self-test:
+	@$(MAKE) -f Make.bench bench-self-test
 
 vec-bench:
 	@$(MAKE) -f Make.bench vec-bench
@@ -280,13 +304,15 @@ help:
 	@echo "-------- faust-rs impulse-response tests --------"
 	@echo "Targets:"
 	@echo "  build          : cargo build the faust-rs compiler + impulse runner"
-	@echo "  reference      : generate the genuine C++ reference .ir files (oracle)"
+	@echo "  reference      : preflight C++ oracle support, then generate supported .ir files"
+	@echo "  reference-report: list C++-oracle-supported/rejected DSPs and diagnostic logs"
 	@echo "  interp         : check the faust-rs interpreter backend (scalar prefix)"
 	@echo "  cranelift      : check the faust-rs Cranelift JIT backend (scalar prefix, 64-bit)"
 	@echo "  wasm           : check the faust-rs WASM backend (scalar prefix, 64-bit, Node)"
 	@echo "  assemblyscript : check the faust-rs AssemblyScript backend (scalar prefix, Node/asc)"
 	@echo "  rust           : check the faust-rs Rust backend (scalar prefix, rustc)"
 	@echo "  julia          : check the faust-rs Julia backend (scalar prefix, Julia)"
+	@echo "  cmajor         : check scalar Cmajor via cmaj-generated C++ (external)"
 	@echo "  *-vec0/*-vec1  : check a backend with -vec -lv 0 / -vec -lv 1"
 	@echo "  all-vec        : run all vector-mode backend variants"
 	@echo "  <backend>-ssN  : check scalar mode with -ss N (N=0..3)"
@@ -301,7 +327,8 @@ help:
 	@echo "  backend-matrix : all-ss + all-vec-ss (full configured corpus)"
 	@echo "  backend-matrix-smoke: backend-matrix on BACKEND_MATRIX_SMOKE_DSPFILES"
 	@echo "  backend-matrix-full : clean matrix outputs, run full matrix, write audited report"
-	@echo "  bench          : compare C++ Faust and faust-rs generated-code speed with faustbench -single"
+	@echo "  bench          : compare generated-code speed (usual: BENCH_OPTIONS='-double -run 5 -bs 512')"
+	@echo "  bench-self-test: validate benchmark ordering, statuses, and aggregate calculations"
 	@echo "  vec-bench      : compare scalar/vec0/vec1 C++ code under -ss 0..3 for universally certified DSPs"
 	@echo "  compile-bench  : compare C++ Faust and faust-rs compile time on the DSP corpus"
 	@echo "  cpp            : check the faust-rs C++ backend (full 4-pass)"
@@ -319,12 +346,16 @@ help:
 	@echo "  RUNNER=$(RUNNER)"
 	@echo "  FAUSTBENCH=$(FAUSTBENCH)"   
 	@echo "  BENCH_OPTIONS=$(BENCH_OPTIONS)"
+	@echo "  BENCH_DIR=$(BENCH_DIR)"
 	@echo "  BENCH_CSV=$(BENCH_CSV)"
+	@echo "  BENCH_AGGREGATE_CSV=$(BENCH_AGGREGATE_CSV)"
 	@echo "  VEC_BENCH_OPTIONS=$(VEC_BENCH_OPTIONS)"
 	@echo "  VEC_BENCH_CSV=$(VEC_BENCH_CSV)"
 	@echo "  VEC_BENCH_SUMMARY_CSV=$(VEC_BENCH_SUMMARY_CSV)"
 	@echo "  VEC_BENCH_AGGREGATE_CSV=$(VEC_BENCH_AGGREGATE_CSV)"
 	@echo "  COMPILE_BENCH_CSV=$(COMPILE_BENCH_CSV)"
+	@echo "  CMAJ_BIN=cmaj"
+	@echo "  CMAJ_CXX=$(CXX)"
 	@echo "  precision=<tol>  (filesCompare tolerance override)"
 	@echo ""
-	@echo "Run 'make reference' once before the backend targets."
+	@echo "Differential backend targets refresh the C++ oracle automatically."

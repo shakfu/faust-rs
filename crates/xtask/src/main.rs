@@ -37,6 +37,14 @@
 //! - Command dispatch and validation are declared once in the typed Clap tree;
 //!   workflow modules receive validated option values.
 
+// Match the `faust-rs` binary's allocator so measurements describe the shipped
+// configuration. Without this, `compile-profile` reports a corpus 39 % slower
+// than the product on allocation-heavy stages, which is exactly the kind of
+// skew that sends an optimisation after the wrong stage.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use fir::dump_fir;
 use serde::{Deserialize, Serialize};
@@ -143,6 +151,9 @@ fn run(cli: XtaskCli) -> Result<(), Box<dyn std::error::Error>> {
         XtaskCommand::CliTranscriptGen => cli_transcript_gen()?,
         XtaskCommand::CliTranscriptCheck => cli_transcript_check()?,
         XtaskCommand::EmissionDeterminism(args) => emission_determinism(args)?,
+        XtaskCommand::CompileProfile(args) => compile_profile(args)?,
+        XtaskCommand::LexerDifferential(args) => lexer_differential(args)?,
+        XtaskCommand::ExamplesCompare(args) => examples_compare(args)?,
     }
 
     Ok(())
@@ -154,14 +165,17 @@ mod cli_parser_check;
 mod cli_transcript;
 mod code_graphs;
 mod compile_budget;
+mod compile_profile;
 mod corpus_status_query;
 mod diagnostics_provenance;
 mod diagnostics_quality_check;
 mod emission_determinism;
 mod error_model_check;
+mod examples_compare;
 mod ffi_boundary_check;
 mod fir_dump;
 mod golden;
+mod lexer_differential;
 mod libfaust_api_matrix;
 mod libfaust_export_check;
 mod lockstep_simd;
@@ -179,14 +193,17 @@ pub(crate) use cli_parser_check::*;
 pub(crate) use cli_transcript::*;
 pub(crate) use code_graphs::*;
 pub(crate) use compile_budget::*;
+pub(crate) use compile_profile::*;
 pub(crate) use corpus_status_query::*;
 pub(crate) use diagnostics_provenance::*;
 pub(crate) use diagnostics_quality_check::*;
 pub(crate) use emission_determinism::*;
 pub(crate) use error_model_check::*;
+pub(crate) use examples_compare::*;
 pub(crate) use ffi_boundary_check::*;
 pub(crate) use fir_dump::*;
 pub(crate) use golden::*;
+pub(crate) use lexer_differential::*;
 pub(crate) use libfaust_api_matrix::*;
 pub(crate) use libfaust_export_check::*;
 pub(crate) use lockstep_simd::*;

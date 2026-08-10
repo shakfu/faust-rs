@@ -55,7 +55,7 @@ impl Compiler {
             &search_paths,
         )
         .map(|_| request.source.clone())
-        .map_err(FaustwasmServiceError::unsupported)
+        .map_err(FaustwasmServiceError::compile_failure)
     }
 
     /// Returns a copy of this compiler with the compilation options found in a
@@ -93,6 +93,15 @@ impl Compiler {
         }
         if let Some(n) = argv_value_parsed(argv, &["-dlt", "--dlt"]) {
             compiler = compiler.with_dlt(n);
+        }
+        if let Some(mode) = argv_value(argv, &["--table-init", "-table-init"]) {
+            // An unknown value keeps the default rather than failing here; the
+            // CLI layer is where argument validation belongs.
+            match mode {
+                "runtime" => compiler = compiler.with_table_init_mode(TableInitMode::Runtime),
+                "const" => compiler = compiler.with_table_init_mode(TableInitMode::Const),
+                _ => {}
+            }
         }
         if has(&["-vec", "--vec"]) {
             let vec_size =
@@ -168,14 +177,14 @@ impl Compiler {
         if wants("-cpp") {
             let cpp = compiler
                 .compile_source_to_cpp(name, source, &CppOptions::default())
-                .map_err(FaustwasmServiceError::unsupported)?;
+                .map_err(FaustwasmServiceError::compile_failure)?;
             artifacts.push(AuxFileArtifact::text(stem, "cpp", cpp));
         }
 
         if wants("-c") {
             let c = compiler
                 .compile_source_to_c(name, source, &COptions::default())
-                .map_err(FaustwasmServiceError::unsupported)?;
+                .map_err(FaustwasmServiceError::compile_failure)?;
             artifacts.push(AuxFileArtifact::text(stem, "c", c));
         }
 
@@ -188,7 +197,7 @@ impl Compiler {
             };
             let wasm = compiler
                 .compile_source_to_wasm(name, source, &options)
-                .map_err(FaustwasmServiceError::unsupported)?;
+                .map_err(FaustwasmServiceError::compile_failure)?;
             artifacts.push(AuxFileArtifact::binary(stem, "wasm", wasm.wasm_binary));
             artifacts.push(AuxFileArtifact::text(stem, "json", wasm.dsp_json));
         }
@@ -200,7 +209,7 @@ impl Compiler {
         if wants("-json") && !wants("-wasm") {
             let json = compiler
                 .compile_source_to_json(name, source)
-                .map_err(FaustwasmServiceError::unsupported)?;
+                .map_err(FaustwasmServiceError::compile_failure)?;
             artifacts.push(AuxFileArtifact::text(stem, "json", json));
         }
 
@@ -212,7 +221,7 @@ impl Compiler {
                     &search_paths,
                     &request.virtual_sources,
                 )
-                .map_err(FaustwasmServiceError::unsupported)?;
+                .map_err(FaustwasmServiceError::compile_failure)?;
             // Name the diagram "process" so the root file is always
             // process.svg, matching the C++ compiler convention and the
             // faustwasm `FaustSvgDiagrams.from(...)` expectation.
@@ -268,14 +277,14 @@ impl Compiler {
                 search_paths,
                 &request.virtual_sources,
             )
-            .map_err(FaustwasmServiceError::unsupported)?;
+            .map_err(FaustwasmServiceError::compile_failure)?;
         let lowered = self
             .lower_to_fir(
                 &request.source_name,
                 &signals,
                 SignalFirLane::TransformFastLane,
             )
-            .map_err(FaustwasmServiceError::unsupported)?;
+            .map_err(FaustwasmServiceError::compile_failure)?;
 
         let class_name = argv_value(argv, &["-cn"]).map_or_else(
             || sanitize_cpp_ident(source_name_to_class(&request.source_name).as_str()),
@@ -285,6 +294,7 @@ impl Compiler {
         // Strict C++-style JSON snapshot, embedded as getJSON() in the output —
         // downstream tooling parses it for inputs/outputs and the UI tree
         // (mirrors the C++ asc backend's getJSON()).
+        let compile_options = compile_options_json_string(Some("asc"), double_precision);
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
@@ -293,7 +303,7 @@ impl Compiler {
                 include_pathnames: Vec::new(),
                 library_list: Vec::new(),
                 top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
-                compile_options: compile_options_json_string(Some("asc"), double_precision),
+                compile_options: compile_options.clone(),
                 double_precision,
             },
         )
@@ -304,6 +314,7 @@ impl Compiler {
             class_name: Some(class_name.clone()),
             double_precision,
             json,
+            compile_options: Some(compile_options),
             ..AscOptions::default()
         };
         let asc = generate_asc_module(&lowered.store, lowered.module, &options)

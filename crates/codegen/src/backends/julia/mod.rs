@@ -55,6 +55,12 @@ pub struct JuliaOptions {
     pub class_name: Option<String>,
     /// Julia real scalar type used by the generated `REAL` alias.
     pub real_type: JuliaRealType,
+    /// Compilation options string printed in the generated-file header.
+    ///
+    /// `None` falls back to a minimal `-lang julia` line derived from
+    /// [`Self::real_type`], for callers (mostly tests) that do not thread the
+    /// real CLI flags through.
+    pub compile_options: Option<String>,
 }
 
 impl Default for JuliaOptions {
@@ -62,6 +68,7 @@ impl Default for JuliaOptions {
         Self {
             class_name: Some("mydsp".to_owned()),
             real_type: JuliaRealType::Float32,
+            compile_options: None,
         }
     }
 }
@@ -247,6 +254,40 @@ pub fn generate_julia_module(
     module: FirId,
     options: &JuliaOptions,
 ) -> Result<String, CodegenError> {
+    // Julia has no nested container and its `classInit!` takes the DSP, so a
+    // table generator is inlined with its state merged into the DSP struct.
+    // This is what upstream does — `julia_code_container.cpp` runs
+    // `inlineSubcontainersFunCalls` on the static-init instructions — and it is
+    // why the reference emits `dsp.iRec0` inside `classInit!` rather than a
+    // separate generator object.
+    let flattened = if fir::subcontainer::has_sub_modules(store, module) {
+        let (mut owned, root) = fir::subcontainer::flatten_sub_modules_owned(
+            store,
+            module,
+            fir::subcontainer::SubModuleStatePolicy::MergedStructFields,
+        )
+        .map_err(|err| {
+            CodegenError::new(
+                CodegenErrorCode::UnsupportedNode,
+                format!("flattening generated tables failed: {err}"),
+            )
+        })?;
+        // Julia has no shared static storage: the reference emits the table as
+        // `dsp.ftbl0mydspSIG0`, zeroed in the constructor.
+        let root = fir::subcontainer::promote_static_tables_to_struct(&mut owned, root).map_err(
+            |err| {
+                CodegenError::new(
+                    CodegenErrorCode::UnsupportedNode,
+                    format!("promoting generated tables failed: {err}"),
+                )
+            },
+        )?;
+        Some((owned, root))
+    } else {
+        None
+    };
+    let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+
     let module = decode_module(store, module)?;
     let class_name = options
         .class_name
@@ -258,7 +299,7 @@ pub fn generate_julia_module(
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
 
     let mut out = String::new();
-    emit_julia_header(&mut out, options.real_type);
+    emit_julia_header(&mut out, options);
     emit_static_tables(store, &mut out, module.static_decls)?;
     emit_struct_definition(
         store,
@@ -287,15 +328,25 @@ pub fn generate_julia_module(
 /// The helper aliases are deliberately close to the C++ Faust Julia backend
 /// output so downstream structural tests and user expectations see the same
 /// runtime vocabulary.
-fn emit_julia_header(out: &mut String, real_type: JuliaRealType) {
+fn emit_julia_header(out: &mut String, options: &JuliaOptions) {
     let _ = writeln!(out, "#=");
-    let _ = writeln!(out, "Code generated with faust-rs");
-    let _ = writeln!(out, "Compilation options: -lang julia");
+    let _ = writeln!(out, "Code generated with faust-rs {}", crate::VERSION);
+    let _ = writeln!(
+        out,
+        "Compilation options: {}",
+        options
+            .compile_options
+            .as_deref()
+            .unwrap_or(match options.real_type {
+                JuliaRealType::Float32 => "-lang julia -single",
+                JuliaRealType::Float64 => "-lang julia -double",
+            })
+    );
     let _ = writeln!(out, "=#");
     let _ = writeln!(out);
     let _ = writeln!(out, "using StaticArrays");
     let _ = writeln!(out);
-    let _ = writeln!(out, "const REAL = {}", real_type.julia_name());
+    let _ = writeln!(out, "const REAL = {}", options.real_type.julia_name());
     let _ = writeln!(out, "pow(x, y) = x ^ y");
     let _ = writeln!(out, "rint(x) = round(x, Base.Rounding.RoundNearest)");
     let _ = writeln!(out, "fmod(x, y) = rem(x, y)");
@@ -529,7 +580,16 @@ fn emit_julia_api(
         out,
         "function classInit!(dsp::{class_name}{{T}}, sample_rate::Int32) where {{T}}"
     );
-    let _ = writeln!(out, "\tnothing");
+    if let Some(body) = declared_functions
+        .iter()
+        .find(|f| f.name == "staticInit")
+        .and_then(|f| f.body)
+    {
+        let mut mode = EmitMode::Default;
+        emit_stmt(store, out, body, 1, &mut mode)?;
+    } else {
+        let _ = writeln!(out, "\tnothing");
+    }
     let _ = writeln!(out, "end");
     let _ = writeln!(out);
 
@@ -651,15 +711,7 @@ fn emit_julia_api(
     }
 
     for f in declared_functions {
-        if matches!(
-            f.name.as_str(),
-            "metadata"
-                | "instanceConstants"
-                | "instanceResetUserInterface"
-                | "instanceClear"
-                | "buildUserInterface"
-                | "compute"
-        ) {
+        if crate::backends::is_lifecycle_function(&f.name) {
             continue;
         }
         emit_helper_function(store, out, f)?;
@@ -1225,18 +1277,7 @@ fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
             for arg in args {
                 rendered.push(emit_value(store, arg)?);
             }
-            let jl_name = match name.as_str() {
-                // Integer min/max: no NaN is representable, so Julia's own are
-                // exact. The float ones go through the NaN-absorbing helpers
-                // emitted in the preamble, because Faust's semantics are C's
-                // `fmin`/`fmax`, not Julia's `min`/`max`.
-                "min_i" => "min",
-                "max_i" => "max",
-                "fmin" | "std::fmin" => "faust_fmin",
-                "fmax" | "std::fmax" => "faust_fmax",
-                "std::fabs" | "fabs" => "abs",
-                _ => name.strip_prefix("std::").unwrap_or(name.as_str()),
-            };
+            let jl_name = map_julia_fun_name(&name);
             Ok(format!("{jl_name}({})", rendered.join(", ")))
         }
         FirMatch::NullValue { .. } => Ok("nothing".to_owned()),
@@ -1263,6 +1304,55 @@ fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
             ))
         }
         _ => Err(unsupported_node("value", value, store)),
+    }
+}
+
+/// Maps FIR C/libm spellings to Julia's precision-generic math API.
+///
+/// Faust's single-precision `maths.lib` declarations select C symbols such as
+/// `tanhf`. Julia uses the same `tanh` spelling for `Float32` and `Float64`,
+/// so leaving the suffix intact produces an unresolved generated call.
+fn map_julia_fun_name(name: &str) -> &str {
+    let name = name.strip_prefix("std::").unwrap_or(name);
+    match name {
+        // Integer min/max: no NaN is representable, so Julia's own are exact.
+        "min_i" => "min",
+        "max_i" => "max",
+        // Float min/max must preserve C `fmin`/`fmax` NaN-absorption semantics.
+        "fminf" | "fmin" => "faust_fmin",
+        "fmaxf" | "fmax" => "faust_fmax",
+        "fabsf" | "fabs" => "abs",
+        "acosf" | "acos" => "acos",
+        "acoshf" | "acosh" => "acosh",
+        "asinf" | "asin" => "asin",
+        "asinhf" | "asinh" => "asinh",
+        "atanf" | "atan" => "atan",
+        "atan2f" | "atan2" => "atan2",
+        "atanhf" | "atanh" => "atanh",
+        "ceilf" | "ceil" => "ceil",
+        "cosf" | "cos" => "cos",
+        "coshf" | "cosh" => "cosh",
+        "copysignf" | "copysign" => "copysign",
+        "expf" | "exp" => "exp",
+        "exp2f" | "exp2" => "exp2",
+        "exp10f" | "exp10" => "exp10",
+        "floorf" | "floor" => "floor",
+        "fmodf" | "fmod" => "fmod",
+        "isnanf" | "isnan" => "isnan",
+        "isinff" | "isinf" => "isinf",
+        "logf" | "log" => "log",
+        "log2f" | "log2" => "log2",
+        "log10f" | "log10" => "log10",
+        "powf" | "pow" => "pow",
+        "remainderf" | "remainder" => "remainder",
+        "rintf" | "rint" => "rint",
+        "roundf" | "round" => "round",
+        "sinf" | "sin" => "sin",
+        "sinhf" | "sinh" => "sinh",
+        "sqrtf" | "sqrt" => "sqrt",
+        "tanf" | "tan" => "tan",
+        "tanhf" | "tanh" => "tanh",
+        other => other,
     }
 }
 
@@ -1460,6 +1550,26 @@ fn emit_static_tables(
     Ok(())
 }
 
+/// Flattens the items of both DSP state sections (`dsp_struct` then `globals`)
+/// into one list, validating that each section is a FIR `Block`.
+///
+/// Shared by [`collect_struct_initializers`] and [`collect_table_initializers`],
+/// which each filter this list for their own declaration kind.
+fn struct_and_global_items(
+    store: &FirStore,
+    dsp_struct: FirId,
+    globals: FirId,
+) -> Result<Vec<FirId>, CodegenError> {
+    let mut out = Vec::new();
+    for section in [dsp_struct, globals] {
+        let FirMatch::Block(items) = match_fir(store, section) else {
+            return Err(invalid_section("struct section", section, store));
+        };
+        out.extend(items);
+    }
+    Ok(out)
+}
+
 /// Collects explicit scalar initializers from DSP state sections.
 ///
 /// These initializers are replayed in synthesized reset paths when the FIR
@@ -1473,24 +1583,18 @@ fn collect_struct_initializers(
     dsp_struct: FirId,
     globals: FirId,
 ) -> Result<Vec<StructInit>, CodegenError> {
-    let mut out = Vec::new();
-    for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(invalid_section("struct section", section, store));
-        };
-        for item in items {
-            if let FirMatch::DeclareVar {
+    Ok(struct_and_global_items(store, dsp_struct, globals)?
+        .into_iter()
+        .filter_map(|item| match match_fir(store, item) {
+            FirMatch::DeclareVar {
                 name,
                 typ,
                 init: Some(init),
                 ..
-            } = match_fir(store, item)
-            {
-                out.push(StructInit { name, typ, init });
-            }
-        }
-    }
-    Ok(out)
+            } => Some(StructInit { name, typ, init }),
+            _ => None,
+        })
+        .collect())
 }
 
 /// Collects mutable table initializers from DSP state sections.
@@ -1506,28 +1610,22 @@ fn collect_table_initializers(
     dsp_struct: FirId,
     globals: FirId,
 ) -> Result<Vec<TableInit>, CodegenError> {
-    let mut out = Vec::new();
-    for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(invalid_section("struct section", section, store));
-        };
-        for item in items {
-            if let FirMatch::DeclareTable {
+    Ok(struct_and_global_items(store, dsp_struct, globals)?
+        .into_iter()
+        .filter_map(|item| match match_fir(store, item) {
+            FirMatch::DeclareTable {
                 name,
                 elem_type,
                 values,
                 ..
-            } = match_fir(store, item)
-            {
-                out.push(TableInit {
-                    name,
-                    elem_type,
-                    values,
-                });
-            }
-        }
-    }
-    Ok(out)
+            } => Some(TableInit {
+                name,
+                elem_type,
+                values,
+            }),
+            _ => None,
+        })
+        .collect())
 }
 
 /// Collects body-bearing function declarations from the module function block.
@@ -1580,6 +1678,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
         globals,
         functions,
         static_decls,
+        sub_modules: _,
     } = match_fir(store, module)
     {
         Ok(ModuleView {
@@ -1712,7 +1811,7 @@ fn julia_string_literal(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodegenErrorCode, EmitMode, JuliaOptions, JuliaRealType, emit_cast, emit_stmt,
+        CodegenErrorCode, EmitMode, JuliaOptions, JuliaRealType, emit_cast, emit_stmt, emit_value,
         generate_julia_module,
     };
     use crate::fixtures::build_sine_phasor_test_module;
@@ -1795,6 +1894,45 @@ mod tests {
         assert_eq!(
             emit_cast(&fir::FirType::Float64, "dsp.fVslider0"),
             "T(dsp.fVslider0)"
+        );
+    }
+
+    #[test]
+    fn maps_single_precision_libm_calls_to_julia_names() {
+        let mut store = FirStore::new();
+        let (calls, copysign) = {
+            let mut b = FirBuilder::new(&mut store);
+            let x = b.float32(0.5);
+            let y = b.float32(0.25);
+            let calls = [
+                ("acoshf", "acosh"),
+                ("asinhf", "asinh"),
+                ("atanhf", "atanh"),
+                ("coshf", "cosh"),
+                ("sinhf", "sinh"),
+                ("tanhf", "tanh"),
+                ("isnanf", "isnan"),
+                ("isinff", "isinf"),
+            ]
+            .into_iter()
+            .map(|(name, expected)| (name, expected, b.fun_call(name, &[x], FirType::Float32)))
+            .collect::<Vec<_>>();
+            let copysign = b.fun_call("copysignf", &[x, y], FirType::Float32);
+            (calls, copysign)
+        };
+
+        for (name, expected, call) in calls {
+            let rendered = emit_value(&store, call).expect("supported math call");
+            assert!(
+                rendered.starts_with(&format!("{expected}(")),
+                "{name} rendered as {rendered}"
+            );
+        }
+
+        assert!(
+            emit_value(&store, copysign)
+                .expect("supported copysign call")
+                .starts_with("copysign("),
         );
     }
 

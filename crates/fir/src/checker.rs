@@ -482,6 +482,8 @@ pub fn verify_module_structure(
     let mut ctx = VerifyCtx::new(store, module_id);
     ctx.check_phase1();
     ctx.check_phase2();
+    ctx.check_table_fill_coverage();
+    ctx.check_fill_call_extent();
     (
         FirVerifyReport {
             diagnostics: ctx.diags,
@@ -573,6 +575,8 @@ struct VerifyCtx<'s> {
     current_fun_args: HashMap<String, FirType>,
     /// Lexical scope stack for `kStack` / `kLoop` variables.
     scope_stack: ScopeStack,
+    /// Sub-module names already seen, across the whole nesting tree (FIR-T04).
+    sub_module_names: HashSet<String>,
 }
 
 impl<'s> VerifyCtx<'s> {
@@ -590,6 +594,7 @@ impl<'s> VerifyCtx<'s> {
             current_return_type: None,
             current_fun_args: HashMap::new(),
             scope_stack: ScopeStack::new(),
+            sub_module_names: HashSet::new(),
         }
     }
 
@@ -643,6 +648,7 @@ impl<'s> VerifyCtx<'s> {
             globals,
             functions,
             static_decls,
+            sub_modules,
         } = match_fir(self.store, id)
         else {
             self.error("FIR-M01", "root node is not a FirMatch::Module", id);
@@ -677,6 +683,486 @@ impl<'s> VerifyCtx<'s> {
         match match_fir(self.store, static_decls) {
             FirMatch::Block(stmts) => self.check_globals(static_decls, stmts),
             _ => self.error("FIR-M05", "static_decls is not a Block", static_decls),
+        }
+
+        // FIR-SM02..SM04: sub_modules must be a Block of SubModule nodes.
+        match match_fir(self.store, sub_modules) {
+            FirMatch::Block(stmts) => self.check_sub_modules(sub_modules, stmts),
+            _ => self.error("FIR-SM02", "sub_modules is not a Block", sub_modules),
+        }
+    }
+
+    /// FIR-SM01: every declared sub-module must have its `fill` called from a
+    /// lifecycle body.
+    ///
+    /// A generated table is declared without an initializer and populated at
+    /// initialization time by its sub-module. If the call is missing — a
+    /// backend that dropped it, a lowering that declared the table but never
+    /// registered the call — the program still compiles and runs, and silently
+    /// reads zeros. That is exactly what upstream 2.87.1 does for nested
+    /// generated tables (`porting/generated/siggen-table-init-s0/`, `f08`),
+    /// and this rule is what makes it impossible here.
+    ///
+    /// The check keys on the **sub-module**, not on the shape of the array:
+    /// an earlier draft flagged any uninitialized array read by `compute` and
+    /// immediately fired on ordinary delay lines (`iVec6`), which are also
+    /// uninitialized arrays but are zeroed by `instanceClear` rather than
+    /// filled. Sub-modules exist only for generated tables, so requiring one
+    /// fill call per sub-module is both precise and producer-independent.
+    fn check_table_fill_coverage(&mut self) {
+        let FirMatch::Module {
+            functions,
+            sub_modules,
+            ..
+        } = match_fir(self.store, self.module_id)
+        else {
+            return;
+        };
+        let FirMatch::Block(subs) = match_fir(self.store, sub_modules) else {
+            return;
+        };
+        if subs.is_empty() {
+            return;
+        }
+        let called = self.collect_called_fills(functions);
+        for sub in subs {
+            let FirMatch::SubModule { name, .. } = match_fir(self.store, sub) else {
+                continue;
+            };
+            let expected = format!("fill{name}");
+            if !called.contains(&expected) {
+                self.error(
+                    "FIR-SM01",
+                    format!(
+                        "sub-module '{name}' fills a generated table but '{expected}' is never \
+                         called from staticInit or instanceConstants; the table would be read \
+                         uninitialized"
+                    ),
+                    sub,
+                );
+            }
+        }
+    }
+
+    /// FIR-SM06: each `fill` call must cover its table's whole declared length.
+    ///
+    /// Invariant I2 of the port plan. FIR-SM01 proves a fill *happens*; it says
+    /// nothing about how much it writes. The sub-module's loop runs `0..count`,
+    /// so the elements actually initialized are decided entirely by the `count`
+    /// the call site passes — pass `size - 1` and the last cell keeps whatever
+    /// the target's uninitialized storage held, which no numeric test on a
+    /// 65536-entry table is likely to notice.
+    ///
+    /// The table's length comes from its own declaration rather than from the
+    /// call, so producer and check do not share a source: the call would have
+    /// to be wrong in the same direction as the declaration to slip through.
+    fn check_fill_call_extent(&mut self) {
+        let FirMatch::Module {
+            functions,
+            dsp_struct,
+            globals,
+            static_decls,
+            ..
+        } = match_fir(self.store, self.module_id)
+        else {
+            return;
+        };
+        let mut lengths: HashMap<String, usize> = HashMap::new();
+        for block in [dsp_struct, globals, static_decls] {
+            let FirMatch::Block(items) = match_fir(self.store, block) else {
+                continue;
+            };
+            for item in items {
+                match match_fir(self.store, item) {
+                    FirMatch::DeclareVar {
+                        name,
+                        typ: FirType::Array(_, size),
+                        ..
+                    } => {
+                        lengths.insert(name, size);
+                    }
+                    FirMatch::DeclareTable { name, values, .. } => {
+                        lengths.insert(name, values.len());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if lengths.is_empty() {
+            return;
+        }
+        let FirMatch::Block(items) = match_fir(self.store, functions) else {
+            return;
+        };
+        for item in items {
+            let FirMatch::DeclareFun {
+                name,
+                body: Some(body),
+                ..
+            } = match_fir(self.store, item)
+            else {
+                continue;
+            };
+            if name != "staticInit" && name != "instanceConstants" {
+                continue;
+            }
+            let mut stack = vec![body];
+            while let Some(id) = stack.pop() {
+                if let FirMatch::FunCall {
+                    name: callee, args, ..
+                } = match_fir(self.store, id)
+                    && callee.starts_with("fill")
+                    && args.len() == 3
+                    && let FirMatch::Int32 { value: count, .. } = match_fir(self.store, args[1])
+                    && let FirMatch::LoadVar { name: table, .. } = match_fir(self.store, args[2])
+                    && let Some(&length) = lengths.get(&table)
+                    && usize::try_from(count).map(|c| c != length).unwrap_or(true)
+                {
+                    self.error(
+                        "FIR-SM06",
+                        format!(
+                            "'{callee}' fills {count} of the {length} cells of table \
+                             '{table}'; the remaining cells would be read uninitialized"
+                        ),
+                        id,
+                    );
+                }
+                stack.extend(child_ids(&match_fir(self.store, id)));
+            }
+        }
+    }
+
+    /// Collects the names of `fill…` functions called from a lifecycle body.
+    fn collect_called_fills(&self, functions: FirId) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let FirMatch::Block(items) = match_fir(self.store, functions) else {
+            return out;
+        };
+        for item in items {
+            let FirMatch::DeclareFun {
+                name,
+                body: Some(body),
+                ..
+            } = match_fir(self.store, item)
+            else {
+                continue;
+            };
+            if name != "staticInit" && name != "instanceConstants" {
+                continue;
+            }
+            let mut stack = vec![body];
+            while let Some(id) = stack.pop() {
+                if let FirMatch::FunCall { name: callee, .. } = match_fir(self.store, id)
+                    && callee.starts_with("fill")
+                {
+                    out.insert(callee);
+                }
+                stack.extend(child_ids(&match_fir(self.store, id)));
+            }
+        }
+        out
+    }
+
+    /// Validates the sub-module block of a module or of another sub-module.
+    ///
+    /// Sub-modules are the table generators of
+    /// `porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md`.
+    /// They are checked structurally here — shape, entry points, uniqueness —
+    /// while the fill/read ordering contract lives in
+    /// [`Self::check_table_fill_coverage`] (FIR-SM01), which needs the module's
+    /// lifecycle bodies and therefore runs from the module level.
+    fn check_sub_modules(&mut self, block_id: FirId, stmts: Vec<FirId>) {
+        for stmt_id in stmts {
+            let FirMatch::SubModule {
+                name,
+                elem_type,
+                functions,
+                sub_modules,
+                dsp_struct,
+                static_decls,
+                globals,
+            } = match_fir(self.store, stmt_id)
+            else {
+                self.error(
+                    "FIR-SM02",
+                    "sub_modules block contains a node that is not a SubModule",
+                    stmt_id,
+                );
+                continue;
+            };
+
+            // FIR-SM04: names identify generated classes and their two entry
+            // points, so a duplicate would collapse two generators onto one
+            // table filler.
+            if !self.sub_module_names.insert(name.clone()) {
+                self.error(
+                    "FIR-SM04",
+                    format!("duplicate sub-module name '{name}'"),
+                    stmt_id,
+                );
+            }
+
+            for (section, section_id) in [
+                ("dsp_struct", dsp_struct),
+                ("static_decls", static_decls),
+                ("globals", globals),
+                ("functions", functions),
+            ] {
+                if !matches!(match_fir(self.store, section_id), FirMatch::Block(_)) {
+                    self.error(
+                        "FIR-SM02",
+                        format!("sub-module '{name}' section '{section}' is not a Block"),
+                        section_id,
+                    );
+                }
+            }
+
+            // The parent's `staticInit`/`instanceConstants` call these, so
+            // their signatures must be visible when those bodies are checked.
+            if let FirMatch::Block(items) = match_fir(self.store, functions) {
+                for item in items {
+                    if let FirMatch::DeclareFun {
+                        name: fun_name,
+                        typ,
+                        args,
+                        body,
+                        ..
+                    } = match_fir(self.store, item)
+                    {
+                        self.register_function_signature(
+                            item, &fun_name, &typ, &args, body, None, false,
+                        );
+                    }
+                }
+            }
+
+            self.check_sub_module_entry_points(stmt_id, &name, &elem_type, functions);
+            self.check_nested_fill_coverage(&name, functions, sub_modules);
+
+            // Nested generators: a sub-module that reads another generated
+            // table owns that table's sub-module in turn.
+            match match_fir(self.store, sub_modules) {
+                FirMatch::Block(nested) => self.check_sub_modules(sub_modules, nested),
+                _ => self.error(
+                    "FIR-SM02",
+                    format!("sub-module '{name}' sub_modules is not a Block"),
+                    sub_modules,
+                ),
+            }
+        }
+        let _ = block_id;
+    }
+
+    /// FIR-SM05: a sub-module that owns nested generators must call each of
+    /// their fills from its own `instanceInit`.
+    ///
+    /// A sub-module has no `classInit`, so a nested generated table can only be
+    /// populated from `instanceInit{name}`, which the parent invokes before
+    /// `fill{name}`. Without this, the inner table is declared and never
+    /// written and the outer table is computed from zeros — the upstream
+    /// 2.87.1 behavior this port deliberately does not reproduce
+    /// (`porting/generated/siggen-table-init-s0/`, fixture `f08`). The first
+    /// implementation of the producer had exactly this bug.
+    fn check_nested_fill_coverage(&mut self, name: &str, functions: FirId, sub_modules: FirId) {
+        let FirMatch::Block(nested) = match_fir(self.store, sub_modules) else {
+            return;
+        };
+        if nested.is_empty() {
+            return;
+        }
+        let mut called: HashSet<String> = HashSet::new();
+        if let FirMatch::Block(items) = match_fir(self.store, functions) {
+            for item in items {
+                let FirMatch::DeclareFun {
+                    name: fun_name,
+                    body: Some(body),
+                    ..
+                } = match_fir(self.store, item)
+                else {
+                    continue;
+                };
+                if fun_name != format!("instanceInit{name}") {
+                    continue;
+                }
+                let mut stack = vec![body];
+                while let Some(id) = stack.pop() {
+                    if let FirMatch::FunCall { name: callee, .. } = match_fir(self.store, id)
+                        && callee.starts_with("fill")
+                    {
+                        called.insert(callee);
+                    }
+                    stack.extend(child_ids(&match_fir(self.store, id)));
+                }
+            }
+        }
+        for inner in nested {
+            let FirMatch::SubModule {
+                name: inner_name, ..
+            } = match_fir(self.store, inner)
+            else {
+                continue;
+            };
+            let expected = format!("fill{inner_name}");
+            if !called.contains(&expected) {
+                self.error(
+                    "FIR-SM05",
+                    format!(
+                        "sub-module '{name}' owns nested generator '{inner_name}' but never \
+                         calls '{expected}' from 'instanceInit{name}'; the nested table would \
+                         be read uninitialized"
+                    ),
+                    inner,
+                );
+            }
+        }
+    }
+
+    /// FIR-SM02/SM03: a sub-module exposes exactly `instanceInit{name}` and
+    /// `fill{name}`, and its fill writes only through the `table` argument.
+    fn check_sub_module_entry_points(
+        &mut self,
+        node: FirId,
+        name: &str,
+        elem_type: &FirType,
+        functions: FirId,
+    ) {
+        let FirMatch::Block(items) = match_fir(self.store, functions) else {
+            return;
+        };
+        let expected_init = format!("instanceInit{name}");
+        let expected_fill = format!("fill{name}");
+        let mut found_init = false;
+        let mut found_fill = false;
+
+        for item in items {
+            let FirMatch::DeclareFun {
+                name: fun_name,
+                args,
+                body,
+                ..
+            } = match_fir(self.store, item)
+            else {
+                self.error(
+                    "FIR-SM02",
+                    format!("sub-module '{name}' functions block holds a non-function node"),
+                    item,
+                );
+                continue;
+            };
+            if fun_name == expected_init {
+                found_init = true;
+            } else if fun_name == expected_fill {
+                found_fill = true;
+                self.check_fill_signature(item, name, elem_type, &args);
+                if let Some(body) = body {
+                    self.check_fill_writes_only_table(body, name);
+                }
+            } else {
+                // A `compute` here would mean the generator was lowered as an
+                // ordinary DSP and would never fill anything.
+                self.error(
+                    "FIR-SM02",
+                    format!(
+                        "sub-module '{name}' declares unexpected function '{fun_name}'; \
+                         expected only '{expected_init}' and '{expected_fill}'"
+                    ),
+                    item,
+                );
+            }
+        }
+
+        if !found_init {
+            self.error(
+                "FIR-SM02",
+                format!("sub-module '{name}' is missing '{expected_init}'"),
+                node,
+            );
+        }
+        if !found_fill {
+            self.error(
+                "FIR-SM02",
+                format!("sub-module '{name}' is missing '{expected_fill}'"),
+                node,
+            );
+        }
+    }
+
+    /// FIR-SM03: `fill{name}` takes `(dsp, count: Int32, table: Ptr(elem_type))`.
+    fn check_fill_signature(
+        &mut self,
+        node: FirId,
+        name: &str,
+        elem_type: &FirType,
+        args: &[NamedType],
+    ) {
+        let Some(count) = args.iter().find(|a| a.name == "count") else {
+            self.error(
+                "FIR-SM03",
+                format!("sub-module '{name}' fill function has no 'count' argument"),
+                node,
+            );
+            return;
+        };
+        if count.typ != FirType::Int32 {
+            self.error(
+                "FIR-SM03",
+                format!(
+                    "sub-module '{name}' fill argument 'count' has type {:?}, expected Int32",
+                    count.typ
+                ),
+                node,
+            );
+        }
+        let Some(table) = args.iter().find(|a| a.name == "table") else {
+            self.error(
+                "FIR-SM03",
+                format!("sub-module '{name}' fill function has no 'table' argument"),
+                node,
+            );
+            return;
+        };
+        let expected = FirType::Ptr(Box::new(elem_type.clone()));
+        if table.typ != expected {
+            self.error(
+                "FIR-SM03",
+                format!(
+                    "sub-module '{name}' fill argument 'table' has type {:?}, \
+                     expected {expected:?} from the sub-module element type",
+                    table.typ
+                ),
+                node,
+            );
+        }
+    }
+
+    /// FIR-SM03: the fill body may write its own state and the `table`
+    /// argument, never a table belonging to the enclosing module.
+    ///
+    /// A sub-module runs before the DSP exists as far as the caller is
+    /// concerned — in the C++ shape it is a separate object built on the stack
+    /// of `classInit` — so a store into any other named table is either a name
+    /// collision or a lowering bug that would corrupt parent state.
+    fn check_fill_writes_only_table(&mut self, body: FirId, name: &str) {
+        let mut stack = vec![body];
+        while let Some(id) = stack.pop() {
+            if let FirMatch::StoreTable {
+                name: target,
+                access,
+                ..
+            } = match_fir(self.store, id)
+                && access == AccessType::FunArgs
+                && target != "table"
+            {
+                self.error(
+                    "FIR-SM03",
+                    format!(
+                        "sub-module '{name}' fill body writes through argument table \
+                         '{target}', expected only 'table'"
+                    ),
+                    id,
+                );
+            }
+            stack.extend(child_ids(&match_fir(self.store, id)));
         }
     }
 

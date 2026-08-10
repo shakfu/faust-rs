@@ -19,7 +19,7 @@
 //! - Aggregate typed stage errors into one top-level [`CompilerError`] surface.
 //! - Provide test/golden-oriented helper outputs (box dump, signal dump, FIR dump).
 //! - Route backend generation, with consistent options, to every emitter:
-//!   C++, C, Rust, Julia, AssemblyScript, interpreter `.fbc`, WASM, the JSON
+//!   C++, C, Cmajor, Rust, Julia, AssemblyScript, interpreter `.fbc`, WASM, the JSON
 //!   description, and the Cranelift JIT status report. Every entry point
 //!   returns source text or bytes; a caller that needs to *run* JIT-compiled
 //!   code must own the generated module itself and so lowers through the FIR
@@ -77,6 +77,9 @@ use std::time::{Duration, Instant};
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use codegen::backends::asc::{AscOptions, CodegenError as AscCodegenError, generate_asc_module};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
+use codegen::backends::cmajor::{
+    CmajorOptions, CodegenError as CmajorCodegenError, generate_cmajor_module,
+};
 use codegen::backends::codebox::{
     CodeboxOptions, CodegenError as CodeboxCodegenError, generate_codebox_module,
 };
@@ -123,7 +126,7 @@ use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::schedule::SchedulingStrategy;
 pub use transform::signal_fir::{
-    ComputeMode, ControlRateMode, ProcessingApi, RealType, VectorEffectiveMode,
+    ComputeMode, ControlRateMode, ProcessingApi, RealType, TableInitMode, VectorEffectiveMode,
     VectorFallbackReason, VectorPipelineStatus,
 };
 use transform::signal_fir::{SignalFirError, SignalFirErrorCode, SignalFirOptions};
@@ -403,6 +406,13 @@ pub struct FaustwasmServiceError {
     pub code: FaustwasmServiceErrorCode,
     /// User-facing explanation intended for JS-side propagation.
     pub message: String,
+    /// Typed compiler diagnostics, retained when the failure came from a
+    /// [`CompilerError`] (the common case: the DSP failed to compile).
+    ///
+    /// `None` for transport/argument failures, which have no compiler
+    /// diagnostic to carry. Host bindings render this through the
+    /// diagnostics-v2 JSON channel instead of re-parsing `message`.
+    pub diagnostics: Option<DiagnosticBundle>,
 }
 
 /// Stable error codes for the helper-service surface.
@@ -420,14 +430,16 @@ impl FaustwasmServiceError {
     /// Builds an error tagged [`FaustwasmServiceErrorCode::Unsupported`].
     ///
     /// Takes any [`Display`](std::fmt::Display) value so a fallible stage can
-    /// be mapped without a closure: `.map_err(FaustwasmServiceError::unsupported)?`
-    /// works for [`CompilerError`], backend codegen errors, and `draw` errors
-    /// alike. Every compile failure on this surface renders through here, so
-    /// one rendered diagnostic shape reaches the host for all of them.
+    /// be mapped without a closure: `.map_err(FaustwasmServiceError::unsupported)?`.
+    /// Use it for failures that carry no typed compiler diagnostics (backend
+    /// codegen errors, `draw` errors); [`CompilerError`] sources go through
+    /// [`FaustwasmServiceError::compile_failure`] instead so the typed
+    /// [`DiagnosticBundle`] survives to the host bindings.
     fn unsupported(message: impl std::fmt::Display) -> Self {
         Self {
             code: FaustwasmServiceErrorCode::Unsupported,
             message: message.to_string(),
+            diagnostics: None,
         }
     }
 
@@ -437,6 +449,21 @@ impl FaustwasmServiceError {
         Self {
             code: FaustwasmServiceErrorCode::InvalidArgument,
             message: message.to_string(),
+            diagnostics: None,
+        }
+    }
+
+    /// Builds an [`FaustwasmServiceErrorCode::Unsupported`] error that keeps
+    /// the typed compiler diagnostics alongside the rendered message.
+    ///
+    /// Use this — not [`FaustwasmServiceError::unsupported`] — wherever the
+    /// source error is a [`CompilerError`], so host bindings can serve the
+    /// complete diagnostics-v2 report instead of one flattened string.
+    fn compile_failure(error: CompilerError) -> Self {
+        Self {
+            code: FaustwasmServiceErrorCode::Unsupported,
+            message: error.to_string(),
+            diagnostics: Some(error.diagnostic_bundle().clone()),
         }
     }
 }
@@ -486,6 +513,8 @@ pub struct Compiler {
     /// Delay above which the if-based wrapping strategy is used.
     /// Mirrors Faust `-dlt N`. Default: `u32::MAX` (disabled).
     delay_line_threshold: u32,
+    /// How generated-table content is produced (`--table-init`).
+    table_init_mode: TableInitMode,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
     /// (`-vec`/`-vs`/`-lv`).
     ///
@@ -570,6 +599,7 @@ impl Compiler {
             entrypoint_name: "process".into(),
             real_type: RealType::default(),
             max_copy_delay: 16,
+            table_init_mode: TableInitMode::default(),
             delay_line_threshold: u32::MAX,
             compute_mode: ComputeMode::Scalar,
             scheduling_strategy: SchedulingStrategy::DepthFirst,
@@ -617,6 +647,17 @@ impl Compiler {
     #[must_use]
     pub fn with_real_type(mut self, real_type: RealType) -> Self {
         self.real_type = real_type;
+        self
+    }
+
+    /// Selects how generated-table content is produced (`--table-init`).
+    ///
+    /// `Runtime` compiles each table generator into a sub-module filled at
+    /// initialization time (the C++ reference behavior); `Const` folds it into
+    /// a literal initializer list at compile time.
+    #[must_use]
+    pub fn with_table_init_mode(mut self, mode: TableInitMode) -> Self {
+        self.table_init_mode = mode;
         self
     }
 
@@ -737,6 +778,7 @@ impl Compiler {
             scheduling_strategy: self.scheduling_strategy,
             control_rate_mode: self.control_rate_mode,
             processing_api: self.processing_api,
+            table_init_mode: self.table_init_mode,
             timing_sink: self.timing_sink.clone(),
         }
     }
@@ -762,6 +804,7 @@ impl Compiler {
             self.scheduling_strategy,
             self.control_rate_mode,
             self.processing_api,
+            self.table_init_mode,
         )
         .map_err(|error| lower_fir_error_to_compiler(source, signals, error))
     }
@@ -1395,6 +1438,15 @@ pub enum CompilerError {
         /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
+    /// Cmajor backend emission failed from FIR.
+    CodegenCmajor {
+        /// Program provenance; see the shared field convention.
+        source: Box<str>,
+        /// Typed error from the stage that failed.
+        error: CmajorCodegenError,
+        /// Rendered diagnostics for this failure.
+        diagnostics: DiagnosticBundle,
+    },
     /// Rust backend emission failed from FIR.
     CodegenRust {
         /// Program provenance; see the shared field convention.
@@ -1496,6 +1548,9 @@ impl std::fmt::Display for CompilerError {
             Self::CodegenCodebox { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
+            Self::CodegenCmajor { source, error, .. } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
             Self::CodegenRust { source, error, .. } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
@@ -1527,6 +1582,7 @@ impl std::error::Error for CompilerError {
             Self::CodegenJulia { error, .. } => Some(error),
             Self::CodegenAsc { error, .. } => Some(error),
             Self::CodegenCodebox { error, .. } => Some(error),
+            Self::CodegenCmajor { error, .. } => Some(error),
             Self::CodegenRust { error, .. } => Some(error),
             Self::CodegenInterp { error, .. } => Some(error),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1558,6 +1614,7 @@ impl CompilerError {
             | Self::CodegenJulia { diagnostics, .. }
             | Self::CodegenAsc { diagnostics, .. }
             | Self::CodegenCodebox { diagnostics, .. }
+            | Self::CodegenCmajor { diagnostics, .. }
             | Self::CodegenRust { diagnostics, .. }
             | Self::CodegenInterp { diagnostics, .. }
             | Self::CodegenWasm { diagnostics, .. }
@@ -1685,6 +1742,7 @@ impl CompilerError {
             Self::CodegenJulia { diagnostics, .. } => diagnostics,
             Self::CodegenAsc { diagnostics, .. } => diagnostics,
             Self::CodegenCodebox { diagnostics, .. } => diagnostics,
+            Self::CodegenCmajor { diagnostics, .. } => diagnostics,
             Self::CodegenRust { diagnostics, .. } => diagnostics,
             Self::CodegenInterp { diagnostics, .. } => diagnostics,
             #[cfg(not(target_arch = "wasm32"))]

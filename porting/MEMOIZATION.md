@@ -27,13 +27,32 @@ Memoization should only be added when all of the following hold:
    context-sensitive semantics.
 4. A structural or differential non-regression test can be added with the
    change.
+5. **The repeat rate is measured, not assumed** — on an input where the stage
+   in question dominates.
+
+Rule 5 was added 2026-08-06 because rules 1–4 only test whether a computation
+*could* be memoized. §3.1 satisfied all four and turned out to be a
+pessimization: 12 % hit rate, 748 k entries stored to avoid 123 k
+recomputations. Choose the input deliberately too — the impulse corpus puts
+propagation at 2.2 % of compile time where a real DSP puts it at 82 %.
 
 Preferred Rust pattern:
 
 - keep pass-global caches explicit,
 - thread them through one pass/session context,
-- do not attach mutable pass state to arena nodes,
-- separate analysis caches from operational lowering caches.
+- separate analysis caches from operational lowering caches,
+- **and pick the owner by what the cached value depends on, not by habit.**
+
+That last point replaces a flat "do not attach mutable pass state to arena
+nodes" (2026-08-06). The prohibition is right about *pass state* — a value that
+depends on where the pass currently is must not be parked on a node shared by
+every pass. It is wrong about a value that is a pure function of the node
+itself: for those the arena is the *correct* owner, because a `TreeId` is only
+meaningful to the arena that issued it, so arena ownership makes the memo's
+lifetime and its keys expire together and removes invalidation as something
+anyone has to remember. That is what C++ does through `CTree::setProperty`, and
+it is how §2.5 was fixed. The test that distinguishes the two cases is whether
+a fresh arena must see an empty table — if yes, the arena should own it.
 
 ## 2. Implemented
 
@@ -167,26 +186,43 @@ Constraint:
 
 ### 2.5 `eval`: box simplification cache
 
-Status: implemented but not yet promoted to production path
+Status: **implemented, on the mainline path, arena-scoped since 2026-08-06.**
+See `porting/eval-box-simplification-memoization-analysis-2026-08-06-en.md`.
 
 Location:
 
-- `crates/eval/src/lib.rs`
+- `crates/eval/src/simplify.rs` (the function), `crates/eval/src/apply.rs:168`
+  (the dominant caller)
 
 Cache:
 
-- `ahash::HashMap<TreeId, TreeId>` threaded through `box_simplification`
+- `PropertyStore<TreeId>` owned by `TreeArena`, under the `simplified-box`
+  property key — the Rust shape of C++ `CTree::setProperty` /
+  `gGlobal->gSimplifiedBoxProperty`.
 
 Purpose:
 
-- memoizes numeric box simplification on shared box DAGs,
-- mirrors the C++ `gSimplifiedBoxProperty` behavior for this helper path.
+- memoizes numeric box simplification on shared box DAGs, once per
+  compilation.
 
-Note:
+History (worth keeping — the failure was subtle and expensive):
 
-- the code is currently marked `#[allow(dead_code)]` and documented as a future
-  production step, so this cache exists even though the surrounding path is not
-  yet a mainline hot path.
+- Until 2026-08-06 the cache was an `ahash::HashMap` supplied by the caller,
+  and the dominant caller — `apply.rs`, on every pattern-match dispatch —
+  allocated a fresh one per argument. The memo existed; its *scope* did not.
+  Every dispatch re-simplified its subtree from scratch.
+- This roadmap recorded that state as "implemented but not yet promoted to
+  production path", `#[allow(dead_code)]`, and "mirrors the C++
+  `gSimplifiedBoxProperty` behavior". All three were wrong, which is why the
+  cost went unnoticed: the entry read as done.
+- Fixing the scope took the corpus from 18.1 s to 10.7 s (3.81× → 2.30× vs
+  C++ Faust) and `reverb_designer` from 7.2 s to 0.75 s, which is faster than
+  the reference's 0.84 s.
+- The lesson for the rules in §1: rule 2 asks for "an explicit key". A key is
+  not enough — the *lifetime* of the table the key indexes is the other half,
+  and it is the half that is easy to get wrong without any test noticing,
+  because a too-short lifetime is merely slow and a too-long one is silently
+  incorrect.
 
 ### 2.6 `propagate`: box arity cache
 
@@ -433,37 +469,86 @@ Purpose:
   recursion,
 - avoids repeated substitution and aperture queries on shared recursive trees.
 
+### 2.15 `propagate`: exact Box-to-Signal result memo
+
+Status: implemented 2026-08-08
+
+Location:
+
+- `crates/propagate/src/result_memo.rs`
+- `crates/propagate/src/engine.rs`
+
+Cache:
+
+- `PropagateMemo.results: PropagateResultMemo`, a compilation-scoped
+  `AHashMap<PropagateResultKey, BusKey>`.
+
+Key and payload:
+
+- the exact key is `(FlatBoxId, SlotEnvId, UiPathId, PropagationModeKey,
+  input bus)`;
+- `PropagationModeKey` contains the clock environment/domain and FAD
+  suppression state, so future eligibility expansion cannot alias those
+  contexts accidentally;
+- zero-, one-, and two-signal buses are stored inline; longer buses are
+  canonicalized in a per-run `Arc<[SigId]>` interner;
+- the payload is the exact output signal bus, using the same compact bus
+  representation.
+
+Purpose:
+
+- adapts C++ `propagate(...)` / `gResult2Memo` to reuse an already propagated
+  Box under the same canonical lexical, UI, execution-mode, and input context;
+- removes the repeated recursive propagation exposed by smoothed
+  Jiles-Atherton parameters while preserving canonical signal sharing and
+  diagnostic origins.
+
+Safety and scope:
+
+- a linear whole-root scan enables replay only when the flat Box DAG contains
+  neither forward/reverse AD nor `ondemand`/upsampling/downsampling wrappers;
+- a non-empty pending-FAD-seed vector is an additional per-call barrier;
+- the adaptive table is further limited to non-empty lexical slot environments:
+  measurements show that context-free calls mostly pay its key cost without
+  finding valuable replay, while the recursive symbolic workloads it targets
+  retain their high-value reuse;
+- an exact-key hit records only its own provenance boundary, while the first
+  miss records the full descendant derivation forest;
+- the table is intentionally one propagation run wide. It must not cross
+  arenas, compilation sessions, or mutable propagation contexts.
+
+Adaptive policy and validation:
+
+- the first 1,024 eligible, lexically-bound calls run on the previous
+  allocation-free path; only a traversal large enough to amortize hashing and
+  retained input buses activates the table;
+- unit tests cover inline and interned buses, slot/UI key separation, warm-up,
+  replay, and the AD/clock safety gate;
+- on the 1,110-symbol faustlibraries corpus, the adaptive result is 71.25 s
+  versus the 70.86 s pre-change reference (+0.55%), whereas always-on caching
+  cost 79.17 s;
+- retained generated C++ is byte-identical. The smoothed stereo sentinel drops
+  from roughly 1.23 s to 0.215 s in propagation, and the two production
+  Jiles-Atherton cases improve by 12.7x and 5.8x respectively.
+
 ## 3. Planned Additions
 
 The items below are ordered by expected leverage and safety.
 
-### 3.1 `propagate`: memoize propagation of context-free closed subtrees
+### 3.1 `propagate`: result-memo eligibility expansion
 
-Status: planned
+Status: deferred; the original result memo is implemented in §2.15.
 
-Target:
+The 2026-08-06 experiment used an expensive mutable-environment and owned-bus
+key. It was slower on `virtualAnalogForBrowser.dsp` (10.6 s to 13.9 s, 12% hit
+rate) despite byte-identical output. That finding rejected the representation,
+not exact result replay. Canonical slot/UI identities and compact buses enabled
+the current implementation.
 
-- `crates/propagate/src/lib.rs`
-
-Likely cache shape:
-
-- `AHashMap<(FlatBoxId, Vec<SigId> or specialized key), Vec<SigId>>`
-- or preferably a narrower cache only for proven closed subtrees
-
-Why:
-
-- `propagate_inner` still recomputes some subtrees that do not depend on
-  `slot_env`, `clock_env`, or dynamic input slicing.
-
-Constraint:
-
-- do not cache general `propagate_inner` results blindly,
-- only cache subtrees whose output is provably independent of dynamic context.
-
-Validation:
-
-- structural tests on recursion and clocked wrappers,
-- targeted profile before/after on shared recursive DSPs.
+The remaining work is to replace the conservative whole-root exclusion with a
+per-subtree eligibility fact, but only after AD seed accumulation and
+clock-domain state deltas have an explicit replay protocol. Until then, do not
+widen §2.15's gate.
 
 ### 3.2 `normalize`: broader normal-form stage caching beyond local simplify/promote passes
 
@@ -627,8 +712,36 @@ For each new memoization site:
 
 ## 6. Current Priority
 
-The next memoization I would add is:
+Reordered 2026-08-06 on measured evidence rather than expectation
+(`porting/eval-box-simplification-memoization-analysis-2026-08-06-en.md`):
 
-1. `propagate`: cache only provably context-free closed subtree propagation.
-2. `normalize`: introduce a signal normal-form cache.
-3. `codegen`: add occurrence counting cache once the scheduling path is stable.
+1. ~~`eval`: give the existing `box_simplification` memo a compilation-scoped
+   lifetime (§2.5).~~ **Done 2026-08-06**; worth 7.4 s of the corpus's 18.1 s.
+2. ~~`propagate`: cache only provably context-free closed subtree propagation
+   (§3.1).~~ **Attempted and rejected 2026-08-06**: slower, 12 % hit rate.
+3. `normalize`: introduce a signal normal-form cache.
+4. `codegen`: add occurrence counting cache once the scheduling path is stable.
+
+### What the day's measurements actually changed
+
+The reordering above was the point when it was written, and it was still not
+enough. Items 2–4 had been listed first for two years on plausibility; item 2
+has since been implemented and measured as a *pessimization*. Three plausible
+memoizations were tried on 2026-08-06 and all three lost:
+
+| change | result |
+|---|---|
+| `box_simplification` scope fix (§2.5) | **3.81× → 2.30×** — the one win |
+| `liftn` closed-subterm fast path | no change (14.19 s → 14.49 s) |
+| `propagate_in_slot_env` result memo (§3.1) | slower (10.6 s → 13.9 s) |
+| `SmallVec` for propagation results | slower (10.7 s → 15.3 s) |
+
+What actually moved the remaining cost was **not memoization at all**: a
+combined-DFA lexer (2.13× → 1.21×) and swapping the platform allocator
+(1.21× → 0.82×). The corpus now compiles *faster* than C++ Faust.
+
+The standing lesson for items 3 and 4: this roadmap's §1 rules test whether a
+computation *could* be memoized, never whether the repeat rate justifies it.
+Measure the hit rate on a case where the stage dominates before writing the
+cache — and pick that case deliberately, because the impulse corpus put
+propagation at 2.2 % where a real DSP puts it at 82 %.

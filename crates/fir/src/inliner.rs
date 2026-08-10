@@ -562,8 +562,29 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
             globals,
             functions,
             static_decls,
+            sub_modules,
             ..
-        } => vec![*dsp_struct, *globals, *functions, *static_decls],
+        } => vec![
+            *dsp_struct,
+            *globals,
+            *functions,
+            *static_decls,
+            *sub_modules,
+        ],
+        FirMatch::SubModule {
+            dsp_struct,
+            static_decls,
+            globals,
+            functions,
+            sub_modules,
+            ..
+        } => vec![
+            *dsp_struct,
+            *static_decls,
+            *globals,
+            *functions,
+            *sub_modules,
+        ],
     }
 }
 
@@ -1149,6 +1170,103 @@ pub fn clone_fir_hygienic_with_state(
     })
 }
 
+/// Clones one sub-module body into the same store with explicit `kFunArgs` and
+/// `kStruct` substitutions, for [`crate::subcontainer::flatten_sub_modules`].
+///
+/// Unlike [`prepare_callee_body_for_inlining`], no argument is materialized
+/// into a temp: the caller has already decided what each parameter maps to,
+/// because a flattened `fill` writes directly into the caller's own table
+/// rather than through a copied pointer. Local `kStack`/`kLoop` names are
+/// still renamed hygienically, which is what keeps the sub-module's loop
+/// counters from colliding with the enclosing function's.
+///
+/// # Errors
+/// Returns [`FirHygienicCloneError`] when the body contains a node the clone
+/// engine does not handle.
+pub(crate) fn flatten_clone_body(
+    store: &mut FirStore,
+    body: FirId,
+    state: &mut FirHygienicCloneState,
+    fun_arg_subst: &HashMap<String, (String, AccessType)>,
+    struct_subst: &HashMap<String, (String, AccessType)>,
+) -> Result<FirId, FirHygienicCloneError> {
+    // Source and destination are the same store, which the cloner cannot
+    // borrow twice. Clone into a scratch store, restore the original, then
+    // re-intern the result into it.
+    //
+    // Writing the clone directly into the emptied `store` and then restoring
+    // the source over it is the obvious-looking version and is wrong: it
+    // discards every node just written, leaving the returned id dangling. The
+    // FIR matcher decodes such an id as `Unknown`, which most consumers ignore
+    // rather than reject, so the damage surfaces far from here.
+    let src = std::mem::take(store);
+    let mut scratch = FirStore::new();
+    let mut cloner = HygienicCloner::new(&src, &mut scratch, state);
+    cloner.fun_arg_subst = fun_arg_subst.clone();
+    cloner.struct_subst = struct_subst.clone();
+    cloner.push_scope();
+    let result = cloner.clone_node(body);
+    cloner.pop_scope();
+    let cloned = result?;
+    *store = src;
+    Ok(store.import_from(&scratch, cloned))
+}
+
+/// Clones a subtree, rewriting `kStruct` references named in `subst`.
+///
+/// Local names are deliberately preserved: this is a renaming of struct member
+/// references, not an inlining, so the body's own loop counters and temporaries
+/// must keep the names the surrounding emitter already expects.
+///
+/// # Errors
+/// Returns [`FirHygienicCloneError`] when the subtree contains a node the clone
+/// engine does not handle.
+pub(crate) fn qualify_clone_body(
+    store: &mut FirStore,
+    body: FirId,
+    state: &mut FirHygienicCloneState,
+    struct_subst: &HashMap<String, (String, AccessType)>,
+) -> Result<FirId, FirHygienicCloneError> {
+    let src = std::mem::take(store);
+    let mut scratch = FirStore::new();
+    let mut cloner = HygienicCloner::new(&src, &mut scratch, state);
+    cloner.struct_subst = struct_subst.clone();
+    cloner.preserve_local_names = true;
+    cloner.push_scope();
+    let result = cloner.clone_node(body);
+    cloner.pop_scope();
+    let cloned = result?;
+    *store = src;
+    Ok(store.import_from(&scratch, cloned))
+}
+
+/// Clones a subtree, rewriting `kStatic` references named in `subst`.
+///
+/// Used when a table moves from file scope into the DSP struct: the
+/// declaration changes access class, and every reference has to follow.
+///
+/// # Errors
+/// Returns [`FirHygienicCloneError`] when the subtree contains a node the clone
+/// engine does not handle.
+pub(crate) fn flatten_clone_body_with_static_subst(
+    store: &mut FirStore,
+    body: FirId,
+    state: &mut FirHygienicCloneState,
+    static_subst: &HashMap<String, (String, AccessType)>,
+) -> Result<FirId, FirHygienicCloneError> {
+    let src = std::mem::take(store);
+    let mut scratch = FirStore::new();
+    let mut cloner = HygienicCloner::new(&src, &mut scratch, state);
+    cloner.static_subst = static_subst.clone();
+    cloner.preserve_local_names = true;
+    cloner.push_scope();
+    let result = cloner.clone_node(body);
+    cloner.pop_scope();
+    let cloned = result?;
+    *store = src;
+    Ok(store.import_from(&scratch, cloned))
+}
+
 /// Prepares a callee body for future inlining by materializing actual arguments and
 /// substituting `kFunArgs` references to fresh stack temporaries.
 ///
@@ -1253,7 +1371,10 @@ fn prepare_callee_body_for_inlining_with_cloned_args(
     subst: HashMap<String, String>,
 ) -> Result<FirPreparedInlineBody, FirInlinePrepareError> {
     let mut cloner = HygienicCloner::new(src_store, dst_store, state);
-    cloner.fun_arg_subst = subst;
+    cloner.fun_arg_subst = subst
+        .into_iter()
+        .map(|(param, temp)| (param, (temp, AccessType::Stack)))
+        .collect();
     cloner.push_scope();
     let body = cloner.clone_node(body_id)?;
     cloner.pop_scope();
@@ -1396,6 +1517,7 @@ fn rewrite_module_once(
         globals,
         functions,
         static_decls,
+        sub_modules,
     } = match_fir(src_store, module)
     else {
         return Err(FirInlineRewriteError::Analysis(
@@ -1429,6 +1551,16 @@ fn rewrite_module_once(
         FirFunctionSection::Functions,
     )?;
 
+    // Sub-modules are self-contained programs with their own state and their
+    // own two entry points; nothing in them is a callsite this pass rewrites,
+    // so they are cloned across unchanged rather than walked for inlining.
+    let mut cloned_sub_modules = Vec::new();
+    if let FirMatch::Block(items) = match_fir(src_store, sub_modules) {
+        for item in items {
+            cloned_sub_modules
+                .push(clone_fir_hygienic_with_state(src_store, item, dst_store, state)?.root);
+        }
+    }
     let mut b = FirBuilder::new(dst_store);
     Ok(b.module(
         num_inputs,
@@ -1438,6 +1570,7 @@ fn rewrite_module_once(
         globals,
         functions,
         static_decls,
+        &cloned_sub_modules,
     ))
 }
 
@@ -2065,7 +2198,25 @@ struct HygienicCloner<'a, 'b> {
     dst: &'b mut FirStore,
     state: &'b mut FirHygienicCloneState,
     scopes: Vec<HashMap<String, String>>,
-    fun_arg_subst: HashMap<String, String>,
+    /// `kFunArgs` name substitutions, each with the access class the
+    /// substituted reference takes.
+    ///
+    /// Inlining a callee parameter into a caller temp gives
+    /// `(temp, AccessType::Stack)`. Flattening a table-generator sub-module
+    /// instead binds its `table` parameter to the caller's own table, which
+    /// lives in `Static` or `Struct` storage — hence the access class travels
+    /// with the name rather than being assumed.
+    fun_arg_subst: HashMap<String, (String, AccessType)>,
+    /// `kStruct` name substitutions, each with the access class the
+    /// substituted reference takes.
+    ///
+    /// Used when a sub-module's own state is merged into the enclosing program
+    /// (renamed struct fields) or demoted to locals of the initialization
+    /// function (`StackLocals`).
+    struct_subst: HashMap<String, (String, AccessType)>,
+    /// `kStatic` name substitutions, used when a file-scope table is promoted
+    /// to a DSP struct field for a target with no shared static storage.
+    static_subst: HashMap<String, (String, AccessType)>,
     local_renames: Vec<FirLocalRename>,
     preserve_local_names: bool,
     sweep_scaffolding_drop_roots: bool,
@@ -2081,6 +2232,8 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             state,
             scopes: Vec::new(),
             fun_arg_subst: HashMap::new(),
+            struct_subst: HashMap::new(),
+            static_subst: HashMap::new(),
             local_renames: Vec::new(),
             preserve_local_names: false,
             sweep_scaffolding_drop_roots: false,
@@ -2126,8 +2279,18 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             return self
                 .fun_arg_subst
                 .get(name)
-                .cloned()
+                .map(|(n, _)| n.clone())
                 .unwrap_or_else(|| name.to_string());
+        }
+        if access == AccessType::Struct
+            && let Some((renamed, _)) = self.struct_subst.get(name)
+        {
+            return renamed.clone();
+        }
+        if access == AccessType::Static
+            && let Some((renamed, _)) = self.static_subst.get(name)
+        {
+            return renamed.clone();
         }
         if matches!(access, AccessType::Stack | AccessType::Loop) {
             self.lookup_local_rename(name)
@@ -2144,10 +2307,20 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
 
     /// Adjusts the access class when a `kFunArgs` reference is materialized to a stack temp.
     fn remap_access(&self, access: AccessType, name: &str) -> AccessType {
-        if access == AccessType::FunArgs && self.fun_arg_subst.contains_key(name) {
-            AccessType::Stack
-        } else {
-            access
+        match access {
+            AccessType::FunArgs => self
+                .fun_arg_subst
+                .get(name)
+                .map_or(access, |(_, target)| *target),
+            AccessType::Struct => self
+                .struct_subst
+                .get(name)
+                .map_or(access, |(_, target)| *target),
+            AccessType::Static => self
+                .static_subst
+                .get(name)
+                .map_or(access, |(_, target)| *target),
+            _ => access,
         }
     }
 
@@ -2186,6 +2359,23 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             });
         }
         renamed
+    }
+
+    /// Clones the *items* of a sub-module block and returns them as a list.
+    ///
+    /// `module`/`sub_module` take the items and intern the enclosing block
+    /// themselves, so cloning the block node directly would nest one block
+    /// inside another and silently break every consumer that expects
+    /// `sub_modules` to decode as a block of `SubModule` nodes.
+    fn clone_sub_modules(&mut self, block: FirId) -> Result<Vec<FirId>, FirHygienicCloneError> {
+        let FirMatch::Block(items) = match_fir(self.src, block) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(self.clone_node(item)?);
+        }
+        Ok(out)
     }
 
     /// Clones one FIR node, recursively renaming locals and remapping parameters as needed.
@@ -2661,11 +2851,13 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 globals,
                 functions,
                 static_decls,
+                sub_modules,
             } => {
                 let dsp_struct = self.clone_node(dsp_struct)?;
                 let globals = self.clone_node(globals)?;
                 let functions = self.clone_node(functions)?;
                 let static_decls = self.clone_node(static_decls)?;
+                let sub_modules = self.clone_sub_modules(sub_modules)?;
                 let mut b = FirBuilder::new(self.dst);
                 b.module(
                     num_inputs,
@@ -2675,6 +2867,32 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                     globals,
                     functions,
                     static_decls,
+                    &sub_modules,
+                )
+            }
+            FirMatch::SubModule {
+                name,
+                elem_type,
+                dsp_struct,
+                static_decls,
+                globals,
+                functions,
+                sub_modules,
+            } => {
+                let dsp_struct = self.clone_node(dsp_struct)?;
+                let static_decls = self.clone_node(static_decls)?;
+                let globals = self.clone_node(globals)?;
+                let functions = self.clone_node(functions)?;
+                let sub_modules = self.clone_sub_modules(sub_modules)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.sub_module(
+                    name,
+                    elem_type,
+                    dsp_struct,
+                    static_decls,
+                    globals,
+                    functions,
+                    &sub_modules,
                 )
             }
         };

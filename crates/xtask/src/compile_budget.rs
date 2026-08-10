@@ -45,8 +45,12 @@ const REQUIRED_CODEGEN_CASES: [&str; 5] = [
 ///
 /// Every name here regressed measurably in the diagnostics-provenance arc, so
 /// dropping one would reopen a known hole rather than merely reduce coverage.
-const REQUIRED_FRONTEND_CASES: [&str; 6] = [
+/// `ja_smoothed_parameter` is the separate propagation-sharing sentinel from
+/// `ja-smoothed-parameter-propagation-analysis-and-optimization-plan-2026-08-08-en.md`;
+/// it is required for the same reason: aggregate corpora hid its stage shape.
+const REQUIRED_FRONTEND_CASES: [&str; 7] = [
     "bells",
+    "ja_smoothed_parameter",
     "parametric_eq",
     "reverb_designer",
     "spectral_level",
@@ -302,9 +306,10 @@ fn measure_frontend_basket(
     baseline: &CompileBudgetBaseline,
 ) -> Result<(u64, Vec<FrontendMeasurement>), Box<dyn std::error::Error>> {
     let calibration_path = workspace_root().join(&baseline.profile.calibration_path);
-    let calibration_ms = measure_frontend(
+    let calibration_ms = measure_frontend_calibration(
         &calibration_path,
         baseline.profile.calibration_repeats.max(1),
+        baseline.profile.min_calibration_ms,
     )?;
     if calibration_ms < baseline.profile.min_calibration_ms {
         return Err(format!(
@@ -569,6 +574,26 @@ fn measure_frontend(path: &Path, repeats: u32) -> Result<u64, Box<dyn std::error
     Ok(best)
 }
 
+/// Measures a cheap calibration DSP in batches, avoiding whole-millisecond
+/// timer quantization without weakening the configured per-run floor.
+fn measure_frontend_calibration(
+    path: &Path,
+    repeats: u32,
+    batch_runs: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut best_micros = u128::MAX;
+    let batch_runs = batch_runs.max(1);
+    for _ in 0..repeats {
+        let started = Instant::now();
+        for _ in 0..batch_runs {
+            black_box(compile_frontend(path)?);
+        }
+        best_micros = best_micros.min(started.elapsed().as_micros());
+    }
+    let per_run_micros = best_micros.div_ceil(u128::from(batch_runs));
+    Ok(u64::try_from(per_run_micros.div_ceil(1_000)).unwrap_or(u64::MAX))
+}
+
 fn compile_cpp(
     path: &Path,
     compute_mode: ComputeMode,
@@ -653,7 +678,7 @@ mod tests {
             repeats: 2,
             codegen_repeats: 2,
             calibration_repeats: 8,
-            frontend_tolerance_percent: 25,
+            frontend_tolerance_percent: 30,
             min_calibration_ms: 5,
         }
     }
@@ -699,9 +724,10 @@ mod tests {
     #[test]
     fn frontend_tolerance_accepts_jitter_and_rejects_regressions() {
         let baseline = frontend_baseline(10_000);
-        // +24% is runner jitter under a 25% tolerance; +26% is not.
+        // +29% is runner jitter under a 30% tolerance; +31% is not.
         check_frontend_basket(&baseline, &[fe("fixture", 12_400)]).unwrap();
-        assert!(check_frontend_basket(&baseline, &[fe("fixture", 12_600)]).is_err());
+        check_frontend_basket(&baseline, &[fe("fixture", 12_900)]).unwrap();
+        assert!(check_frontend_basket(&baseline, &[fe("fixture", 13_100)]).is_err());
     }
 
     #[test]
@@ -751,6 +777,6 @@ mod tests {
 
     #[test]
     fn ceiling_applies_the_configured_tolerance() {
-        assert_eq!(frontend_ceiling_milli(10_000, &profile()), 12_500);
+        assert_eq!(frontend_ceiling_milli(10_000, &profile()), 13_000);
     }
 }

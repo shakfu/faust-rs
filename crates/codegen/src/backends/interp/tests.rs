@@ -47,6 +47,7 @@ fn make_minimal_legacy_like_module() -> (fir::FirStore, fir::FirId) {
         globals,
         functions,
         static_decls,
+        &[],
     );
     (store, module)
 }
@@ -60,6 +61,7 @@ fn generate_interp_module_reserves_sr_and_count_slots_when_missing() {
         &InterpOptions {
             opt_level: 0,
             module_name: None,
+            ..InterpOptions::default()
         },
     )
     .expect("minimal legacy-like module should compile to interp factory");

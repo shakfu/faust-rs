@@ -184,6 +184,45 @@ impl WasmMemoryLayout {
                         )
                     })?;
                 }
+                // A runtime-filled generated table reaches the layout as a
+                // `Static` array declaration: same placement as a constant
+                // static table, but with no data segment behind it — the
+                // generator's fill loop writes the bytes during `classInit`.
+                FirMatch::DeclareVar {
+                    name,
+                    typ: FirType::Array(elem_type, len),
+                    access: AccessType::Static,
+                    ..
+                } => {
+                    let (val_type, elem_size) = fir_type_storage(*elem_type, audio_slot)?;
+                    let len = u32::try_from(len).map_err(|_| {
+                        WasmBackendError::new(
+                            WasmBackendErrorCode::MemoryLayoutOverflow,
+                            "WASM generated table length does not fit in u32",
+                        )
+                    })?;
+                    let size = elem_size.checked_mul(len).ok_or_else(|| {
+                        WasmBackendError::new(
+                            WasmBackendErrorCode::MemoryLayoutOverflow,
+                            "WASM generated table byte size overflow",
+                        )
+                    })?;
+                    let offset = align_up(runtime_offset, elem_size);
+                    field_offsets.insert(
+                        name,
+                        FieldLayout {
+                            offset,
+                            typ: val_type,
+                            size,
+                        },
+                    );
+                    runtime_offset = offset.checked_add(size).ok_or_else(|| {
+                        WasmBackendError::new(
+                            WasmBackendErrorCode::MemoryLayoutOverflow,
+                            "WASM runtime layout size overflow while placing generated table",
+                        )
+                    })?;
+                }
                 FirMatch::DeclareVar { access, .. }
                     if access != AccessType::Struct && access != AccessType::Global =>
                 {
@@ -426,6 +465,14 @@ fn expect_block(store: &FirStore, id: FirId, label: &str) -> Result<Vec<FirId>, 
     }
 }
 
+/// Reserves linear-memory offsets for `Stack`-declared array locals.
+///
+/// WASM's native `local` slots are scalar-only (`i32`/`i64`/`f32`/`f64`), so a
+/// FIR stack-local array cannot be represented as a WASM local the way a
+/// scalar can; it needs a fixed linear-memory address instead, exactly like a
+/// struct array field. This pre-pass walks every function body to collect
+/// those array declarations before [`WasmMemoryLayout::from_module`] assigns
+/// them offsets, so `lower_function_subset` can later look them up by name.
 fn collect_local_stack_arrays(
     store: &FirStore,
     function_items: &[FirId],

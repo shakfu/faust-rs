@@ -39,7 +39,12 @@ function parseArgs(argv) {
       doublePrecision = false;
     } else if (arg === "-vec") {
       compilerArgs.push("-vec");
-    } else if (arg === "-vs" || arg === "-lv" || arg === "-ss" || arg === "--scheduling-strategy") {
+    } else if (arg === "--table-init") {
+      // How generated-table content is produced; forwarded verbatim.
+      i += 1;
+      if (i >= argv.length) throw new Error(`${arg} requires a value`);
+      compilerArgs.push(arg, argv[i]);
+    } else if (arg === "-vs" || arg === "-lv" || arg === "-ss" || arg === "--scheduling-strategy" || arg === "--table-init") {
       i += 1;
       if (i >= argv.length) throw new Error(`${arg} requires a value`);
       if ((arg === "-ss" || arg === "--scheduling-strategy") && !/^\d+$/.test(argv[i])) {

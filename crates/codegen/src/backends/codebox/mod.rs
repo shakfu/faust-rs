@@ -60,6 +60,12 @@ pub struct CodeboxOptions {
     /// names and by nothing else, so without it a round-tripped patch exposes
     /// no controls.
     pub test_labels: bool,
+    /// Compilation options string printed in the generated-file header.
+    ///
+    /// `None` falls back to a minimal `-lang codebox` line derived from
+    /// [`Self::double_precision`], for callers (mostly tests) that do not
+    /// thread the real CLI flags through.
+    pub compile_options: Option<String>,
 }
 
 /// Stable error codes for this backend.
@@ -117,6 +123,8 @@ struct ModuleView {
     functions: FirId,
     num_inputs: usize,
     num_outputs: usize,
+    /// File-scope table declarations; emitted as per-processor `@state`.
+    static_decls: FirId,
 }
 
 /// Where a declaration is being emitted, which decides `@state` versus `let`.
@@ -146,10 +154,44 @@ pub fn generate_codebox_module(
     module: FirId,
     options: &CodeboxOptions,
 ) -> Result<String, CodegenError> {
+    // Codebox folds the whole lifecycle into one entry point and has no nested
+    // container, so a table generator is inlined into the program that calls
+    // it. `StackLocals` applies for the same reason it does to a static
+    // `classInit`: there is no instance to hold the generator's state, only the
+    // initialization code itself.
+    let flattened = fir::subcontainer::has_sub_modules(store, module)
+        .then(|| {
+            fir::subcontainer::flatten_sub_modules_owned(
+                store,
+                module,
+                fir::subcontainer::SubModuleStatePolicy::StackLocals,
+            )
+            .map_err(|err| {
+                CodegenError::new(
+                    CodegenErrorCode::Unsupported,
+                    format!("flattening generated tables failed: {err}"),
+                )
+            })
+        })
+        .transpose()?;
+    let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+
     let view = decode_module(store, module)?;
     let mut out = String::new();
 
-    let _ = writeln!(out, "// Code generated with faust-rs");
+    let _ = writeln!(out, "// Code generated with faust-rs {}", crate::VERSION);
+    let _ = writeln!(
+        out,
+        "// Compilation options: {}",
+        options
+            .compile_options
+            .as_deref()
+            .unwrap_or(if options.double_precision {
+                "-lang codebox -double"
+            } else {
+                "-lang codebox -single"
+            })
+    );
     let _ = writeln!(out, "// Additional functions");
 
     let params = collect_params(store, view.functions, options)?;
@@ -165,6 +207,12 @@ pub fn generate_codebox_module(
     }
 
     let _ = writeln!(out, "// Fields");
+    // File-scope tables are per-processor `@state` in codebox: the language has
+    // no shared static storage, which is the same adaptation the Cmajor backend
+    // documents.
+    for stmt in block_items(store, view.static_decls) {
+        emit_stmt(store, &mut out, options, stmt, 0, Phase::Fields)?;
+    }
     for stmt in block_items(store, view.dsp_struct) {
         emit_stmt(store, &mut out, options, stmt, 0, Phase::Fields)?;
     }
@@ -328,6 +376,7 @@ fn widget_prefix_button(typ: fir::ButtonType) -> &'static str {
     }
 }
 
+/// The `RB_*` prefix `rnbo-dsp.h` matches on, per widget kind.
 fn widget_prefix_slider(typ: fir::SliderType) -> &'static str {
     match typ {
         fir::SliderType::Horizontal => "RB_hslider_",
@@ -422,10 +471,16 @@ fn emit_dspsetup(
     let _ = writeln!(out, "function dspsetup() {{");
     let _ = writeln!(out, "\tfUpdated = true;");
 
+    emit_array_initialisers(store, out, options, view.static_decls)?;
     emit_array_initialisers(store, out, options, view.dsp_struct)?;
     emit_array_initialisers(store, out, options, view.globals)?;
 
     for name in [
+        // `staticInit` carries the fills of generated tables and must run
+        // before anything reads them. It is the FIR name for what the DSP API
+        // calls `classInit`; codebox has one setup entry point, so both land
+        // here.
+        "staticInit",
         "classInit",
         "instanceResetUserInterface",
         "instanceClear",
@@ -452,24 +507,33 @@ fn emit_array_initialisers(
     block: FirId,
 ) -> Result<(), CodegenError> {
     for stmt in block_items(store, block) {
-        let FirMatch::DeclareVar {
-            name,
-            typ,
-            init: Some(init),
-            ..
-        } = match_fir(store, stmt)
-        else {
-            continue;
-        };
-        if !matches!(typ, FirType::Array(..)) {
-            continue;
-        }
-        let target = codebox_var_name(&name);
-        for (index, element) in array_literal_elements(store, options, init)
-            .into_iter()
-            .enumerate()
-        {
-            let _ = writeln!(out, "\t{target}[{index}] = {element};");
+        match match_fir(store, stmt) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(..),
+                init: Some(init),
+                ..
+            } => {
+                let target = codebox_var_name(&name);
+                for (index, element) in array_literal_elements(store, options, init)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let _ = writeln!(out, "\t{target}[{index}] = {element};");
+                }
+            }
+            // Waveforms and folded generated tables reach the backend as
+            // `DeclareTable` with an explicit element list, which is the shape
+            // the transform emits and which this function previously ignored —
+            // leaving `compute` reading a table nothing ever wrote.
+            FirMatch::DeclareTable { name, values, .. } => {
+                let target = codebox_var_name(&name);
+                for (index, value) in values.into_iter().enumerate() {
+                    let element = emit_value(store, options, value)?;
+                    let _ = writeln!(out, "\t{target}[{index}] = {element};");
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -644,11 +708,25 @@ fn emit_stmt(
             if let Some(init) = init {
                 let value = emit_value(store, options, init)?;
                 let _ = write!(out, " = {value}");
-            } else if phase == Phase::Fields || persistent {
-                // A `@state` scalar must be initialised.
+            } else {
+                // Every declaration carries an initialiser in this grammar,
+                // `let` as much as `@state`: `let x : Int;` does not parse.
                 let _ = write!(out, " = 0");
             }
             let _ = writeln!(out, ";");
+            Ok(())
+        }
+
+        // A lookup table: constructed here, filled element by element in
+        // `dspsetup` (see `emit_array_initialisers`). Codebox has no array
+        // literal, so declaration and data are necessarily separate.
+        FirMatch::DeclareTable { name, values, .. } => {
+            let var = codebox_var_name(&name);
+            let _ = writeln!(
+                out,
+                "{tab}@state {var} = new FixedFloatArray({});",
+                values.len()
+            );
             Ok(())
         }
 
@@ -1159,11 +1237,13 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             dsp_struct,
             globals,
             functions,
+            static_decls,
             ..
         } => Ok(ModuleView {
             dsp_struct,
             globals,
             functions,
+            static_decls,
             num_inputs,
             num_outputs,
         }),

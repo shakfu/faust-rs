@@ -371,6 +371,42 @@ pub struct SignalFirOptions {
     /// and [`ControlRateMode`]. Default: block `compute`, which reproduces
     /// the classic contract byte-for-byte.
     pub processing_api: ProcessingApi,
+    /// How the initial content of `rdtable`/`rwtable` tables is produced
+    /// (`--table-init`). See [`TableInitMode`].
+    pub table_init_mode: TableInitMode,
+}
+
+/// How the initial content of a generated table is produced.
+///
+/// `rdtable`/`rwtable` carry a `SIGGEN` generator describing their content.
+/// Two strategies exist, and both are permanently supported
+/// (`porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md` §5.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableInitMode {
+    /// Compile the generator into its own FIR sub-module whose `fill` function
+    /// computes the content at initialization time, as the C++ reference does.
+    ///
+    /// This is the only mode that can express content depending on the sample
+    /// rate or on a foreign function, and it keeps the emitted source small:
+    /// a 65536-entry table costs a loop instead of 65536 literals.
+    ///
+    /// The default since 2026-08-06 (plan phase S7): it matches the C++
+    /// reference and is the only mode that compiles every program the
+    /// reference compiles.
+    #[default]
+    Runtime,
+    /// Evaluate the generator at compile time and emit the content as a literal
+    /// initializer list.
+    ///
+    /// Produces a `const` table — shareable, ROM-placeable, needing no
+    /// initialization phase — but only works for generators that are fully
+    /// determined at compile time; others are rejected with `FRS-SFIR-0004`.
+    ///
+    /// A permanent, supported mode — not a migration scaffold: it is the only
+    /// way to obtain fully folded tables, which matters for targets with no
+    /// initialization phase, for ROM placement, and for bisecting numeric
+    /// differences.
+    Const,
 }
 
 /// Optional observer for internal signal-to-FIR compilation stages.
@@ -391,6 +427,9 @@ impl Default for SignalFirOptions {
             scheduling_strategy: SchedulingStrategy::DepthFirst,
             control_rate_mode: ControlRateMode::InlinePerBlock,
             processing_api: ProcessingApi::Block,
+            // S2..S6 keep `Const` as the effective default; S7 flips it to
+            // `Runtime` once every backend emits sub-modules.
+            table_init_mode: TableInitMode::Runtime,
         }
     }
 }
@@ -837,6 +876,8 @@ fn compile_fastlane_inner(
                     compute_mode: options.compute_mode,
                     strategy: options.scheduling_strategy,
                     control_rate_mode: options.control_rate_mode,
+                    table_init_mode: options.table_init_mode,
+                    delay_line_threshold: options.delay_line_threshold,
                 },
             )
         }) {
@@ -866,12 +907,15 @@ fn compile_fastlane_inner(
             fallback_compute_mode,
             options.control_rate_mode,
             options.processing_api,
+            options.table_init_mode,
+            options.scheduling_strategy,
             clocked,
             if matches!(fallback_compute_mode, ComputeMode::Scalar) {
                 gate_graphs.as_ref().map(|(_, schedule)| schedule)
             } else {
                 None
             },
+            None,
         )
     })
     .map_err(|mut error| {

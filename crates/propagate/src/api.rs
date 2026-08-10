@@ -6,6 +6,7 @@
 //! `arity`, and `ui_build`.
 
 use super::*;
+use crate::context_id::{SlotEnv, UiPathContext};
 
 /// Propagates input signals and grouped UI through one validated flat box expression.
 ///
@@ -70,6 +71,10 @@ fn propagate_typed_with_origins_policy(
     let ui = build_ui_program(arena, box_tree, ui_options);
     let mut slot_env = SlotEnv::new();
     let mut memo = PropagateMemo::default();
+    memo.results
+        .set_enabled(crate::result_memo::result_memo_is_safe_root(
+            arena, box_tree,
+        )?);
     let mut clock_domains = ClockDomainTable::new();
     let mut ctx = PropagateContext {
         cache,
@@ -81,10 +86,12 @@ fn propagate_typed_with_origins_policy(
         clock_domain: None,
         suppress_fad: false,
         pending_fad_seeds: Vec::new(),
-        current_groups: Vec::new(),
+        ui_path: UiPathContext::new(),
         signal_origins: &mut signal_origins,
     };
-    let signals = propagate_in_slot_env(arena, box_tree, inputs, &mut ctx)?;
+    let signals = propagate_in_slot_env(arena, box_tree, inputs, &mut ctx);
+    ctx.memo.profile.print();
+    let signals = signals?;
     Ok(PropagateOutput {
         signals,
         signal_origins,

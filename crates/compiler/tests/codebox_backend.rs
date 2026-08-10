@@ -11,7 +11,9 @@
 //! verification arrives with the evaluator layer.
 
 use codegen::backends::codebox::{CodeboxOptions, CodegenErrorCode, generate_codebox_module};
-use compiler::{Compiler, ComputeMode, ControlRateMode, ProcessingApi, RealType, SignalFirLane};
+use compiler::{
+    Compiler, ComputeMode, ControlRateMode, ProcessingApi, RealType, SignalFirLane, TableInitMode,
+};
 
 /// Compiles one source to codebox, through the lowering the backend expects.
 fn codebox(source_name: &str, source: &str) -> String {
@@ -19,9 +21,19 @@ fn codebox(source_name: &str, source: &str) -> String {
 }
 
 fn codebox_with(source_name: &str, source: &str, options: &CodeboxOptions) -> String {
+    codebox_with_table_init(source_name, source, options, TableInitMode::default())
+}
+
+fn codebox_with_table_init(
+    source_name: &str,
+    source: &str,
+    options: &CodeboxOptions,
+    table_init: TableInitMode,
+) -> String {
     let compiler = Compiler::new()
         .with_control_rate_mode(ControlRateMode::External)
-        .with_processing_api(ProcessingApi::OneSample);
+        .with_processing_api(ProcessingApi::OneSample)
+        .with_table_init_mode(table_init);
     let fir = compiler
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .expect("FIR lowering must succeed");
@@ -174,6 +186,7 @@ fn double_precision_only_changes_literal_spelling() {
         &CodeboxOptions {
             double_precision: true,
             test_labels: false,
+            ..CodeboxOptions::default()
         },
     );
     assert!(single.contains("0.5f"), "{single}");
@@ -182,8 +195,12 @@ fn double_precision_only_changes_literal_spelling() {
         !double.contains("0.5f"),
         "double precision must drop the f suffix:\n{double}"
     );
-    // The shapes are otherwise identical.
-    assert_eq!(single.replace("0.5f", "0.5"), double);
+    // The shapes are otherwise identical (the header's compilation-options
+    // line also reflects `-single`/`-double`, so normalize that too).
+    assert_eq!(
+        single.replace("0.5f", "0.5"),
+        double.replace("-lang codebox -double", "-lang codebox -single")
+    );
 }
 
 /// Soundfiles are rejected with a typed error rather than emitted wrongly,
@@ -255,6 +272,7 @@ fn assert_codebox_matches_interpreter(source_name: &str, source: &str, frames: u
         &CodeboxOptions {
             double_precision: true,
             test_labels: false,
+            ..CodeboxOptions::default()
         },
     )
     .expect("codebox emission must succeed");
@@ -274,6 +292,7 @@ fn assert_codebox_matches_interpreter(source_name: &str, source: &str, frames: u
         &InterpOptions {
             opt_level: 0,
             module_name: None,
+            ..InterpOptions::default()
         },
     )
     .expect("interp codegen must succeed");
@@ -386,6 +405,7 @@ fn dump_ui_for_eyeball_comparison() {
             &CodeboxOptions {
                 double_precision: false,
                 test_labels: true,
+                ..CodeboxOptions::default()
             }
         )
     );
@@ -404,6 +424,7 @@ fn test_labelled(source_name: &str, source: &str) -> String {
         &CodeboxOptions {
             double_precision: false,
             test_labels: true,
+            ..CodeboxOptions::default()
         },
     )
 }
@@ -803,4 +824,204 @@ fn the_facade_forwards_the_test_label_option() {
         )
         .expect("emission must succeed");
     assert!(text.contains("RB_hslider_g"), "{text}");
+}
+
+/// A lookup table must be declared and filled, not merely read.
+///
+/// Regression: `generate_codebox_module` emitted `compute()` reading
+/// `ftbl0_cb[…]` while never declaring the symbol and never writing a single
+/// element, so any `rdtable`/`rwtable` DSP silently returned zeros. Two causes:
+/// the module's `static_decls` block was never visited, and `DeclareTable` —
+/// the shape the transform actually emits for a table — had no arm in either
+/// the statement emitter or the array initialiser pass, which only understood
+/// `DeclareVar` with an array-literal init.
+#[test]
+fn a_read_only_table_is_declared_and_filled() {
+    // The property has to hold in both table-init modes, and the two produce
+    // different shapes: `const` folds the content into one literal store per
+    // element, `runtime` emits the generator's fill loop. What must be true of
+    // both is that the table is declared and written inside `dspsetup`, before
+    // any compute call — the defect this test was written for was codebox
+    // reading a table it never declared or initialized.
+    for mode in [TableInitMode::Const, TableInitMode::Runtime] {
+        // Spelled without imports: the harness compiles from a string and has
+        // no library search path. `t` is `ba.time`.
+        let text = codebox_with_table_init(
+            "tbl.dsp",
+            "t = (+(1) ~ _) - 1;\nprocess = rdtable(4, int(t * 2), int(t % 4));",
+            &CodeboxOptions::default(),
+            mode,
+        );
+
+        // The table name carries a type prefix (`itbl0_cb`), so the whole
+        // identifier around the `tbl` marker is what matters.
+        let table = text
+            .lines()
+            .find_map(|line| {
+                let marker = line.find("tbl")?;
+                let bytes = line.as_bytes();
+                let mut start = marker;
+                while start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
+                    start -= 1;
+                }
+                let mut end = marker;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                Some(line[start..end].to_owned())
+            })
+            .expect("the emitted program must mention a table");
+
+        assert!(
+            text.contains(&format!("@state {table} = new FixedFloatArray(")),
+            "{mode:?}: table `{table}` is read but never declared:\n{text}"
+        );
+
+        let setup = text.find("function dspsetup()").expect("dspsetup");
+        let compute = text.find("function compute(").expect("compute");
+
+        match mode {
+            TableInitMode::Const => {
+                // The folded shape additionally pins the values, which is the
+                // only place the generator's arithmetic is checked directly.
+                for (index, value) in [(0, "0"), (1, "2"), (2, "4"), (3, "6")] {
+                    assert!(
+                        text.contains(&format!("{table}[{index}] = {value};")),
+                        "const: table `{table}` element {index} is never written:\n{text}"
+                    );
+                }
+                let first_fill = text
+                    .find(&format!("{table}[0] ="))
+                    .expect("first element write");
+                assert!(
+                    setup < first_fill && first_fill < compute,
+                    "const: table data must be written inside dspsetup:\n{text}"
+                );
+            }
+            TableInitMode::Runtime => {
+                // The fill loop indexes by its induction variable, so there is
+                // no literal `[0] =` to look for; what must hold is that some
+                // store into the table sits inside `dspsetup`.
+                let fill = text
+                    .find(&format!("{table}["))
+                    .and_then(|_| {
+                        text.match_indices(&format!("{table}["))
+                            .find(|(at, _)| text[*at..].contains("] ="))
+                            .map(|(at, _)| at)
+                    })
+                    .expect("runtime: the fill loop must store into the table");
+                assert!(
+                    setup < fill && fill < compute,
+                    "runtime: the fill must run inside dspsetup:\n{text}"
+                );
+            }
+        }
+    }
+}
+
+/// A literal `waveform` used directly as a signal keeps its own declaration and
+/// data, which is a separate path from generated tables.
+#[test]
+fn a_literal_waveform_is_declared_and_filled() {
+    let text = codebox("wave.dsp", "process = waveform{10.0, 20.0, 30.0};");
+    assert!(
+        text.contains("Wave0_cb = new FixedFloatArray(3)"),
+        "waveform table missing its declaration:\n{text}"
+    );
+    assert!(
+        text.contains("Wave0_cb[0] = 10"),
+        "waveform data missing:\n{text}"
+    );
+}
+
+/// The two `--table-init` modes must agree numerically on the same backend.
+///
+/// `const` folds the generator into a literal table at compile time; `runtime`
+/// compiles it into a sub-module that codebox inlines and runs in `dspsetup`.
+/// The table content is the same either way, so the emitted programs must
+/// produce identical output — which is what makes the flattened fill loop
+/// trustworthy rather than merely well-shaped.
+///
+/// This is the mode matrix of
+/// `porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md` §8.2,
+/// applied to the first backend that consumes the flattening pass.
+fn assert_table_init_modes_agree(source_name: &str, source: &str, frames: usize) {
+    let render = |mode: TableInitMode| -> Vec<f64> {
+        let compiler = Compiler::new()
+            .with_real_type(RealType::Float64)
+            .with_control_rate_mode(ControlRateMode::External)
+            .with_processing_api(ProcessingApi::OneSample)
+            .with_table_init_mode(mode);
+        let fir = compiler
+            .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
+            .unwrap_or_else(|e| panic!("{mode:?}: FIR lowering must succeed: {e:?}"));
+        let text = generate_codebox_module(
+            &fir.store,
+            fir.module,
+            &CodeboxOptions {
+                double_precision: true,
+                test_labels: false,
+                ..CodeboxOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{mode:?}: codebox emission must succeed: {e}"));
+        let mut program = Program::parse(&text)
+            .unwrap_or_else(|e| panic!("{mode:?}: emitted codebox must parse: {e}\n{text}"));
+        program.dspsetup(44100.0).expect("dspsetup must run");
+
+        let arity = program.compute_arity();
+        let mut out = Vec::with_capacity(frames);
+        for frame in 0..frames {
+            let sample = if frame == 0 { 1.0f64 } else { 0.0f64 };
+            let inputs: Vec<f64> = vec![sample; arity];
+            let outputs = program
+                .compute(&[], &inputs)
+                .unwrap_or_else(|e| panic!("{mode:?}: compute must run: {e}"));
+            out.extend(outputs);
+        }
+        out
+    };
+
+    let folded = render(TableInitMode::Const);
+    let filled = render(TableInitMode::Runtime);
+    assert_eq!(
+        folded.len(),
+        filled.len(),
+        "the two modes produced different output lengths"
+    );
+    for (frame, (a, b)) in folded.iter().zip(filled.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-12,
+            "frame {frame}: const mode gave {a}, runtime mode gave {b}"
+        );
+    }
+    // A table of zeros would satisfy the comparison vacuously.
+    assert!(
+        folded.iter().any(|v| *v != 0.0),
+        "the fixture must produce a non-zero signal for the comparison to mean anything"
+    );
+}
+
+#[test]
+fn table_init_modes_agree_on_a_constant_generator() {
+    assert_table_init_modes_agree(
+        "tblc.dsp",
+        "t = (+(1) ~ _) - 1;\nprocess = rdtable(8, 0.25, int(t % 8));",
+        32,
+    );
+}
+
+#[test]
+fn table_init_modes_agree_on_a_recursive_generator() {
+    // The generator's carrier is read one sample late — the shape whose update
+    // used to be dropped, producing an all-zero table.
+    assert_table_init_modes_agree(
+        "tblr.dsp",
+        "t = (+(1) ~ _) - 1;\nprocess = rdtable(8, int(t * 2), int(t % 8));",
+        32,
+    );
 }

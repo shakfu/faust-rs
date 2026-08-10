@@ -57,13 +57,15 @@ COMPILER_OPTS ?= $(VECOPTS)
 FAUSTBENCH ?= faustbench -single
 BENCH_OPTIONS ?= -double
 BENCH_WARN_MIN ?= 5
-BENCH_CSV ?= build/bench/summary.csv
+BENCH_DIR ?= build/bench
+BENCH_CSV ?= $(BENCH_DIR)/summary.csv
+BENCH_AGGREGATE_CSV ?= $(BENCH_DIR)/aggregate.csv
 VEC_BENCH_OPTIONS ?= $(BENCH_OPTIONS)
 VEC_BENCH_WARN_MIN ?= 5
-VEC_BENCH_CSV ?= build/bench/vector-scheduling.csv
-VEC_BENCH_SUMMARY_CSV ?= build/bench/vector-scheduling-summary.csv
-VEC_BENCH_AGGREGATE_CSV ?= build/bench/vector-scheduling-aggregate.csv
-COMPILE_BENCH_CSV ?= build/bench/compile-summary.csv
+VEC_BENCH_CSV ?= $(BENCH_DIR)/vector-scheduling.csv
+VEC_BENCH_SUMMARY_CSV ?= $(BENCH_DIR)/vector-scheduling-summary.csv
+VEC_BENCH_AGGREGATE_CSV ?= $(BENCH_DIR)/vector-scheduling-aggregate.csv
+COMPILE_BENCH_CSV ?= $(BENCH_DIR)/compile-summary.csv
 
 # Which DSP set is under test, and where its reference responses live.
 #
@@ -79,6 +81,21 @@ dspdir ?= dsp
 refdir ?= reference
 
 dspfiles := $(wildcard $(dspdir)/*.dsp)
+# `Make.ref` regenerates this manifest by asking the configured C++ Faust
+# compiler whether each selected DSP can produce the normal C++ oracle. It is
+# deliberately separate from `KNOWN_FAIL_*`: an unavailable C++ oracle makes a
+# differential comparison impossible but says nothing about faust-rs.
+CPP_ORACLE_MANIFEST ?= build/ref/cpp-oracle-manifest.mk
+CPP_ORACLE_CONFIG ?= build/ref/cpp-oracle-config.txt
+CPP_ORACLE_LOG_DIR ?= build/ref/cpp-oracle-errors
+ifneq ($(wildcard $(CPP_ORACLE_MANIFEST)),)
+include $(CPP_ORACLE_MANIFEST)
+endif
+CPP_ORACLE_SUPPORTED ?=
+CPP_ORACLE_UNSUPPORTED ?=
+# The manifest records bare DSP names. Filter by full path so `dspdir` remains
+# overridable for targeted and alternate-corpus runs.
+cpp_oracle_dspfiles = $(filter-out $(addprefix $(dspdir)/,$(addsuffix .dsp,$(CPP_ORACLE_UNSUPPORTED))),$(dspfiles))
 VECTOR_CERTIFIED_LIST := ../vector-coverage/certified-dspfiles.txt
 vector_certified_repo_files := $(shell sed -n '/\.dsp$$/p' $(VECTOR_CERTIFIED_LIST) 2>/dev/null)
 vector_certified_dspfiles := $(patsubst tests/impulse-tests/%,%,$(vector_certified_repo_files))

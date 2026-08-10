@@ -49,6 +49,12 @@ pub struct AscOptions {
     /// downstream tooling (UI/param extraction, impulse runners) parses for
     /// inputs/outputs and the UI tree.
     pub json: Option<String>,
+    /// Compilation options string printed in the generated-file header.
+    ///
+    /// `None` falls back to a minimal `-lang asc` line derived from
+    /// [`Self::double_precision`], for callers (mostly tests) that do not
+    /// thread the real CLI flags through.
+    pub compile_options: Option<String>,
 }
 
 impl Default for AscOptions {
@@ -59,6 +65,7 @@ impl Default for AscOptions {
             quad_type_name: "f64".to_owned(),
             fixed_type_name: "f32".to_owned(),
             json: None,
+            compile_options: None,
         }
     }
 }
@@ -131,6 +138,7 @@ struct ModuleView {
     num_inputs: usize,
     num_outputs: usize,
     static_decls: FirId,
+    sub_modules: FirId,
 }
 
 /// Borrowed function declaration view used while stitching the class body.
@@ -171,7 +179,20 @@ pub fn generate_asc_module(
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "// Code generated with faust-rs (https://faust.grame.fr)"
+        "// Code generated with faust-rs {} (https://faust.grame.fr)",
+        crate::VERSION
+    );
+    let _ = writeln!(
+        out,
+        "// Compilation options: {}",
+        options
+            .compile_options
+            .as_deref()
+            .unwrap_or(if options.double_precision {
+                "-lang asc -double"
+            } else {
+                "-lang asc -single"
+            })
     );
     let _ = writeln!(out, "// Language: AssemblyScript (experimental)");
     let _ = writeln!(out, "// name: {}", module.name);
@@ -183,6 +204,7 @@ pub fn generate_asc_module(
     // are emitted as module-level `export function`s before the class.
     emit_toplevel_functions(store, &mut out, options, &class_name, module.globals)?;
 
+    emit_sub_modules(store, &mut out, options, &class_name, module.sub_modules)?;
     let _ = writeln!(out, "export class {class_name} {{");
 
     // ---- fields: DSP struct state + globals (non-function) ----
@@ -393,6 +415,9 @@ fn emit_methods_canonical_order(
     }
 
     let _ = writeln!(out, "    static classInit(sample_rate: i32): void {{");
+    if let Some(body) = declared_function_body(store, module.functions, "staticInit") {
+        emit_block(store, out, options, class_name, body, 2)?;
+    }
     let _ = writeln!(out, "    }}");
 
     for name in [
@@ -456,6 +481,13 @@ fn emit_methods_canonical_order(
         } = match_fir(store, item)
         {
             if emitted.iter().any(|done| *done == name) {
+                continue;
+            }
+            // A lifecycle function is rendered into this backend's own surface
+            // — `staticInit` becomes the body of the static `classInit` — so
+            // emitting it here too produces a second, never-called copy with a
+            // meaningless receiver parameter.
+            if crate::backends::is_lifecycle_function(&name) {
                 continue;
             }
             emit_declare_fun(
@@ -559,6 +591,37 @@ fn emit_section_fields(
     Ok(())
 }
 
+/// Writes ` = <init>` for an explicit FIR initializer, or the default
+/// ` = new StaticArray<T>(size)` for a non-empty array declaration with no
+/// initializer. Writes nothing when neither applies (matching AssemblyScript's
+/// own default-initialization for scalars).
+///
+/// Shared by the `Fields` and non-`Fields` branches of `emit_stmt`'s
+/// `DeclareVar` arm, which only differ in how the declaration head itself
+/// (`name: type` member vs `let name: type` local) is rendered.
+fn emit_declare_var_init(
+    out: &mut String,
+    store: &FirStore,
+    options: &AscOptions,
+    class_name: &str,
+    typ: &FirType,
+    init: Option<FirId>,
+) -> Result<(), CodegenError> {
+    if let Some(init) = init {
+        let init = emit_value(store, options, class_name, init)?;
+        let _ = write!(out, " = {init}");
+    } else if let FirType::Array(inner, size) = typ
+        && *size > 0
+    {
+        let _ = write!(
+            out,
+            " = new StaticArray<{}>({size})",
+            emit_type(inner, options)
+        );
+    }
+    Ok(())
+}
+
 /// Emits one FIR statement.
 fn emit_stmt(
     store: &FirStore,
@@ -584,35 +647,19 @@ fn emit_stmt(
                     let _ = write!(out, "{tab}");
                 }
                 let _ = write!(out, "{}", emit_member_decl(&typ, &name, options));
-                if let Some(init) = init {
-                    let init = emit_value(store, options, class_name, init)?;
-                    let _ = write!(out, " = {init}");
-                } else if let FirType::Array(inner, size) = &typ
-                    && *size > 0
-                {
-                    let _ = write!(
-                        out,
-                        " = new StaticArray<{}>({size})",
-                        emit_type(inner, options)
-                    );
-                }
-                let _ = writeln!(out, ";");
+            } else if matches!(
+                init.map(|id| match_fir(store, id)),
+                Some(FirMatch::NewDsp { .. })
+            ) {
+                // A sub-container handle is typed by the DSP class: the
+                // trampolines take `dsp: mydsp` and cast internally, so the
+                // generic pointer spelling would not match them.
+                let _ = write!(out, "{tab}let {name}: {class_name}");
             } else {
                 let _ = write!(out, "{tab}let {}: {}", name, emit_type(&typ, options));
-                if let Some(init) = init {
-                    let init = emit_value(store, options, class_name, init)?;
-                    let _ = write!(out, " = {init}");
-                } else if let FirType::Array(inner, size) = &typ
-                    && *size > 0
-                {
-                    let _ = write!(
-                        out,
-                        " = new StaticArray<{}>({size})",
-                        emit_type(inner, options)
-                    );
-                }
-                let _ = writeln!(out, ";");
             }
+            emit_declare_var_init(out, store, options, class_name, &typ, init)?;
+            let _ = writeln!(out, ";");
             Ok(())
         }
         FirMatch::DeclareTable {
@@ -797,7 +844,7 @@ fn emit_stmt(
         }
         // UI / metadata / soundfile lower to comments (parity with C++ asc backend).
         FirMatch::OpenBox { label, .. } => {
-            let _ = writeln!(out, "{tab}// ui openbox {label}");
+            let _ = writeln!(out, "{tab}// ui openbox {}", one_line(&label));
             Ok(())
         }
         FirMatch::CloseBox => {
@@ -805,15 +852,15 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddButton { label, .. } => {
-            let _ = writeln!(out, "{tab}// ui button {label}");
+            let _ = writeln!(out, "{tab}// ui button {}", one_line(&label));
             Ok(())
         }
         FirMatch::AddSlider { label, .. } => {
-            let _ = writeln!(out, "{tab}// ui slider {label}");
+            let _ = writeln!(out, "{tab}// ui slider {}", one_line(&label));
             Ok(())
         }
         FirMatch::AddBargraph { label, .. } => {
-            let _ = writeln!(out, "{tab}// ui bargraph {label}");
+            let _ = writeln!(out, "{tab}// ui bargraph {}", one_line(&label));
             Ok(())
         }
         FirMatch::AddSoundfile { .. } => {
@@ -824,7 +871,7 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddMetaDeclare { key, .. } => {
-            let _ = writeln!(out, "{tab}// metadata {key}");
+            let _ = writeln!(out, "{tab}// metadata {}", one_line(&key));
             Ok(())
         }
         FirMatch::Label(_)
@@ -1068,7 +1115,9 @@ fn emit_value(
             ))
         }
         FirMatch::NullValue { .. } => Ok("null".to_owned()),
-        FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
+        // The generated constructor, not a bare `new`: it wraps the cast the
+        // typed-reference model needs.
+        FirMatch::NewDsp { name, .. } => Ok(format!("new{name}()")),
         _ => Err(unsupported_node("value", value, store)),
     }
 }
@@ -1178,6 +1227,49 @@ fn map_fun_name(name: &str, options: &AscOptions) -> String {
     name.to_owned()
 }
 
+/// Collapses a UI label or metadata key onto a single line for `//` comments.
+///
+/// A Faust label may span several source lines — `demos.lib` has one, reached
+/// by `phaser_flanger.dsp` — and a `//` comment only comments to end of line, so
+/// interpolating the label raw left its continuation as bare text that `asc`
+/// parsed as code and rejected with `TS1109: Expression expected.`
+///
+/// Runs of whitespace containing a line break collapse to one space, which
+/// matches how the label reads in the source: the break is where a space would
+/// be.
+fn one_line(text: &str) -> String {
+    if !text.contains(['\n', '\r']) {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut pending_break = false;
+    for ch in text.chars() {
+        match ch {
+            '\n' | '\r' => {
+                // Drop whitespace on both sides of the break so the join adds
+                // exactly one space.
+                while out.ends_with(char::is_whitespace) {
+                    out.pop();
+                }
+                pending_break = true;
+            }
+            c if c.is_whitespace() && pending_break => {}
+            c => {
+                if pending_break {
+                    // Only emit the joining space when something precedes it,
+                    // so a leading newline does not indent the comment.
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    pending_break = false;
+                }
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
 fn faust_float_type(options: &AscOptions) -> &'static str {
     if options.double_precision {
         "f64"
@@ -1242,6 +1334,169 @@ fn emit_type(typ: &FirType, options: &AscOptions) -> String {
 }
 
 /// Emits `DeclareTable(Static)` nodes as `static` class-member StaticArrays.
+/// Emits every generated-table sub-container as a class plus its trampolines.
+///
+/// AssemblyScript is object-oriented like C++, so the generator is a class with
+/// its two methods. What differs is the call shape: the reference wraps each
+/// entry point in a free function taking `dsp: mydsp` and casting with
+/// `changetype`, because AssemblyScript's typed references do not implicitly
+/// convert. Those trampolines take the receiver as their first argument, which
+/// is exactly the FIR call shape — so unlike `cpp` nothing has to be stripped.
+///
+/// `delete<Sub>` is emitted empty: AssemblyScript is garbage-collected and the
+/// reference keeps the function only to preserve the call surface.
+fn emit_sub_modules(
+    store: &FirStore,
+    out: &mut String,
+    options: &AscOptions,
+    class_name: &str,
+    sub_modules: FirId,
+) -> Result<(), CodegenError> {
+    let FirMatch::Block(items) = match_fir(store, sub_modules) else {
+        return Ok(());
+    };
+    for item in items {
+        let FirMatch::SubModule {
+            name,
+            elem_type,
+            dsp_struct,
+            static_decls,
+            globals,
+            functions,
+            sub_modules: nested,
+        } = match_fir(store, item)
+        else {
+            return Err(CodegenError::new(
+                CodegenErrorCode::InvalidModuleSection,
+                format!("sub_modules holds a non-SubModule node {}", item.as_u32()),
+            ));
+        };
+
+        emit_sub_modules(store, out, options, class_name, nested)?;
+
+        let _ = writeln!(out, "class {name} {{");
+        // A generator's own constants — the `…Wave0` array a `waveform`
+        // generator reads from — are class statics, which is how its body
+        // addresses them (`mydspSIG0.imydspSIG0Wave0`). Skipping them left the
+        // fill referencing a property the class does not declare.
+        emit_static_tables(store, out, options, static_decls)?;
+        emit_static_tables(store, out, options, globals)?;
+        if let FirMatch::Block(fields) = match_fir(store, dsp_struct) {
+            for field in fields {
+                if let FirMatch::DeclareVar { name, typ, .. } = match_fir(store, field) {
+                    match &typ {
+                        FirType::Array(elem, size) => {
+                            let ty = emit_type(elem, options);
+                            let _ = writeln!(
+                                out,
+                                "    {name}: StaticArray<{ty}> = new StaticArray<{ty}>({size});"
+                            );
+                        }
+                        other => {
+                            let _ = writeln!(out, "    {name}: {};", emit_type(other, options));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = writeln!(out);
+        let _ = writeln!(out, "    getNumInputs{name}(): i32 {{");
+        let _ = writeln!(out, "        return 0;");
+        let _ = writeln!(out, "    }}");
+        let _ = writeln!(out, "    getNumOutputs{name}(): i32 {{");
+        let _ = writeln!(out, "        return 1;");
+        let _ = writeln!(out, "    }}");
+
+        let table_ty = emit_type(&elem_type, options);
+        if let FirMatch::Block(fns) = match_fir(store, functions) {
+            for f in fns {
+                let FirMatch::DeclareFun {
+                    name: fun_name,
+                    args,
+                    body: Some(body),
+                    ..
+                } = match_fir(store, f)
+                else {
+                    continue;
+                };
+                // The receiver is the method's own `this`; the rest keep their
+                // FIR names, with `table` typed as the filled array.
+                let params: Vec<String> = args
+                    .iter()
+                    .skip(1)
+                    .map(|arg| match &arg.typ {
+                        FirType::Ptr(_) => {
+                            format!("{}: StaticArray<{table_ty}>", arg.name)
+                        }
+                        other => format!("{}: {}", arg.name, emit_type(other, options)),
+                    })
+                    .collect();
+                let _ = writeln!(out, "    {fun_name}({}): void {{", params.join(", "));
+                emit_block(store, out, options, &name, body, 2)?;
+                let _ = writeln!(out, "    }}");
+            }
+        }
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+
+        let _ = writeln!(out, "function new{name}(): {class_name} {{");
+        let _ = writeln!(out, "    return changetype<{class_name}>(new {name}());");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "function delete{name}(dsp: {class_name}): void {{");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+        if let FirMatch::Block(fns) = match_fir(store, functions) {
+            for f in fns {
+                let FirMatch::DeclareFun {
+                    name: fun_name,
+                    args,
+                    ..
+                } = match_fir(store, f)
+                else {
+                    continue;
+                };
+                let params: Vec<String> = args
+                    .iter()
+                    .skip(1)
+                    .map(|arg| match &arg.typ {
+                        FirType::Ptr(_) => format!("{}: StaticArray<{table_ty}>", arg.name),
+                        other => format!("{}: {}", arg.name, emit_type(other, options)),
+                    })
+                    .collect();
+                let names: Vec<String> = args.iter().skip(1).map(|arg| arg.name.clone()).collect();
+                let _ = writeln!(
+                    out,
+                    "function {fun_name}(dsp: {class_name}{}{}): void {{",
+                    if params.is_empty() { "" } else { ", " },
+                    params.join(", ")
+                );
+                let _ = writeln!(
+                    out,
+                    "    changetype<{name}>(dsp).{fun_name}({});",
+                    names.join(", ")
+                );
+                let _ = writeln!(out, "}}");
+                let _ = writeln!(out);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the body of the named function declared by a module, if any.
+fn declared_function_body(store: &FirStore, functions: FirId, wanted: &str) -> Option<FirId> {
+    let FirMatch::Block(items) = match_fir(store, functions) else {
+        return None;
+    };
+    items
+        .into_iter()
+        .find_map(|item| match match_fir(store, item) {
+            FirMatch::DeclareFun { name, body, .. } if name == wanted => body,
+            _ => None,
+        })
+}
+
 fn emit_static_tables(
     store: &FirStore,
     out: &mut String,
@@ -1253,6 +1508,23 @@ fn emit_static_tables(
     };
     let mut any = false;
     for stmt in stmts {
+        // A table filled at initialization time is declared with its size and
+        // no data; `classInit` writes it.
+        if let FirMatch::DeclareVar {
+            name,
+            typ: FirType::Array(elem, size),
+            init: None,
+            ..
+        } = match_fir(store, stmt)
+        {
+            let ty = emit_type(&elem, options);
+            let _ = writeln!(
+                out,
+                "    static {name}: StaticArray<{ty}> = new StaticArray<{ty}>({size});"
+            );
+            any = true;
+            continue;
+        }
         if let FirMatch::DeclareTable {
             name,
             elem_type,
@@ -1286,6 +1558,9 @@ fn emit_static_tables(
     Ok(())
 }
 
+/// Decodes the FIR root into the [`ModuleView`] used by the rest of the emitter.
+///
+/// Returns `RootNotModule` when `module` does not decode to `FirMatch::Module`.
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     match match_fir(store, module) {
         FirMatch::Module {
@@ -1296,6 +1571,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             globals,
             functions,
             static_decls,
+            sub_modules,
         } => Ok(ModuleView {
             name,
             dsp_struct,
@@ -1304,6 +1580,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             num_inputs,
             num_outputs,
             static_decls,
+            sub_modules,
         }),
         _ => Err(CodegenError::new(
             CodegenErrorCode::RootNotModule,
@@ -1316,6 +1593,12 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
     }
 }
 
+/// Returns `true` for canonical Faust lifecycle/DSP-API function names.
+///
+/// Used by [`emit_declare_fun`] to decide whether to strip the leading `dsp`
+/// FIR argument: these methods become AssemblyScript instance methods with
+/// an implicit `this`, so their explicit FIR `dsp` parameter has no rendered
+/// counterpart.
 fn is_dsp_api_method(name: &str) -> bool {
     // `control`/`frame` are the execution-options entry points (plan §5.7:
     // the AssemblyScript one-sample target).
@@ -1400,10 +1683,13 @@ fn trim_float(value: f64) -> String {
     }
 }
 
+/// Renders a comma-joined `[...]` AssemblyScript array literal.
 fn format_array(values: impl Iterator<Item = String>) -> String {
     format!("[{}]", values.collect::<Vec<_>>().join(", "))
 }
 
+/// Builds an `InvalidModuleSection` error for a module section that did not
+/// decode as a FIR block.
 fn invalid_section(section: &str, id: FirId, store: &FirStore) -> CodegenError {
     CodegenError::new(
         CodegenErrorCode::InvalidModuleSection,
@@ -1415,6 +1701,7 @@ fn invalid_section(section: &str, id: FirId, store: &FirStore) -> CodegenError {
     )
 }
 
+/// Builds an `UnsupportedNode` error for one FIR node the asc emitter cannot render.
 fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     CodegenError::new(
         CodegenErrorCode::UnsupportedNode,
@@ -1426,6 +1713,7 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     )
 }
 
+/// Returns the stable AssemblyScript backend identifier (`"asc"`).
 #[must_use]
 pub fn backend_id() -> &'static str {
     BACKEND_NAME
@@ -1505,7 +1793,16 @@ mod tests {
         let globals = b.block(&[]);
         let functions = b.block(&[]);
         let static_decls = b.block(&[]);
-        let module = b.module(1, 2, "mydsp", dsp_struct, globals, functions, static_decls);
+        let module = b.module(
+            1,
+            2,
+            "mydsp",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            &[],
+        );
         let out = generate_asc_module(&store, module, &AscOptions::default())
             .expect("module should generate");
         assert!(out.contains("export class mydsp {"));
@@ -1527,7 +1824,16 @@ mod tests {
         let globals = b.block(&[]);
         let functions = b.block(&[]);
         let static_decls = b.block(&[]);
-        let module = b.module(1, 1, "mydsp", dsp_struct, globals, functions, static_decls);
+        let module = b.module(
+            1,
+            1,
+            "mydsp",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            &[],
+        );
         let out = generate_asc_module(
             &store,
             module,
@@ -1585,7 +1891,16 @@ mod tests {
         );
         let functions = b.block(&[compute]);
         let static_decls = b.block(&[]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let module = b.module(
+            0,
+            0,
+            "mydsp",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            &[],
+        );
         let out = generate_asc_module(&store, module, &AscOptions::default())
             .expect("module should generate");
         assert!(out.contains("let vbuf0: StaticArray<f32> = new StaticArray<f32>(32);"));
@@ -1617,7 +1932,16 @@ mod tests {
         let globals = b.block(&[]);
         let functions = b.block(&[fun]);
         let static_decls = b.block(&[]);
-        let module = b.module(0, 1, "mydsp", dsp_struct, globals, functions, static_decls);
+        let module = b.module(
+            0,
+            1,
+            "mydsp",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            &[],
+        );
         let out = generate_asc_module(&store, module, &AscOptions::default())
             .expect("module should generate");
         assert!(out.contains("this.fHslider0 = 0.5;"));
@@ -1684,7 +2008,16 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let module = b.module(0, 1, "mydsp", dsp_struct, globals, functions, static_decls);
+        let module = b.module(
+            0,
+            1,
+            "mydsp",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            &[],
+        );
 
         let out = generate_asc_module(&store, module, &AscOptions::default())
             .expect("soundfile access should generate");
@@ -1694,5 +2027,21 @@ mod tests {
         assert!(
             out.contains("<f32>(_soundfileBuffer(<i32>(this.fSound0), <i32>(0), <i32>(0), i0))")
         );
+    }
+
+    /// A Faust label may span source lines (`demos.lib`, reached by
+    /// `phaser_flanger.dsp`). A `//` comment ends at the newline, so emitting
+    /// such a label raw left its tail as bare text that `asc` parsed as code.
+    #[test]
+    fn multi_line_labels_stay_on_one_comment_line() {
+        assert_eq!(
+            one_line("Noise (White or Pink - uses only Amplitude control on\n        the left)"),
+            "Noise (White or Pink - uses only Amplitude control on the left)"
+        );
+        // Whitespace on either side of the break collapses to a single space.
+        assert_eq!(one_line("a  \n   b"), "a b");
+        assert_eq!(one_line("a\r\nb"), "a b");
+        // A label with no break is returned unchanged.
+        assert_eq!(one_line("plain label"), "plain label");
     }
 }

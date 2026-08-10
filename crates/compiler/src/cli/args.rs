@@ -16,6 +16,8 @@ pub enum CliLang {
     Asc,
     #[value(alias = "c99")]
     C,
+    /// Scalar Cmajor processor with intrinsic event control and one-sample I/O.
+    Cmajor,
     /// RNBO codebox. Emits one sample at a time with external control,
     /// whether or not `-ec`/`-os` were passed; rejects `-vec`.
     Codebox,
@@ -49,6 +51,18 @@ pub enum ErrorFormat {
     Human,
     /// Typed, versioned diagnostics JSON contract.
     Json,
+}
+
+/// CLI spelling of the generated-table initialization strategy
+/// (`--table-init`), mapped to `transform::signal_fir::TableInitMode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum TableInitArg {
+    /// Compile each table generator into a sub-module filled at initialization
+    /// time (the C++ reference behavior).
+    Runtime,
+    /// Fold the generator into a literal initializer list at compile time.
+    #[default]
+    Const,
 }
 
 /// How source paths are spelled in rendered human diagnostics.
@@ -313,6 +327,17 @@ pub struct CliArgs {
     /// Default: disabled (all delays above `mcd` use circular-pow2).
     #[arg(long = "dlt", default_value_t = u32::MAX)]
     pub dlt: u32,
+    /// How the initial content of `rdtable`/`rwtable` tables is produced.
+    ///
+    /// `runtime` compiles each table generator into a sub-module whose `fill`
+    /// function computes the content at initialization time, as the C++
+    /// reference does; this is the only mode that can express content
+    /// depending on the sample rate or on a foreign function, and it keeps the
+    /// emitted source small. `const` evaluates the generator at compile time
+    /// and emits a literal initializer list, giving a `const` ROM-able table
+    /// but rejecting generators that are not fully determined at compile time.
+    #[arg(long = "table-init", value_enum, default_value_t = TableInitArg::Runtime)]
+    pub table_init: TableInitArg,
     /// Vector mode (`-vec`): restructure `compute()` into an outer chunk loop
     /// so the C compiler can auto-vectorize the inner loops (SIMD).
     ///
@@ -391,6 +416,26 @@ pub struct CliArgs {
     pub fold_complexity: usize,
 }
 
+/// Returns [`CliArgs`] as `clap` would parse an empty command line.
+///
+/// This is the one place that knows "what a flag defaults to": rather than
+/// re-typing a `default_value_t` as a literal everywhere it needs comparing
+/// against (e.g. deciding whether `-mcd` differs from its default in
+/// [`super::runner::compile_options_full_string`]), callers get the real
+/// value clap resolved from the `#[arg(...)]` attribute itself. A plain
+/// `#[derive(Default)]` on `CliArgs` looks like it would do the same thing
+/// but does not — it fills every field with its type's `Default::default()`
+/// (`0` for `mcd`, not `16`), silently ignoring `default_value_t`. Re-parsing
+/// is the only way to get clap's actual answer without a second copy of
+/// every default.
+///
+/// # Panics
+/// Never in practice: `CliArgs` has no required positional or flag argument,
+/// so an empty argument list always parses.
+pub fn cli_defaults() -> CliArgs {
+    CliArgs::try_parse_from(["faust-rs"]).expect("CliArgs has no required argument")
+}
+
 /// Normalizes legacy Faust-style flags to the current `clap` surface.
 pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut normalized = Vec::new();
@@ -465,6 +510,13 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
         }
         if arg == "-mcd" {
             normalized.push("--mcd".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-table-init" {
+            normalized.push("--table-init".to_owned());
             if let Some(value) = it.next() {
                 normalized.push(value);
             }
@@ -561,4 +613,27 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
         normalized.push(arg);
     }
     normalized
+}
+
+#[cfg(test)]
+mod cli_defaults_tests {
+    use super::*;
+
+    /// Pins the actual values behind `-mcd`/`-pn`/etc. so a change to their
+    /// `default_value_t` in `CliArgs` is a visible, intentional diff here
+    /// rather than a silent shift in what `compile_options_full_string`
+    /// considers "default" (and therefore omits from the header).
+    #[test]
+    fn cli_defaults_matches_documented_flag_defaults() {
+        let d = cli_defaults();
+        assert_eq!(d.mcd, 16);
+        assert_eq!(d.dlt, u32::MAX);
+        assert_eq!(d.process_name, "process");
+        assert_eq!(d.scheduling_strategy, 0);
+        assert_eq!(d.table_init, TableInitArg::Runtime);
+        assert_eq!(d.lv, 0);
+        assert!(!d.vec);
+        assert!(d.class_name.is_none());
+        assert!(d.super_class_name.is_none());
+    }
 }

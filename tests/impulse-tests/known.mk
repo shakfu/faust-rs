@@ -7,9 +7,14 @@
 #                       Used only for genuine *bounded* rounding bands; each
 #                       entry records the observed max |delta| and where.
 #
-#   KNOWN_FAIL_all      DSPs excluded from every backend's default pass/fail gate.
+#   KNOWN_FAIL_all      faust-rs DSPs excluded from every backend's default
+#                       pass/fail gate.
 #   KNOWN_FAIL_<backend> DSPs excluded for one backend (outdir name: cpp/c/interp).
 #                       These are real divergences/gaps to fix, not rounding.
+#
+# `CPP_ORACLE_UNSUPPORTED` comes from the generated C++-oracle manifest. It is
+# also filtered from every backend target because no reference response exists,
+# but is intentionally not a `KNOWN_FAIL`: faust-rs may compile it correctly.
 #
 # Excluded cases are simply not built by the aggregate targets; build one
 # explicitly (e.g. `make ir/interp/sound.ir`) to see it fail.
@@ -27,7 +32,26 @@ PRECISION_noiseabs         := 1e-5   # 3e-6  polyphonic pass (c backend)
 PRECISION_comb_bug_exp     := 1e-3   # 1.1e-4 polyphonic pass (c backend)
 
 # --- shared compile gap ------------------------------------------------------
-KNOWN_FAIL_all := subcontainer1      # faust-rs sub-container codegen gap (compile-fail)
+# Empty since 2026-08-06. `subcontainer1` lived here for the project's lifetime:
+# its table content depends on the sample rate, which the compile-time SIGGEN
+# interpreter cannot evaluate. `--table-init runtime` — the default since the
+# generated-table sub-module port completed — compiles it on every backend, so
+# every lane gates 94 cases rather than 93. (94 of the corpus's 133 DSPs: the
+# generated C++-oracle manifest excludes the 39 clock-domain fixtures upstream
+# Faust cannot compile.)
+KNOWN_FAIL_all :=
+
+# Programs the compile-time SIGGEN interpreter cannot fold, listed so a
+# `--table-init const` run records them as its expected outcome rather than as
+# failures (`porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md`
+# §2.3). They compile in the default `runtime` mode; under `const` they are
+# rejected with `FRS-SFIR-0004`, which is that mode working as specified, not a
+# regression. `const` is a permanent supported mode, so this list is permanent
+# too. Qualify const mode with:
+#
+#   make -f Make.gcc all COMPILER_OPTS="--table-init const" \
+#        KNOWN_FAIL_all="$(TABLE_INIT_CONST_UNFOLDABLE)"
+TABLE_INIT_CONST_UNFOLDABLE := subcontainer1
 
 # --- C++ backend: full parity otherwise --------------------------------------
 KNOWN_FAIL_cpp :=
@@ -73,6 +97,19 @@ KNOWN_FAIL_rust :=
 
 # --- Julia backend (scalar prefix through the local Julia harness) ----------
 KNOWN_FAIL_julia :=
+
+# --- Cmajor backend (full upstream Cmajor impulse adapter) -------------------
+# `control` is excluded by Make.cmajor for parity with the pinned C++ lane; it
+# is not a semantic failure of a supported Cmajor construct.
+# `bs` reads the block-size foreign variable `count`, forbidden by Cmajor's
+# intrinsic one-sample contract (FRS-SFIR-0009), like the `-os` backend lanes.
+# `sound` uses soundfiles, which the scalar Cmajor backend rejects explicitly.
+# `modulations`, `osci`, `tester`, and `tester2` expand generated oscillator
+# tables into 65,536/65,537-element literal initializers. Depending on the
+# surrounding source, Cmajor reports either excessive nesting or an oversized
+# initializer. The pinned backend preserves the generator and emits a compact
+# `SIG0` subprocessor plus `fill..._<size>` loop.
+KNOWN_FAIL_cmajor := bs modulations osci sound tester tester2
 
 # --- mode/scheduling variants ------------------------------------------------
 # Variant outdirs inherit their base backend's known failures. Any divergence
@@ -128,4 +165,4 @@ without_exec = $(patsubst %-ec-os,%,$(patsubst %-ec,%,$(patsubst %-os,%,$1)))
 base_backend = $(patsubst %-vec0,%,$(patsubst %-vec1,%,$(call without_ss,$(call without_exec,$1))))
 # Names excluded for a given backend outdir. Every variant inherits its base
 # backend's known failures plus any exact outdir-specific list.
-known_fail_for = $(KNOWN_FAIL_all) $(KNOWN_FAIL_$(call base_backend,$1)) $(KNOWN_FAIL_$1)
+known_fail_for = $(CPP_ORACLE_UNSUPPORTED) $(KNOWN_FAIL_all) $(KNOWN_FAIL_$(call base_backend,$1)) $(KNOWN_FAIL_$1)

@@ -62,6 +62,12 @@ pub(crate) enum XtaskCommand {
     CliTranscriptGen,
     CliTranscriptCheck,
     EmissionDeterminism(EmissionDeterminismArgs),
+    /// Per-stage compile-time profile over the DSP corpus.
+    CompileProfile(CompileProfileArgs),
+    /// Token-stream differential between the two lexer implementations.
+    LexerDifferential(LexerDifferentialArgs),
+    /// Compare faust-rs and C++ Faust over a DSP tree.
+    ExamplesCompare(ExamplesCompareArgs),
 }
 
 /// Options for comparing provenance storage representations.
@@ -309,6 +315,86 @@ pub(crate) struct CompileBudgetArgs {
     /// them. Every increase must be justified in the commit message.
     #[arg(long)]
     pub(crate) update: bool,
+}
+
+/// Options for the faust-rs vs C++ Faust comparison.
+#[derive(Clone, Debug, Args)]
+pub(crate) struct ExamplesCompareArgs {
+    /// DSP tree to walk (default: the reference `examples/` directory).
+    #[arg(long, value_name = "DIR")]
+    pub(crate) root: Option<PathBuf>,
+    /// Runs per compiler per DSP; the minimum is kept (default 3).
+    #[arg(long, value_name = "N")]
+    pub(crate) repeats: Option<u32>,
+    /// C++ Faust binary. Defaults to `FAUST_CPP_BIN`, then the local build,
+    /// then `faust` on PATH.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) faust_bin: Option<PathBuf>,
+    /// faust-rs binary (default: `target/release/faust-rs`).
+    #[arg(long, value_name = "PATH")]
+    pub(crate) faust_rs_bin: Option<PathBuf>,
+    /// Restrict to DSPs whose path contains this text.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) filter: Option<String>,
+    /// Rows in each detail table (default 10).
+    #[arg(long, value_name = "N")]
+    pub(crate) top: Option<usize>,
+    /// Write the per-DSP results as CSV.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) csv: Option<PathBuf>,
+    /// Additional `-I` search directories passed to both compilers.
+    ///
+    /// A file's own directory is always searched; this is for libraries it
+    /// imports from elsewhere, e.g. `faustlibraries/tests/*.dsp` importing
+    /// `basics.lib` from the checkout root rather than from `tests/` itself.
+    /// Repeatable.
+    #[arg(long = "extra-include", value_name = "DIR")]
+    pub(crate) extra_include: Vec<PathBuf>,
+    /// Compile one case per top-level `<name><suffix>` definition found in
+    /// each file (via `-pn <name><suffix>`) instead of one case per file.
+    ///
+    /// For corpora with no `process`, like `faustlibraries/tests/*.dsp`,
+    /// where each file is a flat list of independent one-liners such as
+    /// `db2linear_test = ba.db2linear(-6);` meant to be selected and
+    /// compiled individually rather than compiled as a whole file.
+    #[arg(long)]
+    pub(crate) per_symbol: bool,
+    /// Suffix identifying a top-level definition as its own compile target
+    /// under `--per-symbol` (default `_test`).
+    #[arg(long, value_name = "SUFFIX")]
+    pub(crate) symbol_suffix: Option<String>,
+}
+
+/// Options for the lexer token-stream differential.
+#[derive(Clone, Debug, Args)]
+pub(crate) struct LexerDifferentialArgs {
+    /// Print both outcomes for every differing file.
+    #[arg(long)]
+    pub(crate) verbose: bool,
+}
+
+/// Options for the per-stage compile-time profile.
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CompileProfileArgs {
+    /// Emit the profile as JSON instead of the human table.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Record the profile to this path (relative paths resolve from the
+    /// workspace root).
+    #[arg(long, value_name = "PATH")]
+    pub(crate) write: Option<PathBuf>,
+    /// Compare stage shares against a recorded profile and fail on drift.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) baseline: Option<PathBuf>,
+    /// Allowed per-stage share drift, in percentage points (default 3.0).
+    #[arg(long, value_name = "POINTS")]
+    pub(crate) tolerance: Option<f64>,
+    /// Restrict the corpus to DSPs whose name contains this text.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) filter: Option<String>,
+    /// How many slowest DSPs to list (default 8).
+    #[arg(long, value_name = "N")]
+    pub(crate) top: Option<usize>,
 }
 
 /// Options for run-to-run emission determinism.
