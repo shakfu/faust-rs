@@ -677,6 +677,33 @@ impl Compiler {
             .map_err(|e| lower_interp_error_to_compiler(source_name, &signals, e))
     }
 
+    /// Parses + evaluates + propagates one source with explicit import search
+    /// paths, then emits `.fbc` bytecode text using the selected lane.
+    ///
+    /// The string counterpart of the file-backed interpreter entry point, and
+    /// the one an embedding layer must call when the caller supplied `-I`.
+    /// See [`Self::compile_source_to_fir_with_lane_and_search_paths`] for why
+    /// the pathless variant is not enough: without the paths a project-local
+    /// `library(...)` is unreachable, and the failure only surfaces when the
+    /// library is actually used, since an unused binding is never loaded.
+    ///
+    /// # Errors
+    /// As [`Self::compile_source_to_interp_with_lane`].
+    pub fn compile_source_to_interp_with_lane_and_search_paths(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &InterpOptions,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals =
+            self.compile_source_to_signals_with_search_paths(source_name, source, search_paths)?;
+        let ctx = self.lowering_ctx(lane);
+        lower_signals_to_interp(source_name, &signals, options, ctx)
+            .map_err(|e| lower_interp_error_to_compiler(source_name, &signals, e))
+    }
+
     /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
     /// text via the interpreter backend using the transform fast lane.
     pub fn compile_file_to_interp(
@@ -860,6 +887,30 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
+        self.lower_to_fir(source_name, &signals, lane)
+    }
+
+    /// Parses + evaluates + propagates one source with explicit import search
+    /// paths, then lowers to FIR using the selected lane.
+    ///
+    /// The string counterpart of [`Self::compile_file_to_fir_with_lane`].
+    /// Embedding layers must use this rather than
+    /// [`Self::compile_source_to_fir_with_lane`] whenever the caller supplied
+    /// `-I`: without the paths, `library(...)` resolution falls back to the
+    /// built-in defaults only, so a DSP importing a project-local library
+    /// compiles from a file and fails from a string.
+    ///
+    /// # Errors
+    /// As [`Self::compile_source_to_fir_with_lane`].
+    pub fn compile_source_to_fir_with_lane_and_search_paths(
+        &self,
+        source_name: &str,
+        source: &str,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+    ) -> Result<FirCompileOutput, CompilerError> {
+        let signals =
+            self.compile_source_to_signals_with_search_paths(source_name, source, search_paths)?;
         self.lower_to_fir(source_name, &signals, lane)
     }
 
@@ -1059,10 +1110,13 @@ impl Compiler {
 
     /// Compiles one file-backed DSP source into an owned artifact bundle.
     ///
-    /// Compared with [`Self::compile_file_to_wasm_with_lane`], this packages the
-    /// result in the artifact-centric shape expected by the `faustwasm`
-    /// dual-mode integration plan, so downstream code can treat compile mode
-    /// and precompiled-artifact mode uniformly.
+    /// Packages the result in the artifact-centric shape expected by the
+    /// `faustwasm` dual-mode integration plan, so downstream code can treat
+    /// compile mode and precompiled-artifact mode uniformly. This inlines the
+    /// same pipeline as [`Self::compile_file_to_wasm_with_lane`] — rather than
+    /// calling it — so it can retain `signals` long enough to forward its
+    /// `warnings`, the same way [`Self::compile_wasm_artifact`] does for the
+    /// source-based path.
     pub fn compile_file_to_wasm_artifact_with_lane(
         &self,
         path: &Path,
@@ -1071,11 +1125,23 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<WasmArtifactBundle, CompilerError> {
         let compile_options = compile_options_json_string(Some("wasm"), options.double_precision);
-        let module = self.compile_file_to_wasm_with_lane(path, search_paths, options, lane)?;
+        let source = path.display().to_string();
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let warnings = signals.warnings.clone();
+        let lowered = self.lower_to_fir(&source, &signals, lane)?;
+        let json_context =
+            wasm_json_context_for_file(path, search_paths, &signals, compile_options.clone());
+        let module = generate_wasm_module_with_context(
+            &lowered.store,
+            lowered.module,
+            options,
+            &json_context,
+        )
+        .map_err(|error| wasm_error_to_compiler(&source, &signals, &lowered, error))?;
         Ok(WasmArtifactBundle::from_wasm_module(
             module,
             compile_options,
-            DiagnosticBundle::new(),
+            warnings,
         ))
     }
 
@@ -1132,8 +1198,36 @@ impl Compiler {
         lane: SignalFirLane,
         compile_options: String,
     ) -> Result<String, CompilerError> {
+        self.compile_source_to_json_with_lane_compile_options_and_memory(
+            source_name,
+            source,
+            lane,
+            compile_options,
+            None,
+        )
+    }
+
+    /// Emits strict JSON for source text with an optional native `-mem0`
+    /// analysis selected by its effective backend layout.
+    ///
+    /// Mapping status: `adapted`. C++ exposes memory metadata through its
+    /// global compiler option state; this facade makes the backend flavor an
+    /// explicit request value and leaves ordinary JSON byte-stable with
+    /// `None`.
+    pub fn compile_source_to_json_with_lane_compile_options_and_memory(
+        &self,
+        source_name: &str,
+        source: &str,
+        lane: SignalFirLane,
+        compile_options: String,
+        memory_flavor: Option<MemoryLayoutFlavor>,
+    ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered = self.lower_to_fir(source_name, &signals, lane)?;
+        // A C/C++-flavored `memory_layout` names its zones like that backend's
+        // own class-name convention, not like the source stem. This entry
+        // point has no `-cn` to forward, so it gets the default (`"mydsp"`).
+        let module_name = json_memory_layout_module_name(memory_flavor, None, source_name);
+        let lowered = self.lower_to_fir_with_name(source_name, &signals, lane, module_name)?;
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
@@ -1144,6 +1238,7 @@ impl Compiler {
                 top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
                 compile_options,
                 double_precision: self.real_type == RealType::Float64,
+                memory_flavor,
             },
         )
         .map_err(|error| wasm_error_to_compiler(source_name, &signals, &lowered, error))?;
@@ -1174,9 +1269,61 @@ impl Compiler {
         lane: SignalFirLane,
         compile_options: String,
     ) -> Result<String, CompilerError> {
+        self.compile_file_to_json_with_compile_options_and_memory(
+            path,
+            search_paths,
+            lane,
+            compile_options,
+            None,
+        )
+    }
+
+    /// Emits strict JSON with an optional effective native `-mem0` layout.
+    ///
+    /// The explicit flavor prevents a JSON companion from accidentally using
+    /// Wasm or host-default layout semantics for C, C++, or Cranelift.
+    pub fn compile_file_to_json_with_compile_options_and_memory(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+        compile_options: String,
+        memory_flavor: Option<MemoryLayoutFlavor>,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_json_with_compile_options_memory_and_class_name(
+            path,
+            search_paths,
+            lane,
+            compile_options,
+            memory_flavor,
+            None,
+        )
+    }
+
+    /// Same as [`Self::compile_file_to_json_with_compile_options_and_memory`],
+    /// with an explicit `-cn` class name.
+    ///
+    /// The C and C++ backends name every generated identifier (class, `SIG0`
+    /// helpers, `ftbl0` static tables) from the class name — `-cn`, default
+    /// `"mydsp"` — so a C/C++-flavored `-mem0` `memory_layout` has to be
+    /// lowered under that same name, or its zones describe identifiers the
+    /// generated source does not contain. `class_name` is ignored for the
+    /// Cranelift flavor and for plain JSON, which keep their source-derived
+    /// module name.
+    pub fn compile_file_to_json_with_compile_options_memory_and_class_name(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+        compile_options: String,
+        memory_flavor: Option<MemoryLayoutFlavor>,
+        class_name: Option<String>,
+    ) -> Result<String, CompilerError> {
         let source = path.display().to_string();
         let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered = self.lower_to_fir(&source, &signals, lane)?;
+        let module_name =
+            json_memory_layout_module_name(memory_flavor, class_name.as_deref(), &source);
+        let lowered = self.lower_to_fir_with_name(&source, &signals, lane, module_name)?;
         let library_list = collect_library_list(&signals);
         let json = build_strict_json_description(
             &lowered.store,
@@ -1195,6 +1342,7 @@ impl Compiler {
                 top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
                 compile_options,
                 double_precision: self.real_type == RealType::Float64,
+                memory_flavor,
             },
         )
         .map_err(|error| wasm_error_to_compiler(&source, &signals, &lowered, error))?;
@@ -1230,5 +1378,23 @@ impl Compiler {
         compile_options: String,
     ) -> Result<String, CompilerError> {
         self.compile_file_to_json_with_compile_options(path, &[], lane, compile_options)
+    }
+
+    /// Default-search-path companion of
+    /// [`Compiler::compile_file_to_json_with_compile_options_and_memory`].
+    pub fn compile_file_default_to_json_with_lane_compile_options_and_memory(
+        &self,
+        path: &Path,
+        lane: SignalFirLane,
+        compile_options: String,
+        memory_flavor: Option<MemoryLayoutFlavor>,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_json_with_compile_options_and_memory(
+            path,
+            &[],
+            lane,
+            compile_options,
+            memory_flavor,
+        )
     }
 }

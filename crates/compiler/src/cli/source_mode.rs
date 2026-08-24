@@ -14,13 +14,9 @@ use codegen::backends::interp::{FbcCppOptions, InterpOptions, generate_cpp_from_
 use codegen::backends::julia::JuliaOptions;
 use codegen::backends::rust::{RustOptions, generate_rust_module};
 use codegen::backends::wasm::WasmOptions;
-use compiler::{
-    Compiler, FirVerifyOptions,
-    enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
-    golden_snapshot_from_file,
-};
+use compiler::{Compiler, FirVerifyOptions, golden_snapshot_from_file};
 use fir::{checker::verify_fir_module, dump_fir};
-use signals::dump_sig_readable;
+use signals::{dump_sig_annotated, dump_sig_dag};
 
 use super::args::{CliArgs, CliLang};
 use super::runner::*;
@@ -127,6 +123,26 @@ pub(crate) fn run_source_mode(
         return;
     }
 
+    if cli.export_dsp {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
+        // The recorded `compile_options` are rebuilt from the parsed model
+        // rather than read back from `std::env::args`. C++ records its raw
+        // argv, which is why its expansions carry the input and output file
+        // names; the effective options are what the declaration is for, and
+        // deriving them keeps this path inside the typed CLI contract.
+        let argv = expansion_option_argv(cli);
+        match compiler.expand_file_to_dsp(input_path, &cli.import_dir, &argv) {
+            Ok(expanded) => {
+                timer.phase("export-dsp");
+                emit_output(&expanded, cli.output.as_ref());
+            }
+            Err(err) => report_pipeline_failure("Expansion failed", &err, cli),
+        }
+        timer.total();
+        return;
+    }
+
     if cli.svg {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
@@ -192,10 +208,35 @@ pub(crate) fn run_source_mode(
                     rendered.push('\n');
                     rendered.push_str(&format!(
                         "[{index}] {}",
-                        dump_sig_readable(&out.parse.state.arena, *sig)
+                        dump_sig_annotated(&out.parse.state.arena, *sig, &out.ui)
                     ));
                 }
                 rendered.push('\n');
+                emit_output(&rendered, cli.output.as_ref());
+            }
+            Err(err) => report_pipeline_failure("Signal pipeline failed", &err, cli),
+        }
+        timer.total();
+        return;
+    }
+
+    if cli.dump_sig_dag {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
+        let result = compiler.compile_file_to_signals(input_path, &cli.import_dir);
+        timer.phase("signals");
+
+        match result {
+            Ok(out) => {
+                let mut rendered = format!(
+                    "Signals OK: inputs={} outputs={}\n",
+                    out.process_arity.inputs, out.process_arity.outputs
+                );
+                rendered.push_str(&dump_sig_dag(
+                    &out.parse.state.arena,
+                    &out.signals,
+                    Some(&out.ui),
+                ));
                 emit_output(&rendered, cli.output.as_ref());
             }
             Err(err) => report_pipeline_failure("Signal pipeline failed", &err, cli),
@@ -294,11 +335,15 @@ pub(crate) fn run_source_mode(
     if cli.dump_json && cli.lang.is_none() {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
-        let result = compiler.compile_file_to_json_with_compile_options(
+        let result = compiler.compile_file_to_json_with_compile_options_memory_and_class_name(
             input_path,
             &cli.import_dir,
             selected_codegen_lane(cli).into_compiler_lane(),
             compile_options_full_string(cli, None),
+            selected_memory_manager_mode(cli)
+                .is_mem0()
+                .then_some(codegen::memory_layout::MemoryLayoutFlavor::Cpp),
+            selected_class_name(cli),
         );
         timer.phase("json");
 
@@ -353,7 +398,10 @@ pub(crate) fn run_source_mode(
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
         let lane = selected_codegen_lane(cli).into_compiler_lane();
-        let options = CraneliftOptions::default();
+        let options = CraneliftOptions {
+            memory_manager_mode: selected_memory_manager_mode(cli),
+            ..CraneliftOptions::default()
+        };
         let result = compiler.compile_file_to_cranelift_report_with_lane(
             input_path,
             &cli.import_dir,
@@ -503,6 +551,9 @@ pub(crate) fn run_source_mode(
                 cli,
                 Some(cli_lang_name(CliLang::Julia)),
             )),
+            // Metadata transport and the embedded JSON description are filled
+            // by the lowering, which is where the compilation snapshot lives.
+            ..JuliaOptions::default()
         };
         let result = compiler.compile_file_to_julia_with_lane(
             input_path,
@@ -633,6 +684,7 @@ pub(crate) fn run_source_mode(
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
         let options = CppOptions {
+            memory_manager_mode: selected_memory_manager_mode(cli),
             class_name: selected_class_name(cli),
             super_class_name: selected_super_class_name(cli),
             compile_options: Some(compile_options_full_string(
@@ -651,31 +703,7 @@ pub(crate) fn run_source_mode(
 
         match result {
             Ok(cpp) => {
-                let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
-                    let mut options = EnrobageOptions::new(architecture_file.clone());
-                    options.architecture_dirs = cli.architecture_dir.clone();
-                    options.inline_arch_files = cli.inline_architecture_files;
-                    if let Some(class_name) = selected_class_name(cli) {
-                        options.class_name = class_name;
-                    }
-                    if let Some(super_class_name) = selected_super_class_name(cli) {
-                        options.super_class_name = super_class_name;
-                    }
-                    let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
-                        Ok(wrapped) => wrapped,
-                        Err(err) => {
-                            eprintln!("Architecture wrapping failed: {err}");
-                            std::process::exit(1);
-                        }
-                    };
-                    if let Some(err) = wrapped.recoverable_error.as_deref() {
-                        eprintln!("{err}");
-                        std::process::exit(1);
-                    }
-                    wrapped.code
-                } else {
-                    cpp
-                };
+                let rendered = wrap_backend_with_architecture(&cpp, cli);
                 emit_output(&rendered, cli.output.as_ref());
                 if cli.dump_json {
                     emit_cli_json_companion_for_backend(&compiler, cli, input_path, CliLang::Cpp);
@@ -691,6 +719,7 @@ pub(crate) fn run_source_mode(
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
         let options = COptions {
+            memory_manager_mode: selected_memory_manager_mode(cli),
             class_name: selected_class_name(cli),
             compile_options: Some(compile_options_full_string(
                 cli,
@@ -708,28 +737,7 @@ pub(crate) fn run_source_mode(
 
         match result {
             Ok(c_code) => {
-                let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
-                    let mut options = EnrobageOptions::new(architecture_file.clone());
-                    options.architecture_dirs = cli.architecture_dir.clone();
-                    options.inline_arch_files = cli.inline_architecture_files;
-                    if let Some(class_name) = selected_class_name(cli) {
-                        options.class_name = class_name;
-                    }
-                    let wrapped = match wrap_cpp_with_architecture(&c_code, &options) {
-                        Ok(wrapped) => wrapped,
-                        Err(err) => {
-                            eprintln!("Architecture wrapping failed: {err}");
-                            std::process::exit(1);
-                        }
-                    };
-                    if let Some(err) = wrapped.recoverable_error.as_deref() {
-                        eprintln!("{err}");
-                        std::process::exit(1);
-                    }
-                    wrapped.code
-                } else {
-                    c_code
-                };
+                let rendered = wrap_backend_with_architecture(&c_code, cli);
                 emit_output(&rendered, cli.output.as_ref());
                 if cli.dump_json {
                     emit_cli_json_companion_for_backend(&compiler, cli, input_path, CliLang::C);
@@ -742,4 +750,51 @@ pub(crate) fn run_source_mode(
     }
 
     print_global_usage_and_exit();
+}
+
+/// Rebuilds the compilation options an expansion records, from the parsed CLI.
+///
+/// C++ writes its raw `argv` into `declare compile_options`, which is why an
+/// expansion produced on the command line carries the input and output file
+/// names it was invoked with. Those say nothing about how the program was
+/// compiled. This rebuilds the options that actually shaped the compilation,
+/// in the spelling the normalizer expects, so the declaration answers the
+/// question it exists for and this path stays inside the typed CLI contract
+/// rather than re-reading process arguments.
+fn expansion_option_argv(cli: &CliArgs) -> Vec<String> {
+    let mut argv: Vec<String> = Vec::new();
+    // `-lang` selects a backend the expansion does not use, but recording it
+    // keeps the document honest about the command line that produced it
+    // rather than dropping the flag without trace.
+    if let Some(lang) = cli.lang {
+        argv.push("-lang".to_owned());
+        argv.push(format!("{lang:?}").to_lowercase());
+    }
+    if cli.double {
+        argv.push("-double".to_owned());
+    }
+    if cli.vec {
+        argv.push("-vec".to_owned());
+        argv.push("-vs".to_owned());
+        argv.push(cli.vs.to_string());
+        argv.push("-lv".to_owned());
+        argv.push(cli.lv.to_string());
+    }
+    if cli.scheduling_strategy != 0 {
+        argv.push("-ss".to_owned());
+        argv.push(cli.scheduling_strategy.to_string());
+    }
+    if cli.external_control {
+        argv.push("-ec".to_owned());
+    }
+    if cli.one_sample {
+        argv.push("-os".to_owned());
+    }
+    argv.push("-mcd".to_owned());
+    argv.push(cli.mcd.to_string());
+    if cli.dlt != u32::MAX {
+        argv.push("-dlt".to_owned());
+        argv.push(cli.dlt.to_string());
+    }
+    argv
 }

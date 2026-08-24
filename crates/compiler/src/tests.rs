@@ -8,11 +8,11 @@ use super::CraneliftBackendError;
 use super::{
     AscCodegenError, CCodegenError, CodeboxCodegenError, Compiler, CompilerError, ComputeMode,
     CppCodegenError, DiagnosticBundle, ExpandDspRequest, GenerateAuxFilesRequest, InferenceError,
-    InterpCodegenError, InterpCodegenErrorCode, JuliaCodegenError, PropagateError, RealType,
-    RustCodegenError, SchedulingStrategy, SignalFirError, SignalFirErrorCode, SignalFirLane,
-    SourceReaderError, WasmArtifactRequest, WasmBackendError, build_import_search_paths,
-    compile_options_json_string, default_import_search_paths, golden_snapshot, resolve_module_name,
-    resolve_ui_root_label,
+    InterpCodegenError, InterpCodegenErrorCode, JuliaCodegenError, MemoryLayoutFlavor,
+    PropagateError, RealType, RustCodegenError, SchedulingStrategy, SignalFirError,
+    SignalFirErrorCode, SignalFirLane, SourceReaderError, WasmArtifactRequest, WasmBackendError,
+    build_import_search_paths, compile_options_json_string, default_import_search_paths,
+    golden_snapshot, resolve_module_name, resolve_ui_root_label,
 };
 use codegen::backends::wasm::WasmOptions;
 use parser::VirtualSourceMap;
@@ -297,6 +297,50 @@ fn compiler_double_precision_selects_doubleprecision_library_variant() {
 }
 
 #[test]
+fn c_family_source_identity_matches_cpp_and_stays_independent_from_class_name() {
+    let compiler = Compiler::new();
+    let source = "declare name \"Display DSP\";\nprocess = 0;\n";
+    let cpp_options = codegen::backends::cpp::CppOptions {
+        class_name: Some("CustomClass".to_owned()),
+        ..codegen::backends::cpp::CppOptions::default()
+    };
+    let cpp = compiler
+        .compile_source_to_cpp("nested/source-file.dsp", source, &cpp_options)
+        .expect("C++ source identity should compile");
+    assert!(cpp.contains("name: \"Display DSP\""));
+    assert!(cpp.contains("class CustomClass"));
+    assert!(cpp.contains("m->declare(\"filename\", \"source-file.dsp\");"));
+    assert!(cpp.contains("m->declare(\"name\", \"Display DSP\");"));
+
+    let c_options = codegen::backends::c::COptions {
+        class_name: Some("CustomClass".to_owned()),
+        ..codegen::backends::c::COptions::default()
+    };
+    let c = compiler
+        .compile_source_to_c("nested/source-file.dsp", source, &c_options)
+        .expect("C source identity should compile");
+    assert!(c.contains("name: \"Display DSP\""));
+    assert!(c.contains("} CustomClass;"));
+    assert!(c.contains("m->declare(m->metaInterface, \"filename\", \"source-file.dsp\");"));
+    assert!(c.contains("m->declare(m->metaInterface, \"name\", \"Display DSP\");"));
+}
+
+#[test]
+fn c_family_source_identity_defaults_to_the_source_basename() {
+    let compiler = Compiler::new();
+    let cpp = compiler
+        .compile_source_to_cpp(
+            "nested/plain-name.dsp",
+            "process = 0;",
+            &codegen::backends::cpp::CppOptions::default(),
+        )
+        .expect("default C++ identity should compile");
+    assert!(cpp.contains("name: \"plain-name\""));
+    assert!(cpp.contains("m->declare(\"filename\", \"plain-name.dsp\");"));
+    assert!(cpp.contains("m->declare(\"name\", \"plain-name\");"));
+}
+
+#[test]
 fn compiler_rejects_conflicting_zero_arity_redefinition() {
     let compiler = Compiler::new();
     let err = compiler
@@ -414,6 +458,36 @@ fn compiler_compile_file_to_signals_aggregates_component_metadata() {
         .get(&key)
         .expect("component metadata should exist in final compiler output");
     assert!(values.contains("child-author"));
+}
+
+#[test]
+fn c_family_callbacks_replay_master_and_component_metadata_with_relative_keys() {
+    let root = temp_root("c_family_metadata");
+    let entry = root.join("main.dsp");
+    let child = root.join("child.dsp");
+    fs::write(
+        &entry,
+        "declare license \"MIT\";\nprocess = component(\"child.dsp\");\n",
+    )
+    .expect("write entry");
+    fs::write(&child, "declare author \"child-author\";\nprocess = _;\n").expect("write child");
+
+    let compiler = Compiler::new();
+    let cpp = compiler
+        .compile_file_default_to_cpp(&entry, &codegen::backends::cpp::CppOptions::default())
+        .expect("C++ metadata callback should compile");
+    assert!(cpp.contains("m->declare(\"child.dsp/author\", \"child-author\");"));
+    assert!(cpp.contains("m->declare(\"license\", \"MIT\");"));
+    assert!(!cpp.contains(&root.to_string_lossy().into_owned()));
+
+    let c = compiler
+        .compile_file_default_to_c(&entry, &codegen::backends::c::COptions::default())
+        .expect("C metadata callback should compile");
+    assert!(c.contains("m->declare(m->metaInterface, \"child.dsp/author\", \"child-author\");"));
+    assert!(c.contains("m->declare(m->metaInterface, \"license\", \"MIT\");"));
+    assert!(!c.contains(&root.to_string_lossy().into_owned()));
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
 }
 
 #[test]
@@ -546,10 +620,16 @@ fn compiler_memory_eval_source_context_preserves_ui_widgets() {
     let source = "process = *(hslider(\"gain\", 0.5, 0.0, 1.0, 0.01));";
     let store_without_ctx = parser::CompilationMetadataStore::new("gain");
     let store_with_ctx = parser::CompilationMetadataStore::new("gain");
-    let output_without_ctx =
-        parser::parse_program_with_metadata(source, "gain", store_without_ctx.clone());
-    let output_with_ctx =
-        parser::parse_program_with_metadata(source, "gain", store_with_ctx.clone());
+    let output_without_ctx = parser::parse_program_with_options(
+        source,
+        "gain",
+        &parser::ParseOptions::default().with_metadata_store(store_without_ctx.clone()),
+    );
+    let output_with_ctx = parser::parse_program_with_options(
+        source,
+        "gain",
+        &parser::ParseOptions::default().with_metadata_store(store_with_ctx.clone()),
+    );
 
     let without_ctx = compiler
         .pipeline_to_signals("gain", output_without_ctx, None)
@@ -642,6 +722,31 @@ fn compiler_compile_file_to_wasm_artifact_preserves_file_provenance_and_options(
 }
 
 #[test]
+fn compiler_compile_file_to_wasm_artifact_forwards_semantic_warnings_when_enabled() {
+    // The file-backed artifact path used to always discard signals.warnings,
+    // unlike its source-based sibling compile_wasm_artifact; this proves the
+    // fix threads it through the same way.
+    let root = temp_root("wasm_artifact_file_warnings");
+    let entry = root.join("main.dsp");
+    fs::write(&entry, "process = sqrt;\n").expect("write entry");
+
+    let quiet = Compiler::new()
+        .compile_file_default_to_wasm_artifact(&entry, &WasmOptions::default())
+        .expect("a potential domain problem must not block compilation");
+    assert!(quiet.warnings.is_empty(), "warnings are opt-in");
+
+    let loud = Compiler::new()
+        .with_semantic_warnings(true)
+        .compile_file_default_to_wasm_artifact(&entry, &WasmOptions::default())
+        .expect("enabling warnings must not change the compilation result");
+    assert_eq!(
+        loud.warnings.len(),
+        1,
+        "sqrt over a signed input may leave its domain"
+    );
+}
+
+#[test]
 fn compiler_compile_source_to_json_emits_strict_json_without_widget_indices() {
     let compiler = Compiler::new();
     let json = compiler
@@ -659,6 +764,52 @@ fn compiler_compile_source_to_json_emits_strict_json_without_widget_indices() {
         compile_options_json_string(None, false)
     )));
     assert!(!json.contains("\"index\":"));
+}
+
+#[test]
+fn compiler_source_json_emits_mem0_layout_for_each_native_backend_only_when_requested() {
+    let compiler = Compiler::new();
+    let source = "process = _ : @(7);";
+    let ordinary = compiler
+        .compile_source_to_json("delay.dsp", source)
+        .expect("ordinary JSON should compile");
+    let ordinary_value: Value = serde_json::from_str(&ordinary).expect("valid ordinary JSON");
+    assert!(ordinary_value.get("memory_layout_version").is_none());
+    assert!(ordinary_value.get("compute_cost").is_none());
+
+    let mut common_cost = None;
+    for (flavor, backend, manager_abi) in [
+        (MemoryLayoutFlavor::C, "c", "faust_memory_manager_v1"),
+        (MemoryLayoutFlavor::Cpp, "cpp", "dsp_memory_manager_v1"),
+        (
+            MemoryLayoutFlavor::Cranelift,
+            "cranelift",
+            "faust_memory_manager_v1",
+        ),
+    ] {
+        let json = compiler
+            .compile_source_to_json_with_lane_compile_options_and_memory(
+                "delay.dsp",
+                source,
+                SignalFirLane::TransformFastLane,
+                format!("-lang {backend} -mem0 -single"),
+                Some(flavor),
+            )
+            .expect("mem0 JSON should compile");
+        let value: Value = serde_json::from_str(&json).expect("valid mem0 JSON");
+        assert_eq!(value["memory_layout_version"], 2);
+        assert_eq!(value["memory_manager"]["backend"], backend);
+        assert_eq!(value["memory_manager"]["manager_abi"], manager_abi);
+        assert!(
+            value["memory_layout"]
+                .as_array()
+                .is_some_and(|zones| !zones.is_empty())
+        );
+        match &common_cost {
+            Some(expected) => assert_eq!(&value["compute_cost"], expected),
+            None => common_cost = Some(value["compute_cost"].clone()),
+        }
+    }
 }
 
 #[test]
@@ -730,17 +881,84 @@ fn compiler_get_faustwasm_info_supports_cpp_directory_keys() {
 }
 
 #[test]
-fn compiler_expand_dsp_returns_source_when_valid() {
+fn compiler_expand_dsp_emits_a_self_contained_document() {
     let compiler = Compiler::new();
-    let source = "process = 0;".to_owned();
+    let expanded = compiler
+        .expand_dsp(&ExpandDspRequest {
+            source_name: "zero.dsp".to_owned(),
+            source: "process = 0;".to_owned(),
+            args: String::new(),
+        })
+        .expect("expand_dsp should succeed for valid source");
+
+    let lines: Vec<&str> = expanded.lines().collect();
+    // The header order is part of the contract: the version line must come
+    // first, and the options line immediately after it.
+    assert!(lines[0].starts_with("declare version "), "{expanded}");
+    assert_eq!(
+        lines[1], "declare compile_options \"-single -scal\";",
+        "{expanded}"
+    );
+    assert!(
+        lines.contains(&"declare filename \"zero.dsp\";"),
+        "the document must name its source: {expanded}"
+    );
+    assert!(
+        expanded.ends_with("process = 0;\n"),
+        "the entry point must be the last binding: {expanded}"
+    );
+}
+
+#[test]
+fn compiler_expand_dsp_keeps_an_already_expanded_source() {
+    // A source whose first statement is a matching `compile_options`
+    // declaration is returned unchanged — the C++ short-circuit.
+    let compiler = Compiler::new();
+    let source = "declare compile_options \"-single -scal\";\nprocess = 0;".to_owned();
     let expanded = compiler
         .expand_dsp(&ExpandDspRequest {
             source_name: "zero.dsp".to_owned(),
             source: source.clone(),
             args: String::new(),
         })
-        .expect("expand_dsp should succeed for valid source");
+        .expect("an already-expanded source is accepted");
     assert_eq!(expanded, source);
+}
+
+#[test]
+fn compiler_expand_dsp_prepends_options_when_they_differ() {
+    let compiler = Compiler::new();
+    let source = "declare compile_options \"-double -scal\";\nprocess = 0;".to_owned();
+    let expanded = compiler
+        .expand_dsp(&ExpandDspRequest {
+            source_name: "zero.dsp".to_owned(),
+            source: source.clone(),
+            args: String::new(),
+        })
+        .expect("an already-expanded source is accepted");
+    assert_eq!(
+        expanded,
+        format!("declare compile_options \"-single -scal\";\n{source}")
+    );
+}
+
+#[test]
+fn compiler_expand_dsp_rejects_a_program_without_outputs() {
+    // C++ refuses this before its `-e` branch, so expansion never produces a
+    // document for a program a normal compilation would reject.
+    let compiler = Compiler::new();
+    let error = compiler
+        .expand_dsp(&ExpandDspRequest {
+            source_name: "silent.dsp".to_owned(),
+            source: "process = !;".to_owned(),
+            args: String::new(),
+        })
+        .expect_err("a program with no output signal must be rejected");
+    assert!(
+        error.message.contains("no output signal"),
+        "unexpected message: {}",
+        error.message
+    );
 }
 
 #[test]

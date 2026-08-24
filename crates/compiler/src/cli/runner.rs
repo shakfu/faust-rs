@@ -14,10 +14,16 @@ use codegen::backends::julia::JuliaRealType;
 use codegen::backends::rust::RustRealType;
 use codegen::backends::wasm::WasmOptions;
 use codegen::fixtures::backend_test_fixtures;
+use codegen::memory_layout::{MemoryLayoutFlavor, MemoryManagerMode};
 use compiler::{
     Compiler, CompilerError, ComputeMode, ControlRateMode, FaustInstallPaths, FirVerifyOptions,
     ProcessingApi, RealType, SchedulingStrategy, TableInitMode,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
+};
+#[cfg(all(feature = "network-imports", not(target_arch = "wasm32")))]
+use compiler::{
+    enrobage::wrap_cpp_with_remote_architecture,
+    remote_fetch::{AllowAllRemoteUrls, UreqSourceFetcher},
 };
 use diagnostics::DiagnosticBundle;
 use fir::checker::verify_fir_module;
@@ -43,6 +49,7 @@ pub fn print_global_usage_and_exit() -> ! {
     eprintln!(
         "  cargo run -p compiler -- --parse <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
+    eprintln!("  cargo run -p compiler -- -e|--export-dsp <input.dsp> [-o <file>] [-I <dir> ...]");
     eprintln!(
         "  cargo run -p compiler -- --dump-box <input.dsp> [-o <file>] [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
@@ -243,11 +250,17 @@ pub fn compile_options_full_string(cli: &CliArgs, backend_lang: Option<&str>) ->
     if cli.inline_architecture_files {
         parts.push("-i".to_owned());
     }
+    if cli.allow_network_imports {
+        parts.push("--allow-network-imports".to_owned());
+    }
     if cli.one_sample {
         parts.push("-os".to_owned());
     }
     if cli.external_control {
         parts.push("-ec".to_owned());
+    }
+    if cli.memory_manager {
+        parts.push("-mem0".to_owned());
     }
     if let Some(name) = cli.class_name.as_deref()
         && name != codegen::DEFAULT_CLASS_NAME
@@ -276,6 +289,9 @@ pub fn compile_options_full_string(cli: &CliArgs, backend_lang: Option<&str>) ->
                 TableInitArg::Const => "const",
             }
         ));
+    }
+    if let Some(sample_rate) = cli.table_init_sample_rate {
+        parts.push(format!("--table-init-sample-rate {sample_rate}"));
     }
     if cli.vec {
         parts.push("-vec".to_owned());
@@ -334,7 +350,31 @@ pub fn wrap_backend_with_architecture(generated: &str, cli: &CliArgs) -> String 
     if let Some(super_class_name) = selected_super_class_name(cli) {
         options.super_class_name = super_class_name;
     }
-    let wrapped = match wrap_cpp_with_architecture(generated, &options) {
+    let architecture_url = architecture_file
+        .to_str()
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"));
+    if architecture_url.is_some() && !cli.allow_network_imports {
+        eprintln!("Architecture wrapping failed: network imports are disabled");
+        std::process::exit(1);
+    }
+    #[cfg(all(feature = "network-imports", not(target_arch = "wasm32")))]
+    let wrapped = if let Some(url) = architecture_url {
+        wrap_cpp_with_remote_architecture(
+            generated,
+            url,
+            &options,
+            std::sync::Arc::new(UreqSourceFetcher::new(std::sync::Arc::new(
+                AllowAllRemoteUrls,
+            ))),
+            parser::RemoteFetchPolicy::default(),
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))
+    } else {
+        wrap_cpp_with_architecture(generated, &options)
+    };
+    #[cfg(not(all(feature = "network-imports", not(target_arch = "wasm32"))))]
+    let wrapped = wrap_cpp_with_architecture(generated, &options);
+    let wrapped = match wrapped {
         Ok(wrapped) => wrapped,
         Err(err) => {
             eprintln!("Architecture wrapping failed: {err}");
@@ -401,6 +441,20 @@ pub fn selected_compute_mode(cli: &CliArgs) -> ComputeMode {
     }
 }
 
+/// Maps the four accepted CLI spellings to the one typed backend mode.
+///
+/// Source provenance: Faust C++ `compiler/global.cpp` assigns each spelling to
+/// `gMemoryManager = 0`. This explicit return value prevents that option from
+/// becoming process-global state in the Rust compiler.
+#[must_use]
+pub fn selected_memory_manager_mode(cli: &CliArgs) -> MemoryManagerMode {
+    if cli.memory_manager {
+        MemoryManagerMode::Mem0
+    } else {
+        MemoryManagerMode::None
+    }
+}
+
 /// Maps `-ss`/`--scheduling-strategy` to a [`SchedulingStrategy`] (vectorization
 /// port plan P2). Reuses [`SchedulingStrategy::decode`]'s total `0/1/2/n>=3`
 /// split; `clap`'s `u32` parsing already rejects missing, non-integer, and
@@ -463,6 +517,13 @@ pub fn compiler_from_cli(
         .with_scheduling_strategy(selected_scheduling_strategy(cli))
         .with_control_rate_mode(selected_control_rate_mode(cli))
         .with_processing_api(selected_processing_api(cli));
+    if let Some(sample_rate) = cli.table_init_sample_rate {
+        compiler = compiler.with_table_init_sample_rate(sample_rate);
+    }
+    #[cfg(all(feature = "network-imports", not(target_arch = "wasm32")))]
+    if cli.allow_network_imports {
+        compiler = compiler.with_native_network_imports();
+    }
     if let Some(flag) = cancel {
         compiler = compiler.with_cancel(flag);
     }
@@ -558,6 +619,9 @@ pub fn compile_fixture_to_json_text(
         &function_items,
         codegen::json::JsonBuildOptions {
             name,
+            backend: None,
+            jit_compiled: None,
+            compute_body_lowered: None,
             filename: None,
             version: Some(Compiler::version().to_owned()),
             compile_options: Some(compile_options),
@@ -568,6 +632,7 @@ pub fn compile_fixture_to_json_text(
             inputs: num_inputs,
             outputs: num_outputs,
             sr_index: None,
+            memory: None,
         },
         |_var| None,
     )
@@ -588,20 +653,23 @@ pub fn emit_cli_json_companion_for_backend(
     backend_lang: CliLang,
 ) {
     let compile_options = compile_options_full_string(cli, Some(cli_lang_name(backend_lang)));
-    let result = if cli.import_dir.is_empty() {
-        compiler.compile_file_default_to_json_with_lane_and_compile_options(
-            input_path,
-            selected_codegen_lane(cli).into_compiler_lane(),
-            compile_options,
-        )
-    } else {
-        compiler.compile_file_to_json_with_compile_options(
-            input_path,
-            &cli.import_dir,
-            selected_codegen_lane(cli).into_compiler_lane(),
-            compile_options,
-        )
-    };
+    let memory_flavor = selected_memory_manager_mode(cli)
+        .is_mem0()
+        .then_some(match backend_lang {
+            CliLang::C => MemoryLayoutFlavor::C,
+            CliLang::Cranelift => MemoryLayoutFlavor::Cranelift,
+            _ => MemoryLayoutFlavor::Cpp,
+        });
+    // An empty `--import-dir` list is already the default-search-path case, so
+    // this needs no separate branch for it.
+    let result = compiler.compile_file_to_json_with_compile_options_memory_and_class_name(
+        input_path,
+        &cli.import_dir,
+        selected_codegen_lane(cli).into_compiler_lane(),
+        compile_options,
+        memory_flavor,
+        selected_class_name(cli),
+    );
 
     match result {
         Ok(json) => emit_json_companion_output(&json, require_companion_output_path(cli)),

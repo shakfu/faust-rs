@@ -27,8 +27,10 @@ In scope now:
 - include injection and class-name replacement behavior used during architecture wrapping.
 
 Out of scope in this plan:
-- network-backed URL fetch behavior from `checkURL` via `sourcefetcher` (`http_fetch` path).
-- broad `sourcefetcher` porting (explicitly deferred).
+- network-backed URL fetch behavior from `checkURL` via `sourcefetcher`
+  (`http_fetch` path);
+- broad `sourcefetcher` porting, now specified but not implemented in
+  [`sourcefetcher-remote-import-analysis-and-implementation-plan-2026-08-11-en.md`](../sourcefetcher-remote-import-analysis-and-implementation-plan-2026-08-11-en.md).
 
 ## 3. Target Rust Placement
 
@@ -54,7 +56,7 @@ Rationale:
 | `streamCopyUntilEnd` | `1:1` | thin wrapper around `streamCopyUntil` |
 | `fileBasename`/`fileDirname`/`stripEnd` | `1:1` | keep edge-case behavior (root/no-dir/windows-style path) |
 | `makeOutputFile` | `adapted` | use `PathBuf` composition while preserving output naming behavior |
-| `checkURL` (file/http/https) | `deferred` | local-file checks can be covered without `sourcefetcher` |
+| `checkURL` (file/http/https) | `adapted` | local files retain the existing search path; remote main architecture templates use the shared injected, bounded fetch contract; remote inline sub-includes remain deferred |
 
 ## 5. Execution Steps
 

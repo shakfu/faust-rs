@@ -69,12 +69,15 @@ pub(crate) struct CodeGraphOptions {
     /// Destination directory for generated Mermaid, DOT, SVG, README, and public
     /// API index files.
     out_dir: PathBuf,
+    /// Compare the checked-in artifacts instead of rewriting them.
+    check: bool,
 }
 
 impl Default for CodeGraphOptions {
     fn default() -> Self {
         Self {
             out_dir: workspace_root().join("docs/code-graphs"),
+            check: false,
         }
     }
 }
@@ -85,6 +88,7 @@ impl From<CodeGraphArgs> for CodeGraphOptions {
             out_dir: args
                 .out_dir
                 .unwrap_or_else(|| PathBuf::from("docs/code-graphs")),
+            check: args.check,
         };
         if options.out_dir.is_relative() {
             options.out_dir = workspace_root().join(&options.out_dir);
@@ -92,6 +96,24 @@ impl From<CodeGraphArgs> for CodeGraphOptions {
         options
     }
 }
+
+/// Artifacts excluded from `--check`.
+///
+/// `public-api-index.md` carries source line numbers, so any code motion makes
+/// it differ even when no public item changed — gating it would fire on exactly
+/// the commits a restructuring produces, and a gate that cries wolf gets
+/// disabled. The line-number-free `public-api-baseline.txt` gates the same
+/// surface, and regenerating to satisfy that baseline refreshes the index too.
+///
+/// The `.svg` files are excluded because rendering them shells out to Graphviz
+/// `dot`, which CI runners do not install; they are derived from the `.dot`
+/// artifacts that *are* checked.
+const CHECK_EXEMPT_ARTIFACTS: [&str; 4] = [
+    "public-api-index.md",
+    "workspace-crates.svg",
+    "internal-crate-deps.svg",
+    "ir-overview.svg",
+];
 
 /// One public source item found by the lightweight public API scanner.
 ///
@@ -101,14 +123,14 @@ impl From<CodeGraphArgs> for CodeGraphOptions {
 #[derive(Debug)]
 pub(crate) struct PublicItem {
     /// Item category such as `struct`, `enum`, `trait`, `fn`, or `use`.
-    kind: String,
+    pub(crate) kind: String,
     /// Parsed item name. For re-exports, this is the first path-like token after
     /// `pub use`.
-    name: String,
+    pub(crate) name: String,
     /// Source file containing the public item.
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     /// One-based source line number.
-    line: usize,
+    pub(crate) line: usize,
 }
 
 /// Generates workspace/dependency graphs, IR overview graphs, and a public API
@@ -119,36 +141,58 @@ pub(crate) struct PublicItem {
 /// fails the workflow so checked-in visualizations do not silently go stale.
 pub(crate) fn code_graphs(args: CodeGraphArgs) -> Result<(), Box<dyn std::error::Error>> {
     let options = CodeGraphOptions::from(args);
-    fs::create_dir_all(&options.out_dir)?;
 
     let metadata = load_cargo_metadata()?;
     let workspace = workspace_packages(&metadata);
     let edges = internal_dependency_edges(&workspace);
 
-    write_text(
-        &options.out_dir.join("workspace-crates.mmd"),
-        &render_workspace_mermaid(&workspace),
-    )?;
-    write_text(
-        &options.out_dir.join("workspace-crates.dot"),
-        &render_workspace_dot(&workspace),
-    )?;
-    write_text(
-        &options.out_dir.join("internal-crate-deps.mmd"),
-        &render_internal_deps_mermaid(&workspace, &edges),
-    )?;
-    write_text(
-        &options.out_dir.join("internal-crate-deps.dot"),
-        &render_internal_deps_dot(&workspace, &edges),
-    )?;
-    write_text(
-        &options.out_dir.join("ir-overview.mmd"),
-        &render_ir_overview_mermaid(),
-    )?;
-    write_text(
-        &options.out_dir.join("ir-overview.dot"),
-        &render_ir_overview_dot(),
-    )?;
+    let artifacts: Vec<(PathBuf, String)> = vec![
+        (
+            options.out_dir.join("workspace-crates.mmd"),
+            render_workspace_mermaid(&workspace),
+        ),
+        (
+            options.out_dir.join("workspace-crates.dot"),
+            render_workspace_dot(&workspace),
+        ),
+        (
+            options.out_dir.join("internal-crate-deps.mmd"),
+            render_internal_deps_mermaid(&workspace, &edges),
+        ),
+        (
+            options.out_dir.join("internal-crate-deps.dot"),
+            render_internal_deps_dot(&workspace, &edges),
+        ),
+        (
+            options.out_dir.join("ir-overview.mmd"),
+            render_ir_overview_mermaid(),
+        ),
+        (
+            options.out_dir.join("ir-overview.dot"),
+            render_ir_overview_dot(),
+        ),
+        (
+            options.out_dir.join("public-api-baseline.txt"),
+            render_public_api_baseline(&workspace)?,
+        ),
+        (
+            options.out_dir.join("public-api-index.md"),
+            render_public_api_index(&workspace)?,
+        ),
+        (
+            options.out_dir.join("README.md"),
+            render_code_graphs_readme(),
+        ),
+    ];
+
+    if options.check {
+        return check_code_graphs(&options.out_dir, &artifacts);
+    }
+
+    fs::create_dir_all(&options.out_dir)?;
+    for (path, text) in &artifacts {
+        write_text(path, text)?;
+    }
     render_svg_with_dot(
         &options.out_dir.join("workspace-crates.dot"),
         &options.out_dir.join("workspace-crates.svg"),
@@ -161,20 +205,65 @@ pub(crate) fn code_graphs(args: CodeGraphArgs) -> Result<(), Box<dyn std::error:
         &options.out_dir.join("ir-overview.dot"),
         &options.out_dir.join("ir-overview.svg"),
     )?;
-    write_text(
-        &options.out_dir.join("public-api-index.md"),
-        &render_public_api_index(&workspace)?,
-    )?;
-    write_text(
-        &options.out_dir.join("README.md"),
-        &render_code_graphs_readme(),
-    )?;
 
     println!(
         "wrote code graph documentation to {}",
         workspace_relative_path(&options.out_dir)
     );
     Ok(())
+}
+
+/// Compares freshly rendered artifacts against the checked-in ones.
+///
+/// Findings are sorted and reported together so one run tells the whole story
+/// rather than stopping at the first difference. Regeneration is deliberately
+/// manual: `code-graphs` without `--check` is the bless path, so a moved crate
+/// boundary is reviewed in a diff instead of being silently absorbed.
+pub(crate) fn check_code_graphs(
+    out_dir: &Path,
+    artifacts: &[(PathBuf, String)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !out_dir.is_dir() {
+        return Err(format!(
+            "{} does not exist — run `cargo run -p xtask -- code-graphs` first",
+            workspace_relative_path(out_dir)
+        )
+        .into());
+    }
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for (path, expected) in artifacts {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if CHECK_EXEMPT_ARTIFACTS.contains(&name.as_str()) {
+            continue;
+        }
+        checked += 1;
+        let rel = workspace_relative_path(path);
+        match fs::read_to_string(path) {
+            Ok(recorded) if &recorded == expected => {}
+            Ok(_) => findings.push(format!("{rel}: differs from the generated artifact")),
+            Err(_) => findings.push(format!("{rel}: missing")),
+        }
+    }
+
+    findings.sort();
+    if findings.is_empty() {
+        println!("code-graphs --check: OK ({checked} artifacts identical)");
+        return Ok(());
+    }
+
+    let mut report = String::from("code-graphs --check failed:\n");
+    for finding in &findings {
+        let _ = writeln!(report, "  - {finding}");
+    }
+    report.push_str(
+        "\nRegenerate with `cargo run -p xtask -- code-graphs`, review the diff, and commit it.\n",
+    );
+    Err(report.into())
 }
 
 /// Loads typed workspace metadata by invoking Cargo rather than parsing
@@ -413,6 +502,59 @@ pub(crate) fn render_public_api_index(
     Ok(out)
 }
 
+/// Renders the gated, line-number-free inventory of each crate's public surface.
+///
+/// This is the artifact `--check` compares. It deliberately drops the source
+/// locations kept by [`render_public_api_index`] and deduplicates `(kind, name)`
+/// pairs, so the file changes when a crate exposes something new — or stops
+/// exposing something — and stays byte-identical when code merely moves.
+///
+/// The failure mode it exists to catch is the `pub` leak: relocating a function
+/// out of a crowded module often means widening a `pub(crate)` helper to `pub`
+/// so the move compiles. Nothing else in the workspace notices, and the crate
+/// boundary a restructuring set out to clarify quietly grows instead.
+pub(crate) fn render_public_api_baseline(
+    packages: &[&CargoPackage],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut out = String::from(
+        "# Public API baseline\n\
+         #\n\
+         # Generated by `cargo run -p xtask -- code-graphs`, verified by\n\
+         # `cargo run -p xtask -- code-graphs --check`.\n\
+         #\n\
+         # One line per public item, as `<kind> <name>`, sorted and deduplicated.\n\
+         # Source locations live in `public-api-index.md` instead: this file gates\n\
+         # the shape of each public surface, not where the code sits.\n\
+         #\n\
+         # A diff here is a moved crate boundary. Regenerate to accept it.\n",
+    );
+
+    for package in packages {
+        let items = public_items_for_package(package)?;
+        out.push_str(&render_baseline_section(&package.name, items));
+    }
+
+    Ok(out)
+}
+
+/// Renders one crate's section of the public API baseline.
+///
+/// Split out from [`render_public_api_baseline`] so the two properties the gate
+/// depends on — blindness to source location, sensitivity to the surface itself
+/// — are unit-testable without invoking `cargo metadata`.
+pub(crate) fn render_baseline_section(package_name: &str, items: Vec<PublicItem>) -> String {
+    let entries: BTreeSet<(String, String)> = items
+        .into_iter()
+        .map(|item| (item.kind, item.name))
+        .collect();
+    let mut out = String::new();
+    let _ = writeln!(out, "\n## {package_name}");
+    for (kind, name) in entries {
+        let _ = writeln!(out, "{kind} {name}");
+    }
+    out
+}
+
 /// Collects public source items for a single package by scanning library-like
 /// targets.
 ///
@@ -443,14 +585,32 @@ pub(crate) fn public_items_for_package(
     let mut items = Vec::new();
     for file in files {
         let text = fs::read_to_string(&file)?;
+        // Track the enclosing `impl` so methods are recorded as `Type::method`.
+        // Without this, `SignalFirRequest::new` and every other constructor
+        // collapse onto the single name `new` in the baseline, and adding a
+        // method to a new type is invisible to `--check`.
+        let mut depth: i32 = 0;
+        let mut impl_type: Option<String> = None;
         for (idx, line) in text.lines().enumerate() {
+            if depth == 0 {
+                impl_type = parse_impl_header(line);
+            }
             if let Some((kind, name)) = parse_public_item_line(line) {
+                let name = match impl_type.as_deref() {
+                    Some(ty) if depth > 0 && kind == "fn" => format!("{ty}::{name}"),
+                    _ => name,
+                };
                 items.push(PublicItem {
                     kind,
                     name,
                     path: file.clone(),
                     line: idx + 1,
                 });
+            }
+            depth += brace_balance(line);
+            if depth <= 0 {
+                depth = 0;
+                impl_type = None;
             }
         }
     }
@@ -474,6 +634,80 @@ pub(crate) fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Extracts the implementing type from an `impl` header line.
+///
+/// Handles the shapes this workspace uses: `impl Type {`, `impl<'a> Type<'a> {`,
+/// and `impl Trait for Type {` — the last one yielding `Type`, since that is the
+/// item a reader looks up. Returns `None` for any line that does not open an
+/// `impl` at the start of the line, which keeps nested or indented blocks out.
+pub(crate) fn parse_impl_header(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("impl")?;
+    let rest = match rest.strip_prefix('<') {
+        // Skip the generic parameter list introduced right after `impl`.
+        Some(after) => {
+            let mut depth = 1usize;
+            let mut end = 0usize;
+            for (offset, ch) in after.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = offset + ch.len_utf8();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            &after[end..]
+        }
+        None => rest,
+    };
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    // `impl Trait for Type` names the type after `for`.
+    let target = rest.rsplit(" for ").next().unwrap_or(rest).trim_start();
+    let target = target
+        .split_whitespace()
+        .next()?
+        .split('<')
+        .next()?
+        .split('{')
+        .next()?;
+    let name = target.rsplit("::").next()?.trim();
+    if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+/// Net brace balance of one source line, ignoring string literals and the
+/// trailing line comment.
+///
+/// Deliberately crude, consistent with the rest of this scanner: it is enough to
+/// tell whether the current line still sits inside an `impl` body.
+pub(crate) fn brace_balance(line: &str) -> i32 {
+    let mut balance = 0;
+    let mut in_string = false;
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\\' if in_string => {
+                chars.next();
+            }
+            '"' => in_string = !in_string,
+            '/' if !in_string && line[idx..].starts_with("//") => break,
+            '{' if !in_string => balance += 1,
+            '}' if !in_string => balance -= 1,
+            _ => {}
+        }
+    }
+    balance
 }
 
 /// Parses one source line as a top-level public item declaration.
@@ -541,11 +775,21 @@ pub(crate) fn render_code_graphs_readme() -> String {
          ```bash\n\
          cargo run -p xtask -- code-graphs\n\
          ```\n\n\
+         Verified in CI by:\n\n\
+         ```bash\n\
+         cargo run -p xtask -- code-graphs --check\n\
+         ```\n\n\
+         The check compares every artifact below except `public-api-index.md` \
+         (its source line numbers make code motion look like an API change) and \
+         the `.svg` renderings (they need Graphviz `dot`, which CI does not \
+         install, and they derive from the checked `.dot` files). Regenerating \
+         is the bless path: run the generator, review the diff, commit it.\n\n\
          Files:\n\n\
          - `workspace-crates.mmd` / `workspace-crates.dot` / `workspace-crates.svg`: workspace crate nodes from `cargo metadata`.\n\
          - `internal-crate-deps.mmd` / `internal-crate-deps.dot` / `internal-crate-deps.svg`: internal crate dependency edges from `cargo metadata`.\n\
          - `ir-overview.mmd` / `ir-overview.dot` / `ir-overview.svg`: curated overview of the main `boxes`, `signals`, `fir`, and `ui` IR relationships.\n\
-         - `public-api-index.md`: lightweight source-scan index of public items. Use Rustdoc as the authoritative API reference.\n\
+         - `public-api-baseline.txt`: gated inventory of every crate's public items, without source locations. A diff here means a crate boundary moved.\n\
+         - `public-api-index.md`: lightweight source-scan index of public items, with locations. Use Rustdoc as the authoritative API reference.\n\
          \n\
          ## Rendered SVG\n\n\
          ### Workspace Crates\n\n\

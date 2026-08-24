@@ -160,6 +160,8 @@ pub(crate) struct StrictJsonContext {
     pub(crate) compile_options: String,
     /// Whether the session targets double-precision output.
     pub(crate) double_precision: bool,
+    /// Effective native memory backend when `-mem0` JSON is requested.
+    pub(crate) memory_flavor: Option<MemoryLayoutFlavor>,
 }
 
 /// Builds the strict (Faust-compatible) JSON description of a compiled module.
@@ -202,11 +204,45 @@ pub(crate) fn build_strict_json_description(
         },
         0,
     )?;
+    let memory = context
+        .memory_flavor
+        .map(|flavor| {
+            let analysis = analyze_effective_mem0(
+                store,
+                module,
+                &Mem0AnalysisOptions::native(flavor, context.double_precision),
+            )
+            .map_err(|error| {
+                WasmBackendError::new(
+                    codegen::backends::wasm::WasmBackendErrorCode::UnsupportedFirNode,
+                    error.to_string(),
+                )
+            })?;
+            Ok(JsonMemoryDescription {
+                backend: match flavor {
+                    MemoryLayoutFlavor::C => "c",
+                    MemoryLayoutFlavor::Cpp => "cpp",
+                    MemoryLayoutFlavor::Cranelift => "cranelift",
+                }
+                .to_owned(),
+                manager_abi: if flavor == MemoryLayoutFlavor::Cpp {
+                    "dsp_memory_manager_v1"
+                } else {
+                    "faust_memory_manager_v1"
+                }
+                .to_owned(),
+                analysis,
+            })
+        })
+        .transpose()?;
     build_json_description_from_fir(
         store,
         &function_items,
         JsonBuildOptions {
             name,
+            backend: None,
+            jit_compiled: None,
+            compute_body_lowered: None,
             filename: Some(context.filename),
             version: Some(Compiler::version().to_owned()),
             compile_options: Some(context.compile_options),
@@ -217,6 +253,7 @@ pub(crate) fn build_strict_json_description(
             inputs: num_inputs,
             outputs: num_outputs,
             sr_index: None,
+            memory,
         },
         |_var| None,
     )
@@ -280,19 +317,7 @@ pub(crate) fn wasm_json_context_for_file(
         .and_then(std::ffi::OsStr::to_str)
         .map(str::to_owned)
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let mut library_list: Vec<String> = signals
-        .parse
-        .used_files
-        .iter()
-        .skip(1)
-        .map(|file| file.to_string_lossy().into_owned())
-        .collect();
-    for file in &signals.loaded_files {
-        let file = file.to_string_lossy().into_owned();
-        if !library_list.iter().any(|existing| existing == &file) {
-            library_list.push(file);
-        }
-    }
+    let library_list = library_list_from_signals(signals);
     WasmJsonContext {
         filename: Some(filename),
         version: Some(Compiler::version().to_owned()),
@@ -306,11 +331,35 @@ pub(crate) fn wasm_json_context_for_file(
     }
 }
 
+/// Collects the imported library files seen during one compilation.
+///
+/// The master document is skipped (`used_files[0]`), then any file the evaluator
+/// loaded later is appended once. Shared by every JSON-carrying backend so the
+/// `library_list` array has one definition.
+pub(crate) fn library_list_from_signals(signals: &SignalCompileOutput) -> Vec<String> {
+    let mut library_list: Vec<String> = signals
+        .parse
+        .used_files
+        .iter()
+        .skip(1)
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+    for file in &signals.loaded_files {
+        let file = file.to_string_lossy().into_owned();
+        if !library_list.iter().any(|existing| existing == &file) {
+            library_list.push(file);
+        }
+    }
+    library_list
+}
+
 /// Converts a compilation metadata snapshot into a flat list of JSON meta entries.
 ///
 /// Each `(key, [v1, v2, ...])` pair in the snapshot becomes one `JsonMetaEntry`
-/// per value.  Global keys (without a path prefix) and path-scoped keys are
-/// both included.
+/// per value, keyed by the same `key` — except `"author"`, where every value
+/// after the first is emitted under `"contributor"` instead, matching the
+/// reference compiler's convention for multiple authors. Global keys (without
+/// a path prefix) and path-scoped keys are both included.
 pub(crate) fn json_meta_entries_from_snapshot(
     snapshot: &CompilationMetadataSnapshot,
 ) -> Vec<JsonMetaEntry> {
@@ -347,6 +396,83 @@ pub(crate) fn json_meta_entries_from_snapshot(
         }
     }
     out
+}
+
+/// Converts compilation metadata into the key/value stream used by the C and
+/// C++ `metadata()` callbacks.
+///
+/// Identity keys are supplied separately by the backend options. Imported-file
+/// keys are displayed relative to the master DSP directory when possible,
+/// matching C++ `declareMetadata` pathname keys instead of leaking the Rust
+/// resolver's canonical absolute path.
+pub(crate) fn c_family_meta_entries_from_snapshot(
+    source_name: &str,
+    snapshot: &CompilationMetadataSnapshot,
+) -> Vec<(String, String)> {
+    let master_parent = Path::new(source_name)
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let master_parent = master_parent
+        .canonicalize()
+        .unwrap_or_else(|_| master_parent.to_path_buf());
+    let mut out = Vec::new();
+    for (key, values) in snapshot.entries() {
+        let key = match key {
+            CompilationMetadataKey::Global { key }
+                if matches!(key.as_ref(), "name" | "filename") =>
+            {
+                continue;
+            }
+            CompilationMetadataKey::Global { key } => {
+                normalize_flat_metadata_key(&master_parent, key)
+            }
+            CompilationMetadataKey::Scoped { source_file, key } => {
+                format!(
+                    "{}/{}",
+                    metadata_source_path(&master_parent, Path::new(source_file.as_ref())),
+                    key.as_ref()
+                )
+            }
+        };
+        for value in values {
+            out.push((key.clone(), value.as_ref().to_owned()));
+        }
+    }
+    out
+}
+
+pub(crate) fn normalize_flat_metadata_key(master_parent: &Path, key: &str) -> String {
+    let Some((source_file, suffix)) = key.rsplit_once('/') else {
+        return key.to_owned();
+    };
+    let source_file = Path::new(source_file);
+    if !source_file.is_absolute() {
+        return key.to_owned();
+    }
+    format!(
+        "{}/{}",
+        metadata_source_path(master_parent, source_file),
+        suffix
+    )
+}
+
+pub(crate) fn metadata_source_path(master_parent: &Path, source_path: &Path) -> String {
+    if let Ok(relative) = source_path.strip_prefix(master_parent) {
+        return metadata_pathname(relative);
+    }
+    source_path
+        .file_name()
+        .map(PathBuf::from)
+        .as_deref()
+        .map(metadata_pathname)
+        .unwrap_or_else(|| metadata_pathname(source_path))
+}
+
+/// Renders one metadata pathname with the slash separator used by Faust keys.
+fn metadata_pathname(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 /// Returns the value following the first occurrence of any of `names` in a

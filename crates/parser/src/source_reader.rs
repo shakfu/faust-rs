@@ -8,20 +8,358 @@
 //! - Search-path based import resolution.
 //! - Recursive import expansion with cycle detection.
 //! - Read cache and used-file tracking for deterministic parser runs.
-//! - Local-file import policy in current parser scope:
-//!   - URL/network fetch is intentionally out-of-scope in `parser` and tracked as deferred
-//!     in Phase 3 porting docs (no temporary network stub in this crate).
+//! - Transport-independent URL identity and remote fetch injection.
+//! - Parser-core never selects a concrete HTTP client. Native or embedded
+//!   compiler hosts inject a capability for the current session.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use diagnostics::{
     Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelRole, LabelStyle, Severity,
     SourceSpan, Stage, codes,
 };
+use url::{ParseError as UrlParseError, Url};
+
+/// Canonical identity of one source consumed by the parser.
+///
+/// # Source provenance and adaptation
+///
+/// C++ `SourceReader` transports every source through `const char*` and tests
+/// URL prefixes at each use site. Rust separates filesystem, HTTP(S), and
+/// immutable virtual identities so caches and relative resolution cannot
+/// reinterpret an URL as a platform path. This adapts
+/// `compiler/parser/sourcereader.cpp::isURL/parseFile`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SourceLocator {
+    /// Filesystem source.
+    File(PathBuf),
+    /// Normalized HTTP(S) source.
+    Url(Url),
+    /// Logical source in a [`VirtualSourceMap`].
+    Virtual(PathBuf),
+}
+
+impl SourceLocator {
+    /// Parses an HTTP(S) reference, optionally relative to a remote parent.
+    ///
+    /// Fragments are removed because they are not part of an HTTP request or
+    /// Faust source identity.
+    pub fn remote(reference: &str, base: Option<&Url>) -> Result<Self, SourceReaderError> {
+        let parsed = match Url::parse(reference) {
+            Ok(url) => url,
+            Err(UrlParseError::RelativeUrlWithoutBase) => base
+                .ok_or_else(|| SourceReaderError::InvalidUrl {
+                    input: reference.into(),
+                    message: "relative URL has no remote base".into(),
+                })?
+                .join(reference)
+                .map_err(|error| SourceReaderError::InvalidUrl {
+                    input: reference.into(),
+                    message: error.to_string().into_boxed_str(),
+                })?,
+            Err(error) => {
+                return Err(SourceReaderError::InvalidUrl {
+                    input: reference.into(),
+                    message: error.to_string().into_boxed_str(),
+                });
+            }
+        };
+        Self::from_remote_url(parsed)
+    }
+
+    /// Validates and normalizes an already parsed remote URL.
+    pub fn from_remote_url(mut url: Url) -> Result<Self, SourceReaderError> {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(SourceReaderError::InvalidUrl {
+                input: url.as_str().into(),
+                message: format!("unsupported URL scheme `{}`", url.scheme()).into_boxed_str(),
+            });
+        }
+        url.set_fragment(None);
+        Ok(Self::Url(url))
+    }
+
+    /// Returns the remote URL carried by this locator, if any.
+    #[must_use]
+    pub fn as_url(&self) -> Option<&Url> {
+        match self {
+            Self::Url(url) => Some(url),
+            Self::File(_) | Self::Virtual(_) => None,
+        }
+    }
+
+    /// Returns a stable user-facing spelling.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::File(path) | Self::Virtual(path) => path.display().to_string(),
+            Self::Url(url) => url.as_str().to_owned(),
+        }
+    }
+}
+
+/// Resource limits supplied to a remote transport.
+///
+/// The defaults preserve the visible C++ timeout and redirect behavior while
+/// adding a bounded body and whole-request deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RemoteFetchPolicy {
+    /// Maximum redirect hops.
+    pub max_redirects: u32,
+    /// Maximum connection/response inactivity duration.
+    pub inactivity_timeout: Duration,
+    /// Maximum duration of the complete request including redirects.
+    pub total_timeout: Duration,
+    /// Maximum accepted response bytes.
+    pub max_response_bytes: usize,
+}
+
+impl Default for RemoteFetchPolicy {
+    fn default() -> Self {
+        Self {
+            max_redirects: 3,
+            inactivity_timeout: Duration::from_secs(5),
+            total_timeout: Duration::from_secs(15),
+            max_response_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
+/// Immutable request passed to an injected remote transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteFetchRequest {
+    /// Normalized requested URL.
+    pub url: Url,
+    /// Limits selected for this compilation session.
+    pub policy: RemoteFetchPolicy,
+}
+
+/// Successful byte response returned by a remote transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchedSource {
+    /// URL requested by the source reader.
+    pub requested_url: Url,
+    /// Final URL after redirects.
+    pub final_url: Url,
+    /// Uninterpreted response bytes. UTF-8 validation belongs to the reader.
+    pub bytes: Vec<u8>,
+}
+
+impl FetchedSource {
+    /// Validates the response as a Faust UTF-8 source.
+    pub fn into_utf8(self) -> Result<String, SourceFetchError> {
+        String::from_utf8(self.bytes).map_err(|error| SourceFetchError {
+            kind: SourceFetchErrorKind::InvalidUtf8,
+            url: self.final_url,
+            message: format!("response is not valid UTF-8: {error}").into_boxed_str(),
+        })
+    }
+}
+
+/// Stable transport-independent remote failure category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceFetchErrorKind {
+    /// Host name resolution failed.
+    Dns,
+    /// TCP connection failed.
+    Connect,
+    /// TLS negotiation or certificate verification failed.
+    Tls,
+    /// A configured timeout elapsed.
+    Timeout,
+    /// The server returned a non-success status.
+    HttpStatus,
+    /// Redirect processing failed or exceeded policy.
+    Redirect,
+    /// The response exceeded the byte limit.
+    ResponseTooLarge,
+    /// The response is not valid UTF-8 Faust source text.
+    InvalidUtf8,
+    /// The host policy rejected the URL.
+    PolicyRejected,
+    /// Other protocol or I/O failure.
+    Transport,
+}
+
+/// Owned error returned by [`RemoteSourceFetcher`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFetchError {
+    /// Stable category independent of the concrete HTTP crate.
+    pub kind: SourceFetchErrorKind,
+    /// Sanitized requested URL.
+    pub url: Url,
+    /// Compact detail; response bodies must never be included.
+    pub message: Box<str>,
+}
+
+impl fmt::Display for SourceFetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.url, self.message)
+    }
+}
+
+impl std::error::Error for SourceFetchError {}
+
+/// Synchronous remote-source capability injected by a compiler host.
+///
+/// Parser-core deliberately has no dependency on `ureq`, `reqwest`, browser
+/// Fetch, or another transport. Hosts implement this interface according to
+/// their execution and security model.
+pub trait RemoteSourceFetcher: fmt::Debug + Send + Sync {
+    /// Fetches one normalized remote source under the supplied limits.
+    fn fetch(&self, request: &RemoteFetchRequest) -> Result<FetchedSource, SourceFetchError>;
+}
+
+/// One immutable remote-source capability and its per-request limits.
+#[derive(Clone, Debug)]
+pub struct RemoteSourceCapability {
+    fetcher: Arc<dyn RemoteSourceFetcher>,
+    policy: RemoteFetchPolicy,
+}
+
+impl RemoteSourceCapability {
+    /// Couples a host fetcher with the limits applied during this parse.
+    #[must_use]
+    pub fn new(fetcher: Arc<dyn RemoteSourceFetcher>, policy: RemoteFetchPolicy) -> Self {
+        Self { fetcher, policy }
+    }
+
+    /// Separates the owned fetcher and policy for source-reader installation.
+    #[must_use]
+    pub fn into_parts(self) -> (Arc<dyn RemoteSourceFetcher>, RemoteFetchPolicy) {
+        (self.fetcher, self.policy)
+    }
+}
+
+/// Error raised while constructing a [`PrefetchedRemoteSourceBundle`].
+#[derive(Debug)]
+pub enum PrefetchedRemoteSourceBundleError {
+    /// One key is not a supported normalized HTTP(S) locator.
+    InvalidUrl(SourceReaderError),
+    /// Two input keys normalize to the same URL identity.
+    DuplicateUrl(Url),
+}
+
+impl fmt::Display for PrefetchedRemoteSourceBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidUrl(error) => error.fmt(f),
+            Self::DuplicateUrl(url) => write!(f, "duplicate prefetched remote source `{url}`"),
+        }
+    }
+}
+
+impl std::error::Error for PrefetchedRemoteSourceBundleError {}
+
+/// Immutable URL-keyed source bundle supplied by a host before compilation.
+///
+/// # Browser-WASM adaptation
+///
+/// Browser `fetch()` is asynchronous while Faust's parser source-reader
+/// contract is synchronous. A browser host therefore fetches the complete
+/// graph first and injects this bundle as a [`RemoteSourceFetcher`]. The
+/// compiler performs no I/O, but remote sources retain canonical URL identity
+/// for relative joining, cycle detection, provenance, and diagnostics.
+///
+/// Keys accept only HTTP(S), are normalized through [`SourceLocator`], and
+/// reject duplicates after fragment removal. Redirects are a host concern:
+/// each stored URL is returned as both the requested and final identity.
+#[derive(Clone, Debug, Default)]
+pub struct PrefetchedRemoteSourceBundle {
+    entries: Arc<HashMap<Url, Arc<[u8]>>>,
+}
+
+impl PrefetchedRemoteSourceBundle {
+    /// Parses and builds a checked bundle from URL-string/response-byte pairs.
+    pub fn try_from_sources(
+        entries: impl IntoIterator<Item = (String, Vec<u8>)>,
+    ) -> Result<Self, PrefetchedRemoteSourceBundleError> {
+        let mut parsed = Vec::new();
+        for (url, bytes) in entries {
+            let normalized = match SourceLocator::remote(&url, None)
+                .map_err(PrefetchedRemoteSourceBundleError::InvalidUrl)?
+            {
+                SourceLocator::Url(url) => url,
+                SourceLocator::File(_) | SourceLocator::Virtual(_) => unreachable!(),
+            };
+            parsed.push((normalized, bytes));
+        }
+        Self::try_new(parsed)
+    }
+
+    /// Builds a checked immutable bundle from URL/response-byte pairs.
+    pub fn try_new(
+        entries: impl IntoIterator<Item = (Url, Vec<u8>)>,
+    ) -> Result<Self, PrefetchedRemoteSourceBundleError> {
+        let mut out = HashMap::new();
+        for (url, bytes) in entries {
+            let normalized = match SourceLocator::from_remote_url(url)
+                .map_err(PrefetchedRemoteSourceBundleError::InvalidUrl)?
+            {
+                SourceLocator::Url(url) => url,
+                SourceLocator::File(_) | SourceLocator::Virtual(_) => unreachable!(),
+            };
+            if out.insert(normalized.clone(), Arc::from(bytes)).is_some() {
+                return Err(PrefetchedRemoteSourceBundleError::DuplicateUrl(normalized));
+            }
+        }
+        Ok(Self {
+            entries: Arc::new(out),
+        })
+    }
+
+    /// Returns whether this bundle contains no remote sources.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns the number of canonical remote sources in this bundle.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns canonical bundle URLs in deterministic lexical order.
+    pub fn urls(&self) -> impl Iterator<Item = &Url> {
+        let mut ordered: Vec<_> = self.entries.keys().collect();
+        ordered.sort_by_key(|url| url.as_str());
+        ordered.into_iter()
+    }
+}
+
+impl RemoteSourceFetcher for PrefetchedRemoteSourceBundle {
+    fn fetch(&self, request: &RemoteFetchRequest) -> Result<FetchedSource, SourceFetchError> {
+        let Some(bytes) = self.entries.get(&request.url) else {
+            return Err(SourceFetchError {
+                kind: SourceFetchErrorKind::Transport,
+                url: request.url.clone(),
+                message: "URL is absent from the prefetched remote source bundle".into(),
+            });
+        };
+        if bytes.len() > request.policy.max_response_bytes {
+            return Err(SourceFetchError {
+                kind: SourceFetchErrorKind::ResponseTooLarge,
+                url: request.url.clone(),
+                message: format!(
+                    "prefetched response exceeds the {} byte limit",
+                    request.policy.max_response_bytes
+                )
+                .into_boxed_str(),
+            });
+        }
+        Ok(FetchedSource {
+            requested_url: request.url.clone(),
+            final_url: request.url.clone(),
+            bytes: bytes.to_vec(),
+        })
+    }
+}
 
 /// One source-origin marker for a line in expanded source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +538,19 @@ pub enum SourceReaderError {
         /// Ordered closed cycle. The last edge points back to the first file.
         cycle: Vec<ImportCycleEdge>,
     },
+    /// A URL is malformed, relative without a base, or uses another scheme.
+    InvalidUrl {
+        input: Box<str>,
+        message: Box<str>,
+    },
+    /// A valid HTTP(S) source was requested without an injected capability.
+    NetworkDisabled {
+        url: Url,
+    },
+    /// The injected transport failed.
+    RemoteFetch {
+        error: SourceFetchError,
+    },
 }
 
 impl fmt::Display for SourceReaderError {
@@ -227,6 +578,13 @@ impl fmt::Display for SourceReaderError {
                 }
                 Ok(())
             }
+            Self::InvalidUrl { input, message } => {
+                write!(f, "invalid remote source URL `{input}`: {message}")
+            }
+            Self::NetworkDisabled { url } => {
+                write!(f, "network imports are disabled for `{url}`")
+            }
+            Self::RemoteFetch { error } => write!(f, "cannot fetch remote source: {error}"),
         }
     }
 }
@@ -241,6 +599,9 @@ impl SourceReaderError {
             Self::Io { .. } => codes::SRC_IO_ERROR,
             Self::UnresolvedImport { .. } => codes::SRC_UNRESOLVED_IMPORT,
             Self::ImportCycle { .. } => codes::SRC_IMPORT_CYCLE,
+            Self::InvalidUrl { .. } => codes::SRC_INVALID_URL,
+            Self::NetworkDisabled { .. } => codes::SRC_NETWORK_DISABLED,
+            Self::RemoteFetch { .. } => codes::SRC_FETCH_FAILED,
         }
     }
 
@@ -371,6 +732,35 @@ impl SourceReaderError {
                 }
                 diag
             }
+            Self::InvalidUrl { input, message } => Diagnostic::new(
+                Severity::Error,
+                Stage::SourceReader,
+                self.code(),
+                format!("invalid remote source URL `{input}`"),
+            )
+            .with_detail_code("invalid-source-url")
+            .with_fact("source_url", input.clone())
+            .with_note(message.clone())
+            .with_help("use an absolute HTTP(S) URL or resolve it from a remote source"),
+            Self::NetworkDisabled { url } => Diagnostic::new(
+                Severity::Error,
+                Stage::SourceReader,
+                self.code(),
+                "network imports are disabled",
+            )
+            .with_detail_code("network-imports-disabled")
+            .with_fact("source_url", url.as_str())
+            .with_help("enable and explicitly allow network imports in the compiler host"),
+            Self::RemoteFetch { error } => Diagnostic::new(
+                Severity::Error,
+                Stage::SourceReader,
+                self.code(),
+                format!("cannot fetch remote source `{}`", error.url),
+            )
+            .with_detail_code("remote-source-fetch-failed")
+            .with_fact("source_url", error.url.as_str())
+            .with_fact("fetch_error_kind", format!("{:?}", error.kind))
+            .with_note(error.message.clone()),
         };
         bundle.push(diag);
         bundle
@@ -388,6 +778,9 @@ pub struct SourceReader {
     visit_stack: Vec<PathBuf>,
     import_edges: Vec<ImportCycleEdge>,
     expanded_files: HashSet<PathBuf>,
+    remote_fetcher: Option<Arc<dyn RemoteSourceFetcher>>,
+    remote_fetch_policy: RemoteFetchPolicy,
+    remote_cache: HashMap<Url, (Arc<str>, Url)>,
 }
 
 impl SourceReader {
@@ -413,6 +806,131 @@ impl SourceReader {
             visit_stack: Vec::new(),
             import_edges: Vec::new(),
             expanded_files: HashSet::new(),
+            remote_fetcher: None,
+            remote_fetch_policy: RemoteFetchPolicy::default(),
+            remote_cache: HashMap::new(),
+        }
+    }
+
+    /// Installs an explicit remote-source capability for this reader.
+    ///
+    /// Merely compiling a transport does not enable networking: a host must
+    /// inject the capability into the specific compilation session.
+    #[must_use]
+    pub fn with_remote_fetcher(
+        mut self,
+        fetcher: Arc<dyn RemoteSourceFetcher>,
+        policy: RemoteFetchPolicy,
+    ) -> Self {
+        self.remote_fetcher = Some(fetcher);
+        self.remote_fetch_policy = policy;
+        self
+    }
+
+    /// Fetches a remote locator through the injected session capability.
+    pub fn fetch_remote(
+        &self,
+        locator: &SourceLocator,
+    ) -> Result<FetchedSource, SourceReaderError> {
+        let Some(url) = locator.as_url() else {
+            return Err(SourceReaderError::InvalidUrl {
+                input: locator.display_name().into_boxed_str(),
+                message: "source locator is not remote".into(),
+            });
+        };
+        let Some(fetcher) = self.remote_fetcher.as_ref() else {
+            return Err(SourceReaderError::NetworkDisabled { url: url.clone() });
+        };
+        fetcher
+            .fetch(&RemoteFetchRequest {
+                url: url.clone(),
+                policy: self.remote_fetch_policy,
+            })
+            .map_err(|error| SourceReaderError::RemoteFetch { error })
+    }
+
+    /// Resolves a filesystem entry into its canonical locator.
+    pub(crate) fn resolve_entry_locator(
+        &self,
+        path: &Path,
+    ) -> Result<SourceLocator, SourceReaderError> {
+        let resolved = self.resolve_entry_path(path)?;
+        Ok(if self.virtual_sources.contains(&resolved) {
+            SourceLocator::Virtual(resolved)
+        } else {
+            SourceLocator::File(resolved)
+        })
+    }
+
+    /// Resolves an explicit HTTP(S) entry source.
+    pub(crate) fn resolve_remote_entry_locator(
+        &self,
+        url: &str,
+    ) -> Result<SourceLocator, SourceReaderError> {
+        SourceLocator::remote(url, None)
+    }
+
+    /// Resolves one import without confusing URL and filesystem syntax.
+    pub(crate) fn resolve_import_locator(
+        &self,
+        name: &str,
+        parent: &SourceLocator,
+    ) -> Result<Option<SourceLocator>, SourceReaderError> {
+        if name.starts_with("http://") || name.starts_with("https://") {
+            return SourceLocator::remote(name, None).map(Some);
+        }
+
+        let local_dir = match parent {
+            SourceLocator::File(path) | SourceLocator::Virtual(path) => path.parent(),
+            SourceLocator::Url(_) => None,
+        };
+        if let Some(path) = self.resolve_import_from(name, local_dir) {
+            return Ok(Some(if self.virtual_sources.contains(&path) {
+                SourceLocator::Virtual(path)
+            } else {
+                SourceLocator::File(path)
+            }));
+        }
+
+        match parent {
+            SourceLocator::Url(base) => SourceLocator::remote(name, Some(base)).map(Some),
+            SourceLocator::File(_) | SourceLocator::Virtual(_) => Ok(None),
+        }
+    }
+
+    /// Reads one locator and returns its UTF-8 text plus canonical final identity.
+    ///
+    /// Redirect targets become the base for relative imports and aliases are
+    /// cached for the compilation session. This prevents redirects from
+    /// bypassing duplicate and cycle detection.
+    pub(crate) fn read_locator(
+        &mut self,
+        locator: &SourceLocator,
+    ) -> Result<(String, SourceLocator), SourceReaderError> {
+        match locator {
+            SourceLocator::File(path) | SourceLocator::Virtual(path) => {
+                Ok((self.read_source_text(path)?, locator.clone()))
+            }
+            SourceLocator::Url(url) => {
+                if let Some((source, final_url)) = self.remote_cache.get(url) {
+                    return Ok((source.to_string(), SourceLocator::Url(final_url.clone())));
+                }
+                let fetched = self.fetch_remote(locator)?;
+                let final_url = match SourceLocator::from_remote_url(fetched.final_url.clone())? {
+                    SourceLocator::Url(url) => url,
+                    SourceLocator::File(_) | SourceLocator::Virtual(_) => unreachable!(),
+                };
+                let requested_url = url.clone();
+                let source: Arc<str> = fetched
+                    .into_utf8()
+                    .map_err(|error| SourceReaderError::RemoteFetch { error })?
+                    .into();
+                self.remote_cache
+                    .insert(final_url.clone(), (source.clone(), final_url.clone()));
+                self.remote_cache
+                    .insert(requested_url, (source.clone(), final_url.clone()));
+                Ok((source.to_string(), SourceLocator::Url(final_url)))
+            }
         }
     }
 
@@ -432,46 +950,6 @@ impl SourceReader {
     #[must_use]
     pub fn resolve_import(&self, name: &str) -> Option<PathBuf> {
         self.resolve_import_from(name, None)
-    }
-
-    /// Resolves one entry path without performing recursive import expansion.
-    ///
-    /// This helper exists for the structural C++ parity path where parsing now
-    /// loads each file as its own unit and expands `importFile` nodes from the
-    /// parsed definition tree instead of from rewritten source text.
-    pub(crate) fn resolve_entry_source_path(
-        &self,
-        path: &Path,
-    ) -> Result<PathBuf, SourceReaderError> {
-        self.resolve_entry_path(path)
-    }
-
-    /// Resolves one import relative to the current importing file directory.
-    ///
-    /// The search order matches the existing C++-style `-I`-before-local-dir`
-    /// behavior used by the reader's text-expansion path.
-    pub(crate) fn resolve_import_source_path(
-        &self,
-        name: &str,
-        local_dir: Option<&Path>,
-    ) -> Option<PathBuf> {
-        self.resolve_import_from(name, local_dir)
-    }
-
-    /// Reads one source unit without recursively expanding imports.
-    ///
-    /// This is the raw file/string loading counterpart used by the parser's
-    /// structural import expansion path.
-    pub(crate) fn read_source_unit(&self, path: &Path) -> Result<String, SourceReaderError> {
-        self.read_source_text(path)
-    }
-
-    /// Returns whether a resolved path names an immutable virtual source.
-    ///
-    /// The structural import expander uses this only to classify snapshots in
-    /// the shared diagnostic [`diagnostics::SourceMap`].
-    pub(crate) fn is_virtual_source(&self, path: &Path) -> bool {
-        self.virtual_sources.contains(path)
     }
 
     /// Reads one logical in-memory source and recursively expands imports.
@@ -754,6 +1232,24 @@ pub(crate) fn import_cycle_from_stack(
 }
 
 fn normalize_logical_path(path: &Path) -> PathBuf {
+    // Only `.` components have to go. A path without any is returned exactly as
+    // given, and that identity matters beyond saving the allocation: rebuilding
+    // it below re-joins the components with the platform separator, so on
+    // Windows `nested/a.dsp` came back as `nested\a.dsp`. As a lookup key the
+    // rebuilt form is equivalent — Windows compares `/` and `\` as the same
+    // separator — but `resolve_entry_path` also turns it into the source
+    // identity through `SourceLocator::display_name`, and that identity is
+    // compared *as a string* against the name the caller handed
+    // `CompilationMetadataStore::new`. With the separator flipped the two
+    // disagreed, so `declare_top_level` filed every top-level `declare` of a
+    // virtual source under imported scope instead of global, and
+    // `declare name "..."` no longer reached the generated code.
+    if !path
+        .components()
+        .any(|component| matches!(component, std::path::Component::CurDir))
+    {
+        return path.to_path_buf();
+    }
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -789,8 +1285,146 @@ fn parse_import_line(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceReader, VirtualSourceMap, parse_import_line};
+    use super::{
+        FetchedSource, PrefetchedRemoteSourceBundle, PrefetchedRemoteSourceBundleError,
+        RemoteFetchPolicy, RemoteFetchRequest, RemoteSourceFetcher, SourceFetchError,
+        SourceFetchErrorKind, SourceLocator, SourceReader, SourceReaderError, VirtualSourceMap,
+        normalize_logical_path, parse_import_line,
+    };
     use std::path::Path;
+    use std::sync::Arc;
+    use url::Url;
+
+    #[derive(Debug)]
+    struct FakeFetcher;
+
+    impl RemoteSourceFetcher for FakeFetcher {
+        fn fetch(&self, request: &RemoteFetchRequest) -> Result<FetchedSource, SourceFetchError> {
+            Ok(FetchedSource {
+                requested_url: request.url.clone(),
+                final_url: request.url.clone(),
+                bytes: b"process = _;\n".to_vec(),
+            })
+        }
+    }
+
+    // A logical path that has nothing to strip must come back byte-identical,
+    // separators included. `SourceLocator::display_name` publishes this value as
+    // the source identity, and `CompilationMetadataStore` matches that identity
+    // against the caller-supplied name by string equality to tell a top-level
+    // `declare` from an imported one. Rebuilding the path re-joined it with the
+    // platform separator, which is invisible on Unix and turned `nested/a.dsp`
+    // into `nested\a.dsp` on Windows — so this assertion only has teeth there,
+    // where CI runs it.
+    #[test]
+    fn normalize_logical_path_preserves_a_path_with_nothing_to_strip() {
+        for raw in ["nested/a.dsp", "a.dsp", "nested/deeper/a.dsp"] {
+            assert_eq!(
+                normalize_logical_path(Path::new(raw)).as_os_str(),
+                Path::new(raw).as_os_str(),
+                "identity must survive normalization: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_logical_path_strips_current_directory_components() {
+        assert_eq!(
+            normalize_logical_path(Path::new("./nested/a.dsp")),
+            Path::new("nested").join("a.dsp")
+        );
+        // Stripping everything leaves the input rather than an empty path.
+        assert_eq!(normalize_logical_path(Path::new(".")), Path::new("."));
+    }
+
+    #[test]
+    fn remote_locator_normalizes_fragments_and_joins_relative_references() {
+        let base = Url::parse("https://example.com/libs/nested/main.lib").unwrap();
+        let locator = SourceLocator::remote("../math.lib#ignored", Some(&base)).unwrap();
+        assert_eq!(
+            locator.as_url().map(Url::as_str),
+            Some("https://example.com/libs/math.lib")
+        );
+    }
+
+    #[test]
+    fn remote_fetch_requires_an_injected_capability() {
+        let locator = SourceLocator::remote("https://example.com/main.dsp", None).unwrap();
+        let error = SourceReader::new(Vec::new())
+            .fetch_remote(&locator)
+            .expect_err("networking must be disabled without injection");
+        assert!(matches!(error, SourceReaderError::NetworkDisabled { .. }));
+    }
+
+    #[test]
+    fn injected_fetcher_receives_the_session_policy() {
+        let locator = SourceLocator::remote("https://example.com/main.dsp", None).unwrap();
+        let reader = SourceReader::new(Vec::new())
+            .with_remote_fetcher(Arc::new(FakeFetcher), RemoteFetchPolicy::default());
+        let fetched = reader.fetch_remote(&locator).unwrap();
+        assert_eq!(fetched.bytes, b"process = _;\n");
+        assert_eq!(fetched.requested_url, fetched.final_url);
+    }
+
+    #[test]
+    fn prefetched_bundle_normalizes_urls_and_enforces_limits() {
+        let bundle = PrefetchedRemoteSourceBundle::try_new([(
+            Url::parse("https://example.com/lib/math.lib#ignored").unwrap(),
+            b"answer = 42;\n".to_vec(),
+        )])
+        .unwrap();
+        assert_eq!(bundle.len(), 1);
+
+        let url = Url::parse("https://example.com/lib/math.lib").unwrap();
+        let fetched = bundle
+            .fetch(&RemoteFetchRequest {
+                url: url.clone(),
+                policy: RemoteFetchPolicy::default(),
+            })
+            .unwrap();
+        assert_eq!(fetched.requested_url, url);
+        assert_eq!(fetched.bytes, b"answer = 42;\n");
+
+        let error = bundle
+            .fetch(&RemoteFetchRequest {
+                url: fetched.final_url,
+                policy: RemoteFetchPolicy {
+                    max_response_bytes: 2,
+                    ..RemoteFetchPolicy::default()
+                },
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, SourceFetchErrorKind::ResponseTooLarge);
+    }
+
+    #[test]
+    fn prefetched_bundle_rejects_normalized_duplicates_and_reports_missing_urls() {
+        let duplicate = PrefetchedRemoteSourceBundle::try_new([
+            (
+                Url::parse("https://example.com/child.lib#one").unwrap(),
+                b"one = 1;".to_vec(),
+            ),
+            (
+                Url::parse("https://example.com/child.lib#two").unwrap(),
+                b"two = 2;".to_vec(),
+            ),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            PrefetchedRemoteSourceBundleError::DuplicateUrl(_)
+        ));
+
+        let bundle = PrefetchedRemoteSourceBundle::default();
+        let error = bundle
+            .fetch(&RemoteFetchRequest {
+                url: Url::parse("https://example.com/missing.lib").unwrap(),
+                policy: RemoteFetchPolicy::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, SourceFetchErrorKind::Transport);
+        assert!(error.message.contains("absent"));
+    }
 
     /// Search paths (-I) must be checked before the local directory of the importing
     /// file, mirroring the C++ gImportDirList ordering where `-I` entries are inserted

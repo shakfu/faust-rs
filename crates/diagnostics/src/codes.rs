@@ -11,6 +11,12 @@ pub const SRC_IO_ERROR: DiagnosticCode = DiagnosticCode("FRS-SRC-0001");
 pub const SRC_UNRESOLVED_IMPORT: DiagnosticCode = DiagnosticCode("FRS-SRC-0002");
 /// Import graph contains a cycle.
 pub const SRC_IMPORT_CYCLE: DiagnosticCode = DiagnosticCode("FRS-SRC-0003");
+/// A remote source locator is invalid or uses an unsupported scheme.
+pub const SRC_INVALID_URL: DiagnosticCode = DiagnosticCode("FRS-SRC-0004");
+/// A remote source was requested without an enabled fetch capability.
+pub const SRC_NETWORK_DISABLED: DiagnosticCode = DiagnosticCode("FRS-SRC-0005");
+/// A configured remote transport failed to return a usable source.
+pub const SRC_FETCH_FAILED: DiagnosticCode = DiagnosticCode("FRS-SRC-0006");
 
 /// Lexer encountered an invalid token sequence.
 pub const LEX_INVALID_TOKEN: DiagnosticCode = DiagnosticCode("FRS-LEX-0001");
@@ -116,6 +122,14 @@ pub const FIR_VERIFY_WARNING: DiagnosticCode = DiagnosticCode("FRS-FIR-0002");
 pub const COMP_TYPE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0004");
 /// Parse succeeded but exposed no root node — an internal invariant guard.
 pub const COMP_MISSING_ROOT: DiagnosticCode = DiagnosticCode("FRS-COMP-0005");
+/// A const table folds a host-dependent sample-rate value.
+pub const COMP_TABLE_INIT_SAMPLE_RATE: DiagnosticCode = DiagnosticCode("FRS-COMP-0006");
+/// `-e` expansion cannot serialize the evaluated program.
+///
+/// Raised when the program has no output signal, or when its evaluated box
+/// contains a shape with no Faust source syntax — the expansion's contract is
+/// that its output re-compiles, so emitting a placeholder is not an option.
+pub const COMP_EXPAND_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0007");
 
 /// Backend code generation failed while emitting from FIR.
 ///
@@ -134,6 +148,9 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         SRC_IO_ERROR,
         SRC_UNRESOLVED_IMPORT,
         SRC_IMPORT_CYCLE,
+        SRC_INVALID_URL,
+        SRC_NETWORK_DISABLED,
+        SRC_FETCH_FAILED,
         LEX_INVALID_TOKEN,
         PARSE_UNEXPECTED_TOKEN,
         PARSE_RECOVERY,
@@ -165,6 +182,8 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         FIR_VERIFY_WARNING,
         COMP_TYPE_FAILED,
         COMP_MISSING_ROOT,
+        COMP_TABLE_INIT_SAMPLE_RATE,
+        COMP_EXPAND_FAILED,
         CODEGEN_EMISSION_FAILED,
     ]
 }

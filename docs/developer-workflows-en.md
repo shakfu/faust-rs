@@ -59,25 +59,41 @@ See:
 
 The compiler currently supports:
 
+- `-lang asc`
 - `-lang c`
+- `-lang cmajor`
+- `-lang codebox` / `-lang codebox-test`
 - `-lang cpp`
+- `-lang cranelift`
 - `-lang fir`
 - `-lang interp`
-- `-lang cranelift`
+- `-lang julia`
+- `-lang rust`
 - `-lang wasm`
 - `-lang wast`
 
 ```bash
+cargo run -p compiler -- -lang asc tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang c tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang cmajor tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang codebox tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang cpp tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang cranelift tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang fir tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang interp tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang julia tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang rust tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang wasm tests/corpus/rep_01_passthrough.dsp -o /tmp/out.wasm
 cargo run -p compiler -- -lang wast tests/corpus/rep_01_passthrough.dsp
 ```
 
+See `docs/user-cli-guide-en.md` for the full flag surface (`-vec`, `-ec`/`-os`,
+`--table-init`, `--svg`, architecture wrapping, legacy flag spellings, etc.).
+
 Useful current CLI extras for developer workflows:
 
+- `--check` for front-end + FIR verification with no codegen, the preferred
+  mode for CI/tooling validity checks (schema shared with success and failure)
 - `--json` for strict Faust JSON output, optionally alongside `-lang <backend>`
 - `--dump-fir-verify` for FIR verifier reports without backend emission
 - `--dump-cranelift` for the experimental backend status report
@@ -132,3 +148,41 @@ Notes:
 - `fir-dump-scan` is a structural regression guard on textual FIR dumps.
 - `backend-align-smoke` and `backend-align-nightly` orchestrate broader
   alignment checks, including runtime/FIR-dump coverage.
+
+## 8. Lines-of-code report (effective vs. test)
+
+`scripts/loc_report.py` reports Rust lines of code under `crates/`, split into
+effective (non-test) code and test code. It requires `cloc` on `PATH`.
+
+```bash
+# Totals only
+python3 scripts/loc_report.py
+
+# Per-crate breakdown table
+python3 scripts/loc_report.py --by-crate
+```
+
+A file (or the relevant portion of a file) is classified as test code when it
+matches one of:
+
+- it lives under a `tests/` directory (integration tests), e.g.
+  `crates/<crate>/tests/*.rs` or `crates/transform/src/schedule/tests/*.rs`;
+- its filename stem is `tests` or `test` (the common `mod tests;` ->
+  `tests.rs` pattern, e.g. `crates/fir/src/checker/tests.rs`);
+- it is reachable, transitively, from a `#[cfg(test)] mod name;` module
+  declaration (e.g. `crates/cranelift-ffi/src/diff.rs`, declared via
+  `#[cfg(test)] mod diff;` in `lib.rs`);
+- it is an inline `#[cfg(test)] mod name { ... }` block — only the lines
+  inside the block count as test code, the rest of the file counts as
+  effective.
+
+Everything else in `crates/**/*.rs` counts as effective code. Generated
+output under `tests/impulse-tests/build/` (Rust emitted by the Faust
+compiler for the numeric-parity corpus) is out of scope: it is neither
+hand-written source nor test code, so the script does not look there at all.
+
+Blank lines and comment-only lines are excluded from both counts (`cloc`
+does the classification). The split is a static-analysis heuristic, not a
+`rustc`/`cfg` evaluation, so it can drift by a fraction of a percent on
+constructs like a doc comment that spans a test-block boundary; cross-check
+against `cloc --include-lang=Rust crates` if exact totals matter.

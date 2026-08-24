@@ -6,6 +6,7 @@
 
 use super::*;
 use clap::{CommandFactory, Parser};
+use std::collections::BTreeSet;
 
 fn parse_xtask<I, T>(args: I) -> Result<XtaskCli, clap::Error>
 where
@@ -47,10 +48,38 @@ fn ci_command_names_are_accepted() {
         "vector-coverage-check",
         "vector-interp-opt-check",
         "compile-budget-check",
+        "corpus-runtime-diff",
     ] {
         parse_xtask([command]).unwrap_or_else(|error| panic!("{command}: {error}"));
     }
     parse_xtask(["backend-align-smoke", "--skip-golden"]).unwrap();
+}
+
+#[test]
+fn generated_reports_replace_checkout_local_paths() {
+    let workspace_case = workspace_root().join("tests/corpus/example.dsp");
+    let cpp_binary = Path::new(CPP_SOURCE_ROOT).join("build/bin/faust");
+    let text = format!(
+        "case={} cpp={} expr=clocked(0x12Ab90, IN[0])",
+        workspace_case.display(),
+        cpp_binary.display()
+    );
+    let portable = portable_report_text(&text);
+    assert_eq!(
+        portable,
+        "case=tests/corpus/example.dsp cpp=../faust/build/bin/faust \
+         expr=clocked(<ptr>, IN[0])"
+    );
+}
+
+#[test]
+fn generated_reports_normalize_windows_path_separators() {
+    let portable =
+        portable_report_text("case=tests\\corpus\\example.dsp cpp=..\\faust\\build\\bin\\faust");
+    assert_eq!(
+        portable,
+        "case=tests/corpus/example.dsp cpp=../faust/build/bin/faust"
+    );
 }
 
 #[test]
@@ -168,6 +197,68 @@ fn parse_interp_trace_batch_accepts_strict_fir_types_flag() {
     };
     let opts = InterpTraceBatchOptions::from(args);
     assert!(opts.strict_fir_types);
+}
+
+#[test]
+fn corpus_runtime_diff_defaults_to_three_scenarios_and_accepts_bare_cases() {
+    let cli = parse_xtask([
+        "corpus-runtime-diff",
+        "--case",
+        "rep_01_passthrough.dsp",
+        "--abs-tol",
+        "0.000002",
+    ])
+    .unwrap();
+    let XtaskCommand::CorpusRuntimeDiff(args) = cli.command else {
+        unreachable!("requested corpus-runtime-diff")
+    };
+    let options = CorpusRuntimeDiffOptions::from(args);
+    assert_eq!(
+        options.scenarios,
+        vec![
+            TraceScenario::Impulse,
+            TraceScenario::Ramp,
+            TraceScenario::Sine
+        ]
+    );
+    assert_eq!(options.tolerances.abs_tol, 2.0e-6);
+    let cases = resolve_corpus_runtime_cases(&options.cases).unwrap();
+    assert_eq!(cases.len(), 1);
+    assert!(cases[0].ends_with("tests/corpus/rep_01_passthrough.dsp"));
+}
+
+#[test]
+fn corpus_runtime_diff_rejects_negative_or_non_finite_tolerances() {
+    for value in ["-1", "NaN", "inf"] {
+        let error = parse_xtask(["corpus-runtime-diff", "--abs-tol", value]).unwrap_err();
+        assert!(error.to_string().contains(value));
+    }
+}
+
+#[test]
+fn corpus_runtime_expectations_are_strict_and_strip_dsp_suffixes() {
+    let entries = parse_corpus_runtime_expectations(
+        "# known\nmismatch | rep_18_stream_wrappers.dsp | DIFF-GAP-001\n\
+         oracle | rep_77_foreign_variable | unsupported by C++ interp\n",
+    )
+    .unwrap();
+    assert_eq!(
+        entries["rep_18_stream_wrappers"].kind,
+        CorpusRuntimeExpectationKind::Mismatch
+    );
+    assert_eq!(
+        entries["rep_77_foreign_variable"].kind,
+        CorpusRuntimeExpectationKind::Oracle
+    );
+
+    for invalid in [
+        "unknown | case | reason",
+        "mismatch | case | free-form reason",
+        "mismatch | case",
+        "mismatch | case | one\noracle | case.dsp | two",
+    ] {
+        assert!(parse_corpus_runtime_expectations(invalid).is_err());
+    }
 }
 
 #[test]
@@ -293,6 +384,33 @@ fn compare_runtime_traces_reports_large_float_delta() {
     assert_eq!(mismatch.field, "outputs");
     assert_eq!(mismatch.channel, Some(0));
     assert_eq!(mismatch.sample, Some(0));
+}
+
+#[test]
+fn cross_compiler_trace_comparison_ignores_only_the_lane() {
+    let cpp = RuntimeTrace {
+        dsp_path: "tests/corpus/x.dsp".into(),
+        lane: "cpp-fbc".into(),
+        scenario: "impulse".into(),
+        sample_rate: 48_000,
+        block_size: 64,
+        num_blocks: 1,
+        num_inputs: 1,
+        num_outputs: 1,
+        outputs: vec![vec![1.0, 0.0]],
+    };
+    let mut rust = cpp.clone();
+    rust.lane = "fast-lane".into();
+    assert!(compare_runtime_traces(&cpp, &rust, TraceCompareTolerances::default()).is_err());
+    assert!(
+        compare_cross_compiler_runtime_traces(&cpp, &rust, TraceCompareTolerances::default())
+            .is_ok()
+    );
+    rust.num_outputs = 2;
+    assert!(
+        compare_cross_compiler_runtime_traces(&cpp, &rust, TraceCompareTolerances::default())
+            .is_err()
+    );
 }
 
 #[test]
@@ -685,4 +803,184 @@ fn corpus_status_query_counts_are_internally_consistent() {
     // (a fresh directory listing) and require the response to agree.
     let actual_corpus_file_count = corpus_files().unwrap().len();
     assert_eq!(response.corpus_file_count_seen, actual_corpus_file_count);
+}
+
+/// The public-API baseline must be blind to code motion.
+///
+/// Two scans of the same crate whose items differ only by source line render
+/// identical baselines; otherwise the gate fires on every commit a
+/// restructuring produces and gets disabled.
+#[test]
+fn public_api_baseline_ignores_source_locations() {
+    let at_line = |line: usize| PublicItem {
+        kind: "fn".to_owned(),
+        name: "lower_signal".to_owned(),
+        path: PathBuf::from("crates/transform/src/lib.rs"),
+        line,
+    };
+
+    assert_eq!(
+        render_baseline_section("transform", vec![at_line(12)]),
+        render_baseline_section("transform", vec![at_line(4210)]),
+        "moving an item must not change the baseline"
+    );
+}
+
+/// The baseline must still react to the surface itself changing.
+///
+/// This is the `pub` leak: a helper widened to `pub` so a code move compiles.
+#[test]
+fn public_api_baseline_detects_a_widened_item() {
+    let item = |name: &str| PublicItem {
+        kind: "fn".to_owned(),
+        name: name.to_owned(),
+        path: PathBuf::from("crates/transform/src/lib.rs"),
+        line: 12,
+    };
+
+    let before = render_baseline_section("transform", vec![item("lower_signal")]);
+    let after = render_baseline_section(
+        "transform",
+        vec![item("lower_signal"), item("leaked_helper")],
+    );
+
+    assert_ne!(before, after, "a new public item must change the baseline");
+    assert!(after.contains("fn leaked_helper"));
+}
+
+/// Duplicate `(kind, name)` pairs collapse, so re-exporting an item under two
+/// paths does not make the baseline churn.
+#[test]
+fn public_api_baseline_deduplicates_entries() {
+    let item = |line: usize| PublicItem {
+        kind: "fn".to_owned(),
+        name: "lower_signal".to_owned(),
+        path: PathBuf::from("crates/transform/src/lib.rs"),
+        line,
+    };
+
+    let section = render_baseline_section("transform", vec![item(12), item(99)]);
+    assert_eq!(section.matches("fn lower_signal").count(), 1);
+}
+
+/// `--check` is opt-in: the bare command still regenerates.
+#[test]
+fn code_graphs_check_flag_parses() {
+    let cli = parse_xtask(["code-graphs", "--check"]).unwrap();
+    match cli.command {
+        XtaskCommand::CodeGraphs(args) => assert!(args.check),
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    let cli = parse_xtask(["code-graphs"]).unwrap();
+    match cli.command {
+        XtaskCommand::CodeGraphs(args) => assert!(!args.check),
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// Methods are recorded under their implementing type.
+///
+/// Without qualification every constructor collapses onto the single name
+/// `new` — 18 of the 31 crates already had a bare `fn new` entry — so adding a
+/// constructor to a new type produced no baseline diff and `--check` stayed
+/// silent. This is the blind spot P1 exposed on 2026-08-18.
+#[test]
+fn impl_headers_name_the_implementing_type() {
+    assert_eq!(
+        parse_impl_header("impl SignalFirRequest<'_> {").as_deref(),
+        Some("SignalFirRequest")
+    );
+    assert_eq!(
+        parse_impl_header("impl<'a> SignalFirRequest<'a> {").as_deref(),
+        Some("SignalFirRequest")
+    );
+    assert_eq!(
+        parse_impl_header("impl std::fmt::Display for CodegenError {").as_deref(),
+        Some("CodegenError"),
+        "a trait impl is looked up by its type, not its trait"
+    );
+    assert_eq!(parse_impl_header("    impl Nested {"), None);
+    assert_eq!(parse_impl_header("pub fn new() -> Self {"), None);
+}
+
+/// Brace counting must ignore braces inside strings and line comments,
+/// otherwise one format string desynchronises every `impl` after it.
+#[test]
+fn brace_balance_ignores_strings_and_comments() {
+    assert_eq!(brace_balance("impl Foo {"), 1);
+    assert_eq!(brace_balance("}"), -1);
+    assert_eq!(brace_balance(r#"write!(f, "[{}] {}", a, b);"#), 0);
+    assert_eq!(brace_balance("let x = 1; // a { brace in a comment"), 0);
+    assert_eq!(brace_balance(r#"let s = "{";"#), 0);
+}
+
+/// A `KNOWN_OVERSIZED_FILES` entry naming a file the scan never found is a
+/// typo or a stale rename — it must be flagged, not silently ignored.
+#[test]
+fn stale_oversized_exceptions_flags_a_path_absent_from_the_scan() {
+    let known = [("crates/does/not/exist.rs", "reason")];
+    let scanned: BTreeSet<String> = BTreeSet::new();
+    let seen: BTreeSet<&str> = BTreeSet::new();
+    let findings = stale_oversized_exceptions(&known, &scanned, &seen, 2000);
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].contains("does not exist"));
+}
+
+/// A file that shrank below the threshold no longer needs its exception; the
+/// exception must be flagged for removal instead of lingering forever.
+#[test]
+fn stale_oversized_exceptions_flags_a_resolved_split() {
+    let known = [("crates/codegen/src/backends/cmajor/mod.rs", "reason")];
+    let scanned: BTreeSet<String> = ["crates/codegen/src/backends/cmajor/mod.rs".to_owned()].into();
+    let seen: BTreeSet<&str> = BTreeSet::new(); // present but not over threshold this run
+    let findings = stale_oversized_exceptions(&known, &scanned, &seen, 2000);
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].contains("no longer over"));
+}
+
+/// An exception that still names a real, still-oversized file is not a
+/// finding: this is the ordinary steady state, not a mutation.
+#[test]
+fn stale_oversized_exceptions_accepts_a_live_exception() {
+    let known = [("crates/codegen/src/backends/rust/mod.rs", "reason")];
+    let scanned: BTreeSet<String> = ["crates/codegen/src/backends/rust/mod.rs".to_owned()].into();
+    let seen: BTreeSet<&str> = ["crates/codegen/src/backends/rust/mod.rs"].into();
+    assert!(stale_oversized_exceptions(&known, &scanned, &seen, 2000).is_empty());
+}
+
+/// `#![warn(missing_docs)]` compiles clean but enforces nothing, since an
+/// inner attribute overrides the command-line `-D warnings` clippy and CI
+/// already pass. This is the exact regression a rejecting mutation caught on
+/// 2026-08-18: the check must reject `warn`, not just accept any mention of
+/// `missing_docs`.
+#[test]
+fn missing_deny_attribute_rejects_warn_instead_of_deny() {
+    let finding = missing_deny_attribute(
+        "transform",
+        "crates/transform/src/lib.rs",
+        Some("#![warn(missing_docs)]\n"),
+    );
+    assert!(finding.is_some());
+    assert!(finding.unwrap().contains("verbatim"));
+}
+
+/// `#![deny(missing_docs)]` verbatim passes.
+#[test]
+fn missing_deny_attribute_accepts_deny() {
+    let finding = missing_deny_attribute(
+        "transform",
+        "crates/transform/src/lib.rs",
+        Some("#![deny(missing_docs)]\n"),
+    );
+    assert!(finding.is_none());
+}
+
+/// A `DOCUMENTED_CRATES` entry whose `lib.rs` cannot be read is itself a
+/// finding, not a silent pass.
+#[test]
+fn missing_deny_attribute_flags_an_unreadable_lib_rs() {
+    let finding = missing_deny_attribute("ghost", "crates/ghost/src/lib.rs", None);
+    assert!(finding.is_some());
+    assert!(finding.unwrap().contains("does not exist"));
 }

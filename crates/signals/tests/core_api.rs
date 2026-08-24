@@ -6,9 +6,9 @@
 
 use signals::{
     BinOp, BlockRevPolicy, SigBuilder, SigMatch, add_sig_fir, add_sig_iir, concerned_iir,
-    convert_fir_to_sig, delay_sig_fir, delay_sig_iir, div_sig_iir, dump_sig, dump_sig_readable,
-    embedded_iir, make_sig_fir, match_sig, mul_sig_iir, neg_sig_fir, proj_to_sig_iir, simplify_fir,
-    sub_sig_fir, sub_sig_iir,
+    convert_fir_to_sig, delay_sig_fir, delay_sig_iir, div_sig_iir, dump_sig, dump_sig_annotated,
+    dump_sig_dag, dump_sig_readable, embedded_iir, make_sig_fir, match_sig, mul_sig_iir,
+    neg_sig_fir, proj_to_sig_iir, simplify_fir, sub_sig_fir, sub_sig_iir,
 };
 use tlib::{TreeArena, list_to_vec};
 
@@ -591,4 +591,109 @@ fn builder_rejects_negative_proj_index_in_debug() {
     };
     let mut b = SigBuilder::new(&mut arena);
     let _ = b.proj(-1, rec);
+}
+
+/// `dump_sig_annotated` resolves the declared range of slider-like controls,
+/// which the plain dumps cannot: a signal node stores only a `ControlId`.
+#[test]
+fn annotated_dump_resolves_control_ranges() {
+    use ui::{ControlKind, ControlRange, ControlSpec, UiProgram};
+
+    let mut program = UiProgram::empty();
+    program.controls.push(ControlSpec::synthetic(
+        0,
+        ControlKind::HSlider,
+        "cutoff".to_owned(),
+        Vec::new(),
+        Some(ControlRange {
+            init: 440.0,
+            min: 20.0,
+            max: 20000.0,
+            step: 0.5,
+        }),
+    ));
+    // A control without a range must be left exactly as the plain dump has it.
+    program.controls.push(ControlSpec::synthetic(
+        1,
+        ControlKind::Button,
+        "gate".to_owned(),
+        Vec::new(),
+        None,
+    ));
+
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let slider = b.hslider(0);
+    let button = b.button(1);
+    let sig = b.add(slider, button);
+
+    assert_eq!(
+        dump_sig_annotated(&arena, sig, &program),
+        "SIGBINOP(op=add (+), \
+         SIGHSLIDER(int(0), init=440.0, min=20.0, max=20000.0, step=0.5), \
+         SIGBUTTON(int(1)))"
+    );
+    // The unannotated dumps stay byte-identical: they are the reference for
+    // structural differential checks and are called from crates that own no
+    // `UiProgram`.
+    assert_eq!(
+        dump_sig_readable(&arena, sig),
+        "SIGBINOP(op=add (+), SIGHSLIDER(int(0)), SIGBUTTON(int(1)))"
+    );
+}
+
+/// The DAG dump prints each interior node once and refers to it by index, so a
+/// shared subgraph costs one line instead of one copy per path to it.
+#[test]
+fn dag_dump_prints_shared_nodes_once() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let d = b.delay1(x);
+    // `d` is reachable by two paths; the tree dump expands it twice.
+    let sum = b.add(d, d);
+
+    let tree = dump_sig_readable(&arena, sum);
+    assert_eq!(
+        tree,
+        "SIGBINOP(op=add (+), SIGDELAY1(SIGINPUT(int(0))), SIGDELAY1(SIGINPUT(int(0))))"
+    );
+    assert_eq!(
+        dump_sig_dag(&arena, &[sum], None),
+        "n0 = SIGINPUT(int(0))\n\
+         n1 = SIGDELAY1(n0)\n\
+         n2 = SIGBINOP(op=add (+), n1, n1)\n\
+         [0] = n2\n"
+    );
+}
+
+/// All roots share one numbering, so structure common to two outputs is printed
+/// once rather than once per output.
+#[test]
+fn dag_dump_shares_numbering_across_roots() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let d = b.delay1(x);
+    let left = b.add(d, x);
+
+    let dumped = dump_sig_dag(&arena, &[left, d], None);
+    assert_eq!(
+        dumped,
+        "n0 = SIGINPUT(int(0))\n\
+         n1 = SIGDELAY1(n0)\n\
+         n2 = SIGBINOP(op=add (+), n1, n0)\n\
+         [0] = n2\n\
+         [1] = n1\n"
+    );
+}
+
+/// A root that is itself an atomic leaf has no binding to point at, so it is
+/// inlined into the root marker instead of dangling.
+#[test]
+fn dag_dump_inlines_a_leaf_root() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let k = b.int(42);
+    assert_eq!(dump_sig_dag(&arena, &[k], None), "[0] = int(42)\n");
 }

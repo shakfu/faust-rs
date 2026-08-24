@@ -399,7 +399,7 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryJSON(
 /// Return library dependencies of a factory (always empty for the interpreter).
 ///
 /// # Safety
-/// `factory` must be a valid non-null factory pointer.
+/// `factory` may be null; it is ignored by the current implementation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getCInterpreterDSPFactoryLibraryList(
     _factory: *mut InterpreterDspFactory,
@@ -523,6 +523,7 @@ fn compile_factory_from_file_fastlane(
     let compiler = apply_table_init(
         FaustCompiler::new().with_real_type(real_type),
         table_init.as_deref(),
+        parsed.table_init_sample_rate,
     );
     let fbc = compiler
         .compile_file_to_interp_with_lane(
@@ -559,12 +560,20 @@ fn compile_factory_from_string_fastlane(
     let compiler = apply_table_init(
         FaustCompiler::new().with_real_type(real_type),
         table_init.as_deref(),
+        parsed.table_init_sample_rate,
     );
+    // Forward `-I` as import search paths, as the Cranelift string factory
+    // does. `parsed.search_paths` already holds them; without passing them on,
+    // only the built-in defaults are searched, so `import("stdfaust.lib")`
+    // resolves while a project-local `library("mine.lib")` does not — and the
+    // failure is deferred until the library is used, because an unused
+    // `library(...)` binding is never loaded.
     let fbc = compiler
-        .compile_source_to_interp_with_lane(
+        .compile_source_to_interp_with_lane_and_search_paths(
             source_name,
             source,
             &interp_options,
+            &parsed.search_paths,
             SignalFirLane::TransformFastLane,
         )
         .map_err(|e| format!("{e}"))?;
@@ -591,11 +600,19 @@ fn ffi_real_type(parsed: &FfiCompileArgs) -> RealType {
 ///
 /// Without this a caller asking for `runtime` silently got the `const`
 /// default, so a gate run "in runtime mode" would really be re-testing `const`.
-fn apply_table_init(compiler: FaustCompiler, table_init: Option<&str>) -> FaustCompiler {
-    match table_init {
+fn apply_table_init(
+    compiler: FaustCompiler,
+    table_init: Option<&str>,
+    table_init_sample_rate: Option<i32>,
+) -> FaustCompiler {
+    let compiler = match table_init {
         Some("runtime") => compiler.with_table_init_mode(TableInitMode::Runtime),
         Some("const") => compiler.with_table_init_mode(TableInitMode::Const),
         _ => compiler,
+    };
+    match table_init_sample_rate {
+        Some(sample_rate) => compiler.with_table_init_sample_rate(sample_rate),
+        None => compiler,
     }
 }
 
@@ -938,26 +955,22 @@ pub unsafe extern "C" fn generateCInterpreterAuxFilesFromString(
     }
 }
 
-/// Write SHA-256 hex of `text` (first 63 chars + NUL) into `buf` if non-null.
+/// Writes the SHA-1 key of `text` into `buf` (40 characters plus NUL).
+///
+/// Mirrors C++ `generateSHA1`, whose result the caller receives in the
+/// 64-character buffer the libfaust C API documents. The buffer is larger than
+/// the digest; the extra room is not filled, exactly as in C++.
 unsafe fn write_sha_key(buf: *mut c_char, text: &str) {
     if buf.is_null() {
         return;
     }
-    let hash = sha256_hex(text.as_bytes());
+    let hash = ffi_common::sha1_hex(text.as_bytes());
     let bytes = hash.as_bytes();
     let len = bytes.len().min(63);
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, len);
         *buf.add(len) = 0;
     }
-}
-
-/// Minimal SHA-256 stand-in: FNV-1a 64-bit repeated to fill a 64-char hex string.
-fn sha256_hex(data: &[u8]) -> String {
-    let hash = data.iter().fold(0xcbf29ce484222325u64, |h, &b| {
-        (h ^ b as u64).wrapping_mul(0x100000001b3)
-    });
-    format!("{hash:016x}{hash:016x}{hash:016x}{hash:016x}")
 }
 
 /// Writes `artifacts` to the directory extracted from `-O <path>` in `argv`.

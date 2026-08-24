@@ -1,4 +1,4 @@
-//! `cranelift` backend (early bring-up).
+//! Native Cranelift JIT backend.
 //!
 //! # Role
 //! - Planned native-code backend lowering Faust FIR to machine code via
@@ -11,7 +11,7 @@
 //!   behavior (`llvm_dsp` / `interpreter_dsp`-style API strategy).
 //!
 //! # Current status
-//! - Early backend bring-up with a real Cranelift JIT integration:
+//! - Real Cranelift JIT integration:
 //!   - a finalized `compute` symbol is emitted,
 //!   - finalized code is kept alive by an owned `JITModule`,
 //!   - a backend `dsp*` layout contract is derived from FIR `globals`.
@@ -20,11 +20,13 @@
 //!   intrinsics, struct globals/tables, etc.).
 //! - When the FIR body exceeds the current subset, the backend deliberately
 //!   falls back to a valid no-op `compute` stub instead of failing the whole
-//!   compilation.
+//!   compilation unless [`CraneliftOptions::fail_on_subset_gap`] is enabled.
+//! - [`MemoryManagerMode::Mem0`] replaces eligible inline array payloads with
+//!   pointer slots backed by the host manager. The resulting
+//!   [`JitDspModule::mem0_analysis`] is the canonical allocation and JSON-cost
+//!   description consumed by `cranelift-ffi`.
 //!
-//! # Design notes (current phase)
-//! - The backend prioritizes compile-path integration and diagnosability over
-//!   runtime parity completeness.
+//! # Design notes
 //! - `FAUSTFLOAT` maps to `f32` by default, or `f64` when
 //!   `CraneliftOptions::double_precision` is set (`-double`).
 //! - The exported FFI/runtime layer (`cranelift_dsp`) can consume diagnostic
@@ -40,8 +42,13 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, Init, Linkage, Module, default_libcall_names};
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+
+use crate::memory_layout::{
+    Mem0Analysis, Mem0AnalysisOptions, MemoryLayoutFlavor, MemoryManagerMode, MemoryRole,
+    MemoryScope, MemoryZoneId, analyze_mem0,
+};
 
 mod api;
 mod core;
@@ -53,8 +60,8 @@ mod subset;
 pub use api::{diagnose_cranelift_compute_subset_gap, generate_cranelift_module};
 pub use core::{
     BACKEND_NAME, CraneliftBackendError, CraneliftBackendErrorCode, CraneliftOptLevel,
-    CraneliftOptions, JitDspModule, StructFieldKind, StructFieldLayout, StructLayoutPlan,
-    backend_id,
+    CraneliftOptions, JitDspModule, StaticMemorySlot, StructFieldKind, StructFieldLayout,
+    StructLayoutPlan, backend_id,
 };
 
 pub(crate) use core::*;

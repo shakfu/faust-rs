@@ -32,7 +32,7 @@ See the design write-up in
      with `filesCompare -part` (same approach the C++ suite uses for its Rust
      target).
    - `make cranelift` — the faust-rs Cranelift JIT runs in-process via
-     `impulse_cranelift` in 64-bit (`-double`), scalar prefix, `-part`.
+     `impulse-cranelift` in 64-bit (`-double`), scalar prefix, `-part`.
    - `make wasm` — the faust-rs WASM backend is compiled to `.wasm + .json`
      and executed through Node's native WebAssembly runtime in 64-bit
      (`-double`), scalar prefix, `-part`.
@@ -81,16 +81,39 @@ See the design write-up in
      `CPP_TESTS` pointed at nonexistent paths. Producing `reference/*.ir` in the
      first place still needs the C++ oracle, exactly as for every other
      target.
+   - `make cpp-mem0` / `c-mem0` / `cranelift-mem0` — mode-zero custom
+     memory-manager lanes over every `dsp/` input supported by both the C++
+     oracle and the selected backend. Each lane compares the managed 15,000
+     frame prefix with `reference/*.ir` and validates the version-2 memory JSON
+     plus `compute_cost`. `make all-mem0` runs all three full-corpus lanes,
+     requires identical FIR costs across backends, then runs the focused
+     `dsp-mem0/` audit. That audit poisons allocations, reconciles descriptions,
+     allocations, reverse destruction and leaks, and compares C/C++ `-O0`/`-O3`
+     with Cranelift optimization levels 0/3. `make mem0-smoke` runs only this
+     self-contained audit; `make mem0-opt` reruns its optimization matrix;
+     `make mem0-sanitize` runs its C/C++ lanes under ASan and UBSan where the
+     host toolchain supports them.
 
 ## Requirements
 
 - A built faust-rs workspace: `make build` (builds `compiler`,
-  `impulse-runner`, and the `impulse_cranelift` binary in release mode).
+  `impulse-runner`, `impulse-cranelift`, and the mem0 JSON checker in release
+  mode).
 - A C++ Faust checkout for the reference oracle and the native C/C++ paths
   (architecture headers + `impulsearch.cpp`). Paths are configured in
   [`common.mk`](common.mk) and overridable:
-  `CPP_TESTS`, `FAUST_ARCH`, `FAUST_CPP`, `FAUSTLIBS`.
+  `CPP_TESTS`, `FAUST_ARCH`, `FAUST_CPP`, `FAUSTLIBS`. `FAUST_CPP` defaults to
+  `faust` resolved through `$PATH` — set it explicitly to the pinned dev
+  checkout's build (e.g. `.../faust/build/bin/faust`) if any other Faust
+  install is also on `$PATH`, or `make reference` silently regenerates against
+  the wrong oracle; see the Status section's methodology note for what that
+  looks like when it happens.
 - `c++` and the Faust standard libraries (default `/usr/local/share/faust`).
+- The full `*-mem0` and `all-mem0` targets use the standard `dsp/` reference
+  corpus and therefore have the same C++ oracle and Faust-library requirements
+  as the ordinary impulse lanes. `mem0-smoke`, the three `*-mem0-smoke`
+  targets, `mem0-opt`, and `mem0-sanitize` use only the import-free
+  `dsp-mem0/` fixtures.
 - Node.js for the WASM and AssemblyScript impulse runners.
 - `rustc` (already required to build the workspace) for the Rust backend gate.
 - Julia with the `StaticArrays` package for the Julia backend gate.
@@ -118,6 +141,10 @@ make assemblyscript # check the AssemblyScript backend (scalar prefix)
 make rust          # check the Rust backend (scalar prefix, rustc)
 make julia         # check the Julia backend (scalar prefix, Julia)
 make cmajor        # check scalar Cmajor via cmaj-generated C++
+make all-mem0      # full dsp/ corpus on C, C++, Cranelift, then focused audit
+make mem0-smoke    # focused allocation/JSON/O0-O3 audit on dsp-mem0/
+make mem0-opt      # rerun the focused C/C++/Cranelift -mem0 O0/O3 matrix
+make mem0-sanitize # audit C/C++ -mem0 ownership with ASan and UBSan
 make cpp-vec0      # check the C++ backend with -vec -lv 0
 make cpp-vec1      # check the C++ backend with -vec -lv 1
 make all-vec       # check -vec -lv 0 and -vec -lv 1 across all backends
@@ -146,7 +173,7 @@ supported responses.
 
 | Path | Purpose |
 |---|---|
-| `dsp/` | 132 test DSP programs (93 baseline + 21 ondemand + 18 multirate) |
+| `dsp/` | 133 test DSP programs used by the ordinary and full `mem0` lanes |
 | `common.mk` | shared, overridable configuration |
 | `known.mk` | per-DSP tolerances + faust-rs known-failure exclusion lists |
 | `build/ref/cpp-oracle-manifest.mk` | generated C++ oracle support classification |
@@ -157,6 +184,9 @@ supported responses.
 | `Make.cranelift` | faust-rs Cranelift JIT backend (scalar prefix, 64-bit, `-part`) |
 | `Make.wasm` | faust-rs WASM backend (scalar prefix, 64-bit, Node WebAssembly, `-part`) |
 | `Make.assemblyscript` | faust-rs AssemblyScript backend (scalar prefix, `asc` + Node WebAssembly, `-part`) |
+| `dsp-mem0/` | focused import-free memory-manager audit corpus (state/UI, delays, tables) |
+| `Make.mem0` | full-corpus and focused C/C++/Cranelift `-mem0` runtime/JSON gates |
+| `archs/faust_mem0*.h`, `archs/impulsemem0*.cpp` | audited custom-manager contracts and native drivers |
 | `Make.bench` | generated-code performance comparison with `faustbench -single` |
 | `tools/filesCompare.cpp` | the comparator |
 | `tools/impulsewasm.js` | Node WebAssembly scalar impulse runner |
@@ -165,51 +195,76 @@ supported responses.
 
 ## Status
 
-Historical raw sweep over the original 93 DSPs at the default `2e-06`
-tolerance (before the 21-case `ondemand_*` extension):
+Current sweep (2026-08-14) over the full `dsp/` corpus — 133 DSPs, default
+`2e-06` tolerance plus the bounded per-DSP overrides in
+[`known.mk`](known.mk) — against the pinned C++ Faust reference
+(`master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`; see `AGENTS.md`):
 
 | Backend | Match | Mismatch | Compile-fail |
 |---|---|---|---|
-| C++ (full 4-pass, exact) | **92** | 0 | 1 (`subcontainer1`) |
-| C (full 4-pass, exact) | **92** | 0 | 1 (`subcontainer1`) |
-| interpreter (scalar prefix, `-part`) | **92** | 0 | 1 (`subcontainer1`) |
-| Cranelift JIT (scalar prefix, `-part`, 64-bit) | **92** | 0 | 1 (`subcontainer1`) |
-| WASM (scalar prefix, `-part`, 64-bit, Node) | **92** | 0 | 1 (`subcontainer1`) |
-| AssemblyScript (scalar prefix, `-part`, `asc` + Node) | **92** | 0 | 1 (`subcontainer1`) |
-| Rust (scalar prefix, `-part`, `rustc`) | **92** | 0 | 1 (`subcontainer1`) |
+| C++ (full 4-pass, exact) | **133** | 0 | 0 |
+| C (full 4-pass, exact) | **133** | 0 | 0 |
+| interpreter (scalar prefix, `-part`) | **133** | 0 | 0 |
+| Cranelift JIT (scalar prefix, `-part`, 64-bit) | **133** | 0 | 0 |
+| WASM (scalar prefix, `-part`, 64-bit, Node) | **133** | 0 | 0 |
+| AssemblyScript (scalar prefix, `-part`, `asc` + Node) | **133** | 0 | 0 |
+| Rust (scalar prefix, `-part`, `rustc`) | **133** | 0 | 0 |
+| Julia (scalar prefix, `-part`, `julia`) | **133** | 0 | 0 |
 | Vector variants (`-vec -lv 0` / `-vec -lv 1`) | inherit backend gates |  |  |
 
-The corpus now also includes `ondemand_01_basic.dsp` through
-`ondemand_21_nested_delay_counter.dsp`. Their genuine C++ 60000-frame
-references all contain finite non-zero signal, and their faust-rs interpreter
-15000-frame scalar responses are finite, non-silent, and match the C++
-reference prefixes at the default tolerance. The smallest non-zero sample
-count is 144 (`ondemand_03_input_filter`), so none of these cases can pass as a
-silent-response test.
+`make cpp`, `make c`, `make interp`, `make cranelift`, `make wasm`,
+`make assemblyscript`, `make rust`, and `make julia` are all green on the
+complete corpus with `KNOWN_FAIL_all` and every backend's `KNOWN_FAIL_<name>`
+empty — the last shared gap, `subcontainer1`, was fixed 2026-08-06 when
+`--table-init runtime` (now the default) started filling its sample-rate-
+dependent table at compile time instead of requiring a fold the compile-time
+SIGGEN interpreter could not do. The clock-domain fixtures
+(`ondemand_*`/`upsampling_*`/`downsampling_*`, 48 files) are full members of
+this sweep, not a separate partial one: the pinned reference branch compiles
+and runs them like any other DSP, since `ondemand` clock domains are exactly
+what that branch develops.
+[`porting/ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md`](../../porting/ondemand-vec-fad-interleave-synthesis-2026-07-07-en.md)
+tracks the broader numerical validation this sweep is one part of.
 
-The 18 multirate cases, `upsampling_01_accumulator.dsp` through
-`upsampling_09_sr_filter.dsp` and their `downsampling_*` counterparts, cover
-input-consuming and domain-free state, parallel recursion, delay lines,
-dynamic UI rates, multiple branches, nested domains, delayed selectors, and a
-two-oscillator filtered signal whose phase and filter coefficients depend on
-the domain-local `ma.SR`. Every 15000-frame interpreter response is finite and
-non-silent (between 3 and 30000 non-zero output samples), and every response
-matches the genuine C++ reference prefix at the default tolerance. Dedicated
+**Methodology note, recorded because it cost real time to find:** `FAUST_CPP`
+defaults to `?= faust`, resolved through `$PATH`. On a machine with a second,
+newer Faust install ahead of the pinned checkout on `$PATH` (Homebrew, a
+system package, anything not `$CPP_TESTS/build/bin/faust`), this sweep silently
+reproduces against the *wrong* oracle — and the failure mode is not an error,
+it is a smaller, differently-shaped corpus and spurious per-DSP mismatches that
+look exactly like real faust-rs regressions. That is what produced this
+table's own previous count: run against a `/usr/local/bin/faust` v2.87.4
+instead of the pinned dev build, the manifest preflight reported only 94/133
+DSPs as oracle-supported (the clock-domain fixtures are dev-branch-only,
+unreleased in 2.87.4) and one 0-input, high-feedback DSP (`bells`) diverged
+outright — not from a faust-rs defect, but from comparing against a genuinely
+different compiler version with different button-excitation timing. Always
+pass `FAUST_CPP=/path/to/pinned/build/bin/faust` explicitly rather than
+trusting the default when regenerating `reference/` for anything you intend to
+publish or rely on.
+
+The `ondemand_*` genuine C++ 60000-frame references all contain finite
+non-zero signal, and the faust-rs interpreter's 15000-frame scalar responses
+are finite, non-silent, and match the C++ reference prefixes (smallest
+non-zero sample count: 144, `ondemand_03_input_filter`) — so none of these 21
+cases can pass as a silent-response test. The 18 multirate cases
+(`upsampling_*`/`downsampling_*`) cover input-consuming and domain-free state,
+parallel recursion, delay lines, dynamic UI rates, multiple branches, nested
+domains, delayed selectors, and a two-oscillator filtered signal whose phase
+and filter coefficients depend on the domain-local `ma.SR`; every 15000-frame
+interpreter response is finite and non-silent (between 3 and 30000 non-zero
+output samples) and matches the genuine C++ reference prefix. Dedicated
 runtime and C++ differential compiler tests additionally assert that `ma.SR`
 is `SR*H` under upsampling and `SR/H` under downsampling, including nested
 factor composition.
 
-In the historical baseline, the C++ backend reproduced the full 60000-frame
-reference exactly on 92/93 DSPs. The remaining mismatches were classified by
-their *max* delta and either given a per-DSP tolerance (bounded rounding) or
-listed as a known failure (real gap) in [`known.mk`](known.mk) /
-[`KNOWN_FAILURES.md`](KNOWN_FAILURES.md). With those applied, the original
-93-DSP aggregate targets were green: `make cpp` (92), `make c` (92),
-`make cranelift` (92), `make interp` (92), `make wasm` (92),
-`make assemblyscript` (92), and `make rust` (92). The vector-mode gates use suffixed
-outdirs such as `cpp-vec0` / `cpp-vec1`, inherit the base backend known-failure
-lists, and can be run per backend or together with `make all-vec`; excluded
-cases are documented in `known.mk` to fix later.
+Historical baseline, kept for provenance: the original sweep covered 93 DSPs
+(before the corpus grew to include the clock-domain fixtures), reproduced the
+full 60000-frame reference exactly on 92/93, and carried `subcontainer1` as a
+shared compile-fail case in every backend until the 2026-08-06 fix above. The
+vector-mode gates use suffixed outdirs such as `cpp-vec0` / `cpp-vec1`, inherit
+the base backend known-failure lists, and can be run per backend or together
+with `make all-vec`; excluded cases are documented in `known.mk` to fix later.
 
 The backend matrix uses separate outdirs such as `cpp-ss2` and
 `wasm-vec1-ss3`. `BACKEND_MATRIX_SMOKE_DSPFILES` defaults to `APF`, `delays`, and
@@ -261,9 +316,21 @@ make bench BENCH_OPTIONS="-double -run 5 -bs 512"
 ```
 
 This is the recommended command for results intended to guide optimization or
-report a regression. The recipe also passes `-I dsp -I $(FAUSTLIBS)`.
+report a regression. The recipe also passes `-I $(dspdir) -I $(FAUSTLIBS)`.
 `BENCH_WARN_MIN` remains independently overridable when a different reporting
 threshold is wanted.
+
+`bench` and `compile-bench` need neither a `.ir` reference nor per-DSP
+certification (unlike `vec-bench` below), so they run against any DSP corpus,
+not just `dsp/`. Point `dspdir` at it; DSPs may be nested in per-category
+subdirectories — every `*.dsp` file under `dspdir` is found recursively, and
+its name in the CSV and under `build/bench/logs/` is the path relative to
+`dspdir` (e.g. `misc/tester`):
+
+```bash
+make bench dspdir=/Users/letz/faust/examples BENCH_OPTIONS="-double -run 5 -bs 512"
+make compile-bench dspdir=/Users/letz/faust/examples
+```
 
 `make bench-self-test` uses a synthetic `faustbench` fixture to verify
 alternating order, all principal statuses, geometric-mean/median calculation,

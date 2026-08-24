@@ -9,6 +9,11 @@ mode, qualified in the same runs at 132/133 with the single expected
 `FRS-SFIR-0004` rejection of §2.3 (93/93 with it excluded). Vector certification
 went from 97 certified with 1 compile error to 98 certified with 0 errors across
 all 16 modes.
+Follow-up (2026-08-11): computed table extents and the real
+`basics.lib::tabulateNd_test` are accepted in scalar/vector and runtime/const
+modes because global signal simplification reduces their arithmetic size before
+the literal FIR boundary. This closes `DIFF-GAP-002`; see
+`tests/corpus/rep_87_table_computed_size.dsp`.
 Scope: initial content of `rdtable` / `rwtable` tables (`SIGWRTBL(size, SIGGEN(g), …)`)
 
 ## 1. Objective
@@ -91,18 +96,16 @@ For the writable case the content is additionally stored **twice**: once in the
 
 ### 2.3 Functional gaps
 
-Three programs that the reference compiles and `faust-rs` rejects with
-`FRS-SFIR-0004`:
-
-1. `tests/impulse-tests/dsp/subcontainer1.dsp` — the canonical upstream test
-   for sample-rate-dependent table content (`rdtable(100, ma.SR, ba.time%100)`).
-   This is the one remaining transform error of the impulse corpus.
-2. Any sample-rate-dependent generator, e.g.
-   `rdtable(1024, exp(-float(ba.time)/ma.SR), …)`. The reference compiles the
-   `1/min(192000, max(1, fSampleRate))` constant **inside the sub-container's**
-   `instanceInit`.
-3. Any `ffunction` inside table content. The reference emits
+One program class that the reference compiles and `faust-rs` still rejects with
+`FRS-SFIR-0004`: an `ffunction` inside table content. The reference emits
    `table[i1] = myfun(static_cast<float>(iRec0[1]));` in the fill loop.
+
+Sample-rate-dependent generators, including
+`rdtable(1024, exp(-float(ba.time)/ma.SR), …)`, compile in `runtime` mode as
+before. In `const` mode they require an explicit
+`--table-init-sample-rate HZ`, which is intentionally embedded in the literal
+table and reported as `FRS-COMP-0006` under `--warn`; no implicit default SR is
+permitted.
 
 UI widgets inside table content are **not** a gap: the reference type checker
 rejects them before code generation (`ERROR : checkInit failed for type RSESN`),

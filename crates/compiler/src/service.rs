@@ -38,24 +38,46 @@ impl Compiler {
         }
     }
 
-    /// Validate and expand one Faust DSP source.
+    /// Expands one Faust DSP source into a self-contained program.
     ///
     /// Parses and evaluates the program using any `-I` search paths carried in
-    /// `request.args`.  If compilation succeeds the original source text is
-    /// returned verbatim; the Rust compiler currently has no box→DSP serializer
-    /// analogous to C++ `printBox`, so the expanded form equals the input.
+    /// `request.args`, then serializes the evaluated box back to Faust source
+    /// with every import and abstraction inlined. See [`crate::expand`] for the
+    /// document layout and the values that legitimately differ from a C++
+    /// expansion.
+    ///
+    /// A source that already begins with a `compile_options` declaration takes
+    /// the short path: it is returned unchanged when the options match, and
+    /// with a fresh options line prepended when they do not. This mirrors C++
+    /// `expandDSPFromString`, including the fact that the test never matches a
+    /// real expansion — see [`expand::starts_with_compilation_options`].
     ///
     /// Mirrors: `expandDSPFromString` / `expandDSPFromFile` (C++ Faust API).
+    ///
+    /// # Errors
+    /// Returns [`FaustwasmServiceError`] when the program does not compile or
+    /// cannot be serialized.
     pub fn expand_dsp(&self, request: &ExpandDspRequest) -> Result<String, FaustwasmServiceError> {
         let argv: Vec<String> = request.args.split_whitespace().map(str::to_owned).collect();
+
+        if expand::starts_with_compilation_options(&request.source) {
+            let normalized = expand::reorganize_compilation_options(&argv);
+            return Ok(
+                if expand::extract_compilation_options(&request.source) == Some(normalized.as_str())
+                {
+                    request.source.clone()
+                } else {
+                    format!(
+                        "declare compile_options \"{normalized}\";\n{}",
+                        request.source
+                    )
+                },
+            );
+        }
+
         let search_paths = parse_search_paths_from_argv(&argv);
-        self.compile_source_to_signals_with_search_paths(
-            &request.source_name,
-            &request.source,
-            &search_paths,
-        )
-        .map(|_| request.source.clone())
-        .map_err(FaustwasmServiceError::compile_failure)
+        self.expand_source_to_dsp(&request.source_name, &request.source, &search_paths, &argv)
+            .map_err(FaustwasmServiceError::compile_failure)
     }
 
     /// Returns a copy of this compiler with the compilation options found in a
@@ -63,9 +85,9 @@ impl Compiler {
     ///
     /// Reads the same flag spellings as the `faust-rs` CLI
     /// (`crates/compiler/src/cli/args.rs`), and selects the same [`RealType`],
-    /// [`ComputeMode`], [`SchedulingStrategy`], [`ControlRateMode`], and
-    /// [`ProcessingApi`] that [`cli::runner::compiler_from_cli`] would build
-    /// for those flags:
+    /// [`ComputeMode`], [`SchedulingStrategy`], [`ControlRateMode`],
+    /// [`ProcessingApi`], and [`TableInitMode`] that
+    /// [`cli::runner::compiler_from_cli`] would build for those flags:
     ///
     /// | flag | effect |
     /// |------|--------|
@@ -75,6 +97,8 @@ impl Compiler {
     /// | `-ss N` / `--scheduling-strategy N` | statement scheduling order |
     /// | `-ec` / `--external-control` | separate `control` entry point |
     /// | `-os` / `--one-sample` | `frame` entry point |
+    /// | `--table-init runtime\|const` | generated-table initialization mode |
+    /// | `--table-init-sample-rate N` | sample rate frozen into a `const` table |
     ///
     /// These are plain Faust CLI flags rather than a dialect belonging to any
     /// one caller, which is why decoding them here — instead of only in the
@@ -102,6 +126,9 @@ impl Compiler {
                 "const" => compiler = compiler.with_table_init_mode(TableInitMode::Const),
                 _ => {}
             }
+        }
+        if let Some(sample_rate) = argv_value_parsed(argv, &["--table-init-sample-rate"]) {
+            compiler = compiler.with_table_init_sample_rate(sample_rate);
         }
         if has(&["-vec", "--vec"]) {
             let vec_size =
@@ -305,6 +332,7 @@ impl Compiler {
                 top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
                 compile_options: compile_options.clone(),
                 double_precision,
+                memory_flavor: None,
             },
         )
         .ok()

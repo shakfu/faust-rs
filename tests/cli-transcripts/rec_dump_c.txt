@@ -1,8 +1,20 @@
+/* ------------------------------------------------------------
+name: "rec"
+Code generated with Faust 0.8.0 (https://faust.grame.fr)
+Compilation options: -lang c -single
+------------------------------------------------------------ */
+
 #ifndef  __mydsp_H__
 #define  __mydsp_H__
 
 #ifndef FAUSTFLOAT
 #define FAUSTFLOAT float
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define FAUST_UNUSED __attribute__((unused))
+#else
+#define FAUST_UNUSED
 #endif
 
 #ifdef __cplusplus
@@ -18,6 +30,7 @@ extern "C" {
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifndef FAUSTCLASS
 #define FAUSTCLASS mydsp
@@ -28,13 +41,13 @@ extern "C" {
 #define exp10 __exp10
 #endif
 
-static inline int faustmini(int a, int b) { return (a < b) ? a : b; }
-static inline int faustmaxi(int a, int b) { return (a > b) ? a : b; }
+static inline FAUST_UNUSED int faustmini(int a, int b) { return (a < b) ? a : b; }
+static inline FAUST_UNUSED int faustmaxi(int a, int b) { return (a > b) ? a : b; }
 
 
 typedef struct {
     int fSampleRate;
-    float fRec40[4];
+    float fRec0[4];
 } mydsp;
 
 mydsp* newmydsp() {
@@ -47,6 +60,9 @@ void deletemydsp(mydsp* dsp) {
 }
 
 void metadatamydsp(MetaGlue* m) {
+    m->declare(m->metaInterface, "compile_options", "-lang c -single");
+    m->declare(m->metaInterface, "filename", "rec.dsp");
+    m->declare(m->metaInterface, "name", "rec");
 }
 
 int getSampleRatemydsp(mydsp* RESTRICT dsp) {
@@ -76,7 +92,7 @@ void instanceResetUserInterfacemydsp(mydsp* dsp) {
 
 void instanceClearmydsp(mydsp* dsp) {
     for (int lRec0 = 0; lRec0 < 4; lRec0 = lRec0 + 1) {
-        dsp->fRec40[lRec0] = 0.0f;
+        dsp->fRec0[lRec0] = 0.0f;
     }
 }
 
@@ -103,10 +119,10 @@ void computemydsp(mydsp* dsp, int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOA
     FAUSTFLOAT* input0 = inputs[0];
     FAUSTFLOAT* output0 = outputs[0];
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
-        dsp->fRec40[0] = (((float)(input0[i0])) + (0.5f * dsp->fRec40[1]));
-        output0[i0] = ((FAUSTFLOAT)(dsp->fRec40[3]));
+        dsp->fRec0[0] = (((float)(input0[i0])) + (0.5f * dsp->fRec0[1]));
+        output0[i0] = ((FAUSTFLOAT)(dsp->fRec0[3]));
         for (int jRec1 = 3; jRec1 > 0; jRec1 = jRec1 + -1) {
-            dsp->fRec40[jRec1] = dsp->fRec40[(jRec1 - 1)];
+            dsp->fRec0[jRec1] = dsp->fRec0[(jRec1 - 1)];
         }
     }
 }

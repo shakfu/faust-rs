@@ -6,14 +6,18 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
 use diagnostics::{LabelRole, SourceKind};
 use parser::{
-    CompilationMetadataKey, CompilationMetadataStore, SourceReaderError, VirtualSourceMap,
-    parse_file_with_imports, parse_minimal, parse_program, parse_program_with_imports_and_metadata,
+    CompilationMetadataKey, CompilationMetadataStore, FetchedSource, PrefetchedRemoteSourceBundle,
+    RemoteFetchPolicy, RemoteFetchRequest, RemoteSourceCapability, RemoteSourceFetcher,
+    SourceFetchError, SourceLocator, SourceReaderError, VirtualSourceMap, parse_file,
+    parse_minimal, parse_program, parse_program_with_imports, parse_url,
 };
 use tlib::{TreeArena, TreeId};
+use url::Url;
 
 fn make_temp_root(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -251,8 +255,11 @@ fn bridge_exposes_file_import_parsing() {
     fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n").expect("main should be written");
     fs::write(&lib, "gain = _;\n").expect("lib should be written");
 
-    let out =
-        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    let out = parse_file(
+        &main,
+        &parser::ParseOptions::default().with_search_paths(std::slice::from_ref(&root)),
+    )
+    .expect("parse should succeed");
     assert!(out.root.is_some(), "root should be present");
     assert!(
         out.errors.is_empty(),
@@ -298,8 +305,11 @@ fn parse_file_with_imports_scopes_top_level_metadata_like_cpp() {
     .expect("main should be written");
     fs::write(&lib, "declare author \"lib-author\";\ngain = _;\n").expect("lib should be written");
 
-    let out =
-        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    let out = parse_file(
+        &main,
+        &parser::ParseOptions::default().with_search_paths(std::slice::from_ref(&root)),
+    )
+    .expect("parse should succeed");
     assert!(
         out.errors.is_empty(),
         "unexpected parse errors: {:?}",
@@ -345,8 +355,11 @@ fn parse_file_with_imports_exposes_deterministic_used_files_order() {
     fs::write(&lib_a, "a = _;\n").expect("a.lib should be written");
     fs::write(&lib_b, "b = _;\n").expect("b.lib should be written");
 
-    let out =
-        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    let out = parse_file(
+        &main,
+        &parser::ParseOptions::default().with_search_paths(std::slice::from_ref(&root)),
+    )
+    .expect("parse should succeed");
     assert!(
         out.errors.is_empty(),
         "unexpected parse errors: {:?}",
@@ -375,8 +388,11 @@ fn parse_file_with_imports_preserves_imported_file_diagnostic_origin() {
     fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n").expect("main should be written");
     fs::write(&lib, "gain = ;\n").expect("lib should be written");
 
-    let out =
-        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    let out = parse_file(
+        &main,
+        &parser::ParseOptions::default().with_search_paths(std::slice::from_ref(&root)),
+    )
+    .expect("parse should succeed");
 
     let lib_canonical = lib.canonicalize().expect("lib path should canonicalize");
     let has_label_on_imported_file = out
@@ -404,8 +420,11 @@ fn parse_file_with_imports_reports_the_complete_cycle_and_each_edge() {
     fs::write(&second, "import(\"third.lib\");\n").expect("write second");
     fs::write(&third, "import(\"first.dsp\");\n").expect("write third");
 
-    let error =
-        parse_file_with_imports(&first, std::slice::from_ref(&root)).expect_err("cycle must fail");
+    let error = parse_file(
+        &first,
+        &parser::ParseOptions::default().with_search_paths(std::slice::from_ref(&root)),
+    )
+    .expect_err("cycle must fail");
     let SourceReaderError::ImportCycle { path, cycle } = error else {
         panic!("expected import cycle");
     };
@@ -437,7 +456,7 @@ fn parse_file_with_imports_reports_the_complete_cycle_and_each_edge() {
 }
 
 #[test]
-fn parse_file_with_imports_keeps_remote_urls_out_of_scope() {
+fn parse_file_with_imports_reports_that_remote_urls_are_disabled() {
     let root = make_temp_root("remote_import_policy");
     let main = root.join("main.dsp");
     fs::write(
@@ -446,16 +465,139 @@ fn parse_file_with_imports_keeps_remote_urls_out_of_scope() {
     )
     .expect("main should be written");
 
-    let err = parse_file_with_imports(&main, std::slice::from_ref(&root)).expect_err("must fail");
+    let err = parse_file(
+        &main,
+        &parser::ParseOptions::default().with_search_paths(std::slice::from_ref(&root)),
+    )
+    .expect_err("must fail");
     match err {
-        SourceReaderError::UnresolvedImport { name, from, .. } => {
-            assert_eq!(&*name, "https://example.com/stdfaust.lib");
-            assert_eq!(from, main.canonicalize().expect("main should canonicalize"));
+        SourceReaderError::NetworkDisabled { url } => {
+            assert_eq!(url.as_str(), "https://example.com/stdfaust.lib");
         }
         other => panic!("unexpected error kind for remote import policy: {other:?}"),
     }
 
     fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[derive(Debug)]
+struct NestedRemoteFetcher;
+
+impl RemoteSourceFetcher for NestedRemoteFetcher {
+    fn fetch(&self, request: &RemoteFetchRequest) -> Result<FetchedSource, SourceFetchError> {
+        let source = match request.url.path() {
+            "/dsp/main.dsp" => "import(\"lib/identity.lib\");\nprocess = identity;\n",
+            "/dsp/lib/identity.lib" => "identity = _;\n",
+            path => panic!("unexpected remote source path: {path}"),
+        };
+        Ok(FetchedSource {
+            requested_url: request.url.clone(),
+            final_url: request.url.clone(),
+            bytes: source.as_bytes().to_vec(),
+        })
+    }
+}
+
+#[test]
+fn parse_url_with_imports_resolves_relative_remote_children() {
+    let output = parse_url(
+        "https://example.test/dsp/main.dsp",
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_metadata_store(CompilationMetadataStore::new(
+                "https://example.test/dsp/main.dsp",
+            ))
+            .with_float_size(1)
+            .with_remote(parser::RemoteSourceCapability::new(
+                Arc::new(NestedRemoteFetcher),
+                RemoteFetchPolicy::default(),
+            )),
+    )
+    .expect("remote source graph should parse");
+
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+    assert!(output.used_files.is_empty());
+    assert_eq!(
+        output
+            .used_sources
+            .iter()
+            .map(SourceLocator::display_name)
+            .collect::<Vec<_>>(),
+        [
+            "https://example.test/dsp/main.dsp",
+            "https://example.test/dsp/lib/identity.lib",
+        ]
+    );
+}
+
+#[test]
+fn supplied_remote_program_uses_its_url_as_the_relative_import_base() {
+    let bundle = PrefetchedRemoteSourceBundle::try_new([(
+        Url::parse("https://example.test/dsp/lib/identity.lib").unwrap(),
+        b"identity = _;\n".to_vec(),
+    )])
+    .unwrap();
+    let output = parse_program_with_imports(
+        "import(\"lib/identity.lib\");\nprocess = identity;\n",
+        "https://example.test/dsp/main.dsp",
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_virtual_sources(VirtualSourceMap::default().clone())
+            .with_metadata_store(CompilationMetadataStore::new(
+                "https://example.test/dsp/main.dsp",
+            ))
+            .with_float_size(1)
+            .with_remote(RemoteSourceCapability::new(
+                Arc::new(bundle),
+                RemoteFetchPolicy::default(),
+            )),
+    )
+    .expect("prefetched relative remote graph should parse");
+
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+    assert_eq!(
+        output
+            .used_sources
+            .iter()
+            .map(SourceLocator::display_name)
+            .collect::<Vec<_>>(),
+        [
+            "https://example.test/dsp/main.dsp",
+            "https://example.test/dsp/lib/identity.lib",
+        ]
+    );
+}
+
+#[test]
+fn supplied_local_program_can_import_an_explicit_prefetched_url() {
+    let child_url = "https://example.test/lib/constant.lib";
+    let bundle = PrefetchedRemoteSourceBundle::try_new([(
+        Url::parse(child_url).unwrap(),
+        b"remote_constant = 42;\n".to_vec(),
+    )])
+    .unwrap();
+    let output = parse_program_with_imports(
+        &format!("import(\"{child_url}\");\nprocess = remote_constant;\n"),
+        "main.dsp",
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_virtual_sources(VirtualSourceMap::default().clone())
+            .with_metadata_store(CompilationMetadataStore::new("main.dsp"))
+            .with_float_size(1)
+            .with_remote(RemoteSourceCapability::new(
+                Arc::new(bundle),
+                RemoteFetchPolicy::default(),
+            )),
+    )
+    .expect("explicit prefetched URL import should parse");
+
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+    assert!(
+        output
+            .used_sources
+            .iter()
+            .any(|source| source.display_name() == child_url)
+    );
 }
 
 #[test]
@@ -472,12 +614,13 @@ fn parse_program_with_imports_deduplicates_transitive_virtual_imports() {
         ),
     ]);
 
-    let out = parse_program_with_imports_and_metadata(
+    let out = parse_program_with_imports(
         "import(\"stdfaust.lib\");\nprocess = freq;\n",
         "main.dsp",
-        &[],
-        &bundle,
-        CompilationMetadataStore::new("main.dsp"),
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_virtual_sources(bundle.clone())
+            .with_metadata_store(CompilationMetadataStore::new("main.dsp")),
     )
     .expect("virtual import parse should succeed");
     assert!(
@@ -521,20 +664,22 @@ fn parse_program_with_imports_deduplicates_transitive_virtual_imports() {
 fn parse_program_with_imports_treats_inline_and_multiline_local_imports_equivalently() {
     let bundle = VirtualSourceMap::new([(PathBuf::from("child.lib"), "process = _;\n".to_owned())]);
 
-    let inline = parse_program_with_imports_and_metadata(
+    let inline = parse_program_with_imports(
         "GEN = environment { import(\"child.lib\"); }.process;\nprocess = GEN;\n",
         "inline_main.dsp",
-        &[],
-        &bundle,
-        CompilationMetadataStore::new("inline_main.dsp"),
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_virtual_sources(bundle.clone())
+            .with_metadata_store(CompilationMetadataStore::new("inline_main.dsp")),
     )
     .expect("inline parse should succeed");
-    let multiline = parse_program_with_imports_and_metadata(
+    let multiline = parse_program_with_imports(
         "GEN = environment {\nimport(\"child.lib\");\n}.process;\nprocess = GEN;\n",
         "multiline_main.dsp",
-        &[],
-        &bundle,
-        CompilationMetadataStore::new("multiline_main.dsp"),
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_virtual_sources(bundle.clone())
+            .with_metadata_store(CompilationMetadataStore::new("multiline_main.dsp")),
     )
     .expect("multiline parse should succeed");
 
@@ -611,12 +756,13 @@ fn repeated_hash_consed_identifier_uses_keep_distinct_parse_occurrences() {
 fn imported_box_occurrences_are_remapped_into_the_destination_arena() {
     let bundle =
         VirtualSourceMap::new([(PathBuf::from("child.lib"), "foo = missing;\n".to_owned())]);
-    let mut output = parse_program_with_imports_and_metadata(
+    let mut output = parse_program_with_imports(
         "import(\"child.lib\");\nprocess = foo;\n",
         "main.dsp",
-        &[],
-        &bundle,
-        CompilationMetadataStore::new("main.dsp"),
+        &parser::ParseOptions::default()
+            .with_search_paths(&[])
+            .with_virtual_sources(bundle.clone())
+            .with_metadata_store(CompilationMetadataStore::new("main.dsp")),
     )
     .expect("virtual import should parse");
     assert!(output.errors.is_empty(), "{:?}", output.errors);

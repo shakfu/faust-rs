@@ -20,6 +20,7 @@ codegen = { path = "../codegen" }
 compiler = { path = "../compiler" }
 fir = { path = "../fir" }
 ffi-common = { path = "../ffi-common" }
+serde_json = "1"
 
 [dev-dependencies]
 interp_ffi = { package = "interp-ffi", path = "../interp-ffi" }
@@ -33,3 +34,20 @@ unused_lifetimes = "warn"
 
 [lints.clippy]
 all = "warn"
+
+# Both binaries are declared explicitly. Without an entry, Cargo auto-discovers
+# `src/bin/*.rs` and takes the file stem as the binary name — which is how
+# `impulse_cranelift` ended up underscored while every other tool, and its own
+# clap `name`, used a hyphen. Rust files stay snake_case; the shipped commands
+# are hyphenated.
+[[bin]]
+name = "impulse-cranelift"
+path = "src/bin/impulse_cranelift.rs"
+
+[[bin]]
+name = "mem0-json-check"
+path = "src/bin/mem0_json_check.rs"
+
+[[bin]]
+name = "faustprobe"
+path = "src/bin/faustprobe.rs"

@@ -33,14 +33,21 @@
 //! - The active signal->FIR lowering route is [`SignalFirLane::TransformFastLane`],
 //!   owned by `crates/transform`.
 
-// Every public item carries documentation, as in `crates/transform`. The
-// workspace CI gate (`cargo clippy --workspace --all-targets -- -D warnings`)
-// turns this into a hard failure, so the surface cannot silently drift back to
-// undocumented.
-#![warn(missing_docs)]
+// Every public item carries documentation, as in `crates/transform`.
+//
+// This must be `deny`, not `warn`: an inner `#![warn(...)]` attribute
+// overrides the command-line `-D warnings` clippy and CI already pass, so a
+// plain `warn` here was invisible to every existing gate — this comment
+// claimed a hard CI failure that a rejecting mutation on 2026-08-18 showed did
+// not happen. `deny` makes an undocumented `pub` item fail
+// `cargo build`/`check`/`clippy`/`test` directly.
+#![deny(missing_docs)]
 
 pub mod diagnostics_json;
 pub mod enrobage;
+pub mod expand;
+#[cfg(all(feature = "network-imports", not(target_arch = "wasm32")))]
+pub mod remote_fetch;
 
 mod box_preview;
 mod diagnostic_enrichment;
@@ -102,8 +109,11 @@ use codegen::backends::rust::{
 use codegen::backends::wasm::layout::WasmMemoryLayout;
 use codegen::backends::wasm::{WasmBackendError, WasmJsonContext, WasmModule, WasmOptions};
 use codegen::json::{
-    JsonBuildOptions, JsonDescription, JsonMetaEntry, build_json_description_from_fir,
+    JsonBuildOptions, JsonDescription, JsonMemoryDescription, JsonMetaEntry,
+    build_json_description_from_fir,
 };
+pub use codegen::memory_layout::MemoryLayoutFlavor;
+use codegen::memory_layout::{Mem0AnalysisOptions, analyze_effective_mem0};
 pub use diagnostics::{
     Applicability, ContentHash, DebugContext, DetailCode, Diagnostic, DiagnosticBundle,
     DiagnosticCategory, DiagnosticCode, DiagnosticTrace, DiagnosticValue, FactKey, HumanPosition,
@@ -111,19 +121,25 @@ pub use diagnostics::{
     SourceCoordinateError, SourceFile, SourceId, SourceKind, SourceMap, SourceMapBuilder,
     SourceRange, SourceSpan, Stage, SuggestedFix, TextEdit, TraceFrame, TraceKind,
 };
-use diagnostics::{ToDiagnostic, codes::COMP_TYPE_FAILED};
+use diagnostics::{
+    ToDiagnostic,
+    codes::{COMP_TABLE_INIT_SAMPLE_RATE, COMP_TYPE_FAILED},
+};
 use fir::{
     FirId, FirStore,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
     inliner::sweep_scaffolding_drop_roots_with_mapping,
 };
 use parser::VirtualSourceMap;
-use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};
+use parser::{
+    CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, RemoteFetchPolicy,
+    RemoteSourceFetcher, SourceReaderError,
+};
 use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
-use signals::SigId;
+use signals::{SigId, SigMatch, match_sig};
 pub use sigtype::InferenceError;
 use sigtype::TypeAnnotator;
-use tlib::NodeKind;
+use tlib::{NodeKind, tree_to_str};
 pub use transform::schedule::SchedulingStrategy;
 pub use transform::signal_fir::{
     ComputeMode, ControlRateMode, ProcessingApi, RealType, TableInitMode, VectorEffectiveMode,
@@ -199,6 +215,61 @@ pub struct SignalCompileOutput {
     /// compilation result: a caller that ignores this field gets exactly the
     /// behavior it had before the field existed.
     pub warnings: DiagnosticBundle,
+}
+
+/// Parse + eval output package, stopping before propagation.
+///
+/// This is what the compiler knows about a program at the point C++
+/// `libcode.cpp:1378` branches for `-e`: the process box is evaluated, its
+/// arity is known, and no signal has been propagated yet.
+///
+/// Mapping status: `adapted`. C++ has no such value — its `-e` branch reads
+/// the same information from `gGlobal` and local variables inside one long
+/// function. Naming the boundary is what lets the expansion path reuse the
+/// evaluation rules instead of reimplementing them.
+#[derive(Debug)]
+pub struct BoxCompileOutput {
+    /// Compiled source name, as reported in diagnostics and metadata keys.
+    ///
+    /// Carried on the value because the propagation half needs the same name
+    /// the evaluation half used; deriving it twice from a path is how the two
+    /// halves would silently disagree for remote and canonicalized sources.
+    pub source_name: String,
+    /// Full parser output (arena + metadata + diagnostics from parse stage).
+    pub parse: ParseOutput,
+    /// Aggregated top-level `declare key "value";` metadata visible after the
+    /// whole parse + eval file-loading session.
+    pub compilation_metadata: parser::CompilationMetadataSnapshot,
+    /// Additional Faust source files loaded through evaluator-side
+    /// `component(...)` / `library(...)` resolution during this session.
+    pub loaded_files: Vec<PathBuf>,
+    /// Evaluated `process` box expression after `eval`.
+    pub process_box: BoxId,
+    /// Definition-list root used for occurrence-aware diagnostic ownership.
+    pub definitions_root: BoxId,
+    /// Selected Faust entrypoint name for binding/source traces.
+    pub entrypoint_name: Box<str>,
+    /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity_typed`.
+    pub process_arity: BoxArity,
+    /// Flattened box consumed by propagation.
+    ///
+    /// Private continuation state: it exists so completing the pipeline does
+    /// not re-flatten, and it is not the tree a serializer should print —
+    /// `process_box` is.
+    process_flat: propagate::FlatBoxId,
+    /// Arity memo shared with propagation, kept for the same reason.
+    arity_cache: ArityCache,
+    /// Evaluated `BoxId` → source definition name, forwarded to the signal
+    /// output package.
+    def_names: std::collections::HashMap<boxes::BoxId, String>,
+}
+
+impl BoxCompileOutput {
+    /// Returns the source name this program was compiled under.
+    #[must_use]
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
 }
 
 impl SignalCompileOutput {
@@ -360,8 +431,8 @@ impl AuxFileArtifact {
 
 /// Request payload for [`Compiler::expand_dsp`].
 ///
-/// Mapping status: `adapted` — see that method for the one behavioral gap
-/// (no box→DSP serializer yet, so the expansion returns the input verbatim).
+/// Mapping status: `adapted` — see [`crate::expand`] for the values that
+/// legitimately differ from a C++ expansion of the same program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandDspRequest {
     /// Logical source name reported in diagnostics.
@@ -499,6 +570,10 @@ pub struct Compiler {
     /// Whether a successful compilation reports non-blocking semantic
     /// observations such as potential out-of-domain math.
     semantic_warnings: bool,
+    /// Optional, session-scoped capability for explicit HTTP(S) sources.
+    remote_fetcher: Option<Arc<dyn RemoteSourceFetcher>>,
+    /// Resource limits passed unchanged to the injected transport.
+    remote_fetch_policy: RemoteFetchPolicy,
     entrypoint_name: Box<str>,
     /// Floating-point precision used for internal DSP computation in the
     /// transform fast lane. `Float32` (single precision) is the default;
@@ -515,6 +590,9 @@ pub struct Compiler {
     delay_line_threshold: u32,
     /// How generated-table content is produced (`--table-init`).
     table_init_mode: TableInitMode,
+    /// Explicit host sample rate used when `--table-init const` folds a
+    /// generator that reads `ma.SR`.
+    table_init_sample_rate: Option<i32>,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
     /// (`-vec`/`-vs`/`-lv`).
     ///
@@ -573,6 +651,11 @@ fn parser_float_size(real_type: RealType) -> u8 {
     }
 }
 
+fn explicit_remote_path(path: &Path) -> Option<&str> {
+    path.to_str()
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+}
+
 impl WasmArtifactBundle {
     /// Repackages a compiled [`WasmModule`] into the public artifact bundle,
     /// pairing its binary and JSON with the formatted `compile_options` string.
@@ -600,6 +683,7 @@ impl Compiler {
             real_type: RealType::default(),
             max_copy_delay: 16,
             table_init_mode: TableInitMode::default(),
+            table_init_sample_rate: None,
             delay_line_threshold: u32::MAX,
             compute_mode: ComputeMode::Scalar,
             scheduling_strategy: SchedulingStrategy::DepthFirst,
@@ -608,7 +692,46 @@ impl Compiler {
             cancel: None,
             timing_sink: None,
             semantic_warnings: false,
+            remote_fetcher: None,
+            remote_fetch_policy: RemoteFetchPolicy::default(),
         }
+    }
+
+    /// Enables explicit HTTP(S) entry sources and imports for this compiler.
+    ///
+    /// # Source provenance and adaptation
+    ///
+    /// This replaces C++ Faust's process-global `http_fetch` configuration
+    /// (`compiler/parser/sourcefetcher.hh`) with a per-compiler capability.
+    /// It is intentionally more general: native, test, browser-prefetched, and
+    /// policy-restricted hosts can inject different transports without global
+    /// state. No network access occurs unless this method is called.
+    #[must_use]
+    pub fn with_remote_source_fetcher(
+        mut self,
+        fetcher: Arc<dyn RemoteSourceFetcher>,
+        policy: RemoteFetchPolicy,
+    ) -> Self {
+        self.remote_fetcher = Some(fetcher);
+        self.remote_fetch_policy = policy;
+        self
+    }
+
+    /// Enables the built-in native HTTP(S) transport with unrestricted host
+    /// selection and bounded default resource limits.
+    ///
+    /// Server applications should normally call
+    /// [`Self::with_remote_source_fetcher`] with a restricted
+    /// [`remote_fetch::RemoteUrlPolicy`] instead.
+    #[cfg(all(feature = "network-imports", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn with_native_network_imports(self) -> Self {
+        self.with_remote_source_fetcher(
+            Arc::new(remote_fetch::UreqSourceFetcher::new(Arc::new(
+                remote_fetch::AllowAllRemoteUrls,
+            ))),
+            RemoteFetchPolicy::default(),
+        )
     }
 
     /// Returns a compiler facade that collects non-blocking semantic warnings.
@@ -658,6 +781,17 @@ impl Compiler {
     #[must_use]
     pub fn with_table_init_mode(mut self, mode: TableInitMode) -> Self {
         self.table_init_mode = mode;
+        self
+    }
+
+    /// Sets the sample rate used to fold `ma.SR`-dependent generated tables
+    /// under `--table-init const`.
+    ///
+    /// The value is deliberately explicit: it is embedded in the table at
+    /// compilation time and is not replaced by the host's `init` sample rate.
+    #[must_use]
+    pub fn with_table_init_sample_rate(mut self, sample_rate: i32) -> Self {
+        self.table_init_sample_rate = Some(sample_rate);
         self
     }
 
@@ -779,6 +913,7 @@ impl Compiler {
             control_rate_mode: self.control_rate_mode,
             processing_api: self.processing_api,
             table_init_mode: self.table_init_mode,
+            table_init_sample_rate: self.table_init_sample_rate,
             timing_sink: self.timing_sink.clone(),
         }
     }
@@ -791,6 +926,21 @@ impl Compiler {
         source: &str,
         signals: &SignalCompileOutput,
         lane: SignalFirLane,
+    ) -> Result<FirCompileOutput, CompilerError> {
+        self.lower_to_fir_with_name(source, signals, lane, None)
+    }
+
+    /// [`Self::lower_to_fir`] with an optional module-name override; `None`
+    /// derives the name from `source`, as the FIR dump and the Cranelift JIT
+    /// identity expect. Native-backend-flavored JSON passes an explicit name
+    /// so its `-mem0` `memory_layout` describes the identifiers that backend
+    /// really emits — see [`signal_lowering::json_memory_layout_module_name`].
+    fn lower_to_fir_with_name(
+        &self,
+        source: &str,
+        signals: &SignalCompileOutput,
+        lane: SignalFirLane,
+        module_name: Option<String>,
     ) -> Result<FirCompileOutput, CompilerError> {
         lower_signals_to_fir(
             source,
@@ -805,6 +955,8 @@ impl Compiler {
             self.control_rate_mode,
             self.processing_api,
             self.table_init_mode,
+            self.table_init_sample_rate,
+            module_name,
         )
         .map_err(|error| lower_fir_error_to_compiler(source, signals, error))
     }
@@ -824,11 +976,12 @@ impl Compiler {
         source: &str,
     ) -> Result<ParseOutput, CompilerError> {
         let output = self.time_phase("parser", || {
-            parser::parse_program_with_precision_and_metadata(
+            parser::parse_program_with_options(
                 source,
                 source_name,
-                parser_float_size(self.real_type),
-                parser::CompilationMetadataStore::new(source_name),
+                &parser::ParseOptions::default()
+                    .with_float_size(parser_float_size(self.real_type))
+                    .with_metadata_store(parser::CompilationMetadataStore::new(source_name)),
             )
         });
         ensure_parse_success(source_name, output)
@@ -847,17 +1000,66 @@ impl Compiler {
         path: &Path,
         search_paths: &[PathBuf],
     ) -> Result<ParseOutput, CompilerError> {
-        let import_search_paths = merge_import_search_paths(path, search_paths);
+        let remote_url = explicit_remote_path(path);
+        let search_path_anchor = if remote_url.is_some() {
+            Path::new("remote.dsp")
+        } else {
+            path
+        };
+        let import_search_paths = merge_import_search_paths(search_path_anchor, search_paths);
         let output = self
             .time_phase("parser", || {
-                parser::parse_file_with_imports_and_precision(
-                    path,
-                    &import_search_paths,
-                    parser_float_size(self.real_type),
-                )
+                if let Some(url) = remote_url {
+                    let metadata = parser::CompilationMetadataStore::new(url);
+                    if let Some(fetcher) = self.remote_fetcher.clone() {
+                        parser::parse_url(
+                            url,
+                            &parser::ParseOptions::default()
+                                .with_search_paths(&import_search_paths)
+                                .with_metadata_store(metadata)
+                                .with_float_size(parser_float_size(self.real_type))
+                                .with_remote(parser::RemoteSourceCapability::new(
+                                    fetcher,
+                                    self.remote_fetch_policy,
+                                )),
+                        )
+                    } else {
+                        parser::parse_url(
+                            url,
+                            &parser::ParseOptions::default()
+                                .with_search_paths(&import_search_paths)
+                                .with_metadata_store(metadata)
+                                .with_float_size(parser_float_size(self.real_type)),
+                        )
+                    }
+                } else if let Some(fetcher) = self.remote_fetcher.clone() {
+                    parser::parse_file(
+                        path,
+                        &parser::ParseOptions::default()
+                            .with_search_paths(&import_search_paths)
+                            .with_metadata_store(parser::CompilationMetadataStore::new(
+                                &path.display().to_string(),
+                            ))
+                            .with_float_size(parser_float_size(self.real_type))
+                            .with_remote(parser::RemoteSourceCapability::new(
+                                fetcher,
+                                self.remote_fetch_policy,
+                            )),
+                    )
+                } else {
+                    parser::parse_file(
+                        path,
+                        &parser::ParseOptions::default()
+                            .with_search_paths(&import_search_paths)
+                            .with_float_size(parser_float_size(self.real_type)),
+                    )
+                }
             })
             .map_err(CompilerError::import)?;
-        ensure_parse_success(&path.display().to_string(), output)
+        let source_name = remote_url
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.display().to_string());
+        ensure_parse_success(&source_name, output)
     }
 
     /// Parses one source file using the same default library search model as the
@@ -914,30 +1116,93 @@ impl Compiler {
         search_paths: &[PathBuf],
         virtual_sources: &VirtualSourceMap,
     ) -> Result<SignalCompileOutput, CompilerError> {
+        let boxes = self.compile_source_to_boxes_with_import_context(
+            source_name,
+            source,
+            search_paths,
+            virtual_sources,
+        )?;
+        self.pipeline_boxes_to_signals(source_name, boxes)
+    }
+
+    /// Parses one source string and evaluates its entry point, stopping before
+    /// propagation.
+    ///
+    /// The box-level counterpart of
+    /// [`Self::compile_source_to_signals_with_import_context`].
+    pub(crate) fn compile_source_to_boxes_with_import_context(
+        &self,
+        source_name: &str,
+        source: &str,
+        search_paths: &[PathBuf],
+        virtual_sources: &VirtualSourceMap,
+    ) -> Result<BoxCompileOutput, CompilerError> {
         let metadata_store = parser::CompilationMetadataStore::new(source_name);
-        let output = if search_paths.is_empty() && virtual_sources.is_empty() {
+        // Merge the built-in import search paths, exactly as
+        // `compile_file_to_boxes` does for a file. Without this a string
+        // source took the branch below, whose parser does not resolve
+        // `import(...)` at all: the statement survived into the box tree and
+        // the evaluator rejected it as "malformed definition node N", with N
+        // tracking its position. The name of the imported library was
+        // irrelevant — a non-existent one failed identically — and passing
+        // `-I` did not help, because nothing forwarded it this far.
+        //
+        // `source_name` is the anchor. It is not a real path for a string
+        // source, so it contributes only its parent directory (`.`), while the
+        // defaults and any caller-supplied paths do the real work.
+        let search_paths = crate::paths::merge_import_search_paths(
+            std::path::Path::new(source_name),
+            search_paths,
+        );
+        let search_paths = search_paths.as_slice();
+        let output = if search_paths.is_empty()
+            && virtual_sources.is_empty()
+            && self.remote_fetcher.is_none()
+        {
             ensure_parse_success(
                 source_name,
                 self.time_phase("parser", || {
-                    parser::parse_program_with_precision_and_metadata(
+                    parser::parse_program_with_options(
                         source,
                         source_name,
-                        parser_float_size(self.real_type),
-                        metadata_store.clone(),
+                        &parser::ParseOptions::default()
+                            .with_float_size(parser_float_size(self.real_type))
+                            .with_metadata_store(metadata_store.clone()),
                     )
                 }),
+            )?
+        } else if let Some(fetcher) = self.remote_fetcher.clone() {
+            ensure_parse_success(
+                source_name,
+                self.time_phase("parser", || {
+                    parser::parse_program_with_imports(
+                        source,
+                        source_name,
+                        &parser::ParseOptions::default()
+                            .with_search_paths(search_paths)
+                            .with_virtual_sources(virtual_sources.clone())
+                            .with_metadata_store(metadata_store.clone())
+                            .with_float_size(parser_float_size(self.real_type))
+                            .with_remote(parser::RemoteSourceCapability::new(
+                                fetcher,
+                                self.remote_fetch_policy,
+                            )),
+                    )
+                })
+                .map_err(CompilerError::import)?,
             )?
         } else {
             ensure_parse_success(
                 source_name,
                 self.time_phase("parser", || {
-                    parser::parse_program_with_imports_and_precision_and_metadata(
+                    parser::parse_program_with_imports(
                         source,
                         source_name,
-                        search_paths,
-                        virtual_sources,
-                        metadata_store.clone(),
-                        parser_float_size(self.real_type),
+                        &parser::ParseOptions::default()
+                            .with_search_paths(search_paths)
+                            .with_virtual_sources(virtual_sources.clone())
+                            .with_metadata_store(metadata_store.clone())
+                            .with_float_size(parser_float_size(self.real_type)),
                     )
                 })
                 .map_err(CompilerError::import)?,
@@ -956,7 +1221,7 @@ impl Compiler {
             RealType::Float32 => eval::SamplePrecision::Float32,
             RealType::Float64 => eval::SamplePrecision::Float64,
         };
-        self.pipeline_to_signals(source_name, output, Some(eval_source_context))
+        self.pipeline_to_boxes(source_name, output, Some(eval_source_context))
     }
 
     /// Parses one file, evaluates `process`, then propagates boxes to output signals.
@@ -970,39 +1235,98 @@ impl Compiler {
         path: &Path,
         search_paths: &[PathBuf],
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let import_search_paths = merge_import_search_paths(path, search_paths);
-        let metadata_store = parser::CompilationMetadataStore::new(
-            &path
-                .canonicalize()
+        let boxes = self.compile_file_to_boxes(path, search_paths)?;
+        let source_name = boxes.source_name().to_owned();
+        self.pipeline_boxes_to_signals(&source_name, boxes)
+    }
+
+    /// Parses one file and evaluates its entry point, stopping before propagation.
+    ///
+    /// The box-level counterpart of [`Self::compile_file_to_signals`], sharing
+    /// its import-resolution, remote-source and metadata behavior exactly
+    /// because both run the same body up to the evaluation boundary.
+    pub fn compile_file_to_boxes(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+    ) -> Result<BoxCompileOutput, CompilerError> {
+        let remote_url = explicit_remote_path(path);
+        let search_path_anchor = if remote_url.is_some() {
+            Path::new("remote.dsp")
+        } else {
+            path
+        };
+        let import_search_paths = merge_import_search_paths(search_path_anchor, search_paths);
+        let source_name = remote_url.map(str::to_owned).unwrap_or_else(|| {
+            path.canonicalize()
                 .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy(),
-        );
+                .to_string_lossy()
+                .into_owned()
+        });
+        let metadata_store = parser::CompilationMetadataStore::new(&source_name);
         let output = ensure_parse_success(
-            &path.display().to_string(),
+            &source_name,
             self.time_phase("parser", || {
-                parser::parse_file_with_imports_and_precision_and_metadata(
-                    path,
-                    &import_search_paths,
-                    metadata_store.clone(),
-                    parser_float_size(self.real_type),
-                )
+                if let Some(url) = remote_url {
+                    if let Some(fetcher) = self.remote_fetcher.clone() {
+                        parser::parse_url(
+                            url,
+                            &parser::ParseOptions::default()
+                                .with_search_paths(&import_search_paths)
+                                .with_metadata_store(metadata_store.clone())
+                                .with_float_size(parser_float_size(self.real_type))
+                                .with_remote(parser::RemoteSourceCapability::new(
+                                    fetcher,
+                                    self.remote_fetch_policy,
+                                )),
+                        )
+                    } else {
+                        parser::parse_url(
+                            url,
+                            &parser::ParseOptions::default()
+                                .with_search_paths(&import_search_paths)
+                                .with_metadata_store(metadata_store.clone())
+                                .with_float_size(parser_float_size(self.real_type)),
+                        )
+                    }
+                } else if let Some(fetcher) = self.remote_fetcher.clone() {
+                    parser::parse_file(
+                        path,
+                        &parser::ParseOptions::default()
+                            .with_search_paths(&import_search_paths)
+                            .with_metadata_store(metadata_store.clone())
+                            .with_float_size(parser_float_size(self.real_type))
+                            .with_remote(parser::RemoteSourceCapability::new(
+                                fetcher,
+                                self.remote_fetch_policy,
+                            )),
+                    )
+                } else {
+                    parser::parse_file(
+                        path,
+                        &parser::ParseOptions::default()
+                            .with_search_paths(&import_search_paths)
+                            .with_metadata_store(metadata_store.clone())
+                            .with_float_size(parser_float_size(self.real_type)),
+                    )
+                }
             })
             .map_err(CompilerError::import)?,
         )?;
-        let mut eval_source_context = eval::EvalSourceContext::for_file_with_metadata(
-            path,
-            &import_search_paths,
-            metadata_store,
-        );
+        let mut eval_source_context = if remote_url.is_some() {
+            eval::EvalSourceContext::memory_with_metadata(metadata_store)
+        } else {
+            eval::EvalSourceContext::for_file_with_metadata(
+                path,
+                &import_search_paths,
+                metadata_store,
+            )
+        };
         eval_source_context.sample_precision = match self.real_type {
             RealType::Float32 => eval::SamplePrecision::Float32,
             RealType::Float64 => eval::SamplePrecision::Float64,
         };
-        self.pipeline_to_signals(
-            &path.display().to_string(),
-            output,
-            Some(eval_source_context),
-        )
+        self.pipeline_to_boxes(&source_name, output, Some(eval_source_context))
     }
 
     /// Parses one file with default import search path, then runs eval+propagate.
@@ -1041,12 +1365,34 @@ impl Compiler {
     /// - top-level metadata aggregation rules,
     /// - diagnostic enrichment policy,
     /// - process arity inference and signal propagation contract.
+    ///
+    /// It is the composition of [`Self::pipeline_to_boxes`] and
+    /// [`Self::pipeline_boxes_to_signals`]; callers that stop at the box level
+    /// — `-e` expansion is the one in tree — use the first half directly and
+    /// still observe every rule above that applies before propagation.
     fn pipeline_to_signals(
+        &self,
+        source: &str,
+        output: ParseOutput,
+        eval_source_context: Option<eval::EvalSourceContext>,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let boxes = self.pipeline_to_boxes(source, output, eval_source_context)?;
+        self.pipeline_boxes_to_signals(source, boxes)
+    }
+
+    /// Runs the `parse output -> eval -> arity` prefix of the pipeline.
+    ///
+    /// Stops where C++ `libcode.cpp:1378` branches for `-e`: after the process
+    /// box has been evaluated and its arity inferred, before any signal is
+    /// propagated. Every diagnostic enrichment rule that applies to evaluation
+    /// lives here, so a caller that stops at this boundary reports evaluation
+    /// failures exactly as a full compilation would.
+    fn pipeline_to_boxes(
         &self,
         source: &str,
         mut output: ParseOutput,
         eval_source_context: Option<eval::EvalSourceContext>,
-    ) -> Result<SignalCompileOutput, CompilerError> {
+    ) -> Result<BoxCompileOutput, CompilerError> {
         let source_map = output.diagnostics.source_map().clone();
         let root = output.root.ok_or_else(|| {
             CompilerError::missing_root(source).with_source_map(source_map.clone())
@@ -1054,27 +1400,25 @@ impl Compiler {
 
         let eval_result = self.time_phase("evaluation", || {
             match (&eval_source_context, &self.cancel) {
-                (Some(source_context), Some(cancel)) => {
-                    eval::eval_entrypoint_with_source_context_and_cancel(
-                        &mut output.state.arena,
-                        root,
-                        self.entrypoint_name.as_ref(),
-                        source_context.clone(),
-                        std::sync::Arc::clone(cancel),
-                    )
-                }
-                (Some(source_context), None) => {
-                    eval::eval_entrypoint_with_stats_and_source_context(
-                        &mut output.state.arena,
-                        root,
-                        self.entrypoint_name.as_ref(),
-                        source_context.clone(),
-                    )
-                }
-                (None, _) => eval::eval_entrypoint_with_stats(
+                (Some(source_context), Some(cancel)) => eval::eval(
                     &mut output.state.arena,
                     root,
-                    self.entrypoint_name.as_ref(),
+                    &eval::EvalRequest::default()
+                        .with_entrypoint(self.entrypoint_name.as_ref())
+                        .with_source_context(source_context.clone())
+                        .with_cancel(std::sync::Arc::clone(cancel)),
+                ),
+                (Some(source_context), None) => eval::eval(
+                    &mut output.state.arena,
+                    root,
+                    &eval::EvalRequest::default()
+                        .with_entrypoint(self.entrypoint_name.as_ref())
+                        .with_source_context(source_context.clone()),
+                ),
+                (None, _) => eval::eval(
+                    &mut output.state.arena,
+                    root,
+                    &eval::EvalRequest::default().with_entrypoint(self.entrypoint_name.as_ref()),
                 ),
             }
         });
@@ -1177,12 +1521,57 @@ impl Compiler {
             || output.compilation_metadata.clone(),
             eval::EvalSourceContext::metadata_snapshot,
         );
+
+        Ok(BoxCompileOutput {
+            source_name: source.to_owned(),
+            parse: output,
+            compilation_metadata,
+            loaded_files: eval_source_context
+                .as_ref()
+                .map_or_else(Vec::new, eval::EvalSourceContext::loaded_files),
+            process_box,
+            definitions_root: root,
+            entrypoint_name: ep.into(),
+            process_arity,
+            process_flat,
+            arity_cache,
+            def_names: eval_stats.def_names,
+        })
+    }
+
+    /// Runs the `propagate -> validate` suffix of the pipeline.
+    ///
+    /// Consumes the [`BoxCompileOutput`] produced by [`Self::pipeline_to_boxes`],
+    /// reusing its arity cache and flattened box so the split costs no repeated
+    /// work.
+    fn pipeline_boxes_to_signals(
+        &self,
+        source: &str,
+        boxes: BoxCompileOutput,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let BoxCompileOutput {
+            source_name: _,
+            mut parse,
+            compilation_metadata,
+            loaded_files,
+            process_box,
+            definitions_root: root,
+            entrypoint_name,
+            process_arity,
+            process_flat,
+            mut arity_cache,
+            def_names,
+        } = boxes;
+        let output = &mut parse;
+        let source_map = output.diagnostics.source_map().clone();
+        let ep = entrypoint_name.as_ref();
+
         let ui_options =
             PropagateUiOptions::new(resolve_ui_root_label(source, &compilation_metadata));
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
         let propagated = self
             .time_phase("propagation", || {
-                propagate::propagate_typed_with_ui_options(
+                propagate::propagate_typed_with_ui(
                     &mut output.state.arena,
                     process_flat,
                     &inputs,
@@ -1221,27 +1610,162 @@ impl Compiler {
             })
             .map_err(|error| error.with_source_map(source_map.clone()))?;
         if self.semantic_warnings {
+            let table_warnings = const_table_sample_rate_warnings(
+                &output.state.arena,
+                &propagated.signals,
+                &propagated.signal_origins,
+                &output.state.ctx,
+                root,
+                ep,
+                self.table_init_mode,
+                self.table_init_sample_rate,
+            );
+            warnings.extend(table_warnings.as_slice().iter().cloned());
             warnings.set_source_map(source_map);
         }
 
         Ok(SignalCompileOutput {
             compilation_metadata,
-            parse: output,
+            parse,
             definitions_root: root,
-            entrypoint_name: ep.into(),
-            loaded_files: eval_source_context
-                .as_ref()
-                .map_or_else(Vec::new, eval::EvalSourceContext::loaded_files),
+            entrypoint_name,
+            loaded_files,
             process_box,
             process_arity,
             signals: propagated.signals,
             signal_origins: propagated.signal_origins,
             ui: propagated.ui,
-            def_names: eval_stats.def_names,
+            def_names,
             clock_domains: propagated.clock_domains,
             warnings,
         })
     }
+}
+
+/// Warns when a literal table embeds `ma.SR` instead of observing the host's
+/// initialization sample rate. The actual folding is performed by transform;
+/// keeping the advisory here gives every backend the same diagnostic channel.
+#[allow(clippy::too_many_arguments)]
+fn const_table_sample_rate_warnings(
+    arena: &tlib::TreeArena,
+    signals: &[SigId],
+    signal_origins: &propagate::SignalOrigins,
+    ctx: &parser::ParserCtx,
+    defs_root: BoxId,
+    entrypoint_name: &str,
+    table_init_mode: TableInitMode,
+    table_init_sample_rate: Option<i32>,
+) -> DiagnosticBundle {
+    if table_init_mode != TableInitMode::Const {
+        return DiagnosticBundle::new();
+    }
+    let Some(sample_rate) = table_init_sample_rate else {
+        return DiagnosticBundle::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut reported = HashSet::new();
+    let mut warnings = DiagnosticBundle::new();
+    for &signal in signals {
+        collect_const_table_sample_rate_reads(
+            arena,
+            signal,
+            &mut seen,
+            &mut reported,
+            &mut warnings,
+            signal_origins,
+            ctx,
+            defs_root,
+            entrypoint_name,
+            sample_rate,
+        );
+    }
+    warnings
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_const_table_sample_rate_reads(
+    arena: &tlib::TreeArena,
+    signal: SigId,
+    seen: &mut HashSet<SigId>,
+    reported: &mut HashSet<SigId>,
+    warnings: &mut DiagnosticBundle,
+    signal_origins: &propagate::SignalOrigins,
+    ctx: &parser::ParserCtx,
+    defs_root: BoxId,
+    entrypoint_name: &str,
+    sample_rate: i32,
+) {
+    if !seen.insert(signal) {
+        return;
+    }
+    if let SigMatch::WrTbl(_, generator, _, _) = match_sig(arena, signal)
+        && let Some(sr_read) = find_sampling_frequency_read(arena, generator, &mut HashSet::new())
+        && reported.insert(sr_read)
+    {
+        let diagnostic = Diagnostic::new(
+            Severity::Warning,
+            Stage::Transform,
+            COMP_TABLE_INIT_SAMPLE_RATE,
+            format!(
+                "--table-init const folds ma.SR as {sample_rate} Hz into this table"
+            ),
+        )
+        .with_category(DiagnosticCategory::InvalidOptions)
+        .with_note("cause: the table generator reads ma.SR")
+        .with_note(format!("computed: compile-time sample rate = {sample_rate} Hz"))
+        .with_fact("table_init", "const")
+        .with_fact("table_init_sample_rate", i64::from(sample_rate))
+        .with_fact("sample_rate_frozen", true)
+        .with_help("use --table-init runtime to evaluate the table with the host initialization sample rate");
+        warnings.push(add_signal_source_labels(
+            diagnostic,
+            sr_read,
+            signal_origins,
+            ctx,
+            arena,
+            defs_root,
+            entrypoint_name,
+        ));
+    }
+    if let Some(children) = arena.children(signal) {
+        for &child in children {
+            collect_const_table_sample_rate_reads(
+                arena,
+                child,
+                seen,
+                reported,
+                warnings,
+                signal_origins,
+                ctx,
+                defs_root,
+                entrypoint_name,
+                sample_rate,
+            );
+        }
+    }
+}
+
+fn find_sampling_frequency_read(
+    arena: &tlib::TreeArena,
+    signal: SigId,
+    seen: &mut HashSet<SigId>,
+) -> Option<SigId> {
+    if !seen.insert(signal) {
+        return None;
+    }
+    if let SigMatch::FConst(_, name, _) = match_sig(arena, signal)
+        && matches!(
+            tree_to_str(arena, name),
+            Some("fSamplingFreq" | "fSamplingRate")
+        )
+    {
+        return Some(signal);
+    }
+    arena
+        .children(signal)?
+        .iter()
+        .find_map(|&child| find_sampling_frequency_read(arena, child, seen))
 }
 
 impl Default for Compiler {
@@ -1312,6 +1836,16 @@ pub enum CompilerError {
     MissingRoot {
         /// Program provenance; see the shared field convention.
         source: Box<str>,
+        /// Rendered diagnostics for this failure.
+        diagnostics: DiagnosticBundle,
+    },
+    /// `-e` expansion could not serialize the evaluated program.
+    Expand {
+        /// Program provenance; see the shared field convention.
+        source: Box<str>,
+        /// What blocked serialization, carried on the variant so the `Display`
+        /// form is actionable for callers that only propagate a message.
+        reason: Box<str>,
         /// Rendered diagnostics for this failure.
         diagnostics: DiagnosticBundle,
     },
@@ -1491,6 +2025,9 @@ impl std::fmt::Display for CompilerError {
         match self {
             Self::Import(err, _) => write!(f, "{err}"),
             Self::MissingRoot { source, .. } => write!(f, "parse returned no root for {source}"),
+            Self::Expand { source, reason, .. } => {
+                write!(f, "cannot expand {source}: {reason}")
+            }
             Self::Parse {
                 source,
                 parse_errors,
@@ -1572,6 +2109,9 @@ impl std::error::Error for CompilerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Import(error, _) => Some(error.as_ref()),
+            // Expansion failures are self-describing: the reason lives in the
+            // diagnostic, not in a wrapped error.
+            Self::Expand { .. } => None,
             Self::Eval { error, .. } => Some(error.as_ref()),
             Self::Propagate { error, .. } => Some(error),
             Self::Type { error, .. } => Some(error.as_ref()),
@@ -1619,6 +2159,7 @@ impl CompilerError {
             | Self::CodegenInterp { diagnostics, .. }
             | Self::CodegenWasm { diagnostics, .. }
             | Self::MissingRoot { diagnostics, .. }
+            | Self::Expand { diagnostics, .. }
             | Self::FirVerify { diagnostics, .. } => diagnostics,
             #[cfg(not(target_arch = "wasm32"))]
             Self::CodegenCranelift { diagnostics, .. } => diagnostics,
@@ -1720,6 +2261,31 @@ impl CompilerError {
         }
     }
 
+    /// Builds the error raised when `-e` cannot serialize a program.
+    ///
+    /// The message states what blocked serialization; the notes say why the
+    /// expansion refuses to emit anything rather than approximate.
+    #[must_use]
+    pub fn expand_failed(source: &str, reason: impl std::fmt::Display) -> Self {
+        let reason = reason.to_string();
+        let mut diagnostics = DiagnosticBundle::new();
+        diagnostics.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Compiler,
+                diagnostics::codes::COMP_EXPAND_FAILED,
+                format!("cannot expand {source}: {reason}"),
+            )
+            .with_note("expansion must produce a DSP that compiles on its own")
+            .with_help("compile the program normally to see the underlying error"),
+        );
+        Self::Expand {
+            source: source.into(),
+            reason: reason.into(),
+            diagnostics,
+        }
+    }
+
     /// Returns the structured diagnostics carried by this error.
     ///
     /// The exhaustive match is deliberate: adding a variant without a bundle
@@ -1734,6 +2300,7 @@ impl CompilerError {
             Self::UiLayout { diagnostics, .. } => diagnostics,
             Self::Type { diagnostics, .. } => diagnostics,
             Self::Transform { diagnostics, .. } => diagnostics,
+            Self::Expand { diagnostics, .. } => diagnostics,
             Self::ExecutionOptions { diagnostics, .. } => diagnostics,
             Self::FirVerify { diagnostics, .. } => diagnostics,
             Self::Import(_, diagnostics) => diagnostics,

@@ -27,6 +27,7 @@ members = [
   "crates/cranelift-ffi",
   "crates/box-ffi",
   "crates/signal-ffi",
+  "crates/libfaust-ffi",
   "crates/faust-ffi",
   "crates/wasm-ffi",
   "crates/impulse-runner",
@@ -38,7 +39,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.7.0"
+version = "0.8.0"
 license = "LGPL-2.1-or-later"
 authors = ["faust-rs contributors"]
 

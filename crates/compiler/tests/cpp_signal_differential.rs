@@ -211,6 +211,36 @@ fn extract_ui_events(cpp: &str) -> Vec<String> {
     events
 }
 
+fn extract_metadata_events(cpp: &str) -> Vec<(String, String)> {
+    let mut in_metadata = false;
+    let mut events = Vec::new();
+    for line in cpp.lines().map(str::trim) {
+        if line.contains("void metadata(Meta* m)") {
+            in_metadata = true;
+            continue;
+        }
+        if !in_metadata {
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("m->declare(\"") else {
+            continue;
+        };
+        let Some((key, rest)) = rest.split_once("\", \"") else {
+            continue;
+        };
+        let Some((value, _)) = rest.split_once("\");") else {
+            continue;
+        };
+        if key != "compile_options" {
+            events.push((key.to_owned(), value.to_owned()));
+        }
+    }
+    events
+}
+
 fn rust_cpp_for_case(compiler: &Compiler, case: &Case) -> Result<String, String> {
     match case.input {
         CaseInput::CorpusFile(file) => {
@@ -474,6 +504,75 @@ fn differential_ui_root_labels_against_cpp_reference() {
 }
 
 #[test]
+fn differential_compilation_metadata_against_cpp_reference() {
+    std::thread::Builder::new()
+        .name("metadata-cpp-differential".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run_compilation_metadata_differential)
+        .expect("metadata differential thread should start")
+        .join()
+        .expect("metadata differential thread should not panic");
+}
+
+fn run_compilation_metadata_differential() {
+    let Some(cpp_bin) = cpp_bin() else {
+        eprintln!(
+            "Skipping metadata differential test: FAUST_CPP_BIN not set and /usr/local/bin/faust not found"
+        );
+        return;
+    };
+    if !cpp_bin.exists() {
+        eprintln!(
+            "Skipping metadata differential test: C++ binary not found at {}",
+            cpp_bin.display()
+        );
+        return;
+    }
+
+    let compiler = Compiler::new();
+    let cases = [
+        "rep_11_declare_metadata.dsp",
+        "rep_40_metadata_master.dsp",
+        "rep_41_metadata_import.dsp",
+        "rep_42_component_metadata.dsp",
+        "rep_43_library_metadata.dsp",
+        "rep_61_fmin_sr.dsp",
+        "rep_64_dynamic_rem.dsp",
+        "rep_69_variable_delay_sr_millisec.dsp",
+        "rep_71_degenerate_unary_recursion.dsp",
+        "rep_79_multi_output_recursion.dsp",
+        "rep_80_mutual_recursion_crossed.dsp",
+        "vector_recursive_delay_fusion_pulse_countup_loop.dsp",
+    ];
+    let mut mismatches = Vec::new();
+    for file in cases {
+        eprintln!("metadata differential: {file}");
+        let case = Case {
+            name: file,
+            input: CaseInput::CorpusFile(file),
+            expect_valid: true,
+        };
+        let rust_cpp =
+            rust_cpp_for_case(&compiler, &case).unwrap_or_else(|error| panic!("{file}: {error}"));
+        let cpp_cpp =
+            cpp_cpp_for_case(&cpp_bin, &case).unwrap_or_else(|error| panic!("{file}: {error}"));
+        let rust_events = extract_metadata_events(&rust_cpp);
+        let cpp_events = extract_metadata_events(&cpp_cpp);
+        if rust_events != cpp_events {
+            mismatches.push(format!(
+                "{file} metadata mismatch:\n  rust={rust_events:?}\n  cpp={cpp_events:?}"
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "metadata mismatches:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
 fn differential_ui_event_order_against_cpp_reference() {
     let Some(cpp_bin) = cpp_bin() else {
         eprintln!(
@@ -514,6 +613,31 @@ fn differential_ui_event_order_against_cpp_reference() {
         Case {
             name: "rep_56_noise_smoo_slider",
             input: CaseInput::CorpusFile("rep_56_noise_smoo_slider.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_38_sine_phasor",
+            input: CaseInput::CorpusFile("rep_38_sine_phasor.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_55_sine_phasor_echo_feedback",
+            input: CaseInput::CorpusFile("rep_55_sine_phasor_echo_feedback.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_57_additive_synth",
+            input: CaseInput::CorpusFile("rep_57_additive_synth.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_66_variable_delay_feedback",
+            input: CaseInput::CorpusFile("rep_66_variable_delay_feedback.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_75_ui_widget_family_breadth",
+            input: CaseInput::CorpusFile("rep_75_ui_widget_family_breadth.dsp"),
             expect_valid: true,
         },
         Case {

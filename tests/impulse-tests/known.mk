@@ -30,15 +30,30 @@ PRECISION_harpe            := 1e-5   # 2e-6  polyphonic pass (c backend)
 PRECISION_noise            := 1e-5   # 2e-6  polyphonic pass (c backend)
 PRECISION_noiseabs         := 1e-5   # 3e-6  polyphonic pass (c backend)
 PRECISION_comb_bug_exp     := 1e-3   # 1.1e-4 polyphonic pass (c backend)
+PRECISION_phaser_flanger   := 1e-2   # 1.419e-3 over the full 60000-frame `cpp` comparison;
+                                      # LFO-modulated feedback chain amplifies rounding noise.
+                                      # Confirmed backend-independent: the ordinary (non-mem0)
+                                      # ir/cpp/phaser_flanger.ir diverges from the same reference
+                                      # at the identical first sample (frame 883, output 1,
+                                      # delta 2e-6) as the mem0 lane, growing from there.
 
 # --- shared compile gap ------------------------------------------------------
 # Empty since 2026-08-06. `subcontainer1` lived here for the project's lifetime:
 # its table content depends on the sample rate, which the compile-time SIGGEN
 # interpreter cannot evaluate. `--table-init runtime` — the default since the
 # generated-table sub-module port completed — compiles it on every backend, so
-# every lane gates 94 cases rather than 93. (94 of the corpus's 133 DSPs: the
-# generated C++-oracle manifest excludes the 39 clock-domain fixtures upstream
-# Faust cannot compile.)
+# every lane gates the full corpus.
+#
+# The full corpus is all 133 `dsp/*.dsp` files, clock-domain fixtures
+# (`ondemand_*`/`upsampling_*`/`downsampling_*`) included: the pinned
+# reference branch (`master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`) compiles
+# and runs those, since `ondemand` clock domains are what it develops. An
+# earlier version of this comment said the C++-oracle manifest excluded 39
+# clock-domain fixtures as unsupported — that was `FAUST_CPP` silently
+# resolving to a different, newer system `faust` on `$PATH` instead of the
+# pinned checkout, not a real gap; see the methodology note in
+# `README.md`'s Status section before trusting a manifest that reports
+# fewer than 133 supported.
 KNOWN_FAIL_all :=
 
 # Programs the compile-time SIGGEN interpreter cannot fold, listed so a

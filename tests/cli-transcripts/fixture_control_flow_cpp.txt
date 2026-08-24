@@ -1,6 +1,7 @@
 /* ------------------------------------------------------------
 name: "control_flow"
-Code generated with Faust (https://faust.grame.fr)
+Code generated with Faust 0.8.0 (https://faust.grame.fr)
+Compilation options: -lang cpp -single
 ------------------------------------------------------------ */
 
 #ifndef  __control_flow_H__
@@ -11,8 +12,12 @@ Code generated with Faust (https://faust.grame.fr)
 #endif
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <exception>
+#include <new>
 
 #ifndef FAUSTCLASS
 #define FAUSTCLASS control_flow

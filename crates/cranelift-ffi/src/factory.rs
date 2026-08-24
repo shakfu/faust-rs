@@ -23,14 +23,17 @@ use box_ffi::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signa
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
+use codegen::json::{JsonBuildOptions, JsonMemoryDescription, build_json_description_from_fir};
+use codegen::memory_layout::MemoryManagerMode;
 use compiler::{
     AuxFileArtifact, Compiler as FaustCompiler, ComputeMode, ExpandDspRequest,
     GenerateAuxFilesRequest, RealType, SchedulingStrategy, SignalFirLane, TableInitMode,
     default_import_search_paths,
 };
 use ffi_common::{
-    decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
-    optional_c_string_arg, parse_ffi_compile_args, required_c_string_arg, write_error_4096,
+    FaustMemoryManager, decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only,
+    null_c_string_array, optional_c_string_arg, parse_ffi_compile_args, required_c_string_arg,
+    write_error_4096,
 };
 use fir::{FirMatch, match_fir};
 
@@ -39,7 +42,7 @@ use crate::cache::{
 };
 use crate::clif::{CLIF_MAGIC, decode_factory_clif, encode_factory_clif};
 use crate::runtime::build_runtime_descriptor;
-use crate::types::{CraneliftDspFactory, alloc_c_string};
+use crate::types::{CraneliftDspFactory, FactoryMemoryState, MemoryManagerBinding, alloc_c_string};
 
 /// Stable version string returned by [`getCLibFaustVersion`].
 const CRANELIFT_FFI_VERSION: &str = concat!("faust-rs-cranelift-ffi/", env!("CARGO_PKG_VERSION"));
@@ -302,10 +305,13 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let fir = export_fir_from_signal_array_handle(&source_name, signals)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
-            let double = parse_ffi_compile_args(args)
-                .map(|a| a.double)
-                .unwrap_or(false);
-            let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
+            let parsed = parse_ffi_compile_args(args)?;
+            let jit = compile_fir_module_to_cranelift(
+                &fir,
+                opt_level,
+                parsed.double,
+                memory_manager_mode(parsed.memory_manager0),
+            )?;
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
@@ -362,10 +368,13 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let fir = export_fir_from_box_handle(&source_name, box_expr)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
-            let double = parse_ffi_compile_args(args)
-                .map(|a| a.double)
-                .unwrap_or(false);
-            let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
+            let parsed = parse_ffi_compile_args(args)?;
+            let jit = compile_fir_module_to_cranelift(
+                &fir,
+                opt_level,
+                parsed.double,
+                memory_manager_mode(parsed.memory_manager0),
+            )?;
             let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
@@ -797,6 +806,16 @@ fn canonicalize_cache_identity_argv(argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     let mut i = 0;
     while i < argv.len() {
+        if matches!(
+            argv[i].as_str(),
+            "-mem" | "-mem0" | "--memory-manager" | "--memory-manager0"
+        ) {
+            if !out.iter().any(|arg| arg == "-mem0") {
+                out.push("-mem0".to_owned());
+            }
+            i += 1;
+            continue;
+        }
         out.push(argv[i].clone());
         if argv[i] == "-ss"
             && let Some(value) = argv.get(i + 1)
@@ -876,31 +895,156 @@ fn build_scaffold_factory_common(
     let runtime = build_runtime_descriptor(&fir.store, fir.module)?;
     let num_inputs = fir.num_inputs;
     let num_outputs = fir.num_outputs;
+    let function_items = match match_fir(&fir.store, fir.module) {
+        FirMatch::Module { functions, .. } => match match_fir(&fir.store, functions) {
+            FirMatch::Block(items) => items,
+            other => {
+                return Err(format!(
+                    "Cranelift JSON expected function block, got {other:?}"
+                ));
+            }
+        },
+        other => return Err(format!("Cranelift JSON expected module, got {other:?}")),
+    };
+    let memory = jit
+        .as_ref()
+        .and_then(JitDspModule::mem0_analysis)
+        .cloned()
+        .map(|analysis| JsonMemoryDescription {
+            backend: "cranelift".to_owned(),
+            manager_abi: "faust_memory_manager_v1".to_owned(),
+            analysis,
+        });
+    let json = build_json_description_from_fir(
+        &fir.store,
+        &function_items,
+        JsonBuildOptions {
+            name: name.to_owned(),
+            backend: Some("cranelift".to_owned()),
+            jit_compiled: Some(jit.is_some()),
+            compute_body_lowered: Some(compute_body_lowered),
+            filename: None,
+            version: Some(CRANELIFT_FFI_VERSION.to_owned()),
+            compile_options: Some(compile_options.clone()),
+            library_list: Vec::new(),
+            include_pathnames: Vec::new(),
+            top_level_meta: Vec::new(),
+            size: None,
+            inputs: num_inputs,
+            outputs: num_outputs,
+            sr_index: None,
+            memory,
+        },
+        |_var| None,
+    )
+    .map_err(|error| format!("cannot build Cranelift factory JSON: {error}"))?
+    .render();
     Ok(CraneliftDspFactory {
         name: name.to_owned(),
         sha_key,
         dsp_code: dsp_code.to_owned(),
         compile_options,
-        json: format!(
-            "{{\"name\":\"{}\",\"backend\":\"cranelift\",\"jit_compiled\":{},\"compute_body_lowered\":{}}}",
-            json_escape(name),
-            if jit.is_some() { "true" } else { "false" },
-            if compute_body_lowered {
-                "true"
-            } else {
-                "false"
-            }
-        ),
+        json,
         source_is_faust,
         source_name: name.to_owned(),
         compile_argv: argv.to_vec(),
         opt_level,
+        memory_state: Mutex::new(FactoryMemoryState::default()),
         compiled_jit: jit,
         runtime,
         compute_body_lowered,
         num_inputs,
         num_outputs,
     })
+}
+
+/// Binds a versioned custom memory manager to a `-mem0` Cranelift factory.
+///
+/// The callback table is copied; the caller may release the temporary table
+/// after this call, but its context and callback targets must remain valid
+/// until the factory and all its instances are destroyed. Description is a
+/// complete transaction and happens before the binding is published.
+///
+/// # Safety
+/// `factory` and `manager` must point to live values. `error_msg`, when
+/// non-null, must reference the standard 4096-byte Faust error buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setCCraneliftMemoryManager(
+    factory: *mut CraneliftDspFactory,
+    manager: *const FaustMemoryManager,
+    error_msg: *mut c_char,
+) -> bool {
+    unsafe {
+        let Some(factory) = factory.as_ref() else {
+            write_error(error_msg, "null Cranelift factory");
+            return false;
+        };
+        let Some(manager) = manager.as_ref() else {
+            write_error(error_msg, "null faust_memory_manager table");
+            return false;
+        };
+        let Some(analysis) = factory
+            .compiled_jit
+            .as_ref()
+            .and_then(JitDspModule::mem0_analysis)
+        else {
+            write_error(error_msg, "factory was not compiled with -mem0");
+            return false;
+        };
+        let binding = match MemoryManagerBinding::copy_from(manager) {
+            Ok(binding) => binding,
+            Err(error) => {
+                write_error(error_msg, &error);
+                return false;
+            }
+        };
+        {
+            let state = match factory.memory_state.lock() {
+                Ok(state) => state,
+                Err(_) => {
+                    write_error(error_msg, "Cranelift memory-manager state is poisoned");
+                    return false;
+                }
+            };
+            if let Some(current) = state.binding {
+                if current.same_identity(binding) {
+                    return true;
+                }
+                if state.class_storage.is_some() || state.live_instances != 0 || state.class_busy {
+                    write_error(
+                        error_msg,
+                        "cannot replace a Cranelift memory manager after allocation",
+                    );
+                    return false;
+                }
+            }
+        }
+        if let Err(error) = binding.describe(analysis) {
+            write_error(error_msg, &error);
+            return false;
+        }
+        let mut state = match factory.memory_state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                write_error(error_msg, "Cranelift memory-manager state is poisoned");
+                return false;
+            }
+        };
+        if let Some(current) = state.binding {
+            if current.same_identity(binding) {
+                return true;
+            }
+            if state.class_storage.is_some() || state.live_instances != 0 || state.class_busy {
+                write_error(
+                    error_msg,
+                    "cannot replace a Cranelift memory manager after allocation",
+                );
+                return false;
+            }
+        }
+        state.binding = Some(binding);
+        true
+    }
 }
 
 /// Decode a conventional `argc`/`argv` C array into owned Rust strings.
@@ -925,8 +1069,8 @@ struct CompiledCraneliftFactory {
 /// `-ss` selects the scheduling strategy (vectorization port plan phase P2:
 /// plumbing only — the strategy is stored but not yet acted on).
 /// Returns the compiler plus the parsed `double` flag (needed by the JIT).
-fn compiler_from_argv(argv: &[String]) -> (FaustCompiler, bool) {
-    let parsed = parse_ffi_compile_args(argv).unwrap_or_default();
+fn compiler_from_argv(argv: &[String]) -> Result<(FaustCompiler, bool, MemoryManagerMode), String> {
+    let parsed = parse_ffi_compile_args(argv)?;
     let compute_mode = if parsed.vec_mode {
         ComputeMode::Vector {
             vec_size: parsed.vec_size,
@@ -948,7 +1092,15 @@ fn compiler_from_argv(argv: &[String]) -> (FaustCompiler, bool) {
         Some("const") => compiler.with_table_init_mode(TableInitMode::Const),
         _ => compiler,
     };
-    (compiler, parsed.double)
+    let compiler = match parsed.table_init_sample_rate {
+        Some(sample_rate) => compiler.with_table_init_sample_rate(sample_rate),
+        None => compiler,
+    };
+    Ok((
+        compiler,
+        parsed.double,
+        memory_manager_mode(parsed.memory_manager0),
+    ))
 }
 
 fn preflight_compile_file_to_cranelift(
@@ -956,7 +1108,7 @@ fn preflight_compile_file_to_cranelift(
     argv: &[String],
     opt_level: c_int,
 ) -> Result<CompiledCraneliftFactory, String> {
-    let (compiler, double) = compiler_from_argv(argv);
+    let (compiler, double, memory_manager_mode) = compiler_from_argv(argv)?;
     let search_paths = collect_search_paths_for_file(path, argv);
     let fir = compiler
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
@@ -969,7 +1121,7 @@ fn preflight_compile_file_to_cranelift(
         num_inputs,
         num_outputs,
     };
-    let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
+    let jit = compile_fir_module_to_cranelift(&fir, opt_level, double, memory_manager_mode)?;
     Ok(CompiledCraneliftFactory {
         fir,
         jit,
@@ -985,9 +1137,22 @@ fn preflight_compile_source_to_cranelift(
     opt_level: c_int,
     argv: &[String],
 ) -> Result<CompiledCraneliftFactory, String> {
-    let (compiler, double) = compiler_from_argv(argv);
+    let (compiler, double, memory_manager_mode) = compiler_from_argv(argv)?;
+    // Forward `-I` as import search paths. Without this the string path sees
+    // only the built-in defaults, so `import("stdfaust.lib")` resolves while a
+    // project-local `library("mine.lib")` does not — and the failure is
+    // deferred until the library is actually *used*, since an unused
+    // `library(...)` binding is never loaded.
+    let search_paths = ffi_common::args::parse_ffi_compile_args(argv)
+        .map(|parsed| parsed.search_paths)
+        .unwrap_or_default();
     let fir = compiler
-        .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
+        .compile_source_to_fir_with_lane_and_search_paths(
+            source_name,
+            source,
+            &search_paths,
+            SignalFirLane::TransformFastLane,
+        )
         .map_err(|e| e.to_string())?;
     let num_inputs = fir_module_num_inputs(&fir.store, fir.module)?;
     let num_outputs = fir_module_num_outputs(&fir.store, fir.module)?;
@@ -997,7 +1162,7 @@ fn preflight_compile_source_to_cranelift(
         num_inputs,
         num_outputs,
     };
-    let jit = compile_fir_module_to_cranelift(&fir, opt_level, double)?;
+    let jit = compile_fir_module_to_cranelift(&fir, opt_level, double, memory_manager_mode)?;
     Ok(CompiledCraneliftFactory {
         fir,
         jit,
@@ -1013,15 +1178,27 @@ fn compile_fir_module_to_cranelift(
     fir: &BoxFfiFirModule,
     opt_level: c_int,
     double: bool,
+    memory_manager_mode: MemoryManagerMode,
 ) -> Result<JitDspModule, String> {
     let extern_function_symbols = snapshot_registered_foreign_functions();
     let options = CraneliftOptions {
+        memory_manager_mode,
         opt_level: map_c_opt_level(opt_level),
         extern_function_symbols,
         double_precision: double,
         ..CraneliftOptions::default()
     };
     generate_cranelift_module(&fir.store, fir.module, &options).map_err(|e| e.to_string())
+}
+
+/// Converts the dependency-light FFI parser bit into the canonical codegen
+/// mode before JIT compilation.
+const fn memory_manager_mode(enabled: bool) -> MemoryManagerMode {
+    if enabled {
+        MemoryManagerMode::Mem0
+    } else {
+        MemoryManagerMode::None
+    }
 }
 
 /// Maps C integer optimization levels to the current Cranelift backend scaffold enum.
@@ -1511,27 +1688,22 @@ pub unsafe extern "C" fn generateCCraneliftAuxFilesFromString(
     }
 }
 
-/// Write SHA-256 hex of `text` (first 63 chars + NUL) into `buf` if non-null.
+/// Writes the SHA-1 key of `text` into `buf` (40 characters plus NUL).
+///
+/// Mirrors C++ `generateSHA1`, whose result the caller receives in the
+/// 64-character buffer the libfaust C API documents. The buffer is larger than
+/// the digest; the extra room is not filled, exactly as in C++.
 unsafe fn write_sha_key(buf: *mut c_char, text: &str) {
     if buf.is_null() {
         return;
     }
-    let hash = sha256_hex(text.as_bytes());
+    let hash = ffi_common::sha1_hex(text.as_bytes());
     let bytes = hash.as_bytes();
     let len = bytes.len().min(63);
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, len);
         *buf.add(len) = 0;
     }
-}
-
-/// Minimal SHA-256 computation returning a lower-hex string (64 chars).
-fn sha256_hex(data: &[u8]) -> String {
-    // FNV-1a 64-bit used as a lightweight stand-in (SHA-256 would need a dep).
-    let hash = data.iter().fold(0xcbf29ce484222325u64, |h, &b| {
-        (h ^ b as u64).wrapping_mul(0x100000001b3)
-    });
-    format!("{hash:016x}{hash:016x}{hash:016x}{hash:016x}")
 }
 
 /// Writes `artifacts` to the directory extracted from `-O <path>` in `argv`
@@ -1568,11 +1740,6 @@ fn extract_output_dir(argv: &[String]) -> PathBuf {
         i += 1;
     }
     PathBuf::from(".")
-}
-
-/// Minimal JSON string escaping for scaffold metadata text.
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -1645,14 +1812,14 @@ mod tests {
         let json_s = unsafe { CStr::from_ptr(json_ptr) }.to_str().unwrap();
         let opts_s = unsafe { CStr::from_ptr(opts_ptr) }.to_str().unwrap();
         assert_eq!(name_s, "mydsp");
-        assert!(json_s.contains("\"backend\":\"cranelift\""));
+        assert!(json_s.contains("\"backend\": \"cranelift\""));
         assert!(opts_s.contains("opt_level=2"));
 
         unsafe {
             assert!((*factory).compiled_jit.is_some());
             let lowered = (*factory).compute_body_lowered;
             assert!(json_s.contains(&format!(
-                "\"compute_body_lowered\":{}",
+                "\"compute_body_lowered\": {}",
                 if lowered { "true" } else { "false" }
             )));
             freeCMemory(name_ptr.cast());
@@ -1693,6 +1860,25 @@ mod tests {
                 "-vs".to_owned(),
                 "64".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn cache_identity_canonicalizes_all_mem0_aliases() {
+        for spelling in ["-mem", "-mem0", "--memory-manager", "--memory-manager0"] {
+            assert_eq!(
+                canonicalize_cache_identity_argv(&[spelling.to_owned()]),
+                vec!["-mem0".to_owned()],
+                "{spelling}"
+            );
+        }
+        assert_ne!(
+            canonicalize_cache_identity_argv(&[]),
+            canonicalize_cache_identity_argv(&["-mem0".to_owned()])
+        );
+        assert_eq!(
+            canonicalize_cache_identity_argv(&["-mem".to_owned(), "--memory-manager0".to_owned(),]),
+            vec!["-mem0".to_owned()]
         );
     }
 
@@ -2460,5 +2646,20 @@ mod tests {
             )
         );
         assert!(header.contains("inline void clearCraneliftForeignFunctions()"));
+        assert!(header.contains("setCCraneliftMemoryManager"));
+        assert!(header.contains("return memory_manager_;"));
+        assert!(!header.contains("setMemoryManager(dsp_memory_manager* /*manager*/)"));
+    }
+
+    #[test]
+    fn cranelift_header_mirrors_the_canonical_memory_manager_abi() {
+        assert_eq!(
+            include_str!("../include/faust-memory-manager.h"),
+            include_str!("../../ffi-common/include/faust-memory-manager.h")
+        );
+        assert!(
+            include_str!("../include/cranelift-dsp-c.h")
+                .contains("#include \"faust-memory-manager.h\"")
+        );
     }
 }

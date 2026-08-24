@@ -286,7 +286,24 @@ cargo run -p compiler -- --help
 
 # Show the installed binary's CLI
 faust-rs --help
+
+# Build/run the optional native HTTP(S) source support (still runtime-off by default)
+cargo run -p compiler --features network-imports -- \
+  --allow-network-imports -lang cpp https://example.test/main.dsp
 ```
+
+The feature and the CLI flag are deliberately separate opt-ins: compiling with
+`network-imports` does not enable network access by itself. Once enabled, the
+CLI accepts a direct HTTP(S) DSP source, explicit URL imports, relative imports
+inside a remote source graph, and a remote main architecture passed with `-a`.
+Requests and redirects are bounded and URL credentials are rejected. Server or
+embedded hosts should inject their own fetcher and URL authorization policy
+instead of using the unrestricted native convenience transport. See the
+[`compiler` HTTP(S) API documentation](crates/compiler/README.md#https-sources-and-architectures)
+and the [`--allow-network-imports` CLI reference](docs/user-cli-guide-en.md#--allow-network-imports).
+The browser compiler module remains network-free but accepts asynchronously
+prefetched URL/source graphs as documented in the
+[`wasm-ffi` README](crates/wasm-ffi/README.md#prefetched-https-source-graphs).
 
 DSP compilation examples:
 
@@ -312,6 +329,13 @@ faust-rs -lang codebox-test foo.dsp -o foo.codebox
 
 # Generate C++
 faust-rs -lang cpp foo.dsp
+
+# Generate C++ with mode-zero host-managed buffers plus layout/cost JSON
+faust-rs -lang cpp -mem0 -json foo.dsp -o foo.cpp
+
+# The same scalar mode is available for C and native Cranelift
+faust-rs -lang c -mem0 foo.dsp -o foo.c
+faust-rs -lang cranelift -mem0 -json foo.dsp -o foo.cranelift
 
 # Generate experimental Cranelift backend report
 faust-rs -lang cranelift foo.dsp
@@ -347,6 +371,15 @@ faust-rs -svg foo.dsp
 faust-rs -lang cpp foo.dsp -o foo.cpp
 faust-rs -lang interp foo.dsp -o foo.fbc
 ```
+
+`-mem`, `-mem0`, `--memory-manager`, and `--memory-manager0` are equivalent.
+Only mode zero is currently supported, for scalar C, C++, and Cranelift. Its
+JSON companion includes a versioned target layout and `compute_cost`; see the
+[`-mem0` custom memory manager guide](docs/user-mem0-guide-en.md) for how to
+write a custom allocator against it, the
+[porting analysis](porting/custom-memory-manager-mem0-analysis-and-porting-plan-2026-08-13-en.md)
+for the full design rationale, and the
+[Cranelift C/C++ API guide](crates/cranelift-ffi/README.md).
 
 Scheduling and vector code generation:
 
@@ -528,6 +561,7 @@ Use the following variables to increase the evaluation depth stack:
 
 - [User CLI reference](docs/user-cli-guide-en.md)
 - [User diagnostics guide](docs/user-diagnostics-guide-en.md)
+- [`-mem0` custom memory manager guide](docs/user-mem0-guide-en.md)
 - Clock domains (`ondemand`/`upsampling`/`downsampling`): [English](docs/ondemand-note-en.md) / [French](docs/ondemand-note-fr.md)
 - Automatic differentiation (`fad`/`rad`): [English](docs/fad-rad-synthesis-en.md) / [French](docs/fad-rad-synthesis-fr.md)
 - [Supported Faust subset](porting/faust-rs-supported-faust-subset-en.md)
@@ -592,16 +626,50 @@ boundary plus the `foreign-call` runtime bridge.
 | `box-ffi` | Box manipulation C/C++ API |
 | `signal-ffi` | Signal manipulation C/C++ API |
 | `interp-ffi` | Interpreter backend C/C++ API |
-| `cranelift-ffi` | Experimental Cranelift backend C/C++ API |
+| `cranelift-ffi` | Experimental Cranelift backend C/C++ API; also hosts the `impulse-cranelift` and `faustprobe` binaries, which drive its runtime |
+| `libfaust-ffi` | Backend-agnostic libfaust C/C++ API (`expandDSP*`, `generateAuxFiles*`, `generateSHA1`) |
 
 ### Distribution and tooling
 
 | Crate | Role |
 |---|---|
 | `impulse-runner` | Interpreter-backed scalar impulse-test runner |
+| `faustprobe` | Generic DSP probe: set controls, render offline, measure (see below) |
 | `xtask` | Developer and CI automation |
 | `faust-ffi` | Unified `libfaust-rs` distribution crate |
 | `wasm-ffi` | Raw WASM ABI for `faustwasm` embedded compiler mode |
+
+### Probing a DSP with `faustprobe`
+
+The two impulse runners answer *did the behaviour change?* — a fixed protocol
+compared against a stored reference. `faustprobe` answers *is the behaviour
+correct?*, by setting controls to a chosen operating point and reporting what
+comes out:
+
+```bash
+# What can be set, with ranges
+cargo run --release -p cranelift-ffi --bin faustprobe -- filter.dsp -I lib --list-params
+
+# Steady-state level of a 1 kHz sine through a filter, transient excluded
+cargo run --release -p cranelift-ffi --bin faustprobe -- filter.dsp -I lib \
+    --set cutoff=1000 --set resonance=0 \
+    --sr 48000 -n 96000 --skip 48000 --in sine:1000 --quiet
+```
+
+Per-frame CSV goes to stdout and the statistics to stderr, so a dump stays
+pipeable. `--skip` applies to both, which matters: statistics taken over a
+window that includes the startup transient will disagree with theory on any
+strongly attenuated signal.
+
+A control is addressable by full path or by any trailing fragment that is
+unambiguous (`cutoff` for `/filter/cutoff`); an ambiguous fragment is reported
+with its candidates rather than resolved arbitrarily. Addresses follow the same
+rule as C++ `MapUI`, so they match what other Faust hosts report for the same
+DSP.
+
+Full reference: [`docs/faustprobe-user-guide-en.md`](docs/faustprobe-user-guide-en.md).
+Design and phases:
+[`porting/faustprobe-generic-test-tool-design-2026-08-14-en.md`](porting/faustprobe-generic-test-tool-design-2026-08-14-en.md).
 
 ## Generate API docs
 

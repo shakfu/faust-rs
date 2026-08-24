@@ -501,6 +501,21 @@ Important current C++ limitation:
 - C++ does not currently interpret group labels such as `../Foo` as relative
   pathname navigation for the group node itself
 
+This boundary matches the Faust manual's wording: the
+[`Labels as Pathnames`](https://faustdoc.grame.fr/manual/syntax/#labels-as-pathnames)
+section permits an absolute or relative pathname directly in the label of a
+*widget* and illustrates it with `hslider("../volume", ...)`; it does not grant
+the same behavior to group labels. It was re-verified on 2026-08-11 against the
+pinned C++ tree (`master-dev-ocpp-od-fir-2-FIR19`, `8eebea429`):
+
+- `compiler/propagate/propagate.cpp` calls `normalizePath(cons(label, path))`
+  for terminal UI elements;
+- its `isBoxVGroup`, `isBoxHGroup`, and `isBoxTGroup` branches only prepend the
+  typed group label to `path`;
+- compiling `rep_63_ui_relative_group_rebase.dsp` therefore emits
+  `openVerticalBox("../Bar")`, whereas Rust emits a root-level `Bar` sibling of
+  `Foo`.
+
 This limitation is part of the current C++ baseline and must be documented
 explicitly before any Rust extension is added on top of it.
 
@@ -643,6 +658,37 @@ Recommended internal direction:
   handling into FIR
 - keep canonical root synthesis and label/metadata extraction in the same UI IR
   construction phase so all layout decisions remain frozen before `transform`
+
+### 8.10 C++ root-sibling ordering parity rule
+
+A corpus-wide generated-UI comparison on 2026-08-11 exposed and then closed an
+ordering gap outside the pathname extension itself.
+
+The C++ UI tree orders every group's children, including controls placed under
+the implicit top-level group, by the raw label/order key. Rust's
+`UiProgramBuilder` now applies that ordering both to children of an explicit
+draft group and to its root forest. When `UiProgram::finish` synthesizes the
+top-level group around otherwise ungrouped controls, those controls are already
+in the same raw-label order as C++
+`UITree::prepareUserInterfaceTree()`. Equal keys retain insertion order.
+
+Historical mismatches used as regression cases:
+
+- `rep_38_sine_phasor.dsp`: Rust started with `gain`; C++ started with `freq1`;
+- `rep_55_sine_phasor_echo_feedback.dsp`: Rust started with `gain`; C++ started
+  with `feedback`;
+- `rep_57_additive_synth.dsp`: Rust started with `gain`; C++ started with `freq`;
+- `rep_66_variable_delay_feedback.dsp`: Rust emitted `mod_delay` before
+  `feedback`; C++ emitted `feedback` first;
+- `rep_75_ui_widget_family_breadth.dsp`: Rust retained the source/dataflow order
+  `gate`, `pitch`, `delay`, `meter`; C++ emitted `delay`, `gate`, `meter`, `pitch`.
+
+The correction changed `UiProgramBuilder::roots` to retain each node's ordering
+key and use the same stable sorted insertion as explicit-group children. The
+five cases above are part of the maintained C++ UI-event differential. A second
+25-case audit now reports only the two deliberate relative-group differences
+(`rep_63` and `rep_64`), so `DIFF-GAP-011` is closed and removed from the living
+difference registry.
 
 ## 9. Transform and FIR contract
 

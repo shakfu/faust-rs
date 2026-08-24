@@ -187,6 +187,8 @@ pub(crate) struct SignalLoweringContext {
     pub(crate) compute_mode: ComputeMode,
     /// How generated-table content is produced (`--table-init`).
     pub(crate) table_init_mode: transform::signal_fir::TableInitMode,
+    /// Explicit SR used only to fold `ma.SR`-dependent const table generators.
+    pub(crate) table_init_sample_rate: Option<i32>,
     /// Signal/loop dependency scheduling policy (`-ss` /
     /// `--scheduling-strategy`) applied to the lowered dependency graph.
     pub(crate) scheduling_strategy: SchedulingStrategy,
@@ -226,6 +228,7 @@ pub(crate) fn lower_signals_to_interp_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -309,6 +312,7 @@ pub(crate) fn lower_signals_to_cranelift_report(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -380,6 +384,11 @@ pub fn render_cranelift_module_report(compiled: &JitDspModule, subset_gap: Optio
             StructFieldKind::Table { elem_type, len } => {
                 format!("table:{elem_type:?}[{len}]")
             }
+            StructFieldKind::ExternalTable {
+                elem_type,
+                len,
+                zone_id,
+            } => format!("external-table:{elem_type:?}[{len}] zone={}", zone_id.0),
         };
         out.push_str(&format!(
             "  - {} @{} size={} align={} {}\n",
@@ -584,6 +593,11 @@ pub(crate) fn lower_signals_to_interp(
 ///
 /// This is the shared implementation behind FIR dump/verification flows and is
 /// also used as the backend-independent boundary for lane comparisons.
+///
+/// `module_name` of `None` derives the name from `source_name`, which is what
+/// the FIR dump and the Cranelift JIT identity want. Callers that must agree
+/// with a C/C++ backend's own class-name convention pass an explicit name —
+/// see [`json_memory_layout_module_name`].
 // The parameters are exactly the facade-owned lowering knobs; bundling them is
 // a separate refactor (they also flow individually through the C++/C/Julia
 // paths). Kept explicit for now.
@@ -601,10 +615,13 @@ pub(crate) fn lower_signals_to_fir(
     control_rate_mode: ControlRateMode,
     processing_api: ProcessingApi,
     table_init_mode: transform::signal_fir::TableInitMode,
+    table_init_sample_rate: Option<i32>,
+    module_name: Option<String>,
 ) -> Result<FirCompileOutput, LowerToFirError> {
     validate_execution_options("fir", control_rate_mode, processing_api, compute_mode)
         .map_err(LowerToFirError::ExecutionOptions)?;
-    let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
+    let module_name = module_name
+        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
     let lowered = lower_signals_to_fir_transform_fastlane(
         output,
         module_name,
@@ -616,6 +633,7 @@ pub(crate) fn lower_signals_to_fir(
         control_rate_mode,
         processing_api,
         table_init_mode,
+        table_init_sample_rate,
     )
     .map_err(LowerToFirError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(|report| LowerToFirError::Verify {
@@ -632,6 +650,28 @@ pub(crate) fn resolve_module_name(class_name: Option<&str>, _source_name: &str) 
         .unwrap_or_else(|| "mydsp".to_owned())
 }
 
+/// Module name a `-mem0` JSON `memory_layout` must lower with to describe
+/// `flavor` faithfully, or `None` to keep the source-derived default.
+///
+/// C and C++ name every generated identifier (class, `SIG0` helpers, `ftbl0`
+/// static tables) from [`resolve_module_name`] — `-cn`, default `"mydsp"` —
+/// so a `memory_layout` claiming to describe one of them must use the same
+/// name, or its zones (`"mydspSIG0"`, `"ftbl0mydspSIG0"`, ...) name
+/// identifiers the generated source does not contain. Cranelift is
+/// deliberately excluded: its module name is a JIT identity derived from the
+/// source name and it has no `-cn` convention.
+pub(crate) fn json_memory_layout_module_name(
+    flavor: Option<MemoryLayoutFlavor>,
+    class_name: Option<&str>,
+    source_name: &str,
+) -> Option<String> {
+    matches!(
+        flavor,
+        Some(MemoryLayoutFlavor::C | MemoryLayoutFlavor::Cpp)
+    )
+    .then(|| resolve_module_name(class_name, source_name))
+}
+
 /// Transform fast-lane FIR lowering used by native backends and FIR dumps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_signals_to_fir_transform_fastlane(
@@ -645,6 +685,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
     control_rate_mode: ControlRateMode,
     processing_api: ProcessingApi,
     table_init_mode: transform::signal_fir::TableInitMode,
+    table_init_sample_rate: Option<i32>,
 ) -> Result<FirCompileOutput, SignalFirError> {
     lower_signals_to_fir_transform_fastlane_with_timing(
         output,
@@ -657,6 +698,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
         control_rate_mode,
         processing_api,
         table_init_mode,
+        table_init_sample_rate,
         None,
     )
 }
@@ -677,6 +719,7 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
     control_rate_mode: ControlRateMode,
     processing_api: ProcessingApi,
     table_init_mode: transform::signal_fir::TableInitMode,
+    table_init_sample_rate: Option<i32>,
     timing_sink: Option<&TimingSink>,
 ) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
@@ -689,19 +732,22 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
         control_rate_mode,
         processing_api,
         table_init_mode,
+        table_init_sample_rate,
     };
-    let lowered =
-        transform::signal_fir::compile_signals_to_fir_fastlane_clocked_with_timing_and_origins(
-            &output.parse.state.arena,
-            &output.signals,
-            output.process_arity.inputs,
-            output.propagated_output_count(),
-            &output.ui,
-            &output.clock_domains,
-            &signal_fir_options,
-            timing_sink.map(|sink| sink.as_ref()),
-            Some(&output.signal_origins),
-        )?;
+    let mut request = transform::signal_fir::SignalFirRequest::new(
+        &output.parse.state.arena,
+        &output.signals,
+        output.process_arity.inputs,
+        output.propagated_output_count(),
+        &output.ui,
+        &signal_fir_options,
+    )
+    .with_clock_domains(&output.clock_domains)
+    .with_signal_origins(&output.signal_origins);
+    if let Some(sink) = timing_sink {
+        request = request.with_timing_sink(sink.as_ref());
+    }
+    let lowered = transform::signal_fir::compile_signals_to_fir_fastlane(&request)?;
     // Canonicalize every FIR artifact before it reaches any backend or FIR
     // dump. This is deliberately independent of `--no-fir-verify`: pure Drop
     // roots are construction scaffolding, not an optional backend optimization.
@@ -719,6 +765,64 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
     })
 }
 
+/// Builds the one-line JSON description embedded in generated source by
+/// backends that expose a `getJSON`-style accessor.
+///
+/// Source provenance: C++ `CodeContainer::generateJSONAux`, called by the
+/// textual backends that carry their own description (Julia, Rust, and the
+/// others in that family).
+///
+/// Two deliberate narrowings against the reference, both recorded in
+/// `porting/wasm-julia-maturity-diff-gap-005-analysis-and-plan-2026-08-14-en.md`:
+///
+/// - `include_pathnames` stays empty. The reference bakes the compiling
+///   machine's absolute import roots into the generated source; that is
+///   provenance no host reads and it makes generated artifacts machine-specific.
+/// - a failure to describe the module is not fatal. The description is a
+///   secondary artifact, and the layout step it needs can reject shapes the
+///   textual backend itself emits happily; degrading to the previous empty
+///   object keeps such a DSP compiling. The degradation is visible in the
+///   artifact — `getJSON` returns `"{}"` — rather than silently wrong.
+fn embedded_json_description(
+    store: &FirStore,
+    module: FirId,
+    source_name: &str,
+    dsp_name: &str,
+    output: &SignalCompileOutput,
+    compile_options: Option<&str>,
+    real_type: RealType,
+) -> Option<String> {
+    let compile_options = compile_options.map_or_else(
+        || compile_options_json_string(None, real_type == RealType::Float64),
+        str::to_owned,
+    );
+    build_strict_json_description(
+        store,
+        module,
+        StrictJsonContext {
+            filename: source_name_to_filename(source_name),
+            include_pathnames: Vec::new(),
+            library_list: library_list_from_signals(output),
+            top_level_meta: json_meta_entries_from_snapshot(&output.compilation_metadata),
+            compile_options,
+            double_precision: real_type == RealType::Float64,
+            memory_flavor: None,
+        },
+    )
+    .ok()
+    .map(|mut description| {
+        // The FIR module carries the *class* identity (`-cn`, default
+        // `"mydsp"`), which is a codegen name, not the DSP name. A description
+        // built from it would advertise `"name": "mydsp"` next to
+        // `"filename": "simple.dsp"`, and would disagree with the `metadata!`
+        // callback generated from the same session. The same confusion produced
+        // the `-mem0` `memory_layout` zone-naming defect fixed on 2026-08-13,
+        // in the other direction.
+        description.name = dsp_name.to_owned();
+        description.render_flat()
+    })
+}
+
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C++.
 pub(crate) fn lower_signals_to_cpp_transform_fastlane(
     source_name: &str,
@@ -727,6 +831,22 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
     ctx: &SignalLoweringContext,
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
+    let mut effective_options = options.clone();
+    effective_options
+        .metadata_name
+        .get_or_insert_with(|| resolve_ui_root_label(source_name, &output.compilation_metadata));
+    effective_options
+        .metadata_filename
+        .get_or_insert_with(|| source_name_to_filename(source_name));
+    if effective_options.metadata_entries.is_empty() {
+        effective_options.metadata_entries =
+            c_family_meta_entries_from_snapshot(source_name, &output.compilation_metadata);
+        if let Some(compile_options) = effective_options.compile_options.clone() {
+            effective_options
+                .metadata_entries
+                .push(("compile_options".to_owned(), compile_options));
+        }
+    }
     let timing_sink = ctx.timing_sink.as_ref();
     let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
         lower_signals_to_fir_transform_fastlane_with_timing(
@@ -740,6 +860,7 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -752,7 +873,8 @@ pub(crate) fn lower_signals_to_cpp_transform_fastlane(
         origins: lowered.origins.clone(),
     })?;
     time_phase_with_sink(timing_sink, "cpp-codegen", || {
-        generate_cpp_module(&lowered.store, lowered.module, options)
+        effective_options.double_precision = ctx.real_type == crate::RealType::Float64;
+        generate_cpp_module(&lowered.store, lowered.module, &effective_options)
     })
     .map_err(|error| LowerError::Codegen {
         error,
@@ -768,6 +890,22 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
     ctx: &SignalLoweringContext,
 ) -> Result<String, LowerToCError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
+    let mut effective_options = options.clone();
+    effective_options
+        .metadata_name
+        .get_or_insert_with(|| resolve_ui_root_label(source_name, &output.compilation_metadata));
+    effective_options
+        .metadata_filename
+        .get_or_insert_with(|| source_name_to_filename(source_name));
+    if effective_options.metadata_entries.is_empty() {
+        effective_options.metadata_entries =
+            c_family_meta_entries_from_snapshot(source_name, &output.compilation_metadata);
+        if let Some(compile_options) = effective_options.compile_options.clone() {
+            effective_options
+                .metadata_entries
+                .push(("compile_options".to_owned(), compile_options));
+        }
+    }
     let timing_sink = ctx.timing_sink.as_ref();
     let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
         lower_signals_to_fir_transform_fastlane_with_timing(
@@ -781,6 +919,7 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -793,7 +932,8 @@ pub(crate) fn lower_signals_to_c_transform_fastlane(
         origins: lowered.origins.clone(),
     })?;
     time_phase_with_sink(timing_sink, "c-codegen", || {
-        generate_c_module(&lowered.store, lowered.module, options)
+        effective_options.double_precision = ctx.real_type == crate::RealType::Float64;
+        generate_c_module(&lowered.store, lowered.module, &effective_options)
     })
     .map_err(|error| LowerError::Codegen {
         error,
@@ -822,6 +962,7 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -838,6 +979,36 @@ pub(crate) fn lower_signals_to_julia_transform_fastlane(
         RealType::Float32 => JuliaRealType::Float32,
         RealType::Float64 => JuliaRealType::Float64,
     };
+    codegen_options
+        .metadata_name
+        .get_or_insert_with(|| resolve_ui_root_label(source_name, &output.compilation_metadata));
+    codegen_options
+        .metadata_filename
+        .get_or_insert_with(|| source_name_to_filename(source_name));
+    if codegen_options.metadata_entries.is_empty() {
+        codegen_options.metadata_entries =
+            c_family_meta_entries_from_snapshot(source_name, &output.compilation_metadata);
+        if let Some(compile_options) = codegen_options.compile_options.clone() {
+            codegen_options
+                .metadata_entries
+                .push(("compile_options".to_owned(), compile_options));
+        }
+    }
+    if codegen_options.dsp_json.is_none() {
+        let dsp_name = codegen_options
+            .metadata_name
+            .clone()
+            .unwrap_or_else(|| resolve_ui_root_label(source_name, &output.compilation_metadata));
+        codegen_options.dsp_json = embedded_json_description(
+            &lowered.store,
+            lowered.module,
+            source_name,
+            &dsp_name,
+            output,
+            codegen_options.compile_options.as_deref(),
+            ctx.real_type,
+        );
+    }
     time_phase_with_sink(timing_sink, "julia-codegen", || {
         generate_julia_module(&lowered.store, lowered.module, &codegen_options)
     })
@@ -871,6 +1042,7 @@ pub(crate) fn lower_signals_to_rust_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -920,6 +1092,7 @@ pub(crate) fn lower_signals_to_asc_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -967,6 +1140,7 @@ pub(crate) fn lower_signals_to_codebox_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })
@@ -1010,6 +1184,7 @@ pub(crate) fn lower_signals_to_cmajor_transform_fastlane(
             ctx.control_rate_mode,
             ctx.processing_api,
             ctx.table_init_mode,
+            ctx.table_init_sample_rate,
             timing_sink,
         )
     })

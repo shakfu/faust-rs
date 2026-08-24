@@ -121,6 +121,7 @@ fn run(cli: XtaskCli) -> Result<(), Box<dyn std::error::Error>> {
         XtaskCommand::InterpTraceGenCppfbc(args) => interp_trace_gen_cppfbc(args)?,
         XtaskCommand::InterpTraceGen(args) => interp_trace_gen(args)?,
         XtaskCommand::InterpTraceCheck(args) => interp_trace_check(args)?,
+        XtaskCommand::CorpusRuntimeDiff(args) => corpus_runtime_diff(args)?,
         XtaskCommand::FirDumpScan(args) => fir_dump_scan(args)?,
         XtaskCommand::BuildFaustwasmCompilerModule(args) => build_faustwasm_compiler_module(args)?,
         XtaskCommand::BuildLibfaust(args) => build_libfaust_distribution_command(args)?,
@@ -154,6 +155,7 @@ fn run(cli: XtaskCli) -> Result<(), Box<dyn std::error::Error>> {
         XtaskCommand::CompileProfile(args) => compile_profile(args)?,
         XtaskCommand::LexerDifferential(args) => lexer_differential(args)?,
         XtaskCommand::ExamplesCompare(args) => examples_compare(args)?,
+        XtaskCommand::ExpandOracle(args) => expand_oracle(args)?,
     }
 
     Ok(())
@@ -172,6 +174,7 @@ mod diagnostics_quality_check;
 mod emission_determinism;
 mod error_model_check;
 mod examples_compare;
+mod expand_oracle;
 mod ffi_boundary_check;
 mod fir_dump;
 mod golden;
@@ -200,6 +203,7 @@ pub(crate) use diagnostics_quality_check::*;
 pub(crate) use emission_determinism::*;
 pub(crate) use error_model_check::*;
 pub(crate) use examples_compare::*;
+pub(crate) use expand_oracle::*;
 pub(crate) use ffi_boundary_check::*;
 pub(crate) use fir_dump::*;
 pub(crate) use golden::*;

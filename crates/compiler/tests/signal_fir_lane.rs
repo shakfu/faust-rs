@@ -6,7 +6,7 @@
 
 use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
-use compiler::{Compiler, RealType, SignalFirLane};
+use compiler::{Compiler, ComputeMode, RealType, SignalFirLane, TableInitMode};
 use std::path::PathBuf;
 
 fn corpus_path(file: &str) -> PathBuf {
@@ -125,6 +125,145 @@ fn fastlane_julia_emits_faust_style_shell() {
     assert!(julia.contains("getNumOutputs(dsp::mydsp{T}) where {T} = Int32(1)"));
     assert!(julia.contains("function compute!(dsp::mydsp{T}, count::Int32"));
     assert!(julia.contains("outputs::AbstractMatrix{FAUSTFLOAT}"));
+}
+
+/// Julia hosts read the DSP through `metadata!` and `getJSON`, exactly as C++
+/// Faust `-lang julia` hosts do. Both callbacks used to be emitted empty, so a
+/// Julia host got nothing back. See
+/// `porting/wasm-julia-maturity-diff-gap-005-analysis-and-plan-2026-08-14-en.md`
+/// (`G5-J1`, `G5-J2`).
+#[test]
+fn fastlane_julia_emits_metadata_and_json_description() {
+    let compiler = Compiler::new();
+    let source = r#"
+        declare name "Demo";
+        declare author "Alice";
+        declare version "1.2";
+        process = _ * hslider("gain", 0.5, 0, 1, 0.01);
+    "#;
+    let julia = compiler
+        .compile_source_to_julia(
+            "demo.dsp",
+            source,
+            &codegen::backends::julia::JuliaOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("Julia compilation failed: {e}"));
+
+    // Source declarations plus the compiler-synthesized identity entries, in
+    // the C++ key order.
+    let metadata = julia
+        .split("function metadata!")
+        .nth(1)
+        .expect("metadata! callback should be emitted");
+    let metadata = metadata
+        .split("\nend")
+        .next()
+        .expect("callback should close");
+    let declared: Vec<&str> = metadata
+        .lines()
+        .filter(|line| line.contains("declare!"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        declared,
+        vec![
+            "declare!(m, \"author\", \"Alice\");",
+            "declare!(m, \"filename\", \"demo.dsp\");",
+            "declare!(m, \"name\", \"Demo\");",
+            "declare!(m, \"version\", \"1.2\");",
+        ]
+    );
+
+    let json = julia
+        .lines()
+        .find(|line| line.starts_with("getJSON("))
+        .expect("getJSON should be emitted");
+    assert!(
+        !json.contains("= \"{}\""),
+        "getJSON must carry a description"
+    );
+    assert!(json.contains("\\\"name\\\": \\\"Demo\\\""));
+    assert!(json.contains("\\\"filename\\\": \\\"demo.dsp\\\""));
+    assert!(json.contains("\\\"inputs\\\": 1"));
+    assert!(json.contains("\\\"outputs\\\": 1"));
+    assert!(json.contains("\\\"label\\\": \\\"gain\\\""));
+}
+
+/// The WASM companion JSON `meta` array used to carry only source `declare`s
+/// (or nothing at all, for a DSP without any), while C++ always injects
+/// `compile_options`/`filename`/`name` alongside them. See
+/// `porting/wasm-julia-maturity-diff-gap-005-analysis-and-plan-2026-08-14-en.md`
+/// (`G5-W2`).
+#[test]
+fn fastlane_wasm_json_meta_carries_the_identity_entries() {
+    let compiler = Compiler::new();
+    let source = r#"
+        declare name "Demo";
+        declare author "Alice";
+        declare version "1.2";
+        process = _ * hslider("gain", 0.5, 0, 1, 0.01);
+    "#;
+    let wasm = compiler
+        .compile_source_to_wasm(
+            "demo.dsp",
+            source,
+            &codegen::backends::wasm::WasmOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("WASM compilation failed: {e}"));
+
+    // Same C++ key order as the metadata transport shared with the C/C++/Julia
+    // emitters: source declares plus the three compiler-synthesized identity
+    // entries, sorted by key.
+    assert!(wasm.dsp_json.contains("{ \"author\": \"Alice\" },"));
+    assert!(wasm.dsp_json.contains("{ \"compile_options\": "));
+    assert!(wasm.dsp_json.contains("{ \"filename\": \"demo.dsp\" },"));
+    assert!(wasm.dsp_json.contains("{ \"name\": \"Demo\" },"));
+    assert!(wasm.dsp_json.contains("{ \"version\": \"1.2\" }"));
+}
+
+/// A DSP without any `declare` must still get the three identity entries: the
+/// gap was not conditional on the DSP having other metadata.
+#[test]
+fn fastlane_wasm_json_meta_carries_identity_entries_without_declares() {
+    let compiler = Compiler::new();
+    let wasm = compiler
+        .compile_source_to_wasm(
+            "plain.dsp",
+            "process = _;",
+            &codegen::backends::wasm::WasmOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("WASM compilation failed: {e}"));
+
+    assert!(wasm.dsp_json.contains("{ \"compile_options\": "));
+    assert!(wasm.dsp_json.contains("{ \"filename\": \"plain.dsp\" },"));
+    assert!(wasm.dsp_json.contains("{ \"name\": \"plain\" }"));
+}
+
+/// The embedded description must name the DSP, not the generated struct. `-cn`
+/// renames the Julia type only; a JSON advertising the class name would also
+/// disagree with the `metadata!` callback built from the same session.
+#[test]
+fn fastlane_julia_json_reports_the_dsp_name_not_the_class_name() {
+    let compiler = Compiler::new();
+    let julia = compiler
+        .compile_source_to_julia(
+            "demo.dsp",
+            "process = _;",
+            &codegen::backends::julia::JuliaOptions {
+                class_name: Some("customdsp".to_owned()),
+                ..codegen::backends::julia::JuliaOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("Julia compilation failed: {e}"));
+
+    assert!(julia.contains("mutable struct customdsp{T} <: dsp"));
+    assert!(julia.contains("declare!(m, \"name\", \"demo\");"));
+    let json = julia
+        .lines()
+        .find(|line| line.starts_with("getJSON("))
+        .expect("getJSON should be emitted");
+    assert!(json.contains("\\\"name\\\": \\\"demo\\\""));
+    assert!(!json.contains("\\\"name\\\": \\\"customdsp\\\""));
 }
 
 #[test]
@@ -486,6 +625,7 @@ fn fastlane_compiles_table_fixtures() {
         "rep_35_table_rwtable_runtime_write.dsp",
         "rep_36_table_rdtable_negative_index.dsp",
         "rep_37_table_rwtable_negative_indices.dsp",
+        "rep_87_table_computed_size.dsp",
     ] {
         let fast = compile_cpp_with_lane(file, SignalFirLane::TransformFastLane);
         assert!(
@@ -496,6 +636,60 @@ fn fastlane_compiles_table_fixtures() {
             !fast.contains("frs_"),
             "fast lane output should not contain frs_* shim names for {file}"
         );
+    }
+}
+
+#[test]
+fn fastlane_keeps_selected_waveform_reads_in_the_sample_loop() {
+    const SOURCE: &str = r#"
+index = (+(1) ~ _) - 1;
+a = rdtable(waveform{0.0, 0.25, 0.5, 0.75}, index & 3);
+b = rdtable(waveform{1.0, 0.75, 0.5, 0.25}, index & 3);
+process = a, b : select2(nentry("pick", 0, 0, 1, 1));
+"#;
+
+    let cpp = compile_cpp_source_with_lane(
+        "selected-waveform-reads",
+        SOURCE,
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(cpp.contains("iSlow0 ? ftbl"));
+    assert!(cpp.contains("iTemp0"));
+}
+
+#[test]
+fn computed_table_size_compiles_in_all_scalar_vector_and_init_modes() {
+    const SOURCE: &str = "process = rdtable((4 + 4) * (10 - 2), 0.25, int(_) & 63);";
+
+    for table_init_mode in [TableInitMode::Runtime, TableInitMode::Const] {
+        for compute_mode in [
+            ComputeMode::Scalar,
+            ComputeMode::Vector {
+                vec_size: 32,
+                loop_variant: 0,
+            },
+        ] {
+            let cpp = Compiler::new()
+                .with_table_init_mode(table_init_mode)
+                .with_compute_mode(compute_mode)
+                .compile_source_to_cpp_with_lane(
+                    "computed-table-size",
+                    SOURCE,
+                    &codegen::backends::cpp::CppOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "computed table size must compile in {table_init_mode:?}/{compute_mode:?}: \
+                         {error}"
+                    )
+                });
+            assert!(
+                cpp.contains("[64]"),
+                "computed table extent must simplify to 64 in \
+                 {table_init_mode:?}/{compute_mode:?}"
+            );
+        }
     }
 }
 
@@ -731,6 +925,7 @@ fn fastlane_compiles_c_table_fixtures_without_shims() {
         "rep_35_table_rwtable_runtime_write.dsp",
         "rep_36_table_rdtable_negative_index.dsp",
         "rep_37_table_rwtable_negative_indices.dsp",
+        "rep_87_table_computed_size.dsp",
     ] {
         let fast = compile_c_with_lane(file, SignalFirLane::TransformFastLane);
         assert!(

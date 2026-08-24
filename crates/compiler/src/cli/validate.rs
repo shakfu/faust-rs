@@ -88,6 +88,19 @@ pub(crate) fn handle_fixture_listing(cli: &CliArgs) -> bool {
 /// Every rejection here exits with status 2, so the order of the checks decides
 /// which message a doubly-invalid command line reports — keep it stable.
 pub(crate) fn validate_cli_arguments(cli: &CliArgs) -> Option<usize> {
+    #[cfg(not(all(feature = "network-imports", not(target_arch = "wasm32"))))]
+    if cli.allow_network_imports {
+        eprintln!(
+            "--allow-network-imports requires a native build with the `network-imports` Cargo feature"
+        );
+        std::process::exit(2);
+    }
+
+    if let Err(error) = validate_memory_manager_options(cli) {
+        eprintln!("ERROR : {error}");
+        std::process::exit(1);
+    }
+
     // Execution-option validation happens before any parsing or lowering
     // (plan §4.2): when `-lang` names the backend, consult the capability
     // table now; backend paths selected without `-lang` are enforced by the
@@ -119,7 +132,9 @@ pub(crate) fn validate_cli_arguments(cli: &CliArgs) -> Option<usize> {
         cli.golden,
         cli.parse,
         cli.dump_box,
+        cli.export_dsp,
         cli.dump_sig,
+        cli.dump_sig_dag,
         cli.dump_cpp,
         cli.dump_cpp_from_fbc,
         cli.dump_c,
@@ -135,8 +150,13 @@ pub(crate) fn validate_cli_arguments(cli: &CliArgs) -> Option<usize> {
     .filter(|v| *v)
     .count();
 
-    let json_plus_lang_only = cli.dump_json && cli.lang.is_some() && backend_mode_count == 2;
-    let mode_count = if json_plus_lang_only {
+    // `--json` and `-e` do not emit backend code: one writes a description,
+    // the other Faust source. Pairing either with `-lang` is what a caller
+    // does when `-lang` lives in a fixed flag set, and C++ accepts it — the
+    // backend it selects is simply unused. Two *emitters* still conflict, so
+    // `-e --dump-cpp` is rejected as before.
+    let lang_is_inert = (cli.dump_json || cli.export_dsp) && cli.lang.is_some();
+    let mode_count = if lang_is_inert && backend_mode_count == 2 {
         1
     } else {
         backend_mode_count
@@ -167,7 +187,9 @@ pub(crate) fn validate_cli_arguments(cli: &CliArgs) -> Option<usize> {
         std::process::exit(2);
     }
 
-    if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
+    if (cli.dump_box || cli.dump_sig || cli.dump_sig_dag || cli.parse || cli.golden)
+        && cli.signal_fir_lane.is_some()
+    {
         eprintln!(
             "--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir/--dump-fir-verify/--dump-cranelift"
         );
@@ -244,7 +266,8 @@ pub(crate) fn validate_cli_arguments(cli: &CliArgs) -> Option<usize> {
     }
 
     if cli.fir_fixture.is_some() {
-        if cli.golden || cli.parse || cli.dump_box || cli.dump_sig || cli.check {
+        if cli.golden || cli.parse || cli.dump_box || cli.dump_sig || cli.dump_sig_dag || cli.check
+        {
             eprintln!(
                 "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm/wast/json)"
             );
@@ -260,4 +283,56 @@ pub(crate) fn validate_cli_arguments(cli: &CliArgs) -> Option<usize> {
         }
     }
     Some(mode_count)
+}
+
+/// Validates the scalar native-backend capability boundary for `mem0`.
+///
+/// Kept as a pure helper so aliases and backend combinations can be tested
+/// without exercising the process-exit orchestration. The C++ reference
+/// accepts only its C++ backend; C and Cranelift are deliberate faust-rs
+/// extensions frozen by the mem0 Phase 0 report.
+pub(crate) fn validate_memory_manager_options(cli: &CliArgs) -> Result<(), String> {
+    if !cli.memory_manager {
+        return Ok(());
+    }
+    if cli.vec {
+        return Err("-mem0 is currently supported only in scalar mode; remove -vec".to_owned());
+    }
+
+    let backend = if let Some(lang) = cli.lang {
+        Some(cli_backend_id(lang))
+    } else if cli.dump_c {
+        Some("c")
+    } else if cli.dump_cranelift {
+        Some("cranelift")
+    } else if cli.dump_cpp || cli.dump_json {
+        Some("cpp")
+    } else if cli.golden
+        || cli.parse
+        || cli.dump_box
+        || cli.export_dsp
+        || cli.dump_sig
+        || cli.dump_sig_dag
+        || cli.dump_cpp_from_fbc
+        || cli.dump_fir
+        || cli.dump_fir_verify
+        || cli.check
+        || cli.dump_interp
+    {
+        None
+    } else {
+        // No explicit output mode means the default C++ backend.
+        Some("cpp")
+    };
+
+    match backend {
+        Some("c" | "cpp" | "cranelift") => Ok(()),
+        Some(backend) => Err(format!(
+            "-mem0 cannot be used with the '{backend}' backend; supported backends are 'c', 'cpp', and 'cranelift'"
+        )),
+        None => Err(
+            "-mem0 requires C, C++, or Cranelift code generation (or backend-specific JSON)"
+                .to_owned(),
+        ),
+    }
 }

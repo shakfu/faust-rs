@@ -15,7 +15,7 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - Respect crate boundaries; avoid circular dependencies.
 - Add new code in the most specific crate first, then expose upward through public APIs.
 - Keep `crates/compiler` as the top-level orchestration crate (lib + CLI entry point).
-- Use `clap` as the default command-line argument parser for user-facing binaries; use another parser only with an explicit documented reason in `porting/` or `JOURNAL.md`.
+- Use `clap` as the default command-line argument parser for user-facing binaries; use another parser only with an explicit documented reason in `porting/` or `JOURNAL.md`. This is enforced mechanically by `cargo run -p xtask -- cli-parser-check`, which flags any file with raw `env::args()`/`env::args_os()` that isn't an approved normalized Clap entry point or a documented exception in `porting/cli-parser-consolidation-analysis-and-porting-plan-2026-07-28-en.md` — every new `[[bin]]` must pass it, not just compile.
 - Keep crate responsibilities aligned with `porting/faust-rust-porting-plan-en.md` section 2/4.
 - Preserve key integrations recommended by the plan:
   - `patternmatcher` logic merged into `eval`.
@@ -29,6 +29,16 @@ Guidelines for contributors and coding agents working on `faust-rs`.
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+  - the five static structure gates CI runs as its "Structure check" step —
+    pure text/metadata analysis with no OS-dependent behavior, so any
+    machine settles all three CI runners at once (the artifacts
+    `code-graphs --check` compares hold crate and item names only, never
+    paths, so they are byte-identical on every platform):
+    - `cargo run -p xtask -- cli-parser-check`
+    - `cargo run -p xtask -- error-model-check`
+    - `cargo run -p xtask -- ffi-boundary-check`
+    - `cargo run -p xtask -- structure-check`
+    - `cargo run -p xtask -- code-graphs --check`
 - Avoid introducing `unsafe` unless strictly required and documented.
 - Tests must be self-contained: they must not depend on a locally installed
   Faust (e.g. `/usr/local/share/faust`), and copies of the Faust standard
@@ -44,6 +54,18 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - CI also runs golden parity guardrails via `cargo run -p xtask -- golden-check`.
 - CI also runs the compilation-cost gate via
   `cargo run --release -p xtask -- compile-budget-check`.
+- CI also runs a Ubuntu-only "Structure check" step (see §3 for the five
+  commands) enforcing the `clap`-only CLI policy, the error-model contract,
+  the FFI-boundary/dependency-direction rule, file-size structure
+  thresholds, and the checked-in code graphs plus the public-API baseline.
+  It runs on one OS only because it is pure text/metadata analysis with no
+  platform-dependent outcome — run it locally on any OS.
+- `docs/code-graphs/public-api-baseline.txt` is the inventory of every crate's
+  public items. When a change adds or removes one, regenerate with
+  `cargo run -p xtask -- code-graphs` and review the diff in the commit: a new
+  entry means a crate boundary widened, which is a design decision, not a
+  side effect. Widening `pub(crate)` to `pub` merely to make a code move
+  compile is the case this gate exists to surface.
 - A change is not considered ready unless CI is green.
 - Code that constructs, normalizes, displays, or compares filesystem paths must
   be checked for cross-platform behavior. Prefer `Path`/`PathBuf` operations,
@@ -120,6 +142,21 @@ Guidelines for contributors and coding agents working on `faust-rs`.
   - `instanceInit` does not call `classInit`;
   - runtime code does not duplicate `instanceClear` with ad-hoc field clearing;
   - compiled `instanceConstants` is authoritative when present.
+
+### Compatibility Difference Registry (Mandatory)
+
+- Keep `porting/faust-rs-vs-faust-cpp-differences-en.md` as the living registry
+  of compatibility-relevant differences from the pinned Faust C++ reference.
+- Update it in the same change whenever work introduces, changes, or removes:
+  - a Rust-only source form, CLI option, backend, diagnostic, API, or artifact;
+  - an intentional difference in defaults, accepted inputs, lifecycle,
+    scheduling, generated output, failure policy, or observable behavior;
+  - an `adapted`, `deferred`, narrower, or excluded public compatibility
+    surface.
+- Each entry must state compatibility impact, distinguish implemented behavior
+  from plans, and link an authoritative plan, test, fixture, or API matrix.
+- Closing a difference requires updating or removing its registry entry; a
+  stale registry is a porting defect.
 
 ## 6. Scope and Non-Goals (Frozen)
 

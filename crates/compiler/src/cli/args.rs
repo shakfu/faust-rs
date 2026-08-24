@@ -157,9 +157,23 @@ pub struct CliArgs {
     /// Parse and dump box IR.
     #[arg(long = "dump-box", action = ArgAction::SetTrue)]
     pub dump_box: bool,
+    /// Expand the DSP into a self-contained program with every import inlined.
+    ///
+    /// Spelled `-e` / `--export-dsp` as in C++ Faust. The output is Faust
+    /// source, not generated code, so it is a terminal mode: combining it with
+    /// a backend selection is rejected rather than silently ignoring one.
+    #[arg(short = 'e', long = "export-dsp", action = ArgAction::SetTrue)]
+    pub export_dsp: bool,
     /// Compile to signals and dump signal IR.
     #[arg(long = "dump-sig", action = ArgAction::SetTrue)]
     pub dump_sig: bool,
+    /// Compile to signals and dump the signal IR as a numbered DAG.
+    ///
+    /// Same information as `--dump-sig`, printed as one binding per interior
+    /// node instead of one tree per output, so shared structure appears once
+    /// and node identity is readable off the text.
+    #[arg(long = "dump-sig-dag", action = ArgAction::SetTrue)]
+    pub dump_sig_dag: bool,
     /// Compile to C++ and print generated code.
     #[arg(long = "dump-cpp", action = ArgAction::SetTrue)]
     pub dump_cpp: bool,
@@ -254,6 +268,13 @@ pub struct CliArgs {
     /// Extra import search directories.
     #[arg(short = 'I', long = "import-dir")]
     pub import_dir: Vec<PathBuf>,
+    /// Permit explicit HTTP(S) entry sources and imports.
+    ///
+    /// This runtime opt-in is effective only in builds compiled with the
+    /// `network-imports` Cargo feature. Ordinary builds never link an HTTP
+    /// transport and all builds keep networking disabled by default.
+    #[arg(long = "allow-network-imports", action = ArgAction::SetTrue)]
+    pub allow_network_imports: bool,
     /// Specify the top-level DSP entry-point name instead of `process`
     /// (`-pn <name>`, `--process-name <name>`).
     #[arg(long = "process-name", default_value = "process")]
@@ -314,6 +335,18 @@ pub struct CliArgs {
     /// compiler.
     #[arg(long = "double", action = ArgAction::SetTrue)]
     pub double: bool,
+    /// Use the host custom memory manager for eligible native DSP state
+    /// (`-mem`/`-mem0`/`--memory-manager`/`--memory-manager0`).
+    ///
+    /// The four spellings select the same typed `mem0` mode. Only mode zero is
+    /// implemented: it is scalar-only and restricted to C, C++, and Cranelift;
+    /// `mem1` through `mem3` are deliberately rejected.
+    #[arg(
+        long = "memory-manager",
+        alias = "memory-manager0",
+        action = ArgAction::SetTrue
+    )]
+    pub memory_manager: bool,
     /// Maximum delay (in samples) below which the shift/copy strategy is used
     /// instead of a circular ring buffer (`-mcd N`).
     ///
@@ -334,10 +367,14 @@ pub struct CliArgs {
     /// reference does; this is the only mode that can express content
     /// depending on the sample rate or on a foreign function, and it keeps the
     /// emitted source small. `const` evaluates the generator at compile time
-    /// and emits a literal initializer list, giving a `const` ROM-able table
-    /// but rejecting generators that are not fully determined at compile time.
+    /// and emits a literal initializer list; a generator using `ma.SR` also
+    /// requires `--table-init-sample-rate HZ` to make the frozen value explicit.
     #[arg(long = "table-init", value_enum, default_value_t = TableInitArg::Runtime)]
     pub table_init: TableInitArg,
+    /// Sample rate embedded when `--table-init const` folds a generated table
+    /// that reads `ma.SR`. Required for that dependency; ignored otherwise.
+    #[arg(long = "table-init-sample-rate", value_name = "HZ")]
+    pub table_init_sample_rate: Option<i32>,
     /// Vector mode (`-vec`): restructure `compute()` into an outer chunk loop
     /// so the C compiler can auto-vectorize the inner loops (SIMD).
     ///
@@ -482,6 +519,10 @@ pub fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<Stri
         }
         if arg == "-json" {
             normalized.push("--json".to_owned());
+            continue;
+        }
+        if arg == "-mem" || arg == "-mem0" {
+            normalized.push("--memory-manager".to_owned());
             continue;
         }
         if arg == "-version" {

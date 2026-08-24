@@ -6,11 +6,17 @@ use std::path::PathBuf;
 ///
 /// Supported options: `-I <path>`, `-cn <name>`, `-double`, the vector-mode
 /// trio `-vec` / `-vs <n>` / `-lv <n>`, the scheduling-strategy option
-/// `-ss <n>`, and the non-fatal diagnostic switch `--warn`.
+/// `-ss <n>`, the four mode-zero memory-manager aliases, and the non-fatal
+/// diagnostic switch `--warn`.
 /// Unknown options are ignored so backend FFI crates can accept broader argv
 /// vectors while incrementally extending support.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FfiCompileArgs {
+    /// Enable custom memory-manager mode zero.
+    ///
+    /// This dependency-light parsing crate stores the semantic bit; consumers
+    /// map it immediately to `codegen::memory_layout::MemoryManagerMode`.
+    pub memory_manager0: bool,
     /// Extra import search paths collected from `-I`.
     pub search_paths: Vec<PathBuf>,
     /// Optional class/module name override from `-cn`.
@@ -53,10 +59,12 @@ pub struct FfiCompileArgs {
     /// [`Self::scheduling_strategy`]: `TableInitMode` lives in `transform`, and
     /// `ffi-common` is a dependency-light leaf crate.
     pub table_init: Option<String>,
+    /// Explicit sample rate used to fold `ma.SR` under `--table-init const`.
+    pub table_init_sample_rate: Option<i32>,
 }
 
 /// Parses the shared FFI option subset (`-I`, `-cn`, `-double`,
-/// `-vec`/`-vs`/`-lv`, `-ss`, `--table-init`, `--warn`) from an argv vector. `vec_size` defaults to 32
+/// `-vec`/`-vs`/`-lv`, `-ss`, `--table-init`, `--table-init-sample-rate`, `--warn`) from an argv vector. `vec_size` defaults to 32
 /// when `-vec` is given without `-vs`, matching the Faust CLI.
 /// `scheduling_strategy` defaults to `0` (depth-first) when `-ss` is absent,
 /// mirroring the CLI's `--scheduling-strategy` default.
@@ -66,6 +74,7 @@ pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String>
         ..FfiCompileArgs::default()
     };
     let mut index = 0usize;
+    let mut in_place = false;
     while index < argv.len() {
         let arg = &argv[index];
         if arg == "-I" {
@@ -86,6 +95,32 @@ pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String>
         }
         if arg == "-double" {
             parsed.double = true;
+            index += 1;
+            continue;
+        }
+        if matches!(
+            arg.as_str(),
+            "-mem" | "-mem0" | "--memory-manager" | "--memory-manager0"
+        ) {
+            parsed.memory_manager0 = true;
+            index += 1;
+            continue;
+        }
+        if matches!(
+            arg.as_str(),
+            "-mem1"
+                | "-mem2"
+                | "-mem3"
+                | "--memory-manager1"
+                | "--memory-manager2"
+                | "--memory-manager3"
+        ) {
+            return Err(format!(
+                "unsupported memory-manager mode `{arg}`; only -mem0 is implemented"
+            ));
+        }
+        if arg == "-it" {
+            in_place = true;
             index += 1;
             continue;
         }
@@ -132,12 +167,30 @@ pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String>
             index += 2;
             continue;
         }
+        if arg == "--table-init-sample-rate" {
+            let Some(value) = argv.get(index + 1) else {
+                return Err("missing value after --table-init-sample-rate".to_owned());
+            };
+            parsed.table_init_sample_rate = Some(
+                value
+                    .parse()
+                    .map_err(|error| format!("bad --table-init-sample-rate value: {error}"))?,
+            );
+            index += 2;
+            continue;
+        }
         if arg == "--warn" {
             parsed.warnings = true;
             index += 1;
             continue;
         }
         index += 1;
+    }
+    if parsed.memory_manager0 && parsed.vec_mode {
+        return Err("-mem0 is currently supported only in scalar mode; remove -vec".to_owned());
+    }
+    if parsed.memory_manager0 && in_place {
+        return Err("-mem0 cannot be combined with -it".to_owned());
     }
     Ok(parsed)
 }
@@ -206,6 +259,26 @@ mod tests {
     fn accepts_non_fatal_warning_collection() {
         let parsed = parse_ffi_compile_args(&["--warn".to_owned()]).unwrap();
         assert!(parsed.warnings);
+    }
+
+    #[test]
+    fn all_mem0_aliases_select_one_mode() {
+        for spelling in ["-mem", "-mem0", "--memory-manager", "--memory-manager0"] {
+            let parsed = parse_ffi_compile_args(&[spelling.to_owned()]).unwrap();
+            assert!(parsed.memory_manager0, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn rejects_unported_memory_modes_and_incompatible_mem0_options() {
+        for spelling in ["-mem1", "-mem2", "-mem3", "--memory-manager3"] {
+            let error = parse_ffi_compile_args(&[spelling.to_owned()]).unwrap_err();
+            assert!(error.contains("only -mem0 is implemented"), "{error}");
+        }
+        let error = parse_ffi_compile_args(&["-mem0".to_owned(), "-vec".to_owned()]).unwrap_err();
+        assert!(error.contains("scalar mode"), "{error}");
+        let error = parse_ffi_compile_args(&["-it".to_owned(), "-mem".to_owned()]).unwrap_err();
+        assert!(error.contains("cannot be combined with -it"), "{error}");
     }
 
     #[test]

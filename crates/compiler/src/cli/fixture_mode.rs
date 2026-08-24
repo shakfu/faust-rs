@@ -17,7 +17,6 @@ use codegen::backends::interp::InterpOptions;
 use codegen::backends::julia::{JuliaOptions, generate_julia_module};
 use codegen::backends::rust::{RustOptions, generate_rust_module};
 use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
-use compiler::enrobage::{EnrobageOptions, wrap_cpp_with_architecture};
 use fir::{checker::verify_fir_module, dump_fir};
 
 use super::args::{CliArgs, CliLang};
@@ -84,8 +83,14 @@ pub(crate) fn run_fir_fixture_mode(cli: &CliArgs, fixture_name: &str, mode_count
     if cli.dump_cranelift || matches!(cli.lang, Some(CliLang::Cranelift)) {
         let subset_gap =
             diagnose_cranelift_compute_subset_gap(&store, module).map_err(|err| err.to_string());
-        let compiled = match generate_cranelift_module(&store, module, &CraneliftOptions::default())
-        {
+        let compiled = match generate_cranelift_module(
+            &store,
+            module,
+            &CraneliftOptions {
+                memory_manager_mode: selected_memory_manager_mode(cli),
+                ..CraneliftOptions::default()
+            },
+        ) {
             Ok(compiled) => compiled,
             Err(err) => {
                 eprintln!("Cranelift fixture codegen failed: {err}");
@@ -242,6 +247,9 @@ pub(crate) fn run_fir_fixture_mode(cli: &CliArgs, fixture_name: &str, mode_count
                 cli,
                 Some(cli_lang_name(CliLang::Julia)),
             )),
+            // A FIR fixture has no source session behind it: there is no
+            // filename, no metadata snapshot, and no JSON description to embed.
+            ..JuliaOptions::default()
         };
         match generate_julia_module(&store, module, &options) {
             Ok(julia) => {
@@ -304,6 +312,8 @@ pub(crate) fn run_fir_fixture_mode(cli: &CliArgs, fixture_name: &str, mode_count
 
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
         let options = CppOptions {
+            memory_manager_mode: selected_memory_manager_mode(cli),
+            double_precision: cli.double,
             class_name: selected_class_name(cli),
             super_class_name: selected_super_class_name(cli),
             compile_options: Some(compile_options_full_string(
@@ -314,31 +324,7 @@ pub(crate) fn run_fir_fixture_mode(cli: &CliArgs, fixture_name: &str, mode_count
         };
         match generate_cpp_module(&store, module, &options) {
             Ok(cpp) => {
-                let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
-                    let mut options = EnrobageOptions::new(architecture_file.clone());
-                    options.architecture_dirs = cli.architecture_dir.clone();
-                    options.inline_arch_files = cli.inline_architecture_files;
-                    if let Some(class_name) = selected_class_name(cli) {
-                        options.class_name = class_name;
-                    }
-                    if let Some(super_class_name) = selected_super_class_name(cli) {
-                        options.super_class_name = super_class_name;
-                    }
-                    let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
-                        Ok(wrapped) => wrapped,
-                        Err(err) => {
-                            eprintln!("Architecture wrapping failed: {err}");
-                            std::process::exit(1);
-                        }
-                    };
-                    if let Some(err) = wrapped.recoverable_error.as_deref() {
-                        eprintln!("{err}");
-                        std::process::exit(1);
-                    }
-                    wrapped.code
-                } else {
-                    cpp
-                };
+                let rendered = wrap_backend_with_architecture(&cpp, cli);
                 emit_output(&rendered, cli.output.as_ref());
                 if cli.dump_json {
                     emit_fixture_json_companion(cli, &store, module, "cpp");
@@ -354,6 +340,8 @@ pub(crate) fn run_fir_fixture_mode(cli: &CliArgs, fixture_name: &str, mode_count
 
     if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
         let options = COptions {
+            memory_manager_mode: selected_memory_manager_mode(cli),
+            double_precision: cli.double,
             class_name: selected_class_name(cli),
             compile_options: Some(compile_options_full_string(
                 cli,
@@ -363,25 +351,8 @@ pub(crate) fn run_fir_fixture_mode(cli: &CliArgs, fixture_name: &str, mode_count
         };
         match generate_c_module(&store, module, &options) {
             Ok(c_code) => {
-                let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
-                    let mut options = EnrobageOptions::new(architecture_file.clone());
-                    options.architecture_dirs = cli.architecture_dir.clone();
-                    options.inline_arch_files = cli.inline_architecture_files;
-                    if let Some(class_name) = selected_class_name(cli) {
-                        options.class_name = class_name;
-                    }
-                    let wrapped = match wrap_cpp_with_architecture(&c_code, &options) {
-                        Ok(wrapped) => wrapped,
-                        Err(err) => {
-                            eprintln!("Architecture wrapping failed: {err}");
-                            std::process::exit(1);
-                        }
-                    };
-                    if let Some(err) = wrapped.recoverable_error.as_deref() {
-                        eprintln!("{err}");
-                        std::process::exit(1);
-                    }
-                    wrapped.code
+                let rendered = if cli.architecture.is_some() {
+                    wrap_backend_with_architecture(&c_code, cli)
                 } else {
                     c_code
                 };
