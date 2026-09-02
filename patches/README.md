@@ -20,6 +20,9 @@ ready-to-send upstream proposal.
 
 ## eval-depth-guard.patch
 
+Proposed upstream as
+[grame-cncm/faust-rs#16](https://github.com/grame-cncm/faust-rs/issues/16) (open).
+
 Bounds *syntactic* recursion depth in the evaluator. `LoopDetector` gains an
 `eval_depth` counter, incremented at every `eval_value` entry, alongside the
 existing `structural_depth`.
@@ -45,6 +48,9 @@ This is the most straightforwardly upstreamable of the patches here: a
 self-contained crash fix with tests, touching no public API.
 
 ## owned-fbc-dsp-instance.patch
+
+Proposed upstream as
+[grame-cncm/faust-rs#17](https://github.com/grame-cncm/faust-rs/issues/17) (open).
 
 Generalizes `FbcDspInstance` in `crates/codegen/src/backends/interp/instance.rs`
 over `Borrow<FbcDspFactory<R>>`, splitting it into a shared base

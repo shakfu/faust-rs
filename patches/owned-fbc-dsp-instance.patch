@@ -1,5 +1,5 @@
 diff --git a/crates/codegen/src/backends/interp/instance.rs b/crates/codegen/src/backends/interp/instance.rs
-index 25dd81fd..2c6c9cf4 100644
+index 4f8385c2..353842cf 100644
 --- a/crates/codegen/src/backends/interp/instance.rs
 +++ b/crates/codegen/src/backends/interp/instance.rs
 @@ -4,13 +4,19 @@
@@ -167,18 +167,20 @@ index 25dd81fd..2c6c9cf4 100644
      /// Full initialization entrypoint used by the public DSP lifecycle.
      ///
      /// This marks the instance initialized, then runs the canonical C++ backend
-@@ -134,8 +214,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -146,9 +226,10 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
      /// - `interpreter_dsp_aux::classInit()` in `interpreter_dsp_aux.hh`
      ///   (lines 570–584).
-     pub fn class_init(&mut self, _sample_rate: i32) {
+     pub fn class_init(&mut self, sample_rate: i32) {
+-        self.executor.int_heap[self.factory.sr_offset as usize] = sample_rate;
 +        let factory = self.factory.borrow();
++        self.executor.int_heap[factory.sr_offset as usize] = sample_rate;
          self.executor
 -            .execute_block(&self.factory.arena, self.factory.static_init_block);
 +            .execute_block(&factory.arena, factory.static_init_block);
      }
  
      /// Sets sample rate and executes the init (constants) block.
-@@ -144,11 +225,12 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -157,11 +238,12 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
      /// - `interpreter_dsp_aux::instanceConstants()` in `interpreter_dsp_aux.hh`
      ///   (lines 586–603).
      pub fn instance_constants(&mut self, sample_rate: i32) {
@@ -193,7 +195,7 @@ index 25dd81fd..2c6c9cf4 100644
      }
  
      /// Executes the reset UI block (sets UI controls to default values).
-@@ -157,8 +239,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -170,8 +252,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
      /// - `interpreter_dsp_aux::instanceResetUserInterface()` in
      ///   `interpreter_dsp_aux.hh` (lines 605–619).
      pub fn instance_reset_user_interface(&mut self) {
@@ -204,7 +206,7 @@ index 25dd81fd..2c6c9cf4 100644
      }
  
      /// Executes the clear block (zeros delay lines, state variables).
-@@ -167,8 +250,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -180,8 +263,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
      /// - `interpreter_dsp_aux::instanceClear()` in `interpreter_dsp_aux.hh`
      ///   (lines 621–635).
      pub fn instance_clear(&mut self) {
@@ -215,7 +217,7 @@ index 25dd81fd..2c6c9cf4 100644
      }
  
      /// Processes one buffer of audio samples.
-@@ -190,20 +274,17 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -203,20 +287,17 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
              return; // Beware: compiled loop does not work with an index of 0.
          }
  
@@ -241,7 +243,7 @@ index 25dd81fd..2c6c9cf4 100644
  
          self.cycle += 1;
      }
-@@ -223,17 +304,18 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -236,17 +317,18 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
              return Ok(()); // Beware: compiled loop does not work with an index of 0.
          }
  
@@ -264,7 +266,7 @@ index 25dd81fd..2c6c9cf4 100644
              inputs,
              outputs,
          )?;
-@@ -248,19 +330,19 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -261,19 +343,19 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
      /// - `interpreter_dsp_aux::getSampleRate()` in `interpreter_dsp_aux.hh`.
      #[must_use]
      pub fn get_sample_rate(&self) -> i32 {
@@ -287,7 +289,7 @@ index 25dd81fd..2c6c9cf4 100644
      }
  
      /// Returns whether `init()` has been called.
-@@ -282,7 +364,7 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
+@@ -295,7 +377,7 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
      /// factory; layout matches the C++ `buildUserInterface` traversal order.
      #[must_use]
      pub fn ui_instructions(&self) -> &[super::bytecode::FbcUiInstruction<R>] {
@@ -397,7 +399,7 @@ index fc18c9ce..75ce463e 100644
 +    assert!(recovered.is_optimized());
 +}
 diff --git a/crates/codegen/src/backends/interp/mod.rs b/crates/codegen/src/backends/interp/mod.rs
-index 6a978b7f..4229c70e 100644
+index 586c7e9a..827e2a7d 100644
 --- a/crates/codegen/src/backends/interp/mod.rs
 +++ b/crates/codegen/src/backends/interp/mod.rs
 @@ -55,7 +55,7 @@ pub use foreign::{
