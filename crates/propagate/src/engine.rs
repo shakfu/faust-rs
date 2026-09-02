@@ -53,7 +53,6 @@ pub(crate) fn propagate_in_slot_env(
             ctx.ui_path.id(),
             PropagationModeKey::new(ctx.clock_env, ctx.clock_domain, ctx.suppress_fad),
             inputs,
-            ctx.slot_env.len() != 0,
         )
     } else {
         None
@@ -811,10 +810,7 @@ fn propagate_inner(
             }
 
             // route propagation
-            for pair in route.chunks_exact(2) {
-                let src_channel = pair[0];
-                let dst_channel = pair[1];
-
+            for &[src_channel, dst_channel] in route.as_chunks::<2>().0 {
                 let Some(src_index) = to_valid_index(src_channel, input_count) else {
                     continue;
                 };

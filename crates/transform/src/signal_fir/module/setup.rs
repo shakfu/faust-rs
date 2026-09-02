@@ -157,6 +157,7 @@ impl<'a> SignalToFirLower<'a> {
             module_name: module_name.to_owned(),
             table_fill_sink: None,
             table_init_mode: crate::signal_fir::TableInitMode::default(),
+            check_table: true,
             table_init_sample_rate: None,
             scheduling_strategy: crate::schedule::SchedulingStrategy::DepthFirst,
             sub_modules: Vec::new(),
@@ -438,7 +439,8 @@ impl<'a> SignalToFirLower<'a> {
         let n = self.next_materialized_counter(prefix);
         let access = match bucket {
             Bucket::Constants if self.konst_escapes(sig) => AccessType::Struct,
-            // Execution-options port §4.4: under external control the store
+            // Plan provenance: execution-options port §4.4 — under external
+            // control the store
             // moves to `control`, so the value must live in DSP-owned storage
             // for sample-rate code to read it across the function boundary —
             // the same escape promotion the Konst arm above already applies.

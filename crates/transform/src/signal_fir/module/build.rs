@@ -13,12 +13,9 @@
 //! All other submodules in `module/` provide `impl SignalToFirLower` methods
 //! that are invoked from the orchestration logic here.
 
-use ahash::AHashMap;
-
 use super::region;
 use super::setup;
 use super::state;
-use crate::signal_fir::ComputeMode;
 use crate::signal_fir::FirId;
 use crate::signal_fir::FirStore;
 use crate::signal_fir::FirType;
@@ -27,10 +24,8 @@ use crate::signal_fir::SignalFirError;
 use crate::signal_fir::SignalFirOutput;
 use crate::signal_fir::TreeArena;
 use crate::signal_fir::UiProgram;
-use crate::signal_fir::loop_graph::LoopKind;
 use crate::signal_fir::module::AccessType;
 use crate::signal_fir::module::DelayOptions;
-use crate::signal_fir::module::FirBinOp;
 use crate::signal_fir::module::FirBuilder;
 use crate::signal_fir::module::FirMathOp;
 use crate::signal_fir::module::HashMap;
@@ -65,276 +60,13 @@ pub(super) struct RadReverseState {
     pub(super) lowering_reverse_loop: bool,
 }
 
-/// Emits one sample-loop slice's statements. Scalar mode — and any reverse-time
-/// loop — stays a single `for (i0 = 0; i0 < count; i0++)`. Vector mode (`-vec`)
-/// restructures a forward slice into a chunk driver (roadmap P6, V5 / S-D):
-///
-/// - a **`Vectorizable`** (state-free) slice is chunked whole;
-/// - a **`Recursive`** slice is *split* when possible (vector doc §5 S-D): its
-///   state-free tail is hoisted into a second, vectorizable inner loop fed by
-///   chunk buffers, leaving only the recursive core serial — otherwise it stays
-///   one plain serial loop (chunking a loop-carried body as one block is pure
-///   overhead the C compiler cannot vectorize);
-/// - a **`Island`** (clocked scalar domain) stays a plain serial loop.
-///
-/// The chunk driver has two layouts, selected by `-lv` (`loop_variant`, as Faust
-/// C++), both bit-exact vs scalar (the inner loop keeps the *global* sample index
-/// `i0`, no I/O rebasing):
-///
-/// ```text
-/// -lv 1 "simple"                       -lv 0 "fastest" (default)
-/// for (vindex=0; vindex<count; +=vs) { int vlimit = count - count % vs;
-///   int vend = min(vindex+vs, count);  for (vindex=0; vindex<vlimit; +=vs)
-///   for (i0=vindex; i0<vend; i0++)…      for (i0=vindex; i0<vindex+vs; i0++)…  // const trip
-/// }                                    int vindex = vlimit;                     // remainder
-///                                      for (i0=vindex; i0<count; i0++)…
-/// ```
-///
-/// The fastest variant's constant inner trip count (`vindex + vs`) is what lets
-/// the C compiler fully unroll / SIMD the (vectorizable) inner loops; the simple
-/// variant's runtime `min` bound is easier to read but vectorizes less well.
-/// Reverse-time loops force scalar mode (chunking would change the implicit TBPTT
-/// window from `count` to `vec_size`, vector doc §5).
-///
-/// Returns the slice's statements: for the split path, the chunk-buffer
-/// declarations followed by the chunk driver; otherwise one loop.
-fn emit_sample_loop(
-    store: &mut FirStore,
-    exec: &[FirId],
-    is_reverse: bool,
-    kind: LoopKind,
-    compute_mode: ComputeMode,
-) -> Vec<FirId> {
-    let (vec_size, variant) = match compute_mode {
-        // Reverse-time and scalar mode: one plain serial loop.
-        ComputeMode::Vector {
-            vec_size,
-            loop_variant,
-        } if !is_reverse => (vec_size.max(1), loop_variant),
-        _ => return vec![plain_sample_loop(store, exec, is_reverse)],
-    };
-    let vs = i32::try_from(vec_size).unwrap_or(i32::MAX);
-
-    match kind {
-        // State-free slice: chunk the whole body (one inner loop per chunk).
-        LoopKind::Vectorizable => build_chunk_driver(store, &[exec.to_vec()], vs, variant),
-        // Recursive slice: split off the state-free tail when possible.
-        LoopKind::Recursive => match split_bodies(store, exec, vec_size) {
-            Some((serial_body, tail_body, buf_decls)) => {
-                let mut out = buf_decls;
-                out.extend(build_chunk_driver(
-                    store,
-                    &[serial_body, tail_body],
-                    vs,
-                    variant,
-                ));
-                out
-            }
-            None => vec![plain_sample_loop(store, exec, false)],
-        },
-        // Clocked scalar island (vector doc §6 D1): plain serial loop.
-        LoopKind::Island => vec![plain_sample_loop(store, exec, false)],
-    }
-}
-
-/// A single `for (i0 = 0; i0 < count; i0++) { <exec> }` (scalar / reverse / the
-/// non-splittable-recursive and island fallbacks).
+/// A single `for (i0 = 0; i0 < count; i0++) { <exec> }` (forward or
+/// reverse-time). The scalar lowerer's only sample-loop shape.
 fn plain_sample_loop(store: &mut FirStore, exec: &[FirId], is_reverse: bool) -> FirId {
     let mut b = FirBuilder::new(store);
     let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
     let body = b.block(exec);
     b.simple_for_loop("i0", upper, body, is_reverse)
-}
-
-/// Splits a recursive slice into `(serial core + buffer stores, rewritten tail,
-/// chunk-buffer declarations)` (vector doc §5 S-D), or `None` when the body is
-/// not splittable (→ one plain serial loop). The serial core buffers each
-/// boundary carrier into `vbufN[i0 - vindex]`; the tail reads it back.
-///
-/// Bit-exact: the serial core runs the whole chunk first (state evolves exactly
-/// as in the fused loop), then the tail reads the buffered values at the same
-/// global `i0`.
-fn split_bodies(
-    store: &mut FirStore,
-    exec: &[FirId],
-    vec_size: u32,
-) -> Option<(Vec<FirId>, Vec<FirId>, Vec<FirId>)> {
-    use crate::signal_fir::loop_graph::{ChunkBuffer, partition_recursive_body, rewrite_var_loads};
-
-    let part = partition_recursive_body(store, exec)?;
-
-    // A chunk buffer per boundary temp (deterministic vbufN numbering).
-    let buffers: Vec<ChunkBuffer> = part
-        .boundary
-        .iter()
-        .enumerate()
-        .map(|(i, (_, ty))| {
-            ChunkBuffer::new(u32::try_from(i).unwrap_or(u32::MAX), ty.clone(), vec_size)
-        })
-        .collect();
-    let buf_decls: Vec<FirId> = buffers.iter().map(|buf| buf.declare(store)).collect();
-
-    // Serial inner body = serial core + `vbufN[i0 - vindex] = temp`.
-    let mut serial_body = part.serial.clone();
-    for (buf, (name, ty)) in buffers.iter().zip(&part.boundary) {
-        let val = FirBuilder::new(store).load_var(name.clone(), AccessType::Stack, ty.clone());
-        serial_body.push(buf.store(store, val));
-    }
-
-    // Tail inner body = tail statements with boundary reads → buffer loads.
-    let mut repl = AHashMap::new();
-    for (buf, (name, _)) in buffers.iter().zip(&part.boundary) {
-        let load = buf.load(store);
-        repl.insert(name.clone(), load);
-    }
-    let tail_body: Vec<FirId> = part
-        .vectorizable
-        .iter()
-        .map(|&s| rewrite_var_loads(store, s, &repl))
-        .collect::<Option<_>>()?;
-
-    Some((serial_body, tail_body, buf_decls))
-}
-
-/// Builds the chunk driver wrapping one inner loop per `body` (in order), in the
-/// requested loop variant (`-lv`). Returns the driver's top-level statements.
-fn build_chunk_driver(
-    store: &mut FirStore,
-    bodies: &[Vec<FirId>],
-    vs: i32,
-    loop_variant: u8,
-) -> Vec<FirId> {
-    if loop_variant == 1 {
-        vec![build_simple_driver(store, bodies, vs)]
-    } else {
-        build_fastest_driver(store, bodies, vs)
-    }
-}
-
-/// One `for (i0 = start; i0 < bound; i0++) { body }` per `body`, in order. Each
-/// loop reads the global `i0`; `start`/`bound` are shared interned expressions.
-fn chunk_inner_loops(
-    store: &mut FirStore,
-    bodies: &[Vec<FirId>],
-    start: FirId,
-    bound: FirId,
-) -> Vec<FirId> {
-    bodies
-        .iter()
-        .map(|body| {
-            let mut b = FirBuilder::new(store);
-            let init = b.declare_var("i0", FirType::Int32, AccessType::Loop, Some(start));
-            let step = b.int32(1);
-            let blk = b.block(body);
-            b.for_loop("i0", init, bound, step, blk, false)
-        })
-        .collect()
-}
-
-/// `-lv 1` "simple": one outer loop with a runtime `vend = min(vindex+vs, count)`.
-fn build_simple_driver(store: &mut FirStore, bodies: &[Vec<FirId>], vs: i32) -> FirId {
-    // vend = (vindex + vs < count) ? vindex + vs : count.
-    let (vend_decl, start, bound) = {
-        let mut b = FirBuilder::new(store);
-        let vindex_r = b.load_var("vindex", AccessType::Loop, FirType::Int32);
-        let vsz = b.int32(vs);
-        let next = b.binop(FirBinOp::Add, vindex_r, vsz, FirType::Int32);
-        let count_hi = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-        let cond = b.binop(FirBinOp::Lt, next, count_hi, FirType::Int32);
-        let vend_val = b.select2(cond, next, count_hi, FirType::Int32);
-        let vend_decl = b.declare_var("vend", FirType::Int32, AccessType::Stack, Some(vend_val));
-        let start = b.load_var("vindex", AccessType::Loop, FirType::Int32);
-        let bound = b.load_var("vend", AccessType::Stack, FirType::Int32);
-        (vend_decl, start, bound)
-    };
-    let mut outer_stmts = vec![vend_decl];
-    outer_stmts.extend(chunk_inner_loops(store, bodies, start, bound));
-
-    let mut b = FirBuilder::new(store);
-    let outer_body = b.block(&outer_stmts);
-    let zero = b.int32(0);
-    let vindex_init = b.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(zero));
-    let count_end = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-    let vsz_step = b.int32(vs);
-    b.for_loop(
-        "vindex",
-        vindex_init,
-        count_end,
-        vsz_step,
-        outer_body,
-        false,
-    )
-}
-
-/// `-lv 0` "fastest": a constant-trip main loop over `[0, vlimit)` (inner bound
-/// `vindex + vs`, so the C compiler proves the trip count) plus a scalar remainder
-/// over `[vlimit, count)`, where `vlimit = count - count % vs`.
-///
-/// Both loops are wrapped in an `if` guard so an *empty* range is never entered:
-/// the main loop is skipped when `count < vs` (`vlimit == 0`), the remainder when
-/// `vs` divides `count` (`vlimit == count`). This matters because the interpreter
-/// runs a loop body once before its first condition check (a `do/while`), so an
-/// empty chunk would read past the block; the C `for` would be fine, but the guard
-/// keeps both backends identical.
-///
-/// `vlimit` is an inline reused expression, not a named variable, so multiple
-/// sample-loop slices never collide, and the remainder's `int vindex = vlimit`
-/// (needed for `vbufN[i0 - vindex]`) is scoped inside its `if` block.
-fn build_fastest_driver(store: &mut FirStore, bodies: &[Vec<FirId>], vs: i32) -> Vec<FirId> {
-    // vlimit = count - count % vs, a reusable interned expression.
-    let vlimit = {
-        let mut b = FirBuilder::new(store);
-        let count1 = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-        let vsz1 = b.int32(vs);
-        let rem = b.binop(FirBinOp::Rem, count1, vsz1, FirType::Int32);
-        let count2 = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-        b.binop(FirBinOp::Sub, count2, rem, FirType::Int32)
-    };
-
-    // Main loop: for (vindex = 0; vindex < vlimit; vindex += vs), inner bound
-    // vindex + vs (constant trip count), guarded by `vlimit > 0`.
-    let (start_m, bound_m) = {
-        let mut b = FirBuilder::new(store);
-        let start_m = b.load_var("vindex", AccessType::Loop, FirType::Int32);
-        let vindex_b = b.load_var("vindex", AccessType::Loop, FirType::Int32);
-        let vsz_b = b.int32(vs);
-        let bound_m = b.binop(FirBinOp::Add, vindex_b, vsz_b, FirType::Int32);
-        (start_m, bound_m)
-    };
-    let main_stmts = chunk_inner_loops(store, bodies, start_m, bound_m);
-    let main_guarded = {
-        let mut b = FirBuilder::new(store);
-        let main_body = b.block(&main_stmts);
-        let zero = b.int32(0);
-        let vindex_init = b.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(zero));
-        let vsz_step = b.int32(vs);
-        let main_loop = b.for_loop("vindex", vindex_init, vlimit, vsz_step, main_body, false);
-        let zero_c = b.int32(0);
-        let cond = b.binop(FirBinOp::Gt, vlimit, zero_c, FirType::Int32);
-        let then_blk = b.block(&[main_loop]);
-        b.if_(cond, then_blk, None)
-    };
-
-    // Remainder: if (vlimit < count) { int vindex = vlimit; for i0=vindex..count }
-    let (start_r, bound_r) = {
-        let mut b = FirBuilder::new(store);
-        let start_r = b.load_var("vindex", AccessType::Loop, FirType::Int32);
-        let bound_r = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-        (start_r, bound_r)
-    };
-    let rem_inner = chunk_inner_loops(store, bodies, start_r, bound_r);
-    let rem_guarded = {
-        let mut b = FirBuilder::new(store);
-        let vindex_decl = b.declare_var("vindex", FirType::Int32, AccessType::Loop, Some(vlimit));
-        let mut rem_stmts = vec![vindex_decl];
-        rem_stmts.extend(rem_inner);
-        let rem_body = b.block(&rem_stmts);
-        let count_hi = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-        let cond = b.binop(FirBinOp::Lt, vlimit, count_hi, FirType::Int32);
-        b.if_(cond, rem_body, None)
-    };
-
-    vec![main_guarded, rem_guarded]
 }
 
 /// Names and element type of the table one generator sub-module fills.
@@ -369,7 +101,7 @@ fn assemble_sub_module(
         // nested table is populated before the loop that reads it.
         //
         // Dropping these is not a missing optimization but a wrong answer: it
-        // is precisely the upstream defect of §2.4, where the inner table is
+        // is precisely the upstream defect where the inner table is
         // declared and never filled, and the outer table is computed from
         // zeros. Rule FIR-SM05 keeps it from coming back.
         let mut statements = lower.sections.static_init_statements.clone();
@@ -451,196 +183,39 @@ fn assemble_sub_module(
     ))
 }
 
-/// Lowers a prepared signal forest into a complete FIR module.
-///
-/// Entry point for the fast-lane Step 2A–2G boundary: accepts pre-validated
-/// planning data and a prepared signal forest, returns a [`SignalFirOutput`]
-/// with all Faust lifecycle sections (`metadata`, `instanceConstants`,
-/// `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
-/// `compute`) assembled in deterministic order.
-///
-/// # Promotion invariant
-///
-/// The `signals` forest **must** have been processed by
-/// `signal_prepare::promote_signals_for_fir` (and optionally
-/// `normalize::simplify`) before being passed here.  That pass guarantees:
-///
-/// - Every `BinOp(op, lhs, rhs)` node has operands whose signal domain
-///   types are already consistent with `op`: mixed Int/Real operands are
-///   wrapped in explicit `FloatCast` nodes; bitwise/shift operands in
-///   `IntCast` nodes; `Div` operands are always Real.
-/// - Every `Delay(_, amount)`, `RdTbl(_, index)`, `WrTbl(…, widx, _)`,
-///   `Select2(selector, …)`, and `Enable(_, gate)` has its integer-context
-///   operand wrapped in `IntCast`.
-/// - `Delay1(x)` and `Prefix(init, x)` have `type(init) == type(x)`.
-///
-/// **Consequence for the lowerer**: no implicit coercion is needed inside
-/// `lower_binop`, `lower_delay_state`, or `normalized_table_index`.  All
-/// necessary casts appear as explicit signal-tree nodes and are handled by
-/// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
-/// FloatCast`.
-///
-/// BRA tape lowering relies on the same invariant.  It does not run a second
-/// promotion pass over synthesized `fBraTapeN` stores.  If the signal graph
-/// contains an integer/discrete subgraph that feeds a real expression through a
-/// `FloatCast` (for example an LCG noise recursion multiplied by a real scale),
-/// the cast node is the promoted real boundary.  The integer nodes upstream of
-/// that cast keep their integer semantics and are not valid real tape values.
-///
-/// # Recursion Boundary
-///
-/// Most recursion-specific mechanics now live in `recursion.rs`:
-///
-/// - recursion carrier/state data types
-/// - active/materialized carrier resolution
-/// - delayed recursion reference resolution
-/// - recursive-group projection decoding/validation
-/// - recursion carrier allocation helpers
-/// - recursion-specific FIR helper emission
-///
-/// `module/` remains responsible for orchestration:
-///
-/// - `lower_signal(...)` dispatch
-/// - deciding when a top-level recursion group must be materialized
-/// - evaluating recursive body expressions
-/// - integrating recursion writes/finalization into the sample phases
-///
-/// # Recursion and delay1 coupling
-///
-/// Recursion outputs can be consumed through delay chains rooted at
-/// `Proj(i, group)`, not only through the immediate feedback form
-/// `Delay1(Proj(i, group))`.
-///
-/// The lowering path now resolves `Delay1^k(Proj(...))` through
-/// `resolve_recursion_delay_ref` and reuses the group's existing recursion
-/// carrier instead of allocating a separate delay-state slot. For scalar
-/// carriers this reads the previous-sample struct field directly. For size-2
-/// carriers, this preserves the direct two-slot fast path; for larger carriers,
-/// reads use the preplanned circular recursion array sized from accumulated
-/// delay analysis.
-///
-/// This is why two separate state spaces exist:
-///
-/// - `state_name_by_node`: standalone non-recursive delay-state slots keyed by
-///   delay node
-/// - `self.recursion`: recursion carriers keyed by `(group, body index)`
-///
-/// They must never alias, even when the body signal of a recursion group
-/// happens to be the same `SigId` as a `Delay1` node (the tf22 regression
-/// pattern).
-///
-/// # Parameters
-///
-/// - `plan` – pre-checked I/O counts and signal statistics.
-/// - `types` – per-signal [`SimpleSigType`] from `signal_prepare`; drives
-///   integer-vs-real decisions for state/table element types.
-/// - `sig_types` – full type-annotator map; used only for interval-based
-///   variable delay sizing via [`sigtype::check_delay_interval`].
-/// - `real_ty` – internal computation type (`Float32` or `Float64`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_module<'a>(
+/// The six Faust lifecycle functions of a scalar module, in emission order.
+struct LifecycleFunctions {
+    /// Optional `staticInit` (present only with file-scope generated tables).
+    static_init: Option<FirId>,
+    /// `metadata(m)`.
+    metadata: FirId,
+    /// `instanceConstants(sample_rate)`.
+    instance_constants: FirId,
+    /// `buildUserInterface(ui_interface)`.
+    build_ui: FirId,
+    /// `instanceResetUserInterface()`.
+    instance_reset_ui: FirId,
+    /// `instanceClear()`.
+    instance_clear: FirId,
+}
+
+/// Lowers the per-sample slices: the scheduled control/top graphs first,
+/// then the forward output slice, then the reverse-time slice (public
+/// reverse-AD outputs), each flattened with its end-of-sample delay
+/// maintenance. Returns `(is_reverse, statements)` per non-empty slice.
+fn lower_sample_slices(
+    lower: &mut SignalToFirLower<'_>,
     plan: &SignalFirPlan,
-    module_name: &str,
-    arena: &'a TreeArena,
     signals: &[SigId],
-    ui: &'a UiProgram,
-    types: &'a HashMap<SigId, SimpleSigType>,
-    sig_types: &'a HashMap<SigId, SigType>,
-    signal_origins: &'a propagate::SignalOrigins,
-    real_ty: FirType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
-    compute_mode: ComputeMode,
-    control_rate_mode: ControlRateMode,
-    processing_api: ProcessingApi,
-    table_init_mode: crate::signal_fir::TableInitMode,
-    table_init_sample_rate: Option<i32>,
-    scheduling_strategy: crate::schedule::SchedulingStrategy,
-    clocked: Option<clocked::ClockedPlan<'a>>,
-    scalar_schedule: Option<&crate::hgraph::Hsched>,
-    // `fill`: when set, lower a table generator instead of a DSP — the single
-    // output is stored into the `table` argument and the result is a
-    // `SubModule` rather than a `Module` (C++ `signal2Container`).
-    fill: Option<&FillSpec>,
-) -> Result<SignalFirOutput, SignalFirError> {
-    let delay_opts = DelayOptions {
-        max_copy_delay,
-        delay_line_threshold,
-    };
-    let (sig_ref_counts, sig_at_boundary, konst_escapes) =
-        analyze_signal_sharing(arena, signals, sig_types);
-    let placement = setup::PlacementInfo::new(sig_ref_counts, sig_at_boundary, konst_escapes);
-    let mut lower = SignalToFirLower::new(
-        arena,
-        module_name,
-        ui,
-        types,
-        sig_types,
-        signal_origins,
-        plan.num_inputs,
-        real_ty,
-        placement,
-        delay_opts,
-    );
-    lower.control_rate_mode = control_rate_mode;
-    lower.processing_api = processing_api;
-    lower.table_fill_sink = fill.map(|spec| spec.elem_ty.clone());
-    lower.table_init_mode = table_init_mode;
-    lower.table_init_sample_rate = table_init_sample_rate;
-    lower.scheduling_strategy = scheduling_strategy;
-    lower.clocked = clocked.map(clocked::ClockedState::new);
-    lower.scalar_schedule = scalar_schedule.cloned();
-    lower.fixed_ad_internal_signals = fixed_ad_internal_signals(lower.arena, signals);
-    lower.register_symbolic_recursion_groups(signals)?;
-    if lower.clocked.is_some() && lower.scalar_schedule.is_some() {
-        lower.prepare_clocked_payload_schedule(signals);
-    }
-    lower.ensure_sample_rate_var();
-    lower.prepare_delay_lines(signals)?;
-    lower.assign_clocked_delay_cursors()?;
-    let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
-    lower.rad_reverse.forward_output_by_sig = signals
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &sig)| (!reverse_time_outputs[index]).then_some((sig, index)))
-        .collect();
-    let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
-    let dsp_arg = NamedType {
-        name: "dsp".to_string(),
-        typ: dsp_arg_type.clone(),
-    };
-
-    {
-        let mut b = FirBuilder::new(&mut lower.store);
-        let label = b.label("signal_fir_fastlane_step2a: executable base slice");
-        lower.sections.push_compute_preamble(label);
-        let label = b.label(format!(
-            "io: inputs={} outputs={}",
-            plan.num_inputs, plan.num_outputs
-        ));
-        lower.sections.push_compute_preamble(label);
-        let label = b.label(format!("signals: {}", plan.signal_count));
-        lower.sections.push_compute_preamble(label);
-    }
-
-    let has_forward_outputs = reverse_time_outputs.iter().any(|is_reverse| !*is_reverse);
-    let has_reverse_outputs = reverse_time_outputs.iter().any(|is_reverse| *is_reverse);
-    if has_reverse_outputs {
-        lower.scalar_schedule = None;
-        // Readable structural fallback keys are only needed when the RAD
-        // reverse-time loop must reconnect a delayed value to a forward output.
-        lower.rad_reverse.forward_output_by_sig_key = signals
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &sig)| {
-                (!reverse_time_outputs[index]).then_some((dump_sig_readable(arena, sig), index))
-            })
-            .collect();
-    }
+    reverse_time_outputs: &[bool],
+    has_forward_outputs: bool,
+    has_reverse_outputs: bool,
+) -> Result<Vec<(bool, Vec<FirId>)>, SignalFirError> {
     let mut sample_loops = Vec::new();
 
     // Reverse AD owns a fixed forward/reverse epoch split and is deliberately
-    // outside P3's flat same-tick Hgraph. P6 keeps that driver authoritative.
+    // outside the flat same-tick Hgraph. Vector mode keeps that driver
+    // authoritative.
     // Every ordinary scalar forward program, including clock islands, is
     // previsited through the selected hierarchical schedule.
     if !has_reverse_outputs {
@@ -703,6 +278,19 @@ pub(crate) fn build_module<'a>(
         sample_loops.push((true, lower.regions.current_flattened()));
         lower.reset_sample_loop_state(region::RegionKind::SampleLoop);
     }
+    Ok(sample_loops)
+}
+
+/// Emits the compute-entry prologue: the `outputN` channel aliases (block
+/// API only), reverse-time recursion resets, and the BRA carry resets that
+/// treat each `compute()` call as a fresh TBPTT block.
+fn emit_compute_prologue(
+    lower: &mut SignalToFirLower<'_>,
+    plan: &SignalFirPlan,
+    processing_api: ProcessingApi,
+    fill: Option<&FillSpec>,
+    has_reverse_outputs: bool,
+) {
     // A table-fill module writes into its `table` argument, not into audio
     // channels: emitting the `outputN = outputs[N]` aliases here would
     // reference an `outputs` parameter its signature does not have.
@@ -735,6 +323,11 @@ pub(crate) fn build_module<'a>(
     // `emit_bra_compute_resets` is a no-op when no BRA carry variables were
     // allocated (i.e. when no `BlockReverseAD` node appears in the program).
     lower.emit_bra_compute_resets();
+}
+
+/// CSE materialization per execution bucket (constants, control, per-slice
+/// sample statements), re-deriving control ownership tags afterwards.
+fn run_bucket_cse(lower: &mut SignalToFirLower<'_>, sample_loops: &mut [(bool, Vec<FirId>)]) {
     // ═══════════════════════════════════════════════════════════════════════
     // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
     // ═══════════════════════════════════════════════════════════════════════
@@ -788,7 +381,7 @@ pub(crate) fn build_module<'a>(
             })
             .collect();
 
-        for (_, sample_loop_statements) in &mut sample_loops {
+        for (_, sample_loop_statements) in sample_loops.iter_mut() {
             cse::materialize_shared_values(
                 &mut lower.store,
                 sample_loop_statements,
@@ -804,7 +397,16 @@ pub(crate) fn build_module<'a>(
             cse::reuse_straight_line_scalar_loads(&mut lower.store, sample_loop_statements);
         }
     }
+}
 
+/// Emits the Faust lifecycle functions (`metadata`, optional `staticInit`,
+/// `instanceConstants`, `buildUserInterface`, `instanceResetUserInterface`,
+/// `instanceClear`) from the finished section statement lists.
+fn emit_lifecycle_functions(
+    lower: &mut SignalToFirLower<'_>,
+    dsp_arg: &NamedType,
+    dsp_arg_type: &FirType,
+) -> Result<LifecycleFunctions, SignalFirError> {
     let metadata_body = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&[])
@@ -931,7 +533,7 @@ pub(crate) fn build_module<'a>(
                 args: vec![dsp_arg_type.clone()],
                 ret: Box::new(FirType::Void),
             },
-            std::slice::from_ref(&dsp_arg),
+            std::slice::from_ref(dsp_arg),
             Some(reset_body),
             false,
         )
@@ -949,192 +551,25 @@ pub(crate) fn build_module<'a>(
                 args: vec![dsp_arg_type.clone()],
                 ret: Box::new(FirType::Void),
             },
-            std::slice::from_ref(&dsp_arg),
+            std::slice::from_ref(dsp_arg),
             Some(clear_body),
             false,
         )
     };
 
-    // Execution-options port §4.3/§4.6: split the tagged compute-preamble
-    // list by ownership. In classic mode everything stays in the block entry
-    // point in original interleaved order; under external control the
-    // externalizable statements move — in their original relative order —
-    // into the separate `control` function.
-    let external_control = control_rate_mode.is_external();
-    let one_sample = processing_api.is_one_sample();
-    debug_assert!(
-        !(one_sample && has_reverse_outputs),
-        "D2 rejects -os for block-sensitive reverse-AD programs before lowering"
-    );
-    let control_fn_statements: Vec<FirId> = if external_control {
-        lower
-            .sections
-            .control_statements
-            .iter()
-            .filter(|entry| entry.ownership == state::ControlOwnership::Externalizable)
-            .map(|entry| entry.statement)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let entry_preamble: Vec<FirId> = lower
-        .sections
-        .control_statements
-        .iter()
-        .filter(|entry| {
-            !external_control || entry.ownership == state::ControlOwnership::ComputePreamble
-        })
-        .map(|entry| entry.statement)
-        .collect();
+    Ok(LifecycleFunctions {
+        static_init,
+        metadata,
+        instance_constants,
+        build_ui,
+        instance_reset_ui,
+        instance_clear,
+    })
+}
 
-    let compute_statements = {
-        use crate::signal_fir::loop_graph::{LoopGraph, LoopKind, slice_has_persistent_state};
-
-        // Route the per-sample slices through the loop graph (roadmap P6, V4/V5b).
-        // One loop node per non-empty slice, classified `Recursive` when the
-        // slice writes cross-sample state (a recursion carrier / delay line) and
-        // `Vectorizable` otherwise. Emitted in insertion order via
-        // `topological_order`. Scalar mode ignores the kind and stays one loop
-        // per slice — bit-identical to the previous inline emission (the 190
-        // goldens are the guarantee). Vector mode chunks only `Vectorizable`
-        // slices (a fully-recursive slice cannot auto-vectorize as one block, so
-        // chunking it is pure overhead); per-statement separation of a recursive
-        // core from its vectorizable pre/post parts is a later slice.
-        let mut graph = LoopGraph::new();
-        for (is_reverse, sample_loop_statements) in &sample_loops {
-            if sample_loop_statements.is_empty() {
-                continue;
-            }
-            let kind = if slice_has_persistent_state(&lower.store, sample_loop_statements) {
-                LoopKind::Recursive
-            } else {
-                LoopKind::Vectorizable
-            };
-            let id = graph.add_loop(kind, *is_reverse);
-            graph
-                .node_mut(id)
-                .exec
-                .extend(sample_loop_statements.iter().copied());
-        }
-        let order = graph
-            .topological_order()
-            .expect("scalar sample loop graph has no dependency edges, so no cycle");
-
-        let mut all = Vec::new();
-        all.extend(entry_preamble.iter().copied());
-        for id in order {
-            let node = graph.node(id);
-            let is_reverse = node.is_reverse;
-            let kind = node.kind;
-            let pre = node.pre.clone();
-            let exec = node.exec.clone();
-            let post = node.post.clone();
-            all.extend(pre);
-            if !exec.is_empty() {
-                if one_sample {
-                    // §4.6: `frame` processes exactly one sample — the slice
-                    // body is emitted directly, with no enclosing loop and no
-                    // `count`. I/O accesses were lowered as direct channel
-                    // loads/stores above.
-                    all.extend(exec.iter().copied());
-                } else {
-                    let sample_loop =
-                        emit_sample_loop(&mut lower.store, &exec, is_reverse, kind, compute_mode);
-                    all.extend(sample_loop);
-                }
-            }
-            all.extend(post);
-        }
-        all
-    };
-    // §2.3: in one-sample mode the canonical `compute` is kept but emitted
-    // empty — it never delegates to `frame`.
-    let compute_body = {
-        let mut b = FirBuilder::new(&mut lower.store);
-        if one_sample {
-            b.block(&[])
-        } else {
-            b.block(&compute_statements)
-        }
-    };
-    let frame = one_sample.then(|| {
-        let mut b = FirBuilder::new(&mut lower.store);
-        let frame_body = b.block(&compute_statements);
-        let flat_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
-        let frame_args = [
-            dsp_arg.clone(),
-            NamedType {
-                name: "inputs".to_string(),
-                typ: flat_ty.clone(),
-            },
-            NamedType {
-                name: "outputs".to_string(),
-                typ: flat_ty.clone(),
-            },
-        ];
-        b.declare_fun(
-            "frame",
-            FirType::Fun {
-                args: vec![
-                    FirType::Ptr(Box::new(FirType::Obj)),
-                    flat_ty.clone(),
-                    flat_ty,
-                ],
-                ret: Box::new(FirType::Void),
-            },
-            &frame_args,
-            Some(frame_body),
-            false,
-        )
-    });
-    let control = external_control.then(|| {
-        let mut b = FirBuilder::new(&mut lower.store);
-        let control_body = b.block(&control_fn_statements);
-        b.declare_fun(
-            "control",
-            FirType::Fun {
-                args: vec![FirType::Ptr(Box::new(FirType::Obj))],
-                ret: Box::new(FirType::Void),
-            },
-            std::slice::from_ref(&dsp_arg),
-            Some(control_body),
-            false,
-        )
-    });
-    let compute_args = [
-        dsp_arg.clone(),
-        NamedType {
-            name: "count".to_string(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
-    let compute = {
-        let mut b = FirBuilder::new(&mut lower.store);
-        b.declare_fun(
-            "compute",
-            FirType::Fun {
-                args: vec![
-                    dsp_arg_type,
-                    FirType::Int32,
-                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                ],
-                ret: Box::new(FirType::Void),
-            },
-            &compute_args,
-            Some(compute_body),
-            false,
-        )
-    };
-
+/// Declares every used math / integer-helper / foreign prototype plus the
+/// module's global declarations, in stable order.
+fn collect_prototype_declarations(lower: &mut SignalToFirLower<'_>) -> Vec<FirId> {
     // Math function prototypes use the internal real type for both arguments and
     // return value: `sin`, `cos`, `pow`, etc. operate on internal-precision samples.
     let math_real_ty = lower.real_ty();
@@ -1225,6 +660,223 @@ pub(crate) fn build_module<'a>(
         math_prototypes.push(decl);
     }
     math_prototypes.extend(lower.sections.global_declarations.iter().copied());
+    math_prototypes
+}
+
+/// Splits the tagged compute-preamble statements by ownership: classic mode
+/// keeps everything in the block entry point in original order; under
+/// external control the externalizable statements move, in order, into the
+/// separate `control` function. Returns `(control_fn, entry_preamble)`.
+fn split_control_statements(
+    lower: &SignalToFirLower<'_>,
+    external_control: bool,
+) -> (Vec<FirId>, Vec<FirId>) {
+    let control_fn_statements: Vec<FirId> = if external_control {
+        lower
+            .sections
+            .control_statements
+            .iter()
+            .filter(|entry| entry.ownership == state::ControlOwnership::Externalizable)
+            .map(|entry| entry.statement)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let entry_preamble: Vec<FirId> = lower
+        .sections
+        .control_statements
+        .iter()
+        .filter(|entry| {
+            !external_control || entry.ownership == state::ControlOwnership::ComputePreamble
+        })
+        .map(|entry| entry.statement)
+        .collect();
+    (control_fn_statements, entry_preamble)
+}
+
+/// Assembles the flat `compute` statement list: the entry preamble followed
+/// by every per-sample slice routed through the loop graph, each emitted as
+/// one plain sample loop (or inline, in one-sample mode).
+fn assemble_compute_statements(
+    lower: &mut SignalToFirLower<'_>,
+    sample_loops: &[(bool, Vec<FirId>)],
+    entry_preamble: &[FirId],
+    one_sample: bool,
+) -> Vec<FirId> {
+    use crate::signal_fir::loop_graph::LoopGraph;
+
+    // Route the per-sample slices through the loop graph: one loop node
+    // per non-empty slice, emitted in insertion order via
+    // `topological_order` — bit-identical to the previous inline
+    // emission (the goldens are the guarantee). This lowerer is
+    // scalar-only: accepted `-vec` compiles are built by the checked
+    // vector pipeline, and a rejected one falls back here in scalar
+    // shape, so every slice becomes one plain sample loop.
+    let mut graph = LoopGraph::new();
+    for (is_reverse, sample_loop_statements) in sample_loops {
+        if sample_loop_statements.is_empty() {
+            continue;
+        }
+        let id = graph.add_loop(*is_reverse);
+        graph
+            .node_mut(id)
+            .exec
+            .extend(sample_loop_statements.iter().copied());
+    }
+    let order = graph
+        .topological_order()
+        .expect("scalar sample loop graph has no dependency edges, so no cycle");
+
+    let mut all = Vec::new();
+    all.extend(entry_preamble.iter().copied());
+    for id in order {
+        let node = graph.node(id);
+        let is_reverse = node.is_reverse;
+        let pre = node.pre.clone();
+        let exec = node.exec.clone();
+        let post = node.post.clone();
+        all.extend(pre);
+        if !exec.is_empty() {
+            if one_sample {
+                // One-sample mode: `frame` processes exactly one sample — the slice
+                // body is emitted directly, with no enclosing loop and no
+                // `count`. I/O accesses were lowered as direct channel
+                // loads/stores above.
+                all.extend(exec.iter().copied());
+            } else {
+                all.push(plain_sample_loop(&mut lower.store, &exec, is_reverse));
+            }
+        }
+        all.extend(post);
+    }
+    all
+}
+
+/// Declares the public entry points: the canonical `compute`, plus `frame`
+/// (one-sample mode) and `control` (external control) when requested.
+fn emit_entry_points(
+    lower: &mut SignalToFirLower<'_>,
+    dsp_arg: &NamedType,
+    dsp_arg_type: FirType,
+    compute_statements: &[FirId],
+    control_fn_statements: &[FirId],
+    one_sample: bool,
+    external_control: bool,
+) -> (FirId, Option<FirId>, Option<FirId>) {
+    // In one-sample mode the canonical `compute` is kept but emitted
+    // empty — it never delegates to `frame`.
+    let compute_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        if one_sample {
+            b.block(&[])
+        } else {
+            b.block(compute_statements)
+        }
+    };
+    let frame = one_sample.then(|| {
+        let mut b = FirBuilder::new(&mut lower.store);
+        let frame_body = b.block(compute_statements);
+        let flat_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let frame_args = [
+            dsp_arg.clone(),
+            NamedType {
+                name: "inputs".to_string(),
+                typ: flat_ty.clone(),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: flat_ty.clone(),
+            },
+        ];
+        b.declare_fun(
+            "frame",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    flat_ty.clone(),
+                    flat_ty,
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &frame_args,
+            Some(frame_body),
+            false,
+        )
+    });
+    let control = external_control.then(|| {
+        let mut b = FirBuilder::new(&mut lower.store);
+        let control_body = b.block(control_fn_statements);
+        b.declare_fun(
+            "control",
+            FirType::Fun {
+                args: vec![FirType::Ptr(Box::new(FirType::Obj))],
+                ret: Box::new(FirType::Void),
+            },
+            std::slice::from_ref(dsp_arg),
+            Some(control_body),
+            false,
+        )
+    });
+    let compute_args = [
+        dsp_arg.clone(),
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    dsp_arg_type,
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        )
+    };
+
+    (compute, frame, control)
+}
+
+/// Assembles the final output: the `functions`/struct/globals/static
+/// blocks, then either the table-generator `SubModule` (fill mode) or the
+/// complete scalar `Module`, with origins derived over the reachable FIR.
+#[allow(clippy::too_many_arguments)]
+fn assemble_module_output(
+    mut lower: SignalToFirLower<'_>,
+    plan: &SignalFirPlan,
+    module_name: &str,
+    lifecycle: LifecycleFunctions,
+    entry_points: (FirId, Option<FirId>, Option<FirId>),
+    math_prototypes: Vec<FirId>,
+    compute_statements: &[FirId],
+    fill: Option<&FillSpec>,
+) -> Result<SignalFirOutput, SignalFirError> {
+    let LifecycleFunctions {
+        static_init,
+        metadata,
+        instance_constants,
+        build_ui,
+        instance_reset_ui,
+        instance_clear,
+    } = lifecycle;
+    let (compute, frame, control) = entry_points;
     let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
         let mut function_items = Vec::new();
@@ -1236,7 +888,7 @@ pub(crate) fn build_module<'a>(
             instance_clear,
             build_ui,
         ]);
-        // C++ emission order (§2.3): `control` then `frame` precede the
+        // C++ emission order: `control` then `frame` precede the
         // canonical `compute`.
         function_items.extend(control);
         function_items.extend(frame);
@@ -1261,7 +913,7 @@ pub(crate) fn build_module<'a>(
     // `count` — which is exactly `compute_statements`, since the output sink
     // already redirected the single output to `table[i0]`.
     if let Some(spec) = fill {
-        let module = assemble_sub_module(&mut lower, spec, &compute_statements)?;
+        let module = assemble_sub_module(&mut lower, spec, compute_statements)?;
         lower.fir_origins.derive_reachable(&lower.store, module);
         return Ok(SignalFirOutput {
             store: lower.store,
@@ -1272,6 +924,7 @@ pub(crate) fn build_module<'a>(
             vector_pipeline_status: super::super::VectorPipelineStatus::NotRequested,
             vector_effective_mode: super::super::VectorEffectiveMode::Scalar,
             vector_pipeline_detail: None,
+            table_warnings: Vec::new(),
         });
     }
 
@@ -1303,5 +956,241 @@ pub(crate) fn build_module<'a>(
         vector_pipeline_status: super::super::VectorPipelineStatus::NotRequested,
         vector_effective_mode: super::super::VectorEffectiveMode::Scalar,
         vector_pipeline_detail: None,
+        table_warnings: Vec::new(),
     })
+}
+
+/// Lowers a prepared signal forest into a complete FIR module.
+///
+/// Entry point for the fast-lane lowering boundary: accepts pre-validated
+/// planning data and a prepared signal forest, returns a [`SignalFirOutput`]
+/// with all Faust lifecycle sections (`metadata`, `instanceConstants`,
+/// `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
+/// `compute`) assembled in deterministic order.
+///
+/// # Promotion invariant
+///
+/// The `signals` forest **must** have been processed by
+/// `signal_prepare::promote_signals_for_fir` (and optionally
+/// `normalize::simplify`) before being passed here.  That pass guarantees:
+///
+/// - Every `BinOp(op, lhs, rhs)` node has operands whose signal domain
+///   types are already consistent with `op`: mixed Int/Real operands are
+///   wrapped in explicit `FloatCast` nodes; bitwise/shift operands in
+///   `IntCast` nodes; `Div` operands are always Real.
+/// - Every `Delay(_, amount)`, `RdTbl(_, index)`, `WrTbl(…, widx, _)`,
+///   `Select2(selector, …)`, and `Enable(_, gate)` has its integer-context
+///   operand wrapped in `IntCast`.
+/// - `Delay1(x)` and `Prefix(init, x)` have `type(init) == type(x)`.
+///
+/// **Consequence for the lowerer**: no implicit coercion is needed inside
+/// `lower_binop`, `lower_delay_state`, or `normalized_table_index`.  All
+/// necessary casts appear as explicit signal-tree nodes and are handled by
+/// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
+/// FloatCast`.
+///
+/// BRA tape lowering relies on the same invariant.  It does not run a second
+/// promotion pass over synthesized `fBraTapeN` stores.  If the signal graph
+/// contains an integer/discrete subgraph that feeds a real expression through a
+/// `FloatCast` (for example an LCG noise recursion multiplied by a real scale),
+/// the cast node is the promoted real boundary.  The integer nodes upstream of
+/// that cast keep their integer semantics and are not valid real tape values.
+///
+/// # Recursion Boundary
+///
+/// Most recursion-specific mechanics now live in `recursion.rs`:
+///
+/// - recursion carrier/state data types
+/// - active/materialized carrier resolution
+/// - delayed recursion reference resolution
+/// - recursive-group projection decoding/validation
+/// - recursion carrier allocation helpers
+/// - recursion-specific FIR helper emission
+///
+/// `module/` remains responsible for orchestration:
+///
+/// - `lower_signal(...)` dispatch
+/// - deciding when a top-level recursion group must be materialized
+/// - evaluating recursive body expressions
+/// - integrating recursion writes/finalization into the sample phases
+///
+/// # Recursion and delay1 coupling
+///
+/// Recursion outputs can be consumed through delay chains rooted at
+/// `Proj(i, group)`, not only through the immediate feedback form
+/// `Delay1(Proj(i, group))`.
+///
+/// The lowering path now resolves `Delay1^k(Proj(...))` through
+/// `resolve_recursion_delay_ref` and reuses the group's existing recursion
+/// carrier instead of allocating a separate delay-state slot. For scalar
+/// carriers this reads the previous-sample struct field directly. For size-2
+/// carriers, this preserves the direct two-slot fast path; for larger carriers,
+/// reads use the preplanned circular recursion array sized from accumulated
+/// delay analysis.
+///
+/// This is why two separate state spaces exist:
+///
+/// - `state_name_by_node`: standalone non-recursive delay-state slots keyed by
+///   delay node
+/// - `self.recursion`: recursion carriers keyed by `(group, body index)`
+///
+/// They must never alias, even when the body signal of a recursion group
+/// happens to be the same `SigId` as a `Delay1` node (the tf22 regression
+/// pattern).
+///
+/// # Parameters
+///
+/// - `plan` – pre-checked I/O counts and signal statistics.
+/// - `types` – per-signal [`SimpleSigType`] from `signal_prepare`; drives
+///   integer-vs-real decisions for state/table element types.
+/// - `sig_types` – full type-annotator map; used only for interval-based
+///   variable delay sizing via [`sigtype::check_delay_interval`].
+/// - `real_ty` – internal computation type (`Float32` or `Float64`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_module<'a>(
+    plan: &SignalFirPlan,
+    module_name: &str,
+    arena: &'a TreeArena,
+    signals: &[SigId],
+    ui: &'a UiProgram,
+    types: &'a HashMap<SigId, SimpleSigType>,
+    sig_types: &'a HashMap<SigId, SigType>,
+    signal_origins: &'a propagate::SignalOrigins,
+    real_ty: FirType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
+    control_rate_mode: ControlRateMode,
+    processing_api: ProcessingApi,
+    table_init_mode: crate::signal_fir::TableInitMode,
+    table_init_sample_rate: Option<i32>,
+    check_table: bool,
+    scheduling_strategy: crate::schedule::SchedulingStrategy,
+    clocked: Option<clocked::ClockedPlan<'a>>,
+    scalar_schedule: Option<&crate::hgraph::Hsched>,
+    // `fill`: when set, lower a table generator instead of a DSP — the single
+    // output is stored into the `table` argument and the result is a
+    // `SubModule` rather than a `Module` (C++ `signal2Container`).
+    fill: Option<&FillSpec>,
+) -> Result<SignalFirOutput, SignalFirError> {
+    let delay_opts = DelayOptions {
+        max_copy_delay,
+        delay_line_threshold,
+    };
+    let (sig_ref_counts, sig_at_boundary, konst_escapes) =
+        analyze_signal_sharing(arena, signals, sig_types);
+    let placement = setup::PlacementInfo::new(sig_ref_counts, sig_at_boundary, konst_escapes);
+    let mut lower = SignalToFirLower::new(
+        arena,
+        module_name,
+        ui,
+        types,
+        sig_types,
+        signal_origins,
+        plan.num_inputs,
+        real_ty,
+        placement,
+        delay_opts,
+    );
+    lower.control_rate_mode = control_rate_mode;
+    lower.processing_api = processing_api;
+    lower.table_fill_sink = fill.map(|spec| spec.elem_ty.clone());
+    lower.table_init_mode = table_init_mode;
+    lower.table_init_sample_rate = table_init_sample_rate;
+    lower.check_table = check_table;
+    lower.scheduling_strategy = scheduling_strategy;
+    lower.clocked = clocked.map(clocked::ClockedState::new);
+    lower.scalar_schedule = scalar_schedule.cloned();
+    lower.fixed_ad_internal_signals = fixed_ad_internal_signals(lower.arena, signals);
+    lower.register_symbolic_recursion_groups(signals)?;
+    if lower.clocked.is_some() && lower.scalar_schedule.is_some() {
+        lower.prepare_clocked_payload_schedule(signals);
+    }
+    lower.ensure_sample_rate_var();
+    lower.prepare_delay_lines(signals)?;
+    lower.assign_clocked_delay_cursors()?;
+    let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
+    lower.rad_reverse.forward_output_by_sig = signals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &sig)| (!reverse_time_outputs[index]).then_some((sig, index)))
+        .collect();
+    let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
+    let dsp_arg = NamedType {
+        name: "dsp".to_string(),
+        typ: dsp_arg_type.clone(),
+    };
+
+    {
+        let mut b = FirBuilder::new(&mut lower.store);
+        let label = b.label("signal_fir_fastlane_step2a: executable base slice");
+        lower.sections.push_compute_preamble(label);
+        let label = b.label(format!(
+            "io: inputs={} outputs={}",
+            plan.num_inputs, plan.num_outputs
+        ));
+        lower.sections.push_compute_preamble(label);
+        let label = b.label(format!("signals: {}", plan.signal_count));
+        lower.sections.push_compute_preamble(label);
+    }
+
+    let has_forward_outputs = reverse_time_outputs.iter().any(|is_reverse| !*is_reverse);
+    let has_reverse_outputs = reverse_time_outputs.iter().any(|is_reverse| *is_reverse);
+    if has_reverse_outputs {
+        lower.scalar_schedule = None;
+        // Readable structural fallback keys are only needed when the RAD
+        // reverse-time loop must reconnect a delayed value to a forward output.
+        lower.rad_reverse.forward_output_by_sig_key = signals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &sig)| {
+                (!reverse_time_outputs[index]).then_some((dump_sig_readable(arena, sig), index))
+            })
+            .collect();
+    }
+    let sample_loops = {
+        let mut sample_loops = lower_sample_slices(
+            &mut lower,
+            plan,
+            signals,
+            &reverse_time_outputs,
+            has_forward_outputs,
+            has_reverse_outputs,
+        )?;
+        emit_compute_prologue(&mut lower, plan, processing_api, fill, has_reverse_outputs);
+        run_bucket_cse(&mut lower, &mut sample_loops);
+        sample_loops
+    };
+
+    let lifecycle = emit_lifecycle_functions(&mut lower, &dsp_arg, &dsp_arg_type)?;
+
+    let external_control = control_rate_mode.is_external();
+    let one_sample = processing_api.is_one_sample();
+    debug_assert!(
+        !(one_sample && has_reverse_outputs),
+        "D2 rejects -os for block-sensitive reverse-AD programs before lowering"
+    );
+    let (control_fn_statements, entry_preamble) =
+        split_control_statements(&lower, external_control);
+    let compute_statements =
+        assemble_compute_statements(&mut lower, &sample_loops, &entry_preamble, one_sample);
+    let (compute, frame, control) = emit_entry_points(
+        &mut lower,
+        &dsp_arg,
+        dsp_arg_type,
+        &compute_statements,
+        &control_fn_statements,
+        one_sample,
+        external_control,
+    );
+    let math_prototypes = collect_prototype_declarations(&mut lower);
+    assemble_module_output(
+        lower,
+        plan,
+        module_name,
+        lifecycle,
+        (compute, frame, control),
+        math_prototypes,
+        &compute_statements,
+        fill,
+    )
 }

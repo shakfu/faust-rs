@@ -95,6 +95,9 @@ pub struct LoopDetector {
     /// In C++, `closure(expr, genv, visited, lenv)` is a tree node. Rust keeps
     /// the closure data here and stores only a handle in the tree.
     pub(crate) closure_store: Vec<ClosureValue>,
+    /// Canonical key per distinct `(expr, environment identity)` closure, so
+    /// [`Self::store_closure`] hands equal closures the same dense key.
+    pub(crate) closure_intern: ahash::HashMap<(TreeId, EnvFrameKey), i32>,
     /// Monotonic slot id source used by `a2sb` when lowering residual closures.
     ///
     /// Source provenance (C++):
@@ -170,36 +173,45 @@ const STRUCTURAL_HARD_MAX_DEPTH_ENV: &str = "FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH"
 ///
 /// A logical frame does not cost a fixed amount of real stack: recursive `case`
 /// evaluation puts several Rust frames on the stack per logical frame, and
-/// debug builds make each of those far fatter. Measured 2026-08-06 on the
-/// 64 MiB thread every faust-rs entry point spawns, using the same unbounded
-/// `fact` recursion `diagnostic_errors` uses:
+/// debug builds make each of those far fatter. Measured 2026-08-06 (and
+/// re-confirmed 2026-08-30) with the unbounded `fact` recursion
+/// `diagnostic_errors` uses, on the 64 MiB thread entry points spawned then:
 ///
 /// | build | last budget that reports cleanly | first that aborts | ≈ stack/frame |
 /// |---|---|---|---|
 /// | release | 16 384 | 32 768 | ~4 KiB |
 /// | debug | 1 024 | 4 096 | ~64 KiB |
 ///
-/// A single constant must therefore be sized for debug, which is what 1 024
-/// was — and it is why raising it uniformly turns
+/// The stack/frame column is the durable finding; the two budget columns just
+/// divide 64 MiB by it. The CLI thread has since grown to 512 MiB (an untouched
+/// stack is virtual memory, so headroom is free), which at ~4 KiB/frame keeps a
+/// factor of 4 against a diverging release-budget run (32 768 × 4 KiB =
+/// 128 MiB). Raising the budget without that stack is what turns
 /// `diagnostic_errors::diverging_recursive_case_reports_eval_error_instead_of_aborting`
 /// from a passing test into a `SIGABRT` that takes the whole test binary with
 /// it. That test is the guard for this constant; it also skips itself when the
 /// *environment variable* raises the budget, which makes an env-var experiment
 /// look like it passed when it merely opted out.
 ///
-/// So the default follows the profile. Release keeps a factor of 2 against its
-/// measured limit; debug keeps the value its own guard is sized for.
+/// Debug keeps 1 024: at ~64 KiB/frame its ceiling scales with the stack too,
+/// but no debug workflow needs deep programs, and the guard test is sized for
+/// this value.
 ///
 /// # What this buys
 ///
 /// 1 024 rejected eight of the 297 DSPs in the reference `examples/` tree — all
 /// finite-difference physical models — with `FRS-EVAL-0099` rather than any
-/// real limitation. Seven need at most 4 096 and now compile.
-/// `physicalModeling/fds/2dKirchhoffThinPlate.dsp` needs 32 768, past the
-/// release limit above, so it stays a deliberate
-/// `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH` opt-in rather than a default that trades a
-/// clean diagnostic for a crash.
-const DEFAULT_EVAL_MAX_DEPTH: usize = if cfg!(debug_assertions) { 1_024 } else { 8_192 };
+/// real limitation. Seven need at most 4 096; the last,
+/// `physicalModeling/fds/2dKirchhoffThinPlate.dsp` (a 20×10 mesh whose
+/// `route()` expands to ~15 000 connections), needs just over 30 000 frames —
+/// terminating structural depth, ~2 KiB/frame, not the diverging-`case` worst
+/// case. 32 768 lets the whole reference tree compile by default; anything
+/// deeper still gets the clean `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH` opt-in.
+const DEFAULT_EVAL_MAX_DEPTH: usize = if cfg!(debug_assertions) {
+    1_024
+} else {
+    32_768
+};
 
 /// Default fallback hard cap for structural lowering recursion.
 ///
@@ -216,7 +228,11 @@ const DEFAULT_EVAL_MAX_DEPTH: usize = if cfg!(debug_assertions) { 1_024 } else {
 /// `with_max_depth` requests, so leaving it lower would silently cap a caller
 /// that asked for more, which is how a raised evaluator budget would appear to
 /// have no effect. It follows the profile for the same reason.
-const STRUCTURAL_HARD_MAX_DEPTH: usize = if cfg!(debug_assertions) { 4_096 } else { 8_192 };
+const STRUCTURAL_HARD_MAX_DEPTH: usize = if cfg!(debug_assertions) {
+    4_096
+} else {
+    32_768
+};
 
 impl LoopDetector {
     /// Creates a detector with the default maximum recursion depth.
@@ -283,6 +299,7 @@ impl LoopDetector {
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
             closure_store: Vec::new(),
+            closure_intern: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
@@ -320,9 +337,25 @@ impl LoopDetector {
     }
 
     /// Stores a `ClosureValue` and returns its dense key for `boxClosure` nodes.
+    ///
+    /// Equal closures (same expression, same environment identity — the
+    /// equality [`ClosureValue`] itself defines) receive the same key, so the
+    /// `boxClosure(boxInt(key))` handle in the tree arena is canonical the way
+    /// C++'s hash-consed `closure(exp, genv, visited, lenv)` node is. Without
+    /// this, every re-evaluation of the same residual abstraction minted a
+    /// fresh handle, `a2sb` then lowered each handle with a fresh slot, and
+    /// propagation saw thousands of structurally identical bodies under
+    /// distinct slot environments that no memo key could ever equate. The
+    /// interned `Environment` is kept alive by the stored clone, so its store
+    /// pointer cannot be recycled while the intern entry exists.
     pub(crate) fn store_closure(&mut self, cv: ClosureValue) -> i32 {
+        let intern_key = (cv.expr, cv.env.frame_key());
+        if let Some(&key) = self.closure_intern.get(&intern_key) {
+            return key;
+        }
         let key = self.closure_store.len() as i32;
         self.closure_store.push(cv);
+        self.closure_intern.insert(intern_key, key);
         key
     }
 

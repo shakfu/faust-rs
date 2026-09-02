@@ -3,7 +3,8 @@
 //! Split out of [`super::subcontainer`] so the checked vector lowerer can build
 //! the *same* sub-module the scalar lowerer builds, rather than keeping a
 //! second, folding-only implementation of table initialization
-//! (`porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md`, S6).
+//! (plan provenance:
+//! `porting/siggen-subcontainer-table-init-port-plan-2026-08-05-en.md` S6).
 //!
 //! The generator itself is never vectorized. It is a 0-input / 1-output program
 //! evaluated once at initialization, so compiling it in scalar mode is correct
@@ -37,6 +38,10 @@ pub(crate) struct GeneratorSubModuleSpec<'a> {
     pub max_copy_delay: u32,
     pub delay_line_threshold: u32,
     pub table_init_mode: TableInitMode,
+    /// Signal-level table protection contract (`-ct`) inherited from the
+    /// enclosing module; gates the check-table pass when this generator is
+    /// itself prepared, and the lowering debug assertion.
+    pub check_table: bool,
     pub table_init_sample_rate: Option<i32>,
     pub scheduling_strategy: SchedulingStrategy,
 }
@@ -60,10 +65,13 @@ pub(crate) fn compile_generator_sub_module(
     // The generator is prepared exactly like the main program, so the
     // interpreter path and this path see the same normalized shape. This is the
     // same call `siggen::interpret_generator` already makes.
-    let prepared = crate::signal_prepare::prepare_signals_for_fir_verified(
+    let prepared = crate::signal_prepare::prepare_signals_for_fir_verified_with_options(
         arena,
         &[payload],
         &UiProgram::empty(),
+        &crate::signal_prepare::PrepareOptions {
+            check_table: spec.check_table,
+        },
     )
     .map_err(|err| {
         SignalFirError::new(
@@ -154,11 +162,11 @@ pub(crate) fn compile_generator_sub_module(
         spec.real_ty.clone(),
         spec.max_copy_delay,
         spec.delay_line_threshold,
-        crate::signal_fir::ComputeMode::Scalar,
         crate::signal_fir::ControlRateMode::InlinePerBlock,
         crate::signal_fir::ProcessingApi::Block,
         spec.table_init_mode,
         spec.table_init_sample_rate,
+        spec.check_table,
         spec.scheduling_strategy,
         None,
         Some(&hsched),

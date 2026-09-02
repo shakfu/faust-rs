@@ -1,4 +1,4 @@
-//! Clock-environment inference over the prepared signal forest (roadmap P1.1).
+//! Clock-environment inference over the prepared signal forest.
 //!
 //! # Source provenance (C++)
 //! - `compiler/signals/clkEnvInference.cpp` (`ClkEnvInference`, 638 lines,
@@ -13,7 +13,7 @@
 //! hierarchical dependency graph ([`crate::hgraph`]) and, later, guarded-block
 //! code generation need.
 //!
-//! The system is a deliberately simplified clock calculus (plan §4.1): no
+//! The system is a deliberately simplified clock calculus (plan provenance: §4.1): no
 //! clock polymorphism, no boolean-clock unification. Domains form a **finite
 //! tree rooted at `nil`** (the audio rate, bottom element), so clock checking
 //! reduces to order checking on the [`ClockDomainTable`] parent chains.
@@ -42,7 +42,7 @@
 //! - C++ attaches results as a tree property (`CLKENVPROPERTY`); Rust returns
 //!   a side map `SigId → ClkEnv` (house style, no tree mutation).
 //! - C++ walks the `(parent, slotenv, path, box, inputs...)` cons tuple;
-//!   Rust decodes the opaque `SIGCLOCKENV` token (P0.2) against the
+//!   Rust decodes the opaque `SIGCLOCKENV` token against the
 //!   propagation-owned [`ClockDomainTable`].
 //! - Runs on the **prepared** forest (symbolic `SYMREC`/`SYMREF` recursion);
 //!   de Bruijn recursion is not supported here, mirroring C++ where inference
@@ -66,13 +66,13 @@ const MAX_ITERATIONS: usize = 1000;
 /// Structured inference errors.
 ///
 /// Every error names the offending signal (and the domains involved) so the
-/// compiler facade can enrich the diagnostic (roadmap P1.1: "structured error
-/// naming the two incomparable domains *and* the offending signal").
+/// compiler facade can enrich the diagnostic ("structured error naming the
+/// two incomparable domains *and* the offending signal").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClkEnvError {
     /// `max_clk_env` was asked to join two domains on different branches of
     /// the domain tree — sibling domains may not exchange un-annotated
-    /// signals (plan §4.1 scoping rule).
+    /// signals (plan provenance: §4.1 scoping rule).
     Incomparable {
         /// The signal at which the incomparable join was attempted.
         sig: SigId,
@@ -276,7 +276,7 @@ pub fn is_ancestor_clk_env(domains: &ClockDomainTable, a: ClkEnv, b: ClkEnv) -> 
 
 /// `maxClkEnv{c1, c2}` — join restricted to chains: the deeper of two
 /// *comparable* domains; incomparable domains are the scoping error of the
-/// system (plan §4.1).
+/// system (plan provenance: §4.1).
 pub fn max_clk_env(
     domains: &ClockDomainTable,
     sig: SigId,
@@ -428,26 +428,96 @@ impl<'a> Inference<'a> {
         Ok(env)
     }
 
+    /// `R_PROJ` core over a `SYMREC` group: seed the group with the current
+    /// hypothesis so back-edges resolve to it, infer every definition, and
+    /// join.
+    fn infer_sym_rec_group(
+        &mut self,
+        sig: SigId,
+        var: SigId,
+        body_list: SigId,
+    ) -> Result<ClkEnv, ClkEnvError> {
+        // `R_PROJ` core: seed the projections of this group with the
+        // hypothesis, infer each definition, join.
+        let defs = list_to_vec(self.arena, body_list).ok_or_else(|| ClkEnvError::Malformed {
+            sig,
+            detail: "malformed SYMREC body list".to_owned(),
+        })?;
+        let seed = self.hypothesis.get(&var).copied().unwrap_or(None);
+        // Seed the group node itself so back-edges through `Proj(i, ref)`
+        // resolve to the hypothesis while the definitions are inferred.
+        self.cache.insert(sig, seed);
+        let mut acc = seed;
+        for def in defs {
+            let def_env = self.infer(def)?;
+            acc = self.max(sig, acc, def_env)?;
+        }
+        Ok(acc)
+    }
+
+    /// `R_CD` over one OD/US/DS wrapper: the first child must be
+    /// `Clocked(c_inner, clock)` with the clock computed in
+    /// `parent(c_inner)`; every other child lives exactly in `c_inner`
+    /// (literal `0` excepted); the block as a whole belongs to the parent.
+    fn infer_wrapper_domain(
+        &mut self,
+        sig: SigId,
+        children: &[SigId],
+    ) -> Result<ClkEnv, ClkEnvError> {
+        let Some((&first, outputs)) = children.split_first() else {
+            return Err(ClkEnvError::Malformed {
+                sig,
+                detail: "clocked wrapper without children".to_owned(),
+            });
+        };
+        let SigMatch::Clocked(env_child, clock) = match_sig(self.arena, first) else {
+            return Err(ClkEnvError::Malformed {
+                sig,
+                detail: "clocked wrapper first child must be Clocked(env, clock)".to_owned(),
+            });
+        };
+        let inner = self.decode_env(sig, env_child)?;
+        let Some(inner_id) = inner else {
+            return Err(ClkEnvError::MalformedClockEnv { sig });
+        };
+        let outer = self
+            .domains
+            .get(inner_id)
+            .ok_or(ClkEnvError::MalformedClockEnv { sig })?
+            .parent;
+        // The clock is computed outside: `C⟦h⟧ ⊆ parent(c_inner)`.
+        let clock_env = self.infer(clock)?;
+        if !is_ancestor_clk_env(self.domains, clock_env, outer) {
+            return Err(ClkEnvError::ClockComputedInside {
+                sig,
+                expected: outer,
+                got: clock_env,
+            });
+        }
+        // Mark the first child as belonging to the inner domain
+        // (it is `Clocked(c_inner, clock)` by construction).
+        self.cache.insert(first, inner);
+        // Every other child lives exactly in `c_inner`
+        // (exception: literal 0).
+        for &child in outputs {
+            let child_env = self.infer(child)?;
+            if child_env != inner && !self.is_literal_zero(child) {
+                return Err(ClkEnvError::WrapperChildOutsideDomain {
+                    sig,
+                    child,
+                    expected: inner,
+                    got: child_env,
+                });
+            }
+        }
+        // The block as a whole belongs to the outer domain.
+        Ok(outer)
+    }
+
     fn infer_uncached(&mut self, sig: SigId) -> Result<ClkEnv, ClkEnvError> {
         // Symbolic recursion forms first (they are not `SigMatch` shapes).
         if let Some((var, body_list)) = match_sym_rec(self.arena, sig) {
-            // `R_PROJ` core: seed the projections of this group with the
-            // hypothesis, infer each definition, join.
-            let defs =
-                list_to_vec(self.arena, body_list).ok_or_else(|| ClkEnvError::Malformed {
-                    sig,
-                    detail: "malformed SYMREC body list".to_owned(),
-                })?;
-            let seed = self.hypothesis.get(&var).copied().unwrap_or(None);
-            // Seed the group node itself so back-edges through `Proj(i, ref)`
-            // resolve to the hypothesis while the definitions are inferred.
-            self.cache.insert(sig, seed);
-            let mut acc = seed;
-            for def in defs {
-                let def_env = self.infer(def)?;
-                acc = self.max(sig, acc, def_env)?;
-            }
-            return Ok(acc);
+            return self.infer_sym_rec_group(sig, var, body_list);
         }
         if let Some(var) = match_sym_ref(self.arena, sig) {
             return Ok(self.hypothesis.get(&var).copied().unwrap_or(None));
@@ -511,55 +581,7 @@ impl<'a> Inference<'a> {
             | SigMatch::Upsampling(children)
             | SigMatch::Downsampling(children) => {
                 let children = children.to_vec();
-                let Some((&first, outputs)) = children.split_first() else {
-                    return Err(ClkEnvError::Malformed {
-                        sig,
-                        detail: "clocked wrapper without children".to_owned(),
-                    });
-                };
-                let SigMatch::Clocked(env_child, clock) = match_sig(self.arena, first) else {
-                    return Err(ClkEnvError::Malformed {
-                        sig,
-                        detail: "clocked wrapper first child must be Clocked(env, clock)"
-                            .to_owned(),
-                    });
-                };
-                let inner = self.decode_env(sig, env_child)?;
-                let Some(inner_id) = inner else {
-                    return Err(ClkEnvError::MalformedClockEnv { sig });
-                };
-                let outer = self
-                    .domains
-                    .get(inner_id)
-                    .ok_or(ClkEnvError::MalformedClockEnv { sig })?
-                    .parent;
-                // The clock is computed outside: `C⟦h⟧ ⊆ parent(c_inner)`.
-                let clock_env = self.infer(clock)?;
-                if !is_ancestor_clk_env(self.domains, clock_env, outer) {
-                    return Err(ClkEnvError::ClockComputedInside {
-                        sig,
-                        expected: outer,
-                        got: clock_env,
-                    });
-                }
-                // Mark the first child as belonging to the inner domain
-                // (it is `Clocked(c_inner, clock)` by construction).
-                self.cache.insert(first, inner);
-                // Every other child lives exactly in `c_inner`
-                // (exception: literal 0).
-                for &child in outputs {
-                    let child_env = self.infer(child)?;
-                    if child_env != inner && !self.is_literal_zero(child) {
-                        return Err(ClkEnvError::WrapperChildOutsideDomain {
-                            sig,
-                            child,
-                            expected: inner,
-                            got: child_env,
-                        });
-                    }
-                }
-                // The block as a whole belongs to the outer domain.
-                Ok(outer)
+                self.infer_wrapper_domain(sig, &children)
             }
 
             // `R_SEQ(x, y)`: require `C⟦x⟧ ⊆ C⟦y⟧`; result `C⟦x⟧`.

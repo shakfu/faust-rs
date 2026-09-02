@@ -43,8 +43,9 @@
 //!   taped backward sweeps with C++-compatible storage.
 //! - [`decoration_verify`] — certified signal decorations consumed by the
 //!   vector pipeline.
-//! - [`pv_slice`], [`shadow`] — diagnostic/experimental surfaces (P2 vector
-//!   pre-slice; schedule-conformance shadow reports).
+//! - [`diagnostics`] — observation-only surfaces, never on the production
+//!   path (the frozen vector pre-slice prototype; schedule-conformance
+//!   shadow reports).
 //! - `loop_graph`, `placement`, `planner`, `cse`, `recursion`, `siggen`,
 //!   `error` — internal analysis/lowering support.
 //!
@@ -67,18 +68,19 @@ mod block_reverse_ad;
 mod cse;
 pub mod decoration_verify;
 mod delay;
+pub mod diagnostics;
 mod error;
+mod leaf_emit;
 mod loop_graph;
 mod module;
 mod one_sample;
 mod origins;
 mod placement;
 mod planner;
-pub mod pv_slice;
 mod recursion;
-pub mod shadow;
 mod siggen;
 pub mod vector;
+pub use diagnostics::{pv_slice, shadow};
 pub use vector::analysis as vector_analysis;
 pub use vector::assemble as vector_assemble;
 pub use vector::clock_ad as vector_clock_ad;
@@ -101,7 +103,8 @@ use ui::UiProgram;
 
 use crate::schedule::SchedulingStrategy;
 use crate::signal_prepare::{
-    prepare_signals_for_fir_verified, prepare_signals_for_fir_verified_with_origins,
+    PrepareOptions, prepare_signals_for_fir_verified_with_options,
+    prepare_signals_for_fir_verified_with_origins,
 };
 
 /// Internal DSP computation precision used when lowering signals to FIR.
@@ -144,9 +147,7 @@ impl RealType {
 /// containing a DAG of small inner loops, so the C compiler can auto-vectorize
 /// the non-recursive ones (SIMD); recursive computations stay in serial loops.
 ///
-/// Roadmap P6, vector doc V1
-/// (`porting/vector-mode-analysis-port-plan-2026-06-10-en.md`). P6.6 activates
-/// the independently checked signal-level path for pure graphs, fixed and
+/// The checked pipeline accepts pure graphs, fixed and
 /// bounded-variable delays, symbolic recursion, stateful clock islands, and
 /// expanded FAD graphs. Other shapes fail closed to scalar lowering with an
 /// observable [`VectorPipelineStatus::Fallback`] reason.
@@ -245,18 +246,18 @@ pub enum VectorFallbackReason {
     ClockAnalysis,
     /// Building or verifying the analysis decorations failed.
     Decorations,
-    /// Building or verifying the P4.4 vector plan failed.
+    /// Building or verifying the vector plan failed.
     VectorPlan,
-    /// Building or verifying the P6.1 state plan failed.
+    /// Building or verifying the state plan failed.
     StatePlan,
     /// Building or verifying the clocked-audio-domain plan failed.
     ClockAdPlan,
     /// A reverse-audio-domain signal requires fixed epochs, so the program
     /// is lowered as scalar.
     ReverseAd,
-    /// Pure P5.2 lowering failed.
+    /// Pure signal lowering failed.
     PureLowering,
-    /// Building or verifying the P5.3 event-order certificate failed.
+    /// Building or verifying the event-order certificate failed.
     EventCertificate,
     /// Assembling the vector FIR bodies failed.
     FirAssembly,
@@ -293,7 +294,7 @@ pub enum VectorPipelineStatus {
     /// Vector-mode codegen was not requested; the scalar path was used.
     #[default]
     NotRequested,
-    /// The P4/P5/P6 producer/checker chain accepted the emitted module.
+    /// The producer/checker chain accepted the emitted module.
     Certified,
     /// A named unsupported shape failed closed to scalar lowering.
     Fallback(VectorFallbackReason),
@@ -355,7 +356,7 @@ pub struct SignalFirOptions {
     /// or above `max_copy_delay` use circular-pow2).
     pub delay_line_threshold: u32,
     /// Codegen strategy for `compute()`: scalar (default) or vector mode
-    /// (`-vec`). Accepted P6.6 programs use the checked P4/P5/P6 path; named
+    /// (`-vec`). Accepted programs use the checked pipeline; named
     /// unsupported shapes fail closed to scalar lowering.
     pub compute_mode: ComputeMode,
     /// Signal/loop dependency scheduling policy (`-ss` /
@@ -378,6 +379,15 @@ pub struct SignalFirOptions {
     /// [`TableInitMode::Const`]. `None` rejects such a generator, because the
     /// host-provided initialization sample rate is otherwise unknowable.
     pub table_init_sample_rate: Option<i32>,
+    /// Signal-level table access protection (`-ct`, default on).
+    ///
+    /// Gates the check-table pass in `signal_prepare` (steps 2.10a/2.10b):
+    /// table indexes the interval analysis cannot prove in-bounds are
+    /// rewritten to `max(0, min(index, size-1))` before lowering. When
+    /// disabled, unprovable indexes reach the generated code raw — the C++
+    /// `-ct 0` contract. Lowering itself never re-checks: the FIR access is
+    /// direct in both modes.
+    pub check_table: bool,
 }
 
 /// How the initial content of a generated table is produced.
@@ -394,7 +404,7 @@ pub enum TableInitMode {
     /// rate or on a foreign function, and it keeps the emitted source small:
     /// a 65536-entry table costs a loop instead of 65536 literals.
     ///
-    /// The default since 2026-08-06 (plan phase S7): it matches the C++
+    /// The default since 2026-08-06: it matches the C++
     /// reference and is the only mode that compiles every program the
     /// reference compiles.
     #[default]
@@ -433,10 +443,9 @@ impl Default for SignalFirOptions {
             scheduling_strategy: SchedulingStrategy::DepthFirst,
             control_rate_mode: ControlRateMode::InlinePerBlock,
             processing_api: ProcessingApi::Block,
-            // S2..S6 keep `Const` as the effective default; S7 flips it to
-            // `Runtime` once every backend emits sub-modules.
             table_init_mode: TableInitMode::Runtime,
             table_init_sample_rate: None,
+            check_table: true,
         }
     }
 }
@@ -460,7 +469,7 @@ pub struct SignalFirOutput {
     /// values. The trace is exported only for conformance diagnostics via
     /// [`shadow::compare_emission_order`].
     pub emission_order: Vec<SigId>,
-    /// P3 schedule-conformance report comparing [`Self::emission_order`] with
+    /// Schedule-conformance report comparing [`Self::emission_order`] with
     /// the selected `Hsched`. Present only when the internal diagnostic entry
     /// point or `FAUST_RS_SHADOW_REPORT` requested it and a hierarchical graph
     /// was built. The report is observation-only; computing it never changes
@@ -476,6 +485,11 @@ pub struct SignalFirOutput {
     /// [`Self::vector_pipeline_status`]; this detail is intended for corpus
     /// triage and may include signal or loop identifiers.
     pub vector_pipeline_detail: Option<String>,
+    /// Out-of-range table accesses clamped by the check-table pass (`-ct`),
+    /// for the semantic-warning channel (the reference compiler reports the
+    /// same class under `-wall`). Empty when `check_table` was off or every
+    /// access was provably in-bounds.
+    pub table_warnings: Vec<crate::signal_prepare::TableRangeWarning>,
 }
 
 /// Everything one fast-lane lowering run needs, in one named place.
@@ -516,13 +530,13 @@ pub struct SignalFirRequest<'a> {
     pub ui: &'a UiProgram,
     /// Lowering options: real type, table-init mode, vector settings, …
     pub options: &'a SignalFirOptions,
-    /// Propagation-owned clock-domain side table ([`propagate::ClockDomainTable`],
-    /// roadmap P0.2).
+    /// Propagation-owned clock-domain side table
+    /// ([`propagate::ClockDomainTable`]).
     ///
     /// When present and the program contains clocked wrappers, lowering runs
     /// clock-environment inference ([`crate::clk_env`]) and hierarchical-graph
     /// validation ([`crate::hgraph`]) on the prepared forest, then lowers
-    /// boolean `ondemand` blocks as guarded regions (roadmap P3). Programs
+    /// boolean `ondemand` blocks as guarded regions. Programs
     /// without clocked wrappers behave exactly as if this were `None`.
     pub clock_domains: Option<&'a propagate::ClockDomainTable>,
     /// Observation-only per-stage timing sink.
@@ -602,7 +616,7 @@ impl<'a> SignalFirRequest<'a> {
 /// This is the single fast-lane entry point of the crate; everything optional
 /// travels in [`SignalFirRequest`].
 ///
-/// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G/2H)
+/// # Current behavior
 /// - validates options and top-level signal/arity contract,
 /// - builds a deterministic planning snapshot,
 /// - prepares and verifies the whole output forest in a private staging arena,
@@ -644,6 +658,122 @@ fn time_signal_fir_phase<T>(
     }
 }
 
+/// Builds the scalar causality gate for one prepared forest: the
+/// hierarchical dependency graph, effect orientation (scalar mode only,
+/// where the hierarchical schedule is authoritative), and the accepted
+/// schedule under the selected strategy.
+fn build_scalar_gate(
+    prepared: &crate::signal_prepare::VerifiedPreparedSignals,
+    domains: &propagate::ClockDomainTable,
+    envs: &crate::clk_env::ClkEnvMap,
+    options: &SignalFirOptions,
+    timing_sink: Option<&SignalFirTimingSink>,
+) -> Result<(crate::hgraph::Hgraph, crate::hgraph::Hsched), SignalFirError> {
+    let mut hgraph = time_signal_fir_phase(timing_sink, "fir-hgraph", || {
+        crate::hgraph::build_hgraph(
+            prepared.arena(),
+            domains,
+            envs,
+            prepared.outputs(),
+            prepared.sig_types_map(),
+        )
+    })
+    .map_err(|err| {
+        SignalFirError::new(
+            SignalFirErrorCode::ClockAnalysis,
+            format!("hierarchical dependency graph failed: {err}"),
+        )
+    })?;
+    if matches!(options.compute_mode, ComputeMode::Scalar) {
+        let effects = time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
+            vector::analysis::analyze_scalar_scheduling_effects(prepared)
+        })
+        .map_err(|err| {
+            SignalFirError::new(
+                SignalFirErrorCode::ClockAnalysis,
+                format!("scalar effect analysis failed: {err}"),
+            )
+        })?;
+        time_signal_fir_phase(timing_sink, "fir-effect-orientation", || {
+            crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects)
+        })
+        .map_err(|err| {
+            SignalFirError::new(
+                SignalFirErrorCode::ClockAnalysis,
+                format!("scalar effect ordering failed: {err}"),
+            )
+        })?;
+    }
+    let hsched = time_signal_fir_phase(timing_sink, "fir-scheduling", || {
+        crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
+    })
+    .map_err(|err| {
+        SignalFirError::new(
+            SignalFirErrorCode::ClockAnalysis,
+            format!("clock-domain scheduling failed: {err}"),
+        )
+    })?;
+    Ok((hgraph, hsched))
+}
+
+/// Runs clock-environment inference and the scalar causality gate.
+///
+/// With a non-empty domain table this returns the clocked-lowering plan and
+/// the gate. Without one, a program that still contains an OD/US/DS wrapper
+/// skips the gate so `build_module`'s specific `FRS-SFIR-0007` rejection can
+/// fire (a clock-unaware entry point supplied no table); ordinary
+/// wrapper-free programs run the gate over an empty table.
+#[allow(clippy::type_complexity)]
+fn analyze_clocks<'a>(
+    prepared: &crate::signal_prepare::VerifiedPreparedSignals,
+    clock_domains: Option<&'a propagate::ClockDomainTable>,
+    options: &SignalFirOptions,
+    timing_sink: Option<&SignalFirTimingSink>,
+) -> Result<
+    (
+        Option<module::ClockedPlan<'a>>,
+        Option<(crate::hgraph::Hgraph, crate::hgraph::Hsched)>,
+    ),
+    SignalFirError,
+> {
+    match clock_domains {
+        Some(domains) if !domains.is_empty() => {
+            let envs = crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs())
+                .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("clock-environment inference failed: {err}"),
+                    )
+                })?;
+            let gate = build_scalar_gate(prepared, domains, &envs, options, timing_sink)?;
+            Ok((Some(module::ClockedPlan { domains, envs }), Some(gate)))
+        }
+        _ => {
+            let has_wrapper = crate::hgraph::contains_wrapper(prepared.arena(), prepared.outputs())
+                .map_err(|err| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::ClockAnalysis,
+                        format!("wrapper scan failed: {err}"),
+                    )
+                })?;
+            if has_wrapper {
+                return Ok((None, None));
+            }
+            let empty_domains = propagate::ClockDomainTable::new();
+            let envs =
+                crate::clk_env::annotate(prepared.arena(), &empty_domains, prepared.outputs())
+                    .map_err(|err| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::ClockAnalysis,
+                            format!("clock-environment inference failed: {err}"),
+                        )
+                    })?;
+            let gate = build_scalar_gate(prepared, &empty_domains, &envs, options, timing_sink)?;
+            Ok((None, Some(gate)))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_fastlane_inner(
     arena: &TreeArena,
@@ -663,10 +793,21 @@ fn compile_fastlane_inner(
     // Preparation owns the five retyping passes, promotions, and simplify
     // normalizations.  Keep them as one atomic timing region so the measured
     // stage matches the verified preparation boundary consumed by lowering.
+    let prepare_options = PrepareOptions {
+        check_table: options.check_table,
+    };
     let prepared = time_signal_fir_phase(timing_sink, "fir-prepare-normalize", || {
         let result = signal_origins.map_or_else(
-            || prepare_signals_for_fir_verified(arena, signals, ui),
-            |origins| prepare_signals_for_fir_verified_with_origins(arena, signals, ui, origins),
+            || prepare_signals_for_fir_verified_with_options(arena, signals, ui, &prepare_options),
+            |origins| {
+                prepare_signals_for_fir_verified_with_origins(
+                    arena,
+                    signals,
+                    ui,
+                    origins,
+                    &prepare_options,
+                )
+            },
         );
         result.map_err(|err| {
             let signal = err.signal();
@@ -687,7 +828,7 @@ fn compile_fastlane_inner(
     // Execution-options port D2: `-os` has no meaning for block-sensitive
     // reverse-AD carriers (block-scoped tape/carry state, reverse-order
     // block traversal). Reject with a typed diagnostic instead of inventing
-    // a persistent one-sample semantics (plan §3.5).
+    // a persistent one-sample semantics.
     if options.processing_api.is_one_sample()
         && one_sample::contains_block_sensitive_operation(prepared.arena(), prepared.outputs())
     {
@@ -697,157 +838,13 @@ fn compile_fastlane_inner(
         ));
     }
 
-    // P3: build the hierarchical dependency graph, orient conflicting effects
+    // Build the hierarchical dependency graph, orient conflicting effects
     // independently of strategy, and schedule every prepared scalar forest.
     // The accepted Hsched drives scalar forward lowering; vector mode instead
     // schedules its strategy-independent LoopGraph.
-    let mut gate_graphs: Option<(crate::hgraph::Hgraph, crate::hgraph::Hsched)> = None;
-    let clocked = time_signal_fir_phase(
-        timing_sink,
-        "fir-clock-analysis",
-        || -> Result<Option<module::ClockedPlan<'_>>, SignalFirError> {
-            match clock_domains {
-                Some(domains) if !domains.is_empty() => {
-                    let envs =
-                        crate::clk_env::annotate(prepared.arena(), domains, prepared.outputs())
-                            .map_err(|err| {
-                                SignalFirError::new(
-                                    SignalFirErrorCode::ClockAnalysis,
-                                    format!("clock-environment inference failed: {err}"),
-                                )
-                            })?;
-                    let mut hgraph = time_signal_fir_phase(timing_sink, "fir-hgraph", || {
-                        crate::hgraph::build_hgraph(
-                            prepared.arena(),
-                            domains,
-                            &envs,
-                            prepared.outputs(),
-                            prepared.sig_types_map(),
-                        )
-                    })
-                    .map_err(|err| {
-                        SignalFirError::new(
-                            SignalFirErrorCode::ClockAnalysis,
-                            format!("hierarchical dependency graph failed: {err}"),
-                        )
-                    })?;
-                    if matches!(options.compute_mode, ComputeMode::Scalar) {
-                        let effects =
-                            time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
-                                vector::analysis::analyze_scalar_scheduling_effects(&prepared)
-                            })
-                            .map_err(|err| {
-                                SignalFirError::new(
-                                    SignalFirErrorCode::ClockAnalysis,
-                                    format!("scalar effect analysis failed: {err}"),
-                                )
-                            })?;
-                        time_signal_fir_phase(timing_sink, "fir-effect-orientation", || {
-                            crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects)
-                        })
-                        .map_err(|err| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::ClockAnalysis,
-                                format!("scalar effect ordering failed: {err}"),
-                            )
-                        })?;
-                    }
-                    let hsched = time_signal_fir_phase(timing_sink, "fir-scheduling", || {
-                        crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
-                    })
-                    .map_err(|err| {
-                        SignalFirError::new(
-                            SignalFirErrorCode::ClockAnalysis,
-                            format!("clock-domain scheduling failed: {err}"),
-                        )
-                    })?;
-                    gate_graphs = Some((hgraph, hsched));
-                    Ok(Some(module::ClockedPlan { domains, envs }))
-                }
-                _ => {
-                    // A program reaching this branch with an actual OD/US/DS wrapper
-                    // node was compiled through a clock-unaware entry point (no
-                    // `ClockDomainTable` was ever supplied): `clk_env::annotate`
-                    // cannot resolve a real wrapper's clock relationship from an
-                    // empty table, and would report a confusing
-                    // `ClockedViolation`-family error instead of letting
-                    // `module::build_module`'s own, specific `FRS-SFIR-0007`
-                    // ("clocked node reached without a domain table") rejection
-                    // fire, exactly as before this gate existed. So skip the gate
-                    // for those; ordinary wrapper-free programs run it.
-                    let has_wrapper =
-                        crate::hgraph::contains_wrapper(prepared.arena(), prepared.outputs())
-                            .map_err(|err| {
-                                SignalFirError::new(
-                                    SignalFirErrorCode::ClockAnalysis,
-                                    format!("wrapper scan failed: {err}"),
-                                )
-                            })?;
-                    if !has_wrapper {
-                        let empty_domains = propagate::ClockDomainTable::new();
-                        let envs = crate::clk_env::annotate(
-                            prepared.arena(),
-                            &empty_domains,
-                            prepared.outputs(),
-                        )
-                        .map_err(|err| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::ClockAnalysis,
-                                format!("clock-environment inference failed: {err}"),
-                            )
-                        })?;
-                        let mut hgraph = time_signal_fir_phase(timing_sink, "fir-hgraph", || {
-                            crate::hgraph::build_hgraph(
-                                prepared.arena(),
-                                &empty_domains,
-                                &envs,
-                                prepared.outputs(),
-                                prepared.sig_types_map(),
-                            )
-                        })
-                        .map_err(|err| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::ClockAnalysis,
-                                format!("hierarchical dependency graph failed: {err}"),
-                            )
-                        })?;
-                        if matches!(options.compute_mode, ComputeMode::Scalar) {
-                            let effects =
-                                time_signal_fir_phase(timing_sink, "fir-scalar-effects", || {
-                                    vector::analysis::analyze_scalar_scheduling_effects(&prepared)
-                                })
-                                .map_err(|err| {
-                                    SignalFirError::new(
-                                        SignalFirErrorCode::ClockAnalysis,
-                                        format!("scalar effect analysis failed: {err}"),
-                                    )
-                                })?;
-                            time_signal_fir_phase(timing_sink, "fir-effect-orientation", || {
-                                crate::hgraph::orient_effect_conflicts(&mut hgraph, &effects)
-                            })
-                            .map_err(|err| {
-                                SignalFirError::new(
-                                    SignalFirErrorCode::ClockAnalysis,
-                                    format!("scalar effect ordering failed: {err}"),
-                                )
-                            })?;
-                        }
-                        let hsched = time_signal_fir_phase(timing_sink, "fir-scheduling", || {
-                            crate::hgraph::schedule(&hgraph, options.scheduling_strategy)
-                        })
-                        .map_err(|err| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::ClockAnalysis,
-                                format!("clock-domain scheduling failed: {err}"),
-                            )
-                        })?;
-                        gate_graphs = Some((hgraph, hsched));
-                    }
-                    Ok(None)
-                }
-            }
-        },
-    )?;
+    let (clocked, gate_graphs) = time_signal_fir_phase(timing_sink, "fir-clock-analysis", || {
+        analyze_clocks(&prepared, clock_domains, options, timing_sink)
+    })?;
 
     let mut vector_fallback = None;
     if options.compute_mode.is_vector() {
@@ -870,19 +867,21 @@ fn compile_fastlane_inner(
                     table_init_mode: options.table_init_mode,
                     table_init_sample_rate: options.table_init_sample_rate,
                     delay_line_threshold: options.delay_line_threshold,
+                    check_table: options.check_table,
                 },
             )
         }) {
-            Ok(output) => return Ok(output),
+            Ok(mut output) => {
+                output.table_warnings = prepared.table_warnings().to_vec();
+                return Ok(output);
+            }
             Err(failure) => vector_fallback = Some(failure),
         }
     }
 
-    let fallback_compute_mode = if vector_fallback.is_some() {
-        ComputeMode::Scalar
-    } else {
-        options.compute_mode
-    };
+    // `build_module` is scalar-only: an accepted `-vec` compile already
+    // returned from the checked vector pipeline above, and a rejected one
+    // falls back here in scalar shape.
     let mut output = time_signal_fir_phase(timing_sink, "fir-lowering", || {
         module::build_module(
             &plan,
@@ -896,18 +895,14 @@ fn compile_fastlane_inner(
             options.real_type.as_fir_type(),
             options.max_copy_delay,
             options.delay_line_threshold,
-            fallback_compute_mode,
             options.control_rate_mode,
             options.processing_api,
             options.table_init_mode,
             options.table_init_sample_rate,
+            options.check_table,
             options.scheduling_strategy,
             clocked,
-            if matches!(fallback_compute_mode, ComputeMode::Scalar) {
-                gate_graphs.as_ref().map(|(_, schedule)| schedule)
-            } else {
-                None
-            },
+            gate_graphs.as_ref().map(|(_, schedule)| schedule),
             None,
         )
     })
@@ -926,6 +921,7 @@ fn compile_fastlane_inner(
     });
 
     output.shadow_report = shadow_report.flatten();
+    output.table_warnings = prepared.table_warnings().to_vec();
     if let Some(failure) = vector_fallback {
         output.vector_pipeline_status = VectorPipelineStatus::Fallback(failure.reason);
         output.vector_pipeline_detail = Some(failure.detail);

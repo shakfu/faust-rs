@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Interval analysis library.
 //!
 //! Ports the C++ interval subsystem from `compiler/interval/` in the Faust
@@ -228,7 +230,7 @@ impl Interval {
     /// Returns whether the singleton interval contains a power of two.
     pub fn is_power_of2(&self) -> bool {
         let n = self.hi as i32;
-        self.is_const() && (n & n.wrapping_neg()) == n
+        self.is_const() && n.isolate_lowest_one() == n
     }
 
     #[inline]
@@ -236,7 +238,7 @@ impl Interval {
     /// Returns whether the singleton interval has an all-low-bits-set mask value.
     pub fn is_bitmask(&self) -> bool {
         let n = (self.hi as i32).wrapping_add(1);
-        self.is_const() && (n & n.wrapping_neg()) == n
+        self.is_const() && n.isolate_lowest_one() == n
     }
 
     /// Position of the MSB of the interval's value range.

@@ -30,12 +30,14 @@
 //!   history spanning the *current* chunk) is `P6` scope, not `PV`.
 //! - Occurrence counting and `max_delay` extraction are a genuine (if
 //!   narrow) walk of the `SigId` forest via
-//!   `loop_graph::signal_value_children`, not hardcoded
+//!   `vector::analysis::signal_dependencies`, not hardcoded
 //!   facts. Variability is asserted `Samp` for this DSP shape rather than
 //!   re-run through the full type inferencer — a full context-sensitive
-//!   `SignalUseInfo` pass is `P4` scope (see the port plan, section 4.3).
+//!   `SignalUseInfo` pass belongs to the production analysis stage (see
+//!   the port plan, section 4.3).
 //! - `PvPlan` has exactly two loop nodes and one transport; there is no
-//!   general `VectorPlan`/certificate schema here yet (that is `R3`/`P5`).
+//!   general `VectorPlan`/certificate schema here (that is the production
+//!   plan/verify stages' job).
 //!
 //! Not wired into any production compile path (no CLI/API consumes this
 //! module), matching the additive pattern of the `P1`/`P2` phases already
@@ -77,7 +79,9 @@ pub fn build_pv_signals(delay_amount: i32) -> (TreeArena, SigId, SigId) {
 /// `SigId`-level facts needed by [`needs_separate_loop`] for this slice:
 /// how many distinct use sites reference each signal, and the largest
 /// constant delay amount any reader applies to it. Computed by a genuine walk
-/// of the reachable forest via [`signal_value_children`] — not hardcoded.
+/// of the reachable forest via
+/// [`signal_dependencies`](crate::signal_fir::vector::analysis::signal_dependencies) —
+/// not hardcoded.
 struct PvFacts {
     occurrences: AHashMap<SigId, u32>,
     max_delay: AHashMap<SigId, i32>,
@@ -87,14 +91,16 @@ fn compute_pv_facts(arena: &TreeArena, roots: &[SigId]) -> PvFacts {
     let sig_types = sigtype::TypeAnnotator::new(arena, &ui::UiProgram::empty())
         .annotate(roots)
         .expect("PV signals have valid types");
-    let analysis = super::vector::analysis::SignalAnalysisContext::new(arena, &sig_types, roots)
-        .expect("PV symbolic recursion index is valid");
+    let analysis =
+        crate::signal_fir::vector::analysis::SignalAnalysisContext::new(arena, &sig_types, roots)
+            .expect("PV symbolic recursion index is valid");
     let mut reachable: HashSet<SigId> = HashSet::new();
     let mut stack: Vec<SigId> = roots.to_vec();
     while let Some(sig) = stack.pop() {
         if reachable.insert(sig) {
-            let dependencies = super::vector::analysis::signal_dependencies(&analysis, sig)
-                .expect("PV signals are canonical");
+            let dependencies =
+                crate::signal_fir::vector::analysis::signal_dependencies(&analysis, sig)
+                    .expect("PV signals are canonical");
             for occurrence in dependencies.occurrences() {
                 stack.push(occurrence.to);
             }
@@ -107,7 +113,7 @@ fn compute_pv_facts(arena: &TreeArena, roots: &[SigId]) -> PvFacts {
         *occurrences.entry(r).or_insert(0) += 1;
     }
     for &sig in &reachable {
-        for occurrence in super::vector::analysis::signal_dependencies(&analysis, sig)
+        for occurrence in crate::signal_fir::vector::analysis::signal_dependencies(&analysis, sig)
             .expect("PV signals are canonical")
             .occurrences()
         {
@@ -156,8 +162,8 @@ pub struct PvTransport {
 }
 
 /// The strategy-independent plan for this slice: exactly two loops and one
-/// transport. Deliberately not a general `VectorPlan` (that is `R3`/`P5`
-/// scope) — see the module docs.
+/// transport. Deliberately not a general `VectorPlan` (that is the
+/// production plan stage's job) — see the module docs.
 #[derive(Debug, Clone)]
 pub struct PvPlan {
     /// The shared signal owned by the first loop.
@@ -176,8 +182,8 @@ impl PvPlan {
     /// Projects this slice's plan into the strategy-independent
     /// [`crate::signal_fir::vector::verify::VectorPlan`] DTO and — by
     /// construction — a plan that [`crate::signal_fir::vector::verify::verify_vector_plan`]
-    /// accepts. This closes the loop between the executed PV slice and the P5
-    /// vector-plan verifier: the same two-loop, one-transport shape the PV
+    /// accepts. This closes the loop between the executed PV slice and the
+    /// production vector-plan verifier: the same two-loop, one-transport shape the PV
     /// test runs bit-exactly is here shown to be a *valid* vector plan, so the
     /// verifier is exercised on a real produced plan rather than only on
     /// hand-written fixtures.
@@ -668,7 +674,8 @@ mod tests {
         let vplan = plan.to_vector_plan();
 
         // The executed PV plan is a valid strategy-independent vector plan:
-        // this exercises the P5 verifier on a real produced plan, not a
+        // this exercises the production plan verifier on a real produced
+        // plan, not a
         // hand-written fixture.
         verify_vector_plan(&vplan).expect("the PV slice's plan must satisfy verify_vector_plan");
 
