@@ -13,8 +13,8 @@ supported Rust API of faust-rs.
 
 ```
 Python  ──▶  faust::Factory::from_source   # .dsp source -> interpreter bytecode or Cranelift machine code
-        ──▶  Factory::instantiate          # -> faust::Dsp, owns a reference to its factory
-        ──▶  Dsp::compute_f32 / _f64       # -> rendered audio blocks (state persists)
+        ──▶  Factory::create_dsp_instance  # -> faust::Dsp, owns a reference to its factory
+        ──▶  Dsp::compute                  # -> rendered audio blocks, f32 or f64 (state persists)
 ```
 
 All `unsafe` lives in the `faust` crate; the binding has none of its own.

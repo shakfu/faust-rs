@@ -83,34 +83,10 @@ fn py_err(e: faust::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
-/// A buffer element width, dispatched to the matching `faust::Dsp` compute.
-trait Sample: Element + Copy + Default {
-    fn compute(
-        dsp: &mut faust::Dsp,
-        inputs: &[&[Self]],
-        outputs: &mut [&mut [Self]],
-    ) -> Result<(), faust::Error>;
-}
+/// A buffer element width the facade computes with and numpy can view.
+trait Sample: faust::Sample + Element + Copy + Default {}
 
-impl Sample for f32 {
-    fn compute(
-        dsp: &mut faust::Dsp,
-        inputs: &[&[f32]],
-        outputs: &mut [&mut [f32]],
-    ) -> Result<(), faust::Error> {
-        dsp.compute_f32(inputs, outputs)
-    }
-}
-
-impl Sample for f64 {
-    fn compute(
-        dsp: &mut faust::Dsp,
-        inputs: &[&[f64]],
-        outputs: &mut [&mut [f64]],
-    ) -> Result<(), faust::Error> {
-        dsp.compute_f64(inputs, outputs)
-    }
-}
+impl<T: faust::Sample + Element + Copy + Default> Sample for T {}
 
 /// A compiled Faust DSP program with a persistent, stateful instance.
 ///
@@ -167,7 +143,7 @@ fn compute_into_impl<T: Sample>(
     inputs: &Bound<'_, PyAny>,
     outputs: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
-    let (num_in, num_out) = (dsp.num_inputs(), dsp.num_outputs());
+    let (num_in, num_out) = (dsp.get_num_inputs(), dsp.get_num_outputs());
     let (in_buf, in_ch, in_frames) = view_2d::<T>(inputs, "inputs")?;
     let (out_buf, out_ch, out_frames) = view_2d::<T>(outputs, "outputs")?;
 
@@ -218,7 +194,8 @@ fn compute_into_impl<T: Sample>(
         } else {
             flat_out.chunks_mut(frames).collect()
         };
-        T::compute(dsp, &in_refs, &mut out_refs).map_err(py_err)?;
+        dsp.compute(frames, &in_refs, &mut out_refs)
+            .map_err(py_err)?;
     }
     if !flat_out.is_empty() {
         out_buf.copy_from_slice(py, &flat_out)?;
@@ -263,25 +240,25 @@ impl Dsp {
     /// Number of audio input channels the DSP expects.
     #[getter]
     fn num_inputs(&self) -> usize {
-        self.dsp.num_inputs()
+        self.dsp.get_num_inputs()
     }
 
     /// Number of audio output channels the DSP produces.
     #[getter]
     fn num_outputs(&self) -> usize {
-        self.dsp.num_outputs()
+        self.dsp.get_num_outputs()
     }
 
     /// Render sample rate the instance is initialized with.
     #[getter]
     fn sample_rate(&self) -> i32 {
-        self.dsp.sample_rate()
+        self.dsp.get_sample_rate()
     }
 
     /// Compiled DSP name.
     #[getter]
     fn name(&self) -> String {
-        self.dsp.factory().name().to_owned()
+        self.dsp.factory().get_name().to_owned()
     }
 
     /// Sample precision the DSP computes with: `"double"` (`f64`) or `"float"`
@@ -315,7 +292,7 @@ impl Dsp {
     /// every control parameter to its default (`init`) value.
     fn reset(&mut self) {
         let dsp = &mut self.dsp;
-        dsp.init(dsp.sample_rate());
+        dsp.init(dsp.get_sample_rate());
     }
 
     /// The DSP's UI control parameters (sliders, buttons, nentries, bargraphs),
@@ -331,7 +308,7 @@ impl Dsp {
     /// output bargraphs (the latter reflect the most recent `compute`).
     fn get_param(&self, key: &str) -> PyResult<f64> {
         let path = &self.resolve(key)?.path;
-        self.dsp.get(path).map_err(py_err)
+        self.dsp.get_param_value(path).map_err(py_err)
     }
 
     /// Set the value of an input control parameter; takes effect on the next
@@ -349,7 +326,7 @@ impl Dsp {
             )));
         }
         let path = param.path.clone();
-        self.dsp.set(&path, value).map_err(py_err)
+        self.dsp.set_param_value(&path, value).map_err(py_err)
     }
 
     /// Render one block of audio, advancing the persistent instance state.
@@ -364,7 +341,7 @@ impl Dsp {
     #[pyo3(signature = (inputs, frames = None))]
     fn compute(&mut self, inputs: Vec<Vec<f64>>, frames: Option<i32>) -> PyResult<Vec<Vec<f64>>> {
         let dsp = &mut self.dsp;
-        let expected_in = dsp.num_inputs();
+        let expected_in = dsp.get_num_inputs();
         if inputs.len() != expected_in {
             return Err(PyValueError::new_err(format!(
                 "DSP expects {expected_in} input channel(s), got {}",
@@ -395,9 +372,10 @@ impl Dsp {
         };
 
         let in_refs: Vec<&[f64]> = inputs.iter().map(Vec::as_slice).collect();
-        let mut outs = vec![vec![0.0; count]; dsp.num_outputs()];
+        let mut outs = vec![vec![0.0; count]; dsp.get_num_outputs()];
         let mut out_refs: Vec<&mut [f64]> = outs.iter_mut().map(Vec::as_mut_slice).collect();
-        dsp.compute_f64(&in_refs, &mut out_refs).map_err(py_err)?;
+        dsp.compute(count, &in_refs, &mut out_refs)
+            .map_err(py_err)?;
         self.cycle += 1;
         Ok(outs)
     }
@@ -532,7 +510,9 @@ fn compile(
         std::thread::Builder::new()
             .name("faust-rs-compile".to_owned())
             .stack_size(COMPILE_STACK_SIZE)
-            .spawn(move || Factory::from_source(&name, &source, &options)?.instantiate(sample_rate))
+            .spawn(move || {
+                Factory::from_source(&name, &source, &options)?.create_dsp_instance(sample_rate)
+            })
             .map_err(|e| PyValueError::new_err(format!("failed to spawn compile thread: {e}")))?
             .join()
             .map_err(|_| PyValueError::new_err("compile thread panicked"))?
