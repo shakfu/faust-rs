@@ -61,10 +61,9 @@ over `Borrow<FbcDspFactory<R>>`, splitting it into a shared base
 - `OwnedFbcDspInstance<R>` owns its factory and therefore carries no lifetime,
   so it can be stored, moved, and returned freely.
 
-**Required by `crates/py-faust-rs`**, which will not compile without it. That
-crate stores an `OwnedFbcDspInstance` inside a `#[pyclass]`, which must be a
-self-contained movable value; a factory plus an instance borrowing it is
-self-referential and cannot be stored otherwise.
+**Superseded.** Upstream answered #17 with the `faust` crate instead, whose
+`Dsp` owns a reference to its factory. `crates/py-faust-rs` now depends on
+`faust` and no longer needs this patch. Kept for reference until #17 closes.
 
 The workaround-free alternatives were all worse. Upstream's only constructor is
 `FbcDspInstance::new(factory: &'a mut FbcDspFactory<R>)`, and that `&mut` rules

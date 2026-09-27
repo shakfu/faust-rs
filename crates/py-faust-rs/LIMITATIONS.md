@@ -8,13 +8,10 @@ a fuller implementation would require. Updated as items are addressed.
 **Original limitation:** `compile()` hard-coded `RealType::Float32` and loaded
 the factory with `read_fbc::<f32>`, so only single precision was available.
 
-- **Resolution:** `compile(..., double=True)` now selects `RealType::Float64`
-  and `read_fbc::<f64>`. `Dsp` holds a precision-erased `Engine` enum
-  (`OwnedFbcDspInstance<f32>` / `<f64>`), mirroring the FFI's `FbcDspFactoryAny`,
-  and a generic `render::<R>` helper marshals audio. A `precision` getter
-  reports `"float"` / `"double"`. Audio crosses the Python boundary as `f64`
-  (Python's native float): lossless for a double-precision DSP and cast to/from
-  `f32` for a single-precision one.
+- **Resolution:** `compile(..., double=True)` compiles with `-double`. A
+  `precision` getter reports `"float"` / `"double"`. Audio crosses the Python
+  boundary as `f64` (Python's native float) and is cast for a single-precision
+  DSP. On the interpreter, a double-precision DSP still has `f32` I/O (item 6).
 
 ## 2. No cross-call state persistence  [RESOLVED — see below]
 
@@ -27,18 +24,12 @@ lines) reset every call. State was correct *within* one block but never carried
   whole lifetime. Holding both factory and instance in one `#[pyclass]` is a
   self-referential struct, which the one-shot design sidestepped by rebuilding
   the instance per call.
-- **Resolution:** the interpreter backend now provides an owning instance,
-  `codegen::backends::interp::OwnedFbcDspInstance<R>`, which holds the factory
-  and the runtime executor as sibling fields (no lifetime, no self-reference).
-  `FbcDspInstance` and `OwnedFbcDspInstance` are two aliases of one generic base
-  (`FbcDspInstanceImpl<F, R>` over `F: Borrow<FbcDspFactory<R>>`) sharing a
-  single, fully **safe** implementation — the factory is read through `Borrow`
-  while the mutable executor lives in a disjoint field. `Dsp` simply owns an
-  `OwnedFbcDspInstance<f32>`, so the binding contains **no hand-written
-  `unsafe`**. `init()` runs once at `compile()`; each `compute()` advances the
-  same instance; `reset()` clears state; a `cycle` getter exposes the running
-  block count. The owning type is covered by `cargo test` (and is Miri-clean, as
-  it carries no unsafe) in `codegen`'s interp instance tests.
+- **Resolution:** `Dsp` holds a `faust::Dsp`, which owns a reference to its
+  factory and has no lifetime parameter. `init()` runs once at `compile()`;
+  each `compute()` advances the same instance; `reset()` clears state; a `cycle`
+  getter exposes the running block count. `faust::Dsp` is `Send` but not
+  `Sync`, so `Dsp` wraps it in a `Mutex` to satisfy PyO3; a `Dsp` can be used
+  from any Python thread.
 
 ## 3. UI parameter (button/slider) bridge  [RESOLVED]
 
@@ -47,11 +38,11 @@ lines) reset every call. State was correct *within* one block but never carried
 (`ui_instructions()`), but the bindings did not map Faust UI widgets to named
 Python accessors.
 
-- **Resolution:** at compile time the binding walks `ui_instructions()` into a
-  `Param` list (tracking enclosing box labels to build each control's full UI
-  path). It exposes:
+- **Resolution:** at compile time the binding copies `faust::Dsp::controls()`
+  into a `Param` list. Paths follow the C++ `MapUI` (`/group/label`). It
+  exposes:
   - `dsp.params()` -> list of `Param` (path, leaf label, kind, `init`/`min`/
-    `max`/`step`, `is_input`, zone offset), in declaration order;
+    `max`/`step`, `is_input`), in path order;
   - `dsp.get_param(key)` / `dsp.set_param(key, value)` keyed by full path or an
     unambiguous leaf label. Set takes effect on the next `compute()`.
   Buttons, checkboxes, h/v sliders, and nentries are settable inputs; h/v
@@ -67,16 +58,10 @@ etc.) failed to resolve. Only self-contained sources compiled.
 
 - **Resolution:** `compile(..., search_paths=[...])` resolves imports against
   the given directories; directories in the `FAUST_LIB_PATH` environment
-  variable are appended automatically. The compiler facade exposes search paths
-  only on its file-based entry points, so the binding stages the source string
-  into a private temp directory (removed on drop) and compiles it via
-  `compile_file_to_interp_with_lane`. The directory is private so that the
-  parent path the facade injects into the import search path cannot resolve
-  anything but the staged file; the cost is that diagnostics name the staged
-  path rather than the `name=` argument. The faust-rs workspace does not bundle
-  the full Faust standard library, so point `search_paths` (or
-  `FAUST_LIB_PATH`) at an existing stdlib install; the import test suite skips
-  when none is discoverable.
+  variable are appended automatically. They reach the compiler as `-I`
+  arguments. The faust-rs workspace does not bundle the full Faust standard
+  library, so point `search_paths` (or `FAUST_LIB_PATH`) at an existing stdlib
+  install; the import test suite skips when none is discoverable.
 
 ## 5. Whole-block render, no host loop / streaming  [BUFFER PROTOCOL ADDED]
 
@@ -96,8 +81,22 @@ boxing every sample as a `PyFloat`.
   the extension needs **no NumPy build dependency** and keeps **no hand-written
   `unsafe`**. The list-based `compute()` remains for convenience.
 - **Still open:** this is a bulk *copy* into and out of the interpreter's own
-  buffers, not a true zero-copy in which the interpreter reads and writes the
+  buffers, not a true zero-copy in which the backend reads and writes the
   caller's memory directly. That would require reinterpreting the buffer's
   `Cell` view as `&mut [R]` — hand-written `unsafe` — which the crate
-  deliberately avoids (see item 2). Rendering is still block-at-a-time: no
+  deliberately avoids. Rendering is still block-at-a-time: no
   streaming ring buffer and no real-time audio-callback integration.
+
+## 6. Interpreter double precision has `f32` I/O  [OPEN]
+
+With `backend="interp"` and `double=True`, audio is rounded to `f32` at the
+input and output. The DSP still computes in `f64`. For example, `process = _;`
+returns `1.0` for an input of `1.0 + 2**-40`.
+
+- **Cause:** the `faust` crate drives the interpreter through its C ABI, which
+  exchanges `f32` buffers whatever the precision. The Cranelift backend
+  exchanges the compiled precision and is exact.
+- **Lift path:** upstream `f64` buffers for the interpreter C ABI, requested on
+  [grame-cncm/faust-rs#17](https://github.com/grame-cncm/faust-rs/issues/17).
+  Three tests in `tests/test_precision.py` are strict xfails on the interpreter
+  and will fail once this lands; then drop the `f64_io` fixture.

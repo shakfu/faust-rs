@@ -1,28 +1,23 @@
 # py-faust-rs (proof of concept)
 
-Minimal PyO3/maturin bindings that expose the faust-rs **interpreter (FBC)
-backend** to Python: compile a Faust `.dsp` source string and render audio
-through the native Rust interpreter, with no C toolchain in the loop.
+Minimal PyO3/maturin bindings that expose faust-rs to Python: compile a Faust
+`.dsp` source string and render audio through the bytecode interpreter or the
+Cranelift JIT, with no C toolchain in the loop.
 
 This crate is intentionally kept **out of the main workspace** (`exclude` in the
 root `Cargo.toml`) so its `extension-module` linkage never affects
-`cargo build --workspace` or CI. It path-depends on the `compiler` and `codegen`
-crates.
+`cargo build --workspace` or CI. It path-depends on the `faust` crate, the
+supported Rust API of faust-rs.
 
 ## Binding path
 
 ```
-Python  ──▶  compiler::Compiler               # .dsp source -> FBC bytecode text (fast lane)
-        ──▶  read_fbc::<f32>                  # -> FbcDspFactory<f32>
-        ──▶  OwnedFbcDspInstance::from_factory # persistent, factory-owning instance
-        ──▶  .try_compute(...)                # -> rendered audio blocks (state persists)
+Python  ──▶  faust::Factory::from_source   # .dsp source -> interpreter bytecode or Cranelift machine code
+        ──▶  Factory::instantiate          # -> faust::Dsp, owns a reference to its factory
+        ──▶  Dsp::compute_f32 / _f64       # -> rendered audio blocks (state persists)
 ```
 
-The binding holds a `codegen::backends::interp::OwnedFbcDspInstance<f32>`, which
-owns its factory alongside the runtime state (no lifetime, no self-referential
-borrowing). As a result the binding contains **no hand-written `unsafe`** — the
-persistent-instance machinery lives, fully safe and unit-tested, in the `codegen`
-interpreter backend.
+All `unsafe` lives in the `faust` crate; the binding has none of its own.
 
 ## Build
 
@@ -61,7 +56,7 @@ If the extension is not built, the suite skips rather than errors.
 ```python
 import faust_rs
 
-faust_rs.version()                       # underlying faust-rs compiler version
+faust_rs.version()                       # underlying faust-rs version
 
 # process = _, _ : + : *(0.5);  -> 2 inputs, 1 output
 dsp = faust_rs.compile("process = _, _ : + : *(0.5);", name="mixer")
@@ -101,9 +96,20 @@ dsp = faust_rs.compile('import("stdfaust.lib"); process = os.osc(440);',
 dsp.compute([], frames=8)                  # a 440 Hz sine block
 ```
 
+### Backends
+
+`backend="interp"` (default) runs the bytecode interpreter. `backend="cranelift"`
+compiles to native code with the Cranelift JIT. Cranelift does not yet lower
+every program; `compile()` raises `ValueError` for one it cannot run.
+
+```python
+jit = faust_rs.compile("process = _ : *(0.5);", backend="cranelift")
+jit.backend                                # 'cranelift'
+```
+
 ### Persistent, stateful instance
 
-`compile()` initializes a single interpreter instance that is reused across
+`compile()` initializes a single instance that is reused across
 `compute()` calls, so DSP state (recursive filters, oscillator phase, delay
 lines) carries from one block to the next.
 
@@ -164,7 +170,7 @@ Buttons, checkboxes, sliders, and nentries are settable inputs; bargraphs are
 outputs (read-only, reflecting the most recent `compute`).
 
 `compile()` and `compute()` raise `ValueError` on compile errors, bad bytecode,
-channel-count mismatches, and interpreter runtime errors; `get_param`/`set_param`
+channel-count mismatches, and programs the Cranelift backend cannot run; `get_param`/`set_param`
 raise on unknown/ambiguous keys (and `set_param` on an output).
 
 ## Scope / limitations (deliberate for a PoC)
@@ -173,11 +179,13 @@ See `LIMITATIONS.md` for the full list and lift paths. In brief:
 
 - Whole-block render only: no streaming ring buffer or real-time audio-callback
   integration. `compute_into` avoids per-sample marshaling but still bulk-copies
-  into and out of the interpreter's own buffers (not a true zero-copy, which
+  into and out of the backend's own buffers (not a true zero-copy, which
   would need hand-written `unsafe`).
 
-**Resolved:** cross-call state persistence (`Dsp` holds a safe, factory-owning
-`OwnedFbcDspInstance`; `reset()` clears state), single/double precision
+- With `backend="interp"` and `double=True`, audio I/O is rounded to `f32`
+  (LIMITATIONS.md item 6).
+
+**Resolved:** cross-call state persistence (`reset()` clears state), single/double precision
 (`double=True`), `import(...)` resolution (`search_paths=` / `FAUST_LIB_PATH`),
 the UI parameter bridge (`params()` / `get_param` / `set_param`), and
 buffer-protocol block I/O (`compute_into`, accepting NumPy/`memoryview`/

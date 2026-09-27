@@ -6,14 +6,10 @@ Only `noise.dsp` is exercised: it is the one cyfaust fixture that does not
 soundfile) are intentionally not included here.
 """
 
-import pytest
 
-import faust_rs
-
-
-def test_noise_dsp_compiles_and_runs(dsp_dir):
+def test_noise_dsp_compiles_and_runs(dsp_dir, compile_dsp):
     source = (dsp_dir / "noise.dsp").read_text()
-    dsp = faust_rs.compile(source, name="Noise")
+    dsp = compile_dsp(source, name="Noise")
     assert dsp.name == "Noise"
     # A UI slider is present but does not add audio I/O: 0 inputs, 1 output.
     assert dsp.num_inputs == 0
@@ -25,16 +21,16 @@ def test_noise_dsp_compiles_and_runs(dsp_dir):
     assert any(s != 0.0 for s in out)  # and is not pure silence
 
 
-def test_noise_dsp_is_deterministic(dsp_dir):
+def test_noise_dsp_is_deterministic(dsp_dir, compile_dsp):
     source = (dsp_dir / "noise.dsp").read_text()
-    a = faust_rs.compile(source).compute([], frames=32)[0]
-    b = faust_rs.compile(source).compute([], frames=32)[0]
+    a = compile_dsp(source).compute([], frames=32)[0]
+    b = compile_dsp(source).compute([], frames=32)[0]
     assert a == b  # same seed sequence from a fresh instance
 
 
-def test_noise_dsp_double_precision(dsp_dir):
+def test_noise_dsp_double_precision(dsp_dir, compile_dsp):
     source = (dsp_dir / "noise.dsp").read_text()
-    dsp = faust_rs.compile(source, double=True)
+    dsp = compile_dsp(source, double=True)
     assert dsp.precision == "double"
     out = dsp.compute([], frames=16)[0]
     assert len(out) == 16

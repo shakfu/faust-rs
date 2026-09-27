@@ -24,14 +24,16 @@ sample to/from `Vec<f64>`. This is the last open item from `LIMITATIONS.md` (#5)
 
 - **Type stubs (`.pyi`)** for `Dsp`, `Param`, `compile`, `version` so editors
   and type checkers see the API. maturin can ship a stub alongside the module.
-- **Compile from file:** a `compile_file(path, ...)` entry point using the
-  compiler's file-backed APIs (which also auto-merge default import search
-  paths), complementing the current string-only `compile`.
-- **Metadata / introspection:** expose factory JSON, `sha_key`, and compile
-  options (cyfaust surfaces these via `get_sha_key` / `get_compile_options`).
+- **Compile from file:** a `compile_file(path, ...)` entry point over
+  `faust::Factory::from_file`, complementing the current string-only `compile`.
+- **Metadata / introspection:** expose the factory JSON (`faust::Factory::json`)
+  and compile options (cyfaust surfaces these via `get_sha_key` /
+  `get_compile_options`).
 - **Packaging & CI:** `cibuildwheel` + GitHub Actions to build wheels across
   platforms and Python versions, toward a PyPI release like cyfaust. Bundling a
   Faust standard library would let the import tests run in CI instead of
   skipping.
-- **Param metadata declarations:** capture `declare`/`[unit:...]`-style widget
-  metadata (`FbcUiInstruction.key`/`value`) onto `Param`.
+- **Param metadata declarations:** copy `[unit:...]`-style widget metadata
+  (`faust::Control::metadata`) onto `Param`.
+- **Interpreter `f64` I/O:** drop the `f64_io` xfail fixture once upstream
+  lands it (`LIMITATIONS.md` item 6).

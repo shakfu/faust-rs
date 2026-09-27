@@ -9,6 +9,7 @@ Pytest skips the whole suite (rather than erroring) if the module is absent, so
 a checkout without a build does not produce spurious failures.
 """
 
+import functools
 import os
 from pathlib import Path
 
@@ -68,3 +69,32 @@ def stdfaust_dir() -> Path:
 def faust():
     """The imported `faust_rs` module."""
     return faust_rs
+
+
+@pytest.fixture(params=["interp", "cranelift"])
+def backend(request) -> str:
+    """Each backend in turn; tests taking `compile_dsp` run once per backend."""
+    return request.param
+
+
+@pytest.fixture
+def compile_dsp(backend):
+    """`faust_rs.compile` bound to the current `backend`."""
+    return functools.partial(faust_rs.compile, backend=backend)
+
+
+@pytest.fixture
+def f64_io(backend, request):
+    """Marks a test needing `f64` audio I/O as a strict xfail on the interpreter.
+
+    The `faust` crate drives the interpreter through its C ABI, which exchanges
+    `f32` buffers whatever the precision. Strict, so the test fails once
+    upstream exchanges `f64` and the marker can go.
+    """
+    if backend == "interp":
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=True,
+                reason="faust crate: interpreter I/O is f32 in double mode",
+            )
+        )
