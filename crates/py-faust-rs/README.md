@@ -152,7 +152,7 @@ gen.compute_into(np.zeros((0, 4), np.float32), np.zeros((1, 4), np.float32))
 ### UI parameters (sliders, buttons, bargraphs)
 
 DSP controls are exposed as parameters. `params()` lists them; `get_param` /
-`set_param` address a control by full UI path or unambiguous leaf label. A set
+`set_param` address a control by full UI path or unambiguous label. A set
 takes effect on the next `compute()`.
 
 ```python
@@ -160,7 +160,7 @@ dsp = faust_rs.compile('process = _ * hslider("gain", 1, 0, 2, 0.01);')
 [p.path for p in dsp.params()]     # ['/FaustDSP/gain']
 dsp.params()[0].kind               # 'hslider'  (init/min/max/step also exposed)
 
-dsp.set_param("gain", 0.5)         # by leaf label (or "/FaustDSP/gain")
+dsp.set_param("gain", 0.5)         # by label (or "/FaustDSP/gain")
 dsp.compute([[2.0, 4.0]])          # [[1.0, 2.0]]
 dsp.get_param("gain")              # 0.5
 dsp.reset()                        # restores gain to its init (1.0)

@@ -35,5 +35,3 @@ sample to/from `Vec<f64>`. This is the last open item from `LIMITATIONS.md` (#5)
   skipping.
 - **Param metadata declarations:** copy `[unit:...]`-style widget metadata
   (`faust::Control::metadata`) onto `Param`.
-- **Interpreter `f64` I/O:** drop the `f64_io` xfail fixture once upstream
-  lands it (`LIMITATIONS.md` item 6).

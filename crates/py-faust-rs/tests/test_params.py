@@ -95,3 +95,26 @@ def test_params_work_in_double_precision(compile_dsp):
     assert dsp.precision == "double"
     dsp.set_param("gain", 0.25)
     assert dsp.compute([[8.0]]) == [[2.0]]
+
+
+def test_label_as_declared(compile_dsp):
+    # The path mangles ' ' and drops metadata; the label keeps the text.
+    dsp = compile_dsp('process = _ * hslider("my gain[unit:dB]", 1, 0, 2, 0.01);')
+    (p,) = dsp.params()
+    assert p.label == "my gain"
+    assert p.path.endswith("/my_gain")
+    dsp.set_param("my gain", 0.5)
+    assert dsp.get_param(p.path) == 0.5
+
+
+def test_params_in_ui_order(compile_dsp):
+    # Faust sorts a group by raw label, `[n]` included; paths drop `[n]`.
+    # UI order is then b, a; path order would be a, b.
+    src = 'process = hslider("[2]a", 0, 0, 1, 0.1) + hslider("[1]b", 0, 0, 1, 0.1);'
+    assert [p.label for p in compile_dsp(src).params()] == ["b", "a"]
+
+
+def test_double_ranges_exact(compile_dsp):
+    dsp = compile_dsp('process = _ * hslider("g", 0.1, 0, 2, 0.01);', double=True)
+    (p,) = dsp.params()
+    assert (p.init, p.step) == (0.1, 0.01)

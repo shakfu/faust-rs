@@ -27,9 +27,8 @@ lines) reset every call. State was correct *within* one block but never carried
 - **Resolution:** `Dsp` holds a `faust::Dsp`, which owns a reference to its
   factory and has no lifetime parameter. `init()` runs once at `compile()`;
   each `compute()` advances the same instance; `reset()` clears state; a `cycle`
-  getter exposes the running block count. `faust::Dsp` is `Send` but not
-  `Sync`, so `Dsp` wraps it in a `Mutex` to satisfy PyO3; a `Dsp` can be used
-  from any Python thread.
+  getter exposes the running block count. `faust::Dsp` is `Send + Sync`, as
+  PyO3 requires.
 
 ## 3. UI parameter (button/slider) bridge  [RESOLVED]
 
@@ -41,10 +40,10 @@ Python accessors.
 - **Resolution:** at compile time the binding copies `faust::Dsp::controls()`
   into a `Param` list. Paths follow the C++ `MapUI` (`/group/label`). It
   exposes:
-  - `dsp.params()` -> list of `Param` (path, leaf label, kind, `init`/`min`/
-    `max`/`step`, `is_input`), in path order;
+  - `dsp.params()` -> list of `Param` (path, label, kind, `init`/`min`/
+    `max`/`step`, `is_input`), in UI order;
   - `dsp.get_param(key)` / `dsp.set_param(key, value)` keyed by full path or an
-    unambiguous leaf label. Set takes effect on the next `compute()`.
+    unambiguous label. Set takes effect on the next `compute()`.
   Buttons, checkboxes, h/v sliders, and nentries are settable inputs; h/v
   bargraphs are outputs (readable via `get_param`, reflecting the most recent
   `compute`; not settable). `reset()` restores all controls to their defaults.
@@ -87,16 +86,11 @@ boxing every sample as a `PyFloat`.
   deliberately avoids. Rendering is still block-at-a-time: no
   streaming ring buffer and no real-time audio-callback integration.
 
-## 6. Interpreter double precision has `f32` I/O  [OPEN]
+## 6. Interpreter double precision has `f32` I/O  [RESOLVED]
 
-With `backend="interp"` and `double=True`, audio is rounded to `f32` at the
-input and output. The DSP still computes in `f64`. For example, `process = _;`
-returns `1.0` for an input of `1.0 + 2**-40`.
+With `backend="interp"` and `double=True`, audio was rounded to `f32` at the
+input and output, because the interpreter C ABI exchanges `f32` buffers.
 
-- **Cause:** the `faust` crate drives the interpreter through its C ABI, which
-  exchanges `f32` buffers whatever the precision. The Cranelift backend
-  exchanges the compiled precision and is exact.
-- **Lift path:** upstream `f64` buffers for the interpreter C ABI, requested on
-  [grame-cncm/faust-rs#17](https://github.com/grame-cncm/faust-rs/issues/17).
-  Three tests in `tests/test_precision.py` are strict xfails on the interpreter
-  and will fail once this lands; then drop the `f64_io` fixture.
+- **Resolution:** the `faust` crate uses a Rust-only `f64` entry of
+  `interp-ffi` (upstream `c7a9d5a2`); the C ABI is unchanged. Both backends
+  now exchange the compiled precision.

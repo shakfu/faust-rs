@@ -72,3 +72,12 @@ def test_backend_getter(compile_dsp, backend):
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="unknown backend"):
         faust_rs.compile("process = _;", backend="llvm")
+
+
+def test_unknown_ffunction_refused(faust):
+    # Cranelift cannot lower `compute`; the interpreter rejects it at compile.
+    src = 'process = _ : ffunction(float frs_unknown_fn(float), "", "");'
+    with pytest.raises(ValueError, match="^Instantiate:"):
+        faust.compile(src, backend="cranelift")
+    with pytest.raises(ValueError, match="^Compile:"):
+        faust.compile(src, backend="interp")

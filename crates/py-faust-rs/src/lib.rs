@@ -15,7 +15,6 @@
 //! (`f64`) precision are supported via the `double=` flag on `compile`.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use faust::{Backend, CompileOptions, ControlKind, Factory, Precision};
 use pyo3::buffer::{Element, PyBuffer};
@@ -33,7 +32,7 @@ use pyo3::prelude::*;
 struct Param {
     /// Full UI path, e.g. `/Oscillator/freq`.
     path: String,
-    /// Last path segment, e.g. `freq`.
+    /// Label as declared, without its `[key:value]` metadata, e.g. `freq`.
     label: String,
     /// Widget kind: `button`, `checkbox`, `hslider`, `vslider`, `nentry`,
     /// `hbargraph`, or `vbargraph`.
@@ -69,7 +68,7 @@ impl From<&faust::Control> for Param {
         };
         Self {
             path: c.path.clone(),
-            label: c.path.rsplit('/').next().unwrap_or_default().to_owned(),
+            label: c.label.clone(),
             kind,
             is_input: c.kind.is_writable(),
             init: c.init,
@@ -123,9 +122,7 @@ impl Sample for f64 {
 /// `compute`, and at the DSP's precision in `compute_into`.
 #[pyclass]
 struct Dsp {
-    /// `faust::Dsp` is `Send` but not `Sync`, and PyO3 requires both. The
-    /// lock is uncontended: PyO3's borrow flag already serializes `&mut self`.
-    dsp: Mutex<faust::Dsp>,
+    dsp: faust::Dsp,
     params: Vec<Param>,
     /// Blocks rendered since construction; not zeroed by `reset()`.
     cycle: usize,
@@ -229,26 +226,17 @@ fn compute_into_impl<T: Sample>(
     Ok(true)
 }
 
-/// Exclusive access without locking, for `&mut self` methods.
-fn exclusive(dsp: &mut Mutex<faust::Dsp>) -> &mut faust::Dsp {
-    dsp.get_mut().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl Dsp {
     fn new(dsp: faust::Dsp) -> Self {
         let params = dsp.controls().map(Param::from).collect();
         Self {
-            dsp: Mutex::new(dsp),
+            dsp,
             params,
             cycle: 0,
         }
     }
 
-    fn shared(&self) -> MutexGuard<'_, faust::Dsp> {
-        self.dsp.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Resolves a parameter key (full path or unambiguous leaf label) to its
+    /// Resolves a parameter key (full path or unambiguous label) to its
     /// `Param`. Errors on unknown or ambiguous keys.
     fn resolve(&self, key: &str) -> PyResult<&Param> {
         if let Some(p) = self.params.iter().find(|p| p.path == key) {
@@ -275,32 +263,32 @@ impl Dsp {
     /// Number of audio input channels the DSP expects.
     #[getter]
     fn num_inputs(&self) -> usize {
-        self.shared().num_inputs()
+        self.dsp.num_inputs()
     }
 
     /// Number of audio output channels the DSP produces.
     #[getter]
     fn num_outputs(&self) -> usize {
-        self.shared().num_outputs()
+        self.dsp.num_outputs()
     }
 
     /// Render sample rate the instance is initialized with.
     #[getter]
     fn sample_rate(&self) -> i32 {
-        self.shared().sample_rate()
+        self.dsp.sample_rate()
     }
 
     /// Compiled DSP name.
     #[getter]
     fn name(&self) -> String {
-        self.shared().factory().name().to_owned()
+        self.dsp.factory().name().to_owned()
     }
 
     /// Sample precision the DSP computes with: `"double"` (`f64`) or `"float"`
     /// (`f32`).
     #[getter]
     fn precision(&self) -> &'static str {
-        match self.shared().precision() {
+        match self.dsp.precision() {
             Precision::F32 => "float",
             Precision::F64 => "double",
         }
@@ -309,7 +297,7 @@ impl Dsp {
     /// Backend running the DSP: `"interp"` or `"cranelift"`.
     #[getter]
     fn backend(&self) -> String {
-        self.shared().backend().to_string()
+        self.dsp.backend().to_string()
     }
 
     /// Total blocks rendered by the persistent instance since construction.
@@ -326,12 +314,12 @@ impl Dsp {
     /// oscillator phase, delay lines) as if freshly compiled. This also resets
     /// every control parameter to its default (`init`) value.
     fn reset(&mut self) {
-        let dsp = exclusive(&mut self.dsp);
+        let dsp = &mut self.dsp;
         dsp.init(dsp.sample_rate());
     }
 
     /// The DSP's UI control parameters (sliders, buttons, nentries, bargraphs),
-    /// in path order. Each carries its path, kind, and range metadata.
+    /// in user-interface order (Faust sorts a group's widgets by label). Each carries its path, kind, and range metadata.
     fn params(&self) -> Vec<Param> {
         self.params.clone()
     }
@@ -339,17 +327,17 @@ impl Dsp {
     /// Read the current value of a control parameter.
     ///
     /// `key` may be the full UI path (e.g. `/Oscillator/freq`) or an
-    /// unambiguous leaf label (e.g. `freq`). Works for both input controls and
+    /// unambiguous label (e.g. `freq`). Works for both input controls and
     /// output bargraphs (the latter reflect the most recent `compute`).
     fn get_param(&self, key: &str) -> PyResult<f64> {
         let path = &self.resolve(key)?.path;
-        self.shared().get(path).map_err(py_err)
+        self.dsp.get(path).map_err(py_err)
     }
 
     /// Set the value of an input control parameter; takes effect on the next
     /// `compute()`. Bargraphs (outputs) cannot be set.
     ///
-    /// `key` may be the full UI path or an unambiguous leaf label. The value is
+    /// `key` may be the full UI path or an unambiguous label. The value is
     /// not clamped to the control's declared `[min, max]` range (matching
     /// Faust's `setParamValue` semantics).
     fn set_param(&mut self, key: &str, value: f64) -> PyResult<()> {
@@ -361,7 +349,7 @@ impl Dsp {
             )));
         }
         let path = param.path.clone();
-        exclusive(&mut self.dsp).set(&path, value).map_err(py_err)
+        self.dsp.set(&path, value).map_err(py_err)
     }
 
     /// Render one block of audio, advancing the persistent instance state.
@@ -375,7 +363,7 @@ impl Dsp {
     /// cross as Python floats (`f64`); a `float`-precision DSP casts internally.
     #[pyo3(signature = (inputs, frames = None))]
     fn compute(&mut self, inputs: Vec<Vec<f64>>, frames: Option<i32>) -> PyResult<Vec<Vec<f64>>> {
-        let dsp = exclusive(&mut self.dsp);
+        let dsp = &mut self.dsp;
         let expected_in = dsp.num_inputs();
         if inputs.len() != expected_in {
             return Err(PyValueError::new_err(format!(
@@ -440,7 +428,7 @@ impl Dsp {
         inputs: &Bound<'_, PyAny>,
         outputs: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let dsp = exclusive(&mut self.dsp);
+        let dsp = &mut self.dsp;
         let ran = match dsp.precision() {
             Precision::F32 => compute_into_impl::<f32>(py, dsp, inputs, outputs)?,
             Precision::F64 => compute_into_impl::<f64>(py, dsp, inputs, outputs)?,

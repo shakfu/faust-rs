@@ -81,20 +81,3 @@ def backend(request) -> str:
 def compile_dsp(backend):
     """`faust_rs.compile` bound to the current `backend`."""
     return functools.partial(faust_rs.compile, backend=backend)
-
-
-@pytest.fixture
-def f64_io(backend, request):
-    """Marks a test needing `f64` audio I/O as a strict xfail on the interpreter.
-
-    The `faust` crate drives the interpreter through its C ABI, which exchanges
-    `f32` buffers whatever the precision. Strict, so the test fails once
-    upstream exchanges `f64` and the marker can go.
-    """
-    if backend == "interp":
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                reason="faust crate: interpreter I/O is f32 in double mode",
-            )
-        )

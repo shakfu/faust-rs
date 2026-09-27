@@ -73,16 +73,15 @@ tracks the faust-rs workspace and its API may change at any time.
   `Dsp.backend`. A program Cranelift cannot lower raises `ValueError` at
   `compile()` rather than producing a silent instance. The test suite runs
   every compiling test on both backends.
-- Regression: with `backend="interp"` and `double=True`, audio I/O is rounded
-  to `f32`, because the `faust` crate drives the interpreter through its C ABI.
-  Computation stays `f64`; Cranelift is exact. See `LIMITATIONS.md` item 6.
-- `Param.offset` is removed, `params()` is in path order rather than
-  declaration order, and `Param.label` is the last path segment.
+- `double=True` exchanges `f64` audio on both backends (upstream `dd531a7a`);
+  the interpreter no longer rounds I/O to `f32`, and control ranges are exact.
+- `Param.offset` is removed. `params()` follows the UI tree, where Faust sorts
+  a group by raw label, `[n]` prefixes included. `Param.label` is the label as
+  declared, without metadata; `"my gain"` no longer resolves as `"my_gain"`.
 - Source strings are compiled directly rather than staged in a temp directory,
   since `faust` passes import directories for string sources too. Diagnostics
   name the `name=` argument again.
-- `Dsp` holds its instance in a `Mutex`: `faust::Dsp` is not `Sync`, which
-  PyO3 requires. A `Dsp` stays usable from any Python thread.
+- `Dsp` holds `faust::Dsp` directly, which is `Send + Sync` as PyO3 requires.
 - Persistence now uses the safe, factory-owning `OwnedFbcDspInstance<f32>` from
   the `codegen` interpreter backend. An earlier iteration held a boxed factory
   plus a `'static` self-referential borrow inside the binding; that
