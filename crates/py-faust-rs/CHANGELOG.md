@@ -82,6 +82,13 @@ tracks the faust-rs workspace and its API may change at any time.
   since `faust` passes import directories for string sources too. Diagnostics
   name the `name=` argument again.
 - `Dsp` holds `faust::Dsp` directly, which is `Send + Sync` as PyO3 requires.
+- Follows the `faust` facade's `dsp.h` renames (rust-facade `c23c13de`), such as
+  `create_dsp_instance`, `get_num_inputs` and `set_param_value`. The Python API
+  is unchanged. The facade's `compute` now takes an explicit frame count; the
+  binding passes the block length it already validates.
+- Follows the `faust` facade's `Control` -> `Param` rename (rust-facade
+  `c0a86088`): `ControlKind` is `ParamKind`, `Dsp::controls()` is
+  `Dsp::params()`. The Python API is unchanged.
 - Persistence now uses the safe, factory-owning `OwnedFbcDspInstance<f32>` from
   the `codegen` interpreter backend. An earlier iteration held a boxed factory
   plus a `'static` self-referential borrow inside the binding; that
