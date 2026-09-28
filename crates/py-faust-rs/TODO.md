@@ -34,4 +34,4 @@ sample to/from `Vec<f64>`. This is the last open item from `LIMITATIONS.md` (#5)
   Faust standard library would let the import tests run in CI instead of
   skipping.
 - **Param metadata declarations:** copy `[unit:...]`-style widget metadata
-  (`faust::Control::metadata`) onto `Param`.
+  (`faust::Param::metadata`) onto `Param`.

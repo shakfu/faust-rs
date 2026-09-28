@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use faust::{Backend, CompileOptions, ControlKind, Factory, Precision};
+use faust::{Backend, CompileOptions, Factory, ParamKind, Precision};
 use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -55,16 +55,16 @@ impl Param {
     }
 }
 
-impl From<&faust::Control> for Param {
-    fn from(c: &faust::Control) -> Self {
+impl From<&faust::Param> for Param {
+    fn from(c: &faust::Param) -> Self {
         let kind = match c.kind {
-            ControlKind::Button => "button",
-            ControlKind::CheckButton => "checkbox",
-            ControlKind::HorizontalSlider => "hslider",
-            ControlKind::VerticalSlider => "vslider",
-            ControlKind::NumEntry => "nentry",
-            ControlKind::HorizontalBargraph => "hbargraph",
-            ControlKind::VerticalBargraph => "vbargraph",
+            ParamKind::Button => "button",
+            ParamKind::CheckButton => "checkbox",
+            ParamKind::HorizontalSlider => "hslider",
+            ParamKind::VerticalSlider => "vslider",
+            ParamKind::NumEntry => "nentry",
+            ParamKind::HorizontalBargraph => "hbargraph",
+            ParamKind::VerticalBargraph => "vbargraph",
         };
         Self {
             path: c.path.clone(),
@@ -205,7 +205,7 @@ fn compute_into_impl<T: Sample>(
 
 impl Dsp {
     fn new(dsp: faust::Dsp) -> Self {
-        let params = dsp.controls().map(Param::from).collect();
+        let params = dsp.params().map(Param::from).collect();
         Self {
             dsp,
             params,

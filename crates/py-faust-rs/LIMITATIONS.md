@@ -37,7 +37,7 @@ lines) reset every call. State was correct *within* one block but never carried
 (`ui_instructions()`), but the bindings did not map Faust UI widgets to named
 Python accessors.
 
-- **Resolution:** at compile time the binding copies `faust::Dsp::controls()`
+- **Resolution:** at compile time the binding copies `faust::Dsp::params()`
   into a `Param` list. Paths follow the C++ `MapUI` (`/group/label`). It
   exposes:
   - `dsp.params()` -> list of `Param` (path, label, kind, `init`/`min`/
