@@ -7,7 +7,21 @@ import faust_rs
 
 
 def test_module_exports():
-    for name in ("compile", "version", "Dsp"):
+    names = (
+        "compile",
+        "compile_file",
+        "version",
+        "Factory",
+        "Dsp",
+        "Param",
+        "FaustError",
+        "CompileError",
+        "InstantiateError",
+        "UnknownParamError",
+        "ReadOnlyParamError",
+        "BuffersError",
+    )
+    for name in names:
         assert hasattr(faust_rs, name), f"missing export: {name}"
 
 

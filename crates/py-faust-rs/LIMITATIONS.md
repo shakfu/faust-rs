@@ -37,13 +37,15 @@ lines) reset every call. State was correct *within* one block but never carried
 (`ui_instructions()`), but the bindings did not map Faust UI widgets to named
 Python accessors.
 
-- **Resolution:** at compile time the binding copies `faust::Dsp::params()`
-  into a `Param` list. Paths follow the C++ `MapUI` (`/group/label`). It
+- **Resolution:** `params()` converts `faust::Dsp::params()` to `Param`
+  objects. Paths follow the C++ `MapUI` (`/group/label`). It
   exposes:
-  - `dsp.params()` -> list of `Param` (path, label, kind, `init`/`min`/
-    `max`/`step`, `is_input`), in UI order;
-  - `dsp.get_param(key)` / `dsp.set_param(key, value)` keyed by full path or an
-    unambiguous label. Set takes effect on the next `compute()`.
+  - `dsp.params()` -> list of `Param` (path, shortname, label, kind,
+    `init`/`min`/`max`/`step`, `is_input`, metadata), in UI order;
+  - `dsp.get_param(key)` / `dsp.set_param(key, value)`, looked up by the
+    facade as the C++ `MapUI` does: path, shortname, then label (a shared
+    label designates the last one declared). Set takes effect on the next
+    `compute()`.
   Buttons, checkboxes, h/v sliders, and nentries are settable inputs; h/v
   bargraphs are outputs (readable via `get_param`, reflecting the most recent
   `compute`; not settable). `reset()` restores all controls to their defaults.

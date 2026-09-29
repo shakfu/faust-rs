@@ -41,13 +41,13 @@ backend.
 | Capability | cyfaust | py-faust-rs |
 |---|---|---|
 | Compile source string, render audio | Yes | Yes |
-| Compile from file | Yes | No (string only) |
+| Compile from file | Yes | Yes (`Factory.from_file`) |
 | Block `compute` | Yes (plus one-sample `frame`, timestamped compute) | Yes (block only) |
 | Audio buffers | float32 memoryviews (numpy / `array`) | Python lists (no numpy zero-copy) |
 | Double precision | No | Yes |
 | Runtime parameter get/set | No | Yes |
 | Vendored Faust standard library | Yes (54 libraries shipped in the wheel) | No (must point at an external library dir) |
-| JSON / metadata introspection | Yes (`get_json`, `metadata()`) | Partial (`params()`, channel counts, name; no JSON) |
+| JSON / metadata introspection | Yes (`get_json`, `metadata()`) | Yes (`get_json`, `metadata()` without `declare`s, `params()`) |
 | Bitcode serialize + SHA factory cache | Yes | No |
 | Box API + Signal API (programmatic DSP construction) | Yes (full, object-oriented and functional) | No |
 | SVG / block-diagram generation | Yes | No |
@@ -71,15 +71,13 @@ has" rather than new engine work.
 2. **NumPy zero-copy buffers.** Audio currently crosses the boundary as Python
    lists, one block at a time; cyfaust uses float32 memoryviews. A real
    performance and ergonomics gap.
-3. **Compile from file** and **JSON metadata** (`get_json`). Small surface,
-   high value.
-4. **SVG diagrams** and **source-codegen** (c / cpp / rust / wasm). `faust-rs`
+3. **SVG diagrams** and **source-codegen** (c / cpp / rust / wasm). `faust-rs`
    already has `draw`, `codegen`, `cranelift-ffi`, and `wasm-encoder` crates, so
    these are wrapping work, not new engines.
-5. **Box API / Signal API** for programmatic DSP construction. Large surface;
+4. **Box API / Signal API** for programmatic DSP construction. Large surface;
    `faust-rs` has `boxes`, `signals`, and `propagate` crates. Matches cyfaust's
    biggest feature area.
-6. **Bitcode / factory caching**, **real-time audio**, and **polyphony / MIDI**.
+5. **Bitcode / factory caching**, **real-time audio**, and **polyphony / MIDI**.
    Larger and lower priority for a proof of concept.
 
 ## Reference points

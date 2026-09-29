@@ -49,7 +49,7 @@ def test_default_name_and_sample_rate(compile_dsp):
     ],
 )
 def test_compile_bad_source_raises(bad_source, compile_dsp):
-    with pytest.raises(ValueError):
+    with pytest.raises(faust_rs.CompileError):
         compile_dsp(bad_source)
 
 
@@ -77,7 +77,38 @@ def test_unknown_backend_raises():
 def test_unknown_ffunction_refused(faust):
     # Cranelift cannot lower `compute`; the interpreter rejects it at compile.
     src = 'process = _ : ffunction(float frs_unknown_fn(float), "", "");'
-    with pytest.raises(ValueError, match="^Instantiate:"):
+    with pytest.raises(faust.InstantiateError, match="^Instantiate:"):
         faust.compile(src, backend="cranelift")
-    with pytest.raises(ValueError, match="^Compile:"):
+    with pytest.raises(faust.CompileError, match="^Compile:"):
         faust.compile(src, backend="interp")
+
+
+def test_args_passed_to_compiler(compile_dsp):
+    # -vec with a vector size that does not divide the block: same samples.
+    src = "process = +~_;"
+    scalar = compile_dsp(src).compute([[1.0] * 10])
+    vec = compile_dsp(src, args=["-vec", "-vs", "4"]).compute([[1.0] * 10])
+    assert vec == scalar == [[float(n) for n in range(1, 11)]]
+
+
+def test_args_reach_cranelift():
+    dsp = faust_rs.compile("process = _;", backend="cranelift", args=["-vec", "-vs", "4"])
+    assert "argv=-vec -vs 4" in dsp.factory.get_json()
+
+
+@pytest.mark.parametrize("flag", ["-single", "-double", "--single", "--double"])
+def test_precision_flag_in_args_refused(flag, compile_dsp):
+    # The precision must come from double=, which sizes the buffers.
+    with pytest.raises(ValueError, match="double="):
+        compile_dsp("process = _;", args=[flag])
+
+
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+def test_opt_level_accepted(level, compile_dsp):
+    assert compile_dsp("process = *(2);", opt_level=level).compute([[1.5]]) == [[3.0]]
+
+
+@pytest.mark.parametrize("level", [-1, 4])
+def test_opt_level_out_of_range_raises(level, compile_dsp):
+    with pytest.raises(ValueError, match="opt_level"):
+        compile_dsp("process = _;", opt_level=level)

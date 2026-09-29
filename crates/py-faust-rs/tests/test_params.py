@@ -72,21 +72,21 @@ def test_widget_kinds(source, kind, compile_dsp):
     assert compile_dsp(source).params()[0].kind == kind
 
 
-def test_bargraph_is_output_readable_not_settable(compile_dsp):
+def test_bargraph_is_output_readable_not_settable(compile_dsp, faust):
     dsp = compile_dsp('process = _ <: attach(_, hbargraph("meter", 0, 1));')
     meter = next(p for p in dsp.params() if p.kind == "hbargraph")
     assert meter.is_input is False
-    with pytest.raises(ValueError):
+    with pytest.raises(faust.ReadOnlyParamError):
         dsp.set_param("meter", 0.5)  # cannot set an output
     dsp.compute([[0.7, 0.7]])
     assert dsp.get_param("meter") == pytest.approx(0.7)  # reflects last compute
 
 
-def test_unknown_param_raises_with_listing(compile_dsp):
+def test_unknown_param_raises_with_listing(compile_dsp, faust):
     dsp = compile_dsp(GAIN)
-    with pytest.raises(ValueError, match="unknown parameter"):
+    with pytest.raises(faust.UnknownParamError, match="unknown parameter.*/gain"):
         dsp.set_param("does_not_exist", 1.0)
-    with pytest.raises(ValueError):
+    with pytest.raises(faust.UnknownParamError):
         dsp.get_param("does_not_exist")
 
 
@@ -118,3 +118,37 @@ def test_double_ranges_exact(compile_dsp):
     dsp = compile_dsp('process = _ * hslider("g", 0.1, 0, 2, 0.01);', double=True)
     (p,) = dsp.params()
     assert (p.init, p.step) == (0.1, 0.01)
+
+
+# Two controls labelled `freq`, told apart by their groups.
+TWO_FREQ = (
+    'process = hgroup("a", hslider("freq[unit:Hz]", 1, 0, 2, 0.1))'
+    ' + hgroup("b", hslider("freq", 1, 0, 2, 0.1));'
+)
+
+
+def test_shortname(compile_dsp):
+    assert [p.shortname for p in compile_dsp(GAIN).params()] == ["gain"]
+    assert [p.shortname for p in compile_dsp(TWO_FREQ).params()] == ["a_freq", "b_freq"]
+
+
+def test_lookup_by_shortname(compile_dsp):
+    dsp = compile_dsp(TWO_FREQ, name="S")
+    dsp.set_param("a_freq", 0.5)
+    dsp.set_param("b_freq", 0.25)
+    assert dsp.get_param("/S/a/freq") == 0.5
+    assert dsp.get_param("/S/b/freq") == 0.25
+
+
+def test_shared_label_designates_last_declared(compile_dsp):
+    # As the C++ MapUI: a label several parameters share is the last one's.
+    dsp = compile_dsp(TWO_FREQ, name="S")
+    dsp.set_param("freq", 0.5)
+    assert dsp.get_param("b_freq") == 0.5
+    assert dsp.get_param("a_freq") == 1.0
+
+
+def test_param_metadata(compile_dsp):
+    a, b = compile_dsp(TWO_FREQ).params()
+    assert a.metadata == [("unit", "Hz")]
+    assert b.metadata == []

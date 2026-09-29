@@ -10,6 +10,24 @@ tracks the faust-rs workspace and its API may change at any time.
 
 ### Added
 
+- `Factory(source, ...)` compiles once; `create_dsp_instance(sample_rate)`
+  creates independent instances. `Dsp.factory` returns the program an
+  instance runs. `compile()` is now `Factory(...).create_dsp_instance(...)`.
+- `args=` passes compiler flags verbatim (e.g. `-vec`); `opt_level=` sets the
+  Cranelift level, 0 to 3. Precision flags in `args` are refused: the facade
+  sizes buffers from `double=`, and with `-double` in `args` on an `f32`
+  program the Cranelift backend writes `f64` samples past the host's output
+  buffer (reproduced against `faust` at `c0a86088`).
+- Exception classes per facade `ErrorKind`: `CompileError`,
+  `InstantiateError`, `UnknownParamError`, `ReadOnlyParamError` and
+  `BuffersError`, under `FaustError(ValueError)`. Existing `except
+  ValueError` handlers still catch them.
+- `Factory.from_file(path, ...)` compiles a `.dsp` file, named after its
+  stem; `import(...)` also searches the file's directory. `compile_file(path,
+  sample_rate=48000, ...)` is `Factory.from_file(...).create_dsp_instance(...)`.
+- `Param.shortname`, `Param.metadata`, `Factory.get_json()` and
+  `Dsp.metadata()`.
+
 - Initial proof-of-concept PyO3/maturin bindings exposing the faust-rs
   interpreter (FBC) backend to Python as the `faust_rs` extension module.
 - `compile(source, name="FaustDSP", sample_rate=48000, double=False)` -> `Dsp`:
@@ -65,6 +83,12 @@ tracks the faust-rs workspace and its API may change at any time.
   extension.
 
 ### Changed
+
+- `get_param`/`set_param` delegate lookup to the facade, which follows the C++
+  `MapUI`: path, then shortname, then label. A label several parameters share
+  now designates the last one declared; it previously raised as ambiguous.
+  The binding's own resolver ignored shortnames and disagreed with C++ on
+  shared labels.
 
 - The binding runs on the `faust` crate instead of `compiler` and `codegen`,
   which upstream declares internal

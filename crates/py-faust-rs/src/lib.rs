@@ -8,30 +8,69 @@
 //! dsp = faust_rs.compile("process = _, _ : + : *(0.5);", sample_rate=48000)
 //! outs = dsp.compute([[0.1, 0.2], [0.3, 0.4]])   # channels -> channels
 //! jit = faust_rs.compile("process = _;", backend="cranelift")
+//! factory = faust_rs.Factory("process = _;")  # compile once
+//! a, b = factory.create_dsp_instance(), factory.create_dsp_instance()
 //! ```
 //!
-//! Scope is deliberately narrow (persistent single-block render) to demonstrate
-//! the binding path, not to be a full host API. Both single (`f32`) and double
-//! (`f64`) precision are supported via the `double=` flag on `compile`.
+//! Parameter lookup and errors follow the `faust` facade, which follows the C++
+//! `dsp`/`MapUI` contract: the binding adds no name resolution of its own.
 
 use std::path::PathBuf;
 
-use faust::{Backend, CompileOptions, Factory, ParamKind, Precision};
+use faust::{Backend, CompileOptions, ErrorKind, ParamKind, Precision};
 use pyo3::buffer::{Element, PyBuffer};
+use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+create_exception!(
+    faust_rs,
+    FaustError,
+    PyValueError,
+    "Base class of every error the `faust` facade reports."
+);
+create_exception!(
+    faust_rs,
+    CompileError,
+    FaustError,
+    "The program did not compile."
+);
+create_exception!(
+    faust_rs,
+    InstantiateError,
+    FaustError,
+    "The backend could not instantiate the program."
+);
+create_exception!(
+    faust_rs,
+    UnknownParamError,
+    FaustError,
+    "No parameter has this path, shortname or label."
+);
+create_exception!(
+    faust_rs,
+    ReadOnlyParamError,
+    FaustError,
+    "The parameter is a bargraph, written by the DSP only."
+);
+create_exception!(
+    faust_rs,
+    BuffersError,
+    FaustError,
+    "The audio buffers do not match the DSP's channel or frame counts."
+);
 
 /// A DSP control parameter (button, slider, nentry, or bargraph).
 ///
 /// Bargraphs are *outputs* (metering) — readable via `get_param` but not
 /// settable. All other kinds are settable inputs.
-// `Param` is only ever returned to Python (never taken as an argument), so skip
-// the `FromPyObject` derive that `Clone` would otherwise opt into.
-#[pyclass(frozen, get_all, skip_from_py_object)]
-#[derive(Clone)]
+#[pyclass(frozen, get_all)]
 struct Param {
     /// Full UI path, e.g. `/Oscillator/freq`.
     path: String,
+    /// Shortest unambiguous name, as the C++ `MapUI` builds it, e.g.
+    /// `freq`, or `osc0_freq` when another parameter is also named `freq`.
+    shortname: String,
     /// Label as declared, without its `[key:value]` metadata, e.g. `freq`.
     label: String,
     /// Widget kind: `button`, `checkbox`, `hslider`, `vslider`, `nentry`,
@@ -43,6 +82,8 @@ struct Param {
     min: f64,
     max: f64,
     step: f64,
+    /// The `[key:value]` metadata declared on the widget, in order.
+    metadata: Vec<(String, String)>,
 }
 
 #[pymethods]
@@ -68,6 +109,7 @@ impl From<&faust::Param> for Param {
         };
         Self {
             path: c.path.clone(),
+            shortname: c.shortname.clone(),
             label: c.label.clone(),
             kind,
             is_input: c.kind.is_writable(),
@@ -75,12 +117,29 @@ impl From<&faust::Param> for Param {
             min: c.min,
             max: c.max,
             step: c.step,
+            metadata: c.metadata.clone(),
         }
     }
 }
 
+fn precision_name(precision: Precision) -> &'static str {
+    match precision {
+        Precision::F32 => "float",
+        Precision::F64 => "double",
+    }
+}
+
+/// Raises the exception class of the facade's `ErrorKind`.
 fn py_err(e: faust::Error) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    let msg = e.to_string();
+    match e.kind {
+        ErrorKind::Compile => CompileError::new_err(msg),
+        ErrorKind::Instantiate => InstantiateError::new_err(msg),
+        ErrorKind::UnknownParam => UnknownParamError::new_err(msg),
+        ErrorKind::ReadOnlyParam => ReadOnlyParamError::new_err(msg),
+        ErrorKind::Buffers => BuffersError::new_err(msg),
+        _ => FaustError::new_err(msg),
+    }
 }
 
 /// A buffer element width the facade computes with and numpy can view.
@@ -99,7 +158,6 @@ impl<T: faust::Sample + Element + Copy + Default> Sample for T {}
 #[pyclass]
 struct Dsp {
     dsp: faust::Dsp,
-    params: Vec<Param>,
     /// Blocks rendered since construction; not zeroed by `reset()`.
     cycle: usize,
 }
@@ -115,18 +173,18 @@ fn view_2d<T: Element>(
     role: &str,
 ) -> PyResult<(PyBuffer<T>, usize, usize)> {
     let buf = PyBuffer::<T>::get(obj).map_err(|e| {
-        PyValueError::new_err(format!(
+        BuffersError::new_err(format!(
             "{role} must be a contiguous buffer whose dtype matches the DSP precision: {e}"
         ))
     })?;
     if buf.dimensions() != 2 {
-        return Err(PyValueError::new_err(format!(
+        return Err(BuffersError::new_err(format!(
             "{role} must be a 2-D (channels, frames) buffer, got {}-D",
             buf.dimensions()
         )));
     }
     if !buf.is_c_contiguous() {
-        return Err(PyValueError::new_err(format!(
+        return Err(BuffersError::new_err(format!(
             "{role} must be C-contiguous"
         )));
     }
@@ -148,24 +206,24 @@ fn compute_into_impl<T: Sample>(
     let (out_buf, out_ch, out_frames) = view_2d::<T>(outputs, "outputs")?;
 
     if in_ch != num_in {
-        return Err(PyValueError::new_err(format!(
+        return Err(BuffersError::new_err(format!(
             "inputs has {in_ch} channel(s), DSP expects {num_in}"
         )));
     }
     if out_ch != num_out {
-        return Err(PyValueError::new_err(format!(
+        return Err(BuffersError::new_err(format!(
             "outputs has {out_ch} channel(s), DSP produces {num_out}"
         )));
     }
     if out_buf.readonly() {
-        return Err(PyValueError::new_err("outputs buffer is read-only"));
+        return Err(BuffersError::new_err("outputs buffer is read-only"));
     }
 
     // Frame count is authoritative from whichever side carries channels; if both
     // do, they must agree. A DSP with neither inputs nor outputs is a no-op.
     let frames = match (num_in > 0, num_out > 0) {
         (true, true) if in_frames != out_frames => {
-            return Err(PyValueError::new_err(format!(
+            return Err(BuffersError::new_err(format!(
                 "inputs has {in_frames} frame(s) but outputs has {out_frames}"
             )));
         }
@@ -174,7 +232,7 @@ fn compute_into_impl<T: Sample>(
         (false, false) => return Ok(false),
     };
     if i32::try_from(frames).is_err() {
-        return Err(PyValueError::new_err("block length exceeds i32::MAX"));
+        return Err(BuffersError::new_err("block length exceeds i32::MAX"));
     }
 
     let mut flat_in = vec![T::default(); num_in * frames];
@@ -205,33 +263,18 @@ fn compute_into_impl<T: Sample>(
 
 impl Dsp {
     fn new(dsp: faust::Dsp) -> Self {
-        let params = dsp.params().map(Param::from).collect();
-        Self {
-            dsp,
-            params,
-            cycle: 0,
-        }
+        Self { dsp, cycle: 0 }
     }
 
-    /// Resolves a parameter key (full path or unambiguous label) to its
-    /// `Param`. Errors on unknown or ambiguous keys.
-    fn resolve(&self, key: &str) -> PyResult<&Param> {
-        if let Some(p) = self.params.iter().find(|p| p.path == key) {
-            return Ok(p);
+    /// `py_err`, with the known paths listed when `key` names no parameter.
+    fn param_err(&self, key: &str, e: faust::Error) -> PyErr {
+        if e.kind != ErrorKind::UnknownParam {
+            return py_err(e);
         }
-        let mut by_label = self.params.iter().filter(|p| p.label == key);
-        match (by_label.next(), by_label.next()) {
-            (Some(p), None) => Ok(p),
-            (None, _) => {
-                let available: Vec<&str> = self.params.iter().map(|p| p.path.as_str()).collect();
-                Err(PyValueError::new_err(format!(
-                    "unknown parameter {key:?}; available: {available:?}"
-                )))
-            }
-            (Some(_), Some(_)) => Err(PyValueError::new_err(format!(
-                "ambiguous parameter label {key:?}; use the full path"
-            ))),
-        }
+        let available: Vec<&str> = self.dsp.params().map(|p| p.path.as_str()).collect();
+        UnknownParamError::new_err(format!(
+            "unknown parameter {key:?}; available: {available:?}"
+        ))
     }
 }
 
@@ -265,10 +308,7 @@ impl Dsp {
     /// (`f32`).
     #[getter]
     fn precision(&self) -> &'static str {
-        match self.dsp.precision() {
-            Precision::F32 => "float",
-            Precision::F64 => "double",
-        }
+        precision_name(self.dsp.precision())
     }
 
     /// Backend running the DSP: `"interp"` or `"cranelift"`.
@@ -295,38 +335,50 @@ impl Dsp {
         dsp.init(dsp.get_sample_rate());
     }
 
-    /// The DSP's UI control parameters (sliders, buttons, nentries, bargraphs),
-    /// in user-interface order (Faust sorts a group's widgets by label). Each carries its path, kind, and range metadata.
-    fn params(&self) -> Vec<Param> {
-        self.params.clone()
-    }
-
-    /// Read the current value of a control parameter.
-    ///
-    /// `key` may be the full UI path (e.g. `/Oscillator/freq`) or an
-    /// unambiguous label (e.g. `freq`). Works for both input controls and
-    /// output bargraphs (the latter reflect the most recent `compute`).
-    fn get_param(&self, key: &str) -> PyResult<f64> {
-        let path = &self.resolve(key)?.path;
-        self.dsp.get_param_value(path).map_err(py_err)
-    }
-
-    /// Set the value of an input control parameter; takes effect on the next
-    /// `compute()`. Bargraphs (outputs) cannot be set.
-    ///
-    /// `key` may be the full UI path or an unambiguous label. The value is
-    /// not clamped to the control's declared `[min, max]` range (matching
-    /// Faust's `setParamValue` semantics).
-    fn set_param(&mut self, key: &str, value: f64) -> PyResult<()> {
-        let param = self.resolve(key)?;
-        if !param.is_input {
-            return Err(PyValueError::new_err(format!(
-                "parameter {:?} is an output ({}) and cannot be set",
-                param.path, param.kind
-            )));
+    /// The program this instance runs; `create_dsp_instance` on it makes
+    /// siblings without recompiling.
+    #[getter]
+    fn factory(&self) -> Factory {
+        Factory {
+            factory: self.dsp.factory(),
         }
-        let path = param.path.clone();
-        self.dsp.set_param_value(&path, value).map_err(py_err)
+    }
+
+    /// The `declare` (key, value) metadata of the program, plus the
+    /// backend's own entries, in declaration order. Keys may repeat.
+    fn metadata(&self) -> Vec<(String, String)> {
+        self.dsp.metadata()
+    }
+
+    /// The DSP's UI control parameters (sliders, buttons, nentries, bargraphs),
+    /// in user-interface order (Faust sorts a group's widgets by label).
+    fn params(&self) -> Vec<Param> {
+        self.dsp.params().map(Param::from).collect()
+    }
+
+    /// Read the current value of a control parameter. For a bargraph, the
+    /// value the most recent `compute` wrote.
+    ///
+    /// `key` is looked up as the C++ `MapUI` does: as a path
+    /// (`/synth/osc0/freq`), then a shortname (`osc0_freq`), then a label
+    /// (`freq`). A label several parameters share designates the last one
+    /// declared.
+    fn get_param(&self, key: &str) -> PyResult<f64> {
+        self.dsp
+            .get_param_value(key)
+            .map_err(|e| self.param_err(key, e))
+    }
+
+    /// Set an input control parameter; takes effect on the next `compute()`.
+    /// `key` is looked up as by `get_param`. The value is not clamped to
+    /// `[min, max]`, as with Faust's `setParamValue`.
+    ///
+    /// Raises `ReadOnlyParamError` for a bargraph.
+    fn set_param(&mut self, key: &str, value: f64) -> PyResult<()> {
+        match self.dsp.set_param_value(key, value) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.param_err(key, e)),
+        }
     }
 
     /// Render one block of audio, advancing the persistent instance state.
@@ -343,7 +395,7 @@ impl Dsp {
         let dsp = &mut self.dsp;
         let expected_in = dsp.get_num_inputs();
         if inputs.len() != expected_in {
-            return Err(PyValueError::new_err(format!(
+            return Err(BuffersError::new_err(format!(
                 "DSP expects {expected_in} input channel(s), got {}",
                 inputs.len()
             )));
@@ -354,13 +406,13 @@ impl Dsp {
         let count = if expected_in > 0 {
             let len = inputs[0].len();
             if let Some(bad) = inputs.iter().position(|c| c.len() != len) {
-                return Err(PyValueError::new_err(format!(
+                return Err(BuffersError::new_err(format!(
                     "input channel {bad} length {} differs from channel 0 length {len}",
                     inputs[bad].len()
                 )));
             }
             if i32::try_from(len).is_err() {
-                return Err(PyValueError::new_err("block length exceeds i32::MAX"));
+                return Err(BuffersError::new_err("block length exceeds i32::MAX"));
             }
             len
         } else {
@@ -442,33 +494,35 @@ impl Dsp {
 /// headroom keeps the binding within the same envelope as every other embedder.
 const COMPILE_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Compile a Faust `.dsp` source string into a runnable [`Dsp`] handle.
-///
-/// `backend` is `"interp"` (the bytecode interpreter, the default) or
-/// `"cranelift"` (native code through the Cranelift JIT). Cranelift does not
-/// yet lower every program; one it cannot run raises `ValueError`.
-///
-/// Set `double=True` for double-precision (`f64`) DSP; the default is single
-/// precision (`f32`).
-///
-/// `search_paths` is an optional list of directories in which to resolve
-/// `import("...")` directives (e.g. a directory containing the Faust standard
-/// libraries so `import("stdfaust.lib")` works). Directories listed in the
-/// `FAUST_LIB_PATH` environment variable are appended automatically.
-#[pyfunction]
-#[pyo3(signature = (source, name = "FaustDSP", sample_rate = 48000, double = false, search_paths = None, backend = "interp"))]
-fn compile(
-    py: Python<'_>,
-    source: &str,
-    name: &str,
-    sample_rate: i32,
-    double: bool,
-    search_paths: Option<Vec<String>>,
-    backend: &str,
-) -> PyResult<Dsp> {
+/// Compiler flags that set the precision. The facade sizes buffers from
+/// `CompileOptions::precision`; given `-double` in `args` on an `f32` program,
+/// Cranelift writes `f64` samples past the host's output buffer.
+const PRECISION_FLAGS: [&str; 4] = ["-single", "-double", "--single", "--double"];
+
+fn check_sample_rate(sample_rate: i32) -> PyResult<()> {
     if sample_rate <= 0 {
         return Err(PyValueError::new_err("sample_rate must be positive"));
     }
+    Ok(())
+}
+
+/// What a factory is compiled from.
+enum Source {
+    Text { name: String, source: String },
+    File(PathBuf),
+}
+
+/// Compiles `source` on a worker thread with the workspace stack contract
+/// (see `COMPILE_STACK_SIZE`), the GIL released.
+fn build_factory(
+    py: Python<'_>,
+    source: Source,
+    double: bool,
+    search_paths: Option<Vec<String>>,
+    backend: &str,
+    args: Option<Vec<String>>,
+    opt_level: i32,
+) -> PyResult<faust::Factory> {
     let backend = match backend {
         "interp" => Backend::Interp,
         "cranelift" => Backend::Cranelift,
@@ -478,6 +532,17 @@ fn compile(
             )));
         }
     };
+    if !(0..=3).contains(&opt_level) {
+        return Err(PyValueError::new_err(format!(
+            "opt_level must be 0 to 3, got {opt_level}"
+        )));
+    }
+    let args = args.unwrap_or_default();
+    if let Some(flag) = args.iter().find(|a| PRECISION_FLAGS.contains(&a.as_str())) {
+        return Err(PyValueError::new_err(format!(
+            "{flag:?} is not accepted in args; use double= to set the precision"
+        )));
+    }
 
     // Effective import search paths: explicit argument first, then any
     // directories from FAUST_LIB_PATH (Faust's conventional env var).
@@ -497,29 +562,189 @@ fn compile(
             Precision::F32
         },
         import_dirs,
-        ..CompileOptions::default()
+        opt_level,
+        args,
     };
 
-    let source = source.to_owned();
-    let name = name.to_owned();
-
-    // Run the deeply-recursive compile on a worker thread with the workspace
-    // stack contract (see `COMPILE_STACK_SIZE`), releasing the GIL while it runs
-    // since the pipeline touches no Python state.
-    let dsp = py.detach(move || {
+    py.detach(move || {
         std::thread::Builder::new()
             .name("faust-rs-compile".to_owned())
             .stack_size(COMPILE_STACK_SIZE)
-            .spawn(move || {
-                Factory::from_source(&name, &source, &options)?.create_dsp_instance(sample_rate)
+            .spawn(move || match source {
+                Source::Text { name, source } => {
+                    faust::Factory::from_source(&name, &source, &options)
+                }
+                Source::File(path) => faust::Factory::from_file(&path, &options),
             })
             .map_err(|e| PyValueError::new_err(format!("failed to spawn compile thread: {e}")))?
             .join()
             .map_err(|_| PyValueError::new_err("compile thread panicked"))?
             .map_err(py_err)
-    })?;
+    })
+}
 
-    Ok(Dsp::new(dsp))
+/// A compiled Faust program. Compile once, then create any number of
+/// independent `Dsp` instances with `create_dsp_instance`.
+///
+/// Takes the arguments of [`compile`] except `sample_rate`, which each
+/// instance chooses.
+#[pyclass(frozen)]
+struct Factory {
+    factory: faust::Factory,
+}
+
+#[pymethods]
+impl Factory {
+    #[new]
+    #[pyo3(signature = (source, name = "FaustDSP", double = false, search_paths = None, backend = "interp", args = None, opt_level = 0))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        source: &str,
+        name: &str,
+        double: bool,
+        search_paths: Option<Vec<String>>,
+        backend: &str,
+        args: Option<Vec<String>>,
+        opt_level: i32,
+    ) -> PyResult<Self> {
+        let source = Source::Text {
+            name: name.to_owned(),
+            source: source.to_owned(),
+        };
+        let factory = build_factory(py, source, double, search_paths, backend, args, opt_level)?;
+        Ok(Self { factory })
+    }
+
+    /// Compiles the program in the file at `path`, named after its stem.
+    /// `import(...)` searches `search_paths`, then the installed libraries,
+    /// then the file's own directory. Other arguments as for `Factory(...)`.
+    #[staticmethod]
+    #[pyo3(signature = (path, double = false, search_paths = None, backend = "interp", args = None, opt_level = 0))]
+    fn from_file(
+        py: Python<'_>,
+        path: PathBuf,
+        double: bool,
+        search_paths: Option<Vec<String>>,
+        backend: &str,
+        args: Option<Vec<String>>,
+        opt_level: i32,
+    ) -> PyResult<Self> {
+        let source = Source::File(path);
+        let factory = build_factory(py, source, double, search_paths, backend, args, opt_level)?;
+        Ok(Self { factory })
+    }
+
+    /// A new instance, initialised at `sample_rate` and ready to compute.
+    #[pyo3(signature = (sample_rate = 48000))]
+    fn create_dsp_instance(&self, sample_rate: i32) -> PyResult<Dsp> {
+        check_sample_rate(sample_rate)?;
+        let dsp = self
+            .factory
+            .create_dsp_instance(sample_rate)
+            .map_err(py_err)?;
+        Ok(Dsp::new(dsp))
+    }
+
+    /// The program name: the `name` argument.
+    #[getter]
+    fn name(&self) -> &str {
+        self.factory.get_name()
+    }
+
+    /// `"interp"` or `"cranelift"`.
+    #[getter]
+    fn backend(&self) -> String {
+        self.factory.backend().to_string()
+    }
+
+    /// `"float"` (`f32`) or `"double"` (`f64`).
+    #[getter]
+    fn precision(&self) -> &'static str {
+        precision_name(self.factory.precision())
+    }
+
+    /// The JSON description of the program, its UI and metadata, as the C
+    /// API's `getDSPFactoryJSON` returns it.
+    fn get_json(&self) -> String {
+        self.factory.get_json()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Factory(name={:?}, backend={:?}, precision={:?})",
+            self.name(),
+            self.backend(),
+            self.precision()
+        )
+    }
+}
+
+/// Compile a Faust `.dsp` source string into a runnable [`Dsp`] handle:
+/// `Factory(...).create_dsp_instance(sample_rate)`.
+///
+/// `backend` is `"interp"` (the bytecode interpreter, the default) or
+/// `"cranelift"` (native code through the Cranelift JIT). Cranelift does not
+/// yet lower every program; one it cannot run raises `InstantiateError`.
+///
+/// Set `double=True` for double-precision (`f64`) DSP; the default is single
+/// precision (`f32`).
+///
+/// `search_paths` is an optional list of directories in which to resolve
+/// `import("...")` directives (e.g. a directory containing the Faust standard
+/// libraries so `import("stdfaust.lib")` works). Directories listed in the
+/// `FAUST_LIB_PATH` environment variable are appended automatically.
+///
+/// `args` are further compiler flags, passed verbatim (e.g. `["-vec", "-vs",
+/// "16"]`); precision flags are refused in favour of `double=`. `opt_level`
+/// is the Cranelift optimisation level, 0 to 3; the interpreter ignores it.
+#[pyfunction]
+#[pyo3(signature = (source, name = "FaustDSP", sample_rate = 48000, double = false, search_paths = None, backend = "interp", args = None, opt_level = 0))]
+#[allow(clippy::too_many_arguments)]
+fn compile(
+    py: Python<'_>,
+    source: &str,
+    name: &str,
+    sample_rate: i32,
+    double: bool,
+    search_paths: Option<Vec<String>>,
+    backend: &str,
+    args: Option<Vec<String>>,
+    opt_level: i32,
+) -> PyResult<Dsp> {
+    check_sample_rate(sample_rate)?;
+    Factory::new(
+        py,
+        source,
+        name,
+        double,
+        search_paths,
+        backend,
+        args,
+        opt_level,
+    )?
+    .create_dsp_instance(sample_rate)
+}
+
+/// Compile the `.dsp` file at `path` into a runnable [`Dsp`] handle:
+/// `Factory.from_file(...).create_dsp_instance(sample_rate)`. Arguments as
+/// for [`compile`], without `name`: the program is named after the file stem.
+#[pyfunction]
+#[pyo3(signature = (path, sample_rate = 48000, double = false, search_paths = None, backend = "interp", args = None, opt_level = 0))]
+#[allow(clippy::too_many_arguments)]
+fn compile_file(
+    py: Python<'_>,
+    path: PathBuf,
+    sample_rate: i32,
+    double: bool,
+    search_paths: Option<Vec<String>>,
+    backend: &str,
+    args: Option<Vec<String>>,
+    opt_level: i32,
+) -> PyResult<Dsp> {
+    check_sample_rate(sample_rate)?;
+    Factory::from_file(py, path, double, search_paths, backend, args, opt_level)?
+        .create_dsp_instance(sample_rate)
 }
 
 /// Return the underlying faust-rs version string.
@@ -533,8 +758,17 @@ fn version() -> &'static str {
 fn faust_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(compile, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_file, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_class::<Factory>()?;
     m.add_class::<Dsp>()?;
     m.add_class::<Param>()?;
+    let py = m.py();
+    m.add("FaustError", py.get_type::<FaustError>())?;
+    m.add("CompileError", py.get_type::<CompileError>())?;
+    m.add("InstantiateError", py.get_type::<InstantiateError>())?;
+    m.add("UnknownParamError", py.get_type::<UnknownParamError>())?;
+    m.add("ReadOnlyParamError", py.get_type::<ReadOnlyParamError>())?;
+    m.add("BuffersError", py.get_type::<BuffersError>())?;
     Ok(())
 }

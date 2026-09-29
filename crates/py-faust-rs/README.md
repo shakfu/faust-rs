@@ -100,12 +100,37 @@ dsp.compute([], frames=8)                  # a 440 Hz sine block
 
 `backend="interp"` (default) runs the bytecode interpreter. `backend="cranelift"`
 compiles to native code with the Cranelift JIT. Cranelift does not yet lower
-every program; `compile()` raises `ValueError` for one it cannot run.
+every program; `compile()` raises `InstantiateError` for one it cannot run.
 
 ```python
-jit = faust_rs.compile("process = _ : *(0.5);", backend="cranelift")
+jit = faust_rs.compile("process = _ : *(0.5);", backend="cranelift", opt_level=3)
 jit.backend                                # 'cranelift'
 ```
+
+`opt_level` (0 to 3, default 0) is the Cranelift optimisation level; the
+interpreter ignores it. `args` passes further compiler flags verbatim, e.g.
+`args=["-vec", "-vs", "16"]`. Precision flags (`-single`, `-double`) are
+refused: use `double=`. Unknown flags are not rejected by the backends.
+
+### Factory: compile once, many instances
+
+`compile()` is `Factory(...).create_dsp_instance(sample_rate)`. Use `Factory`
+directly to create several independent instances without recompiling.
+
+```python
+factory = faust_rs.Factory("process = +~_;", name="acc")   # compile args, no sample_rate
+a = factory.create_dsp_instance(48000)
+b = factory.create_dsp_instance(44100)     # own state, own sample rate
+factory.get_json()                         # UI and metadata, as getDSPFactoryJSON
+a.factory                                  # the Factory an instance runs
+a.metadata()                               # [(key, value), ...]
+
+osc = faust_rs.Factory.from_file("osc.dsp")  # named "osc"; also searches the file's directory
+dsp = faust_rs.compile_file("osc.dsp", sample_rate=44100)  # from_file + create_dsp_instance
+```
+
+`Dsp.metadata()` holds the backend's own entries only: the FIR backends do not
+yet carry the program's `declare`s (an upstream compiler gap).
 
 ### Persistent, stateful instance
 
@@ -152,13 +177,16 @@ gen.compute_into(np.zeros((0, 4), np.float32), np.zeros((1, 4), np.float32))
 ### UI parameters (sliders, buttons, bargraphs)
 
 DSP controls are exposed as parameters. `params()` lists them; `get_param` /
-`set_param` address a control by full UI path or unambiguous label. A set
+`set_param` look a key up as the C++ `MapUI` does: as a path
+(`/synth/osc0/freq`), then a shortname (`osc0_freq`), then a label (`freq`).
+A label several parameters share designates the last one declared. A set
 takes effect on the next `compute()`.
 
 ```python
 dsp = faust_rs.compile('process = _ * hslider("gain", 1, 0, 2, 0.01);')
 [p.path for p in dsp.params()]     # ['/FaustDSP/gain']
-dsp.params()[0].kind               # 'hslider'  (init/min/max/step also exposed)
+dsp.params()[0].kind               # 'hslider'  (shortname, label, init/min/max/step,
+                                   #  metadata also exposed)
 
 dsp.set_param("gain", 0.5)         # by label (or "/FaustDSP/gain")
 dsp.compute([[2.0, 4.0]])          # [[1.0, 2.0]]
@@ -169,9 +197,21 @@ dsp.reset()                        # restores gain to its init (1.0)
 Buttons, checkboxes, sliders, and nentries are settable inputs; bargraphs are
 outputs (read-only, reflecting the most recent `compute`).
 
-`compile()` and `compute()` raise `ValueError` on compile errors, bad bytecode,
-channel-count mismatches, and programs the Cranelift backend cannot run; `get_param`/`set_param`
-raise on unknown/ambiguous keys (and `set_param` on an output).
+### Errors
+
+Each facade error kind has its own exception class, all subclasses of
+`FaustError`, itself a `ValueError`:
+
+| Exception | Raised when |
+|-|-|
+| `CompileError` | the program does not compile |
+| `InstantiateError` | the backend cannot instantiate it (e.g. Cranelift cannot lower `compute`) |
+| `UnknownParamError` | a key names no parameter |
+| `ReadOnlyParamError` | `set_param` on a bargraph |
+| `BuffersError` | audio buffers do not match the channel or frame counts |
+
+Bad arguments to the binding itself (`backend="llvm"`, `sample_rate=0`,
+`opt_level=7`) raise a plain `ValueError`.
 
 ## Scope / limitations (deliberate for a PoC)
 
@@ -181,9 +221,6 @@ See `LIMITATIONS.md` for the full list and lift paths. In brief:
   integration. `compute_into` avoids per-sample marshaling but still bulk-copies
   into and out of the backend's own buffers (not a true zero-copy, which
   would need hand-written `unsafe`).
-
-- With `backend="interp"` and `double=True`, audio I/O is rounded to `f32`
-  (LIMITATIONS.md item 6).
 
 **Resolved:** cross-call state persistence (`reset()` clears state), single/double precision
 (`double=True`), `import(...)` resolution (`search_paths=` / `FAUST_LIB_PATH`),
