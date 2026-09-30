@@ -21,12 +21,16 @@ All `unsafe` lives in the `faust` crate; the binding has none of its own.
 
 ## Build
 
-Requires a Rust toolchain and [uv](https://docs.astral.sh/uv/). uv manages the
+Requires Python 3.11 or later, a Rust toolchain and
+[uv](https://docs.astral.sh/uv/). The extension targets the stable ABI
+([abi3](https://docs.python.org/3/c-api/stable.html)), so one wheel runs on
+CPython 3.11 and every later version. The floor is 3.11 because the buffer
+protocol behind `compute_into` joined the limited API in 3.11. uv manages the
 virtualenv, builds the extension through the [maturin](https://www.maturin.rs/)
 backend, and installs the dev tooling (`maturin`, `pytest`).
 
 ```bash
-cd crates/py-faust
+cd crates/py-faust-rs
 uv sync                        # create .venv, build + install `faust_rs`, add dev tools
 ```
 
@@ -35,8 +39,8 @@ into the venv with:
 
 ```bash
 uv run maturin develop --uv    # fast in-place rebuild
-# or: uv sync --reinstall-package faust-rs
-# or: uv run maturin build --release   # produce a wheel
+# or: uv sync --reinstall-package py-faust-rs
+# or: uv run maturin build --release   # produce an abi3 wheel (cp311-abi3)
 ```
 
 ## Test
@@ -44,7 +48,7 @@ uv run maturin develop --uv    # fast in-place rebuild
 A pytest suite lives in `tests/`; `uv sync` has already built the extension:
 
 ```bash
-uv run pytest                  # from crates/py-faust
+uv run pytest                  # from crates/py-faust-rs
 ```
 
 The suite verifies exact rendered sample values (compile, compute, persistence,

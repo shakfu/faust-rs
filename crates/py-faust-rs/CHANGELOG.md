@@ -90,6 +90,9 @@ tracks the faust-rs workspace and its API may change at any time.
 
 ### Changed
 
+- Wheels are built against the stable ABI (`abi3`), so one wheel serves
+  CPython 3.11 and later. `requires-python` rises from 3.9 to 3.11: pyo3
+  exposes `PyBuffer`, which `compute_into` needs, under abi3 only from 3.11.
 - `get_param`/`set_param` delegate lookup to the facade, which follows the C++
   `MapUI`: path, then shortname, then label. A label several parameters share
   now designates the last one declared; it previously raised as ambiguous.
