@@ -96,11 +96,26 @@ def test_args_reach_cranelift():
     assert "argv=-vec -vs 4" in dsp.factory.get_json()
 
 
-@pytest.mark.parametrize("flag", ["-single", "-double", "--single", "--double"])
-def test_precision_flag_in_args_refused(flag, compile_dsp):
-    # The precision must come from double=, which sizes the buffers.
-    with pytest.raises(ValueError, match="double="):
-        compile_dsp("process = _;", args=[flag])
+@pytest.mark.parametrize(
+    "flag, precision",
+    [("-single", "float"), ("-double", "double"), ("--single", "float"), ("--double", "double")],
+)
+def test_precision_flag_in_args(flag, precision, compile_dsp):
+    dsp = compile_dsp("process = _ : +(1);", args=[flag])
+    assert dsp.precision == precision
+    assert dsp.compute([[1.0, 2.0]]) == [[2.0, 3.0]]
+
+
+@pytest.mark.parametrize(
+    "double, args, precision",
+    [
+        (True, ["-single"], "float"),
+        (False, ["-double"], "double"),
+        (False, ["-double", "-single"], "float"),
+    ],
+)
+def test_last_precision_flag_wins(double, args, precision, compile_dsp):
+    assert compile_dsp("process = _;", double=double, args=args).precision == precision
 
 
 @pytest.mark.parametrize("level", [0, 1, 2, 3])

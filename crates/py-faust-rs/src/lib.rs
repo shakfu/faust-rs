@@ -335,6 +335,42 @@ impl Dsp {
         dsp.init(dsp.get_sample_rate());
     }
 
+    /// Global init at `sample_rate`: static tables (`classInit`), then
+    /// `instance_init`. Resets parameters and state.
+    fn init(&mut self, sample_rate: i32) -> PyResult<()> {
+        check_sample_rate(sample_rate)?;
+        self.dsp.init(sample_rate);
+        Ok(())
+    }
+
+    /// `instance_constants`, `instance_reset_user_interface`, then
+    /// `instance_clear` (`instanceInit`).
+    fn instance_init(&mut self, sample_rate: i32) -> PyResult<()> {
+        check_sample_rate(sample_rate)?;
+        self.dsp.instance_init(sample_rate);
+        Ok(())
+    }
+
+    /// Recompute the sample-rate-dependent constants; parameters and state
+    /// are kept (`instanceConstants`).
+    fn instance_constants(&mut self, sample_rate: i32) -> PyResult<()> {
+        check_sample_rate(sample_rate)?;
+        self.dsp.instance_constants(sample_rate);
+        Ok(())
+    }
+
+    /// Reset every parameter to its `init` value; state is kept
+    /// (`instanceResetUserInterface`).
+    fn instance_reset_user_interface(&mut self) {
+        self.dsp.instance_reset_user_interface();
+    }
+
+    /// Clear state (delay lines, recursions); parameters are kept
+    /// (`instanceClear`).
+    fn instance_clear(&mut self) {
+        self.dsp.instance_clear();
+    }
+
     /// The program this instance runs; `create_dsp_instance` on it makes
     /// siblings without recompiling.
     #[getter]
@@ -494,11 +530,6 @@ impl Dsp {
 /// headroom keeps the binding within the same envelope as every other embedder.
 const COMPILE_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Compiler flags that set the precision. The facade sizes buffers from
-/// `CompileOptions::precision`; given `-double` in `args` on an `f32` program,
-/// Cranelift writes `f64` samples past the host's output buffer.
-const PRECISION_FLAGS: [&str; 4] = ["-single", "-double", "--single", "--double"];
-
 fn check_sample_rate(sample_rate: i32) -> PyResult<()> {
     if sample_rate <= 0 {
         return Err(PyValueError::new_err("sample_rate must be positive"));
@@ -537,12 +568,13 @@ fn build_factory(
             "opt_level must be 0 to 3, got {opt_level}"
         )));
     }
-    let args = args.unwrap_or_default();
-    if let Some(flag) = args.iter().find(|a| PRECISION_FLAGS.contains(&a.as_str())) {
-        return Err(PyValueError::new_err(format!(
-            "{flag:?} is not accepted in args; use double= to set the precision"
-        )));
-    }
+    // `double=` goes first, so a precision flag in `args` overrides it: the
+    // last one wins.
+    let args = double
+        .then(|| "-double".to_owned())
+        .into_iter()
+        .chain(args.unwrap_or_default())
+        .collect();
 
     // Effective import search paths: explicit argument first, then any
     // directories from FAUST_LIB_PATH (Faust's conventional env var).
@@ -556,11 +588,6 @@ fn build_factory(
     }
     let options = CompileOptions {
         backend,
-        precision: if double {
-            Precision::F64
-        } else {
-            Precision::F32
-        },
         import_dirs,
         opt_level,
         args,
@@ -688,7 +715,7 @@ impl Factory {
 /// yet lower every program; one it cannot run raises `InstantiateError`.
 ///
 /// Set `double=True` for double-precision (`f64`) DSP; the default is single
-/// precision (`f32`).
+/// precision (`f32`). `double=True` is `-double` ahead of `args`.
 ///
 /// `search_paths` is an optional list of directories in which to resolve
 /// `import("...")` directives (e.g. a directory containing the Faust standard
@@ -696,7 +723,7 @@ impl Factory {
 /// `FAUST_LIB_PATH` environment variable are appended automatically.
 ///
 /// `args` are further compiler flags, passed verbatim (e.g. `["-vec", "-vs",
-/// "16"]`); precision flags are refused in favour of `double=`. `opt_level`
+/// "16"]`); the last `-single`/`-double` wins. `opt_level`
 /// is the Cranelift optimisation level, 0 to 3; the interpreter ignores it.
 #[pyfunction]
 #[pyo3(signature = (source, name = "FaustDSP", sample_rate = 48000, double = false, search_paths = None, backend = "interp", args = None, opt_level = 0))]

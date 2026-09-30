@@ -32,6 +32,3 @@ sample to/from `Vec<f64>`. This is the last open item from `LIMITATIONS.md` (#5)
   program's `declare`s: the FIR backends do not carry them (upstream gap).
 - **Validate `args`:** the backends accept unknown flags silently, so a typo in
   `args=` is ignored. Belongs in the facade or the C entry points.
-- **Report upstream:** `faust::CompileOptions { precision: F32, args:
-  ["-double"] }` makes Cranelift write past the output buffer from safe Rust.
-  The binding refuses precision flags; the facade should too.

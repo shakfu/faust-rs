@@ -109,8 +109,8 @@ jit.backend                                # 'cranelift'
 
 `opt_level` (0 to 3, default 0) is the Cranelift optimisation level; the
 interpreter ignores it. `args` passes further compiler flags verbatim, e.g.
-`args=["-vec", "-vs", "16"]`. Precision flags (`-single`, `-double`) are
-refused: use `double=`. Unknown flags are not rejected by the backends.
+`args=["-vec", "-vs", "16"]`. `double=True` is `-double` ahead of `args`; the
+last precision flag wins. Unknown flags are not rejected by the backends.
 
 ### Factory: compile once, many instances
 
@@ -147,6 +147,16 @@ c.cycle                   # 2  (monotonic block counter)
 c.reset()                 # clear DSP state
 c.compute([], frames=4)   # [[1.0, 2.0, 3.0, 4.0]]   <- restarts
 ```
+
+`reset()` is `init()` at the current rate. The C++ `dsp` lifecycle calls are
+also exposed:
+
+| Method | Rate | Parameters | State |
+|-|-|-|-|
+| `init(sr)`, `instance_init(sr)` | set | reset | cleared |
+| `instance_constants(sr)` | set | kept | kept |
+| `instance_reset_user_interface()` | kept | reset | kept |
+| `instance_clear()` | kept | kept | cleared |
 
 ### In-place rendering via the buffer protocol
 

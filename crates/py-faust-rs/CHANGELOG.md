@@ -10,14 +10,20 @@ tracks the faust-rs workspace and its API may change at any time.
 
 ### Added
 
+- `Dsp.init(sample_rate)`, `instance_init(sample_rate)`,
+  `instance_constants(sample_rate)`, `instance_reset_user_interface()` and
+  `instance_clear()`, the C++ `dsp` lifecycle calls. They change the sample
+  rate of an existing instance, or reset only its state or only its
+  parameters; `reset()` does both at the current rate.
 - `Factory(source, ...)` compiles once; `create_dsp_instance(sample_rate)`
   creates independent instances. `Dsp.factory` returns the program an
   instance runs. `compile()` is now `Factory(...).create_dsp_instance(...)`.
 - `args=` passes compiler flags verbatim (e.g. `-vec`); `opt_level=` sets the
-  Cranelift level, 0 to 3. Precision flags in `args` are refused: the facade
-  sizes buffers from `double=`, and with `-double` in `args` on an `f32`
-  program the Cranelift backend writes `f64` samples past the host's output
-  buffer (reproduced against `faust` at `c0a86088`).
+  Cranelift level, 0 to 3. `double=True` is `-double` ahead of `args`, and the
+  last precision flag wins, as in the facade since `8a632dd7`. That commit
+  fixed [#19](https://github.com/grame-cncm/faust-rs/issues/19): a precision
+  flag in `args` made Cranelift write past the host's output buffer. The
+  binding had refused such flags until then.
 - Exception classes per facade `ErrorKind`: `CompileError`,
   `InstantiateError`, `UnknownParamError`, `ReadOnlyParamError` and
   `BuffersError`, under `FaustError(ValueError)`. Existing `except
