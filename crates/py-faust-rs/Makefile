@@ -46,6 +46,10 @@ build: ## Build a release wheel into target/wheels
 test: develop ## Build the extension, then run the pytest suite
 	$(UV) run --no-sync pytest $(PYTEST_ARGS)
 
+.PHONY: demos
+demos: develop ## Build the extension, then run every script in demos/
+	@for f in demos/[0-9]*.py; do echo "=== $$f"; $(UV) run --no-sync python $$f || exit 1; done
+
 .PHONY: fmt
 fmt: ## Format the Rust sources
 	cargo fmt
