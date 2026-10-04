@@ -1079,7 +1079,13 @@ impl<'a> SignalToFirLower<'a> {
                     Self::add_to_adjoint(&mut self.store, adj, x, y_bar, real_ty);
                 }
             }
-            SigMatch::IntCast(x) | SigMatch::BitCast(x) => {
+            // `int(x)` truncates: its derivative is zero almost everywhere,
+            // and the adjoint stops here (`docs/rad-note-en.md` §3.5), as in
+            // the symbolic sweep and as FAD's zero tangent. Forwarding it
+            // would hand `x` a straight-through gradient: `rad(int(10 * g)', g)`
+            // read 10 where `fad` reads 0.
+            SigMatch::IntCast(_) => {}
+            SigMatch::BitCast(x) => {
                 Self::add_to_adjoint(&mut self.store, adj, x, y_bar, real_ty);
             }
 
@@ -1195,12 +1201,52 @@ impl<'a> SignalToFirLower<'a> {
                 Self::add_to_adjoint(&mut self.store, adj, else_value, else_bar, real_ty);
             }
 
+            // ── RdTbl(table, index): read-only table read ───────────────────
+            SigMatch::RdTbl(table, ridx) => self.check_bra_rdtbl(sig, table, ridx)?,
+
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
                     format!("signal {other:?} not supported in BlockReverseAD backward pass (B6)"),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// `RdTbl(table, index)` in the backward sweep: the contents of a
+    /// read-only table (`Waveform`, write-once `WrTbl(_, _, nil, nil)` such as
+    /// `os.osc`'s sine table) are constant data and receive nothing
+    /// (`docs/rad-note-en.md` §3.6). The read index is an integer once signal
+    /// promotion has run (`rdtable(n, t, int(phase))`): a gradient boundary, as
+    /// for an int→real `FloatCast`, since a real adjoint must not enter the
+    /// integer index arithmetic. FAD gives the same zero there, the tangent of
+    /// an integer index being zero. Nothing is propagated; a mutable table is
+    /// refused, as by the symbolic sweep (`reverse_ad.rs`).
+    fn check_bra_rdtbl(
+        &mut self,
+        sig: SigId,
+        table: SigId,
+        ridx: SigId,
+    ) -> Result<(), SignalFirError> {
+        if !is_readonly_table_source(self.arena, table) {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "a read of a writable table is not supported in BlockReverseAD \
+                     backward pass (expr={})",
+                    dump_sig_readable(self.arena, sig)
+                ),
+            ));
+        }
+        if !matches!(self.signal_fir_type(ridx)?, FirType::Int32 | FirType::Int64) {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "BlockReverseAD: a table read with a non-integer index (expr={})",
+                    dump_sig_readable(self.arena, sig)
+                ),
+            ));
         }
         Ok(())
     }
@@ -1568,5 +1614,17 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Real(v) => self.float_const(v),
             _ => self.float_const(0.0),
         }
+    }
+}
+
+/// A table whose contents the backward sweep may treat as constant data: a
+/// `Waveform`, or a write-once `WrTbl(_, _, nil, nil)` with no live writer
+/// port. The classifier of the symbolic sweep and of FAD
+/// (`propagate::reverse_ad::is_readonly_table_source`).
+fn is_readonly_table_source(arena: &crate::signal_fir::module::TreeArena, sig: SigId) -> bool {
+    match match_sig(arena, sig) {
+        SigMatch::Waveform(_) => true,
+        SigMatch::WrTbl(_, _, widx, wsig) => arena.is_nil(widx) && arena.is_nil(wsig),
+        _ => false,
     }
 }

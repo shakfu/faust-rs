@@ -2,7 +2,7 @@
 
 Status: living compatibility registry
 
-Last reviewed: 2026-09-30 (the `faust` Rust API); full review 2026-08-13
+Last reviewed: 2026-10-01 (soundfile channel wrap); full review 2026-08-13
 
 C++ reference: `master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`
 
@@ -124,6 +124,42 @@ verified Rust extension must not be presented as a proof of C++ parity.
   [implementation explanation and review, 2026-09-19](fad-clock-domains-explanation-and-review-2026-09-19-en.md),
   [`ondemand_pipeline.rs`](../crates/compiler/tests/ondemand_pipeline.rs),
   [`fad_recursive_runtime.rs`](../crates/compiler/tests/fad_recursive_runtime.rs).
+
+### DIFF-SRC-004 — control inputs as boxes and the wildcard modulation target
+
+- Status: `extension`.
+- Rust surface: `cinputs(e)`, `cinput(i, e)`, `coutputs(e)`, `coutput(i, e)`
+  (new keywords), and the modulation target `"*"` / `"group/*"`.
+- Difference: the four primitives fold at evaluation to lists of `e`'s widget
+  boxes (`cinputs`: the `par` of its sliders, numentries, buttons and
+  checkboxes; `cinput`: `(widget, init, min, max, step)`; the bargraph twins
+  `(bargraph, min, max)`), in the order of `e`'s own interface, dead widgets included (groups merged,
+  children sorted by raw label, as the C++ UI is). A wildcard target rebinds
+  every matched control input, bargraphs excepted, and gives a two-input
+  modulator **one extra input per control** in that order, where a literal
+  label shares one input between its matches (kept, as in C++). A wildcard
+  matching nothing is the error `FRS-EVAL-0010`; a literal target matching
+  nothing stays the C++ warning and dangling input (`FRS-EVAL-0008`). An index
+  that is not a compile-time integer, negative or past the count is
+  `FRS-EVAL-0009`.
+- Compatibility impact: the four names become reserved words, so a program
+  that defines `cinputs`, `cinput`, `coutputs` or `coutput` no longer parses.
+  The C++ compiler rejects the primitives as unknown identifiers and parses a
+  wildcard target as a label that matches nothing (a dangling input and a
+  warning under `-wall`), so a program using them is a `faust-rs` program.
+  `optimizers.lib` 0.11.0 (`adaptive_fad`, `adaptive_rad`) and the
+  Rust-only library `controls.lib` 0.2.0 (smoothing, CV inputs, rebuilt
+  interfaces, morphing, randomizing, sweeps, gradients over every control of
+  a program) depend on them.
+- Evidence: [`docs/control-inputs-en.md`](../docs/control-inputs-en.md),
+  [analysis and contract](control-inputs-and-wildcard-modulation-analysis-2026-09-22-en.md),
+  [`control_inputs.rs`](../crates/compiler/tests/control_inputs.rs) on the
+  `tests/corpus/cinputs_*.dsp`, `wildcard_*.dsp` and `err_3{0,1}_*.dsp`
+  fixtures,
+  `adaptive_operators_follow_the_hand_written_loop` in
+  [`optimizers_lib.rs`](../crates/compiler/tests/optimizers_lib.rs),
+  [`controls_lib.rs`](../crates/compiler/tests/controls_lib.rs) on the
+  `tests/corpus/ctl_*.dsp` fixtures.
 
 ## 4. Command-line additions and differences
 
@@ -526,6 +562,47 @@ must run unchanged with Faust C++ should not pass them.
   `unlabelled_controls_are_named_as_in_cpp_and_can_conflict` and
   `anonymous_widget_names_count_per_prefix_like_get_fresh_id` in
   `crates/ui/tests/core_api.rs`.
+
+### DIFF-BEH-016 — soundfile channel wrap generated as `chan % fChannels`
+
+- Status: `adapted`, 2026-10-01: ahead of the pinned C++ reference, in step
+  with the C++ `rework-soundfile` branch (`49c6d9367`, `5c1b9b257`; follow-up
+  to grame-cncm/faust#1322), not yet in `master-dev`.
+- A `soundfile(label, N)` read whose resource has fewer than `N` channels
+  reads real channel `chan % fChannels`. Rust generates that wrap in every
+  backend (C, C++, Rust, Julia, WASM, AssemblyScript, Cranelift, interpreter),
+  from one lowering rule shared by the scalar and vector lowerers
+  (`emit_soundfile_buffer`, `crates/transform/src/signal_fir/leaf_emit.rs`)
+  over a new FIR load `LoadSoundfileChannels` (`fSoundN->fChannels`).
+  Constant channel 0 is not wrapped, as in C++.
+- The pinned C++ reference (`8eebea429`) instead indexes `fBuffers[chan]`
+  directly and relies on the architecture duplicating channel pointers up to
+  `MAX_CHAN` (64, `Soundfile::shareBuffers`). That limit is gone in Rust: a
+  soundfile can be read with any number of outputs.
+- Runtime contract (the C++ branch's `Soundfile.h`): `fChannels >= 1`, and
+  `fBuffers` holds at least `fChannels` pointers. A `Soundfile` that
+  duplicates pointers still works; one with `fChannels == 0` divides by zero
+  (no guard, as in C++).
+- Rust-only host contracts that change with it: the Rust backend's host
+  `Soundfile` type must expose `fChannels: i32`, the Julia one
+  `fChannels::Int32`, and an AssemblyScript host must provide the import
+  `env._soundfileChannels(slot): i32`. The interpreter encodes the field as
+  `kLoadSoundFieldInt` with selector 2, which pops no part, and its
+  `Soundfile::read_sample` no longer wraps (faust-rs `.fbc` was already not
+  interchangeable with C++).
+- Compatibility impact: generated code now requires `fChannels` to be set
+  correctly, which every C++ runtime does but not faustwasm before its
+  matching release. Code generated earlier, run against a runtime that no
+  longer duplicates channels, reads out of bounds.
+- The impulse fixtures follow the C++ branch's `TestMemoryReader`: each
+  channel has its own phase (`sin(part + chan + ...)`) and only the real
+  channels are provided. The `sound` reference therefore has to be produced by
+  a C++ compiler and `tests/impulse-tests/archs` from that branch; against the
+  pinned checkout, `sound` differs on its odd channels.
+- Evidence: `crates/compiler/tests/soundfile_channel_wrap.rs` (a 1-, 2- and
+  3-channel soundfile read as 70 outputs by the interpreter, scalar and
+  vector; C++ text wraps every channel but 0); the `sound` impulse test on all
+  backend lanes.
 
 ## 6. Additional backends and delivery forms
 

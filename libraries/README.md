@@ -15,10 +15,20 @@ and are versioned with this repository:
   the Faust standard libraries must be on the import path too;
   `tests/corpus/opt_*.dsp` and `crates/compiler/tests/optimizers_lib.rs`
   exercise it (the tests skip when no faustlibraries checkout is found);
-- `interleave.lib` provides frame-rate serialization around `ondemand` blocks.
+- `interleave.lib` provides frame-rate serialization around `ondemand` blocks;
+- `controls.lib` (prefix `ct`) works on the control inputs of a whole program
+  without rewriting it, with the `cinputs`/`cinput` primitives and the `"*"`
+  modulation target: readers of each control's default, range and step, a
+  generic `map`, smoothing, CV inputs, normalized or external parameters,
+  rebuilt interfaces (`knobs`, `relabel`), preset morphing, randomizing,
+  shifted copies, sweeps for testing, and gradients with respect to every
+  control. It imports nothing; `tests/corpus/ctl_*.dsp` and
+  `crates/compiler/tests/controls_lib.rs` exercise it, and
+  [`../docs/control-inputs-en.md`](../docs/control-inputs-en.md)
+  ([`fr`](../docs/control-inputs-fr.md)) describes the uses.
 
 Add this directory to the Faust import search path when compiling a DSP that
-uses either library:
+uses one of them:
 
 ```sh
 faust-rs -I libraries -I <faustlibraries> -lang cpp program.dsp
@@ -43,7 +53,7 @@ machine learning and differentiable DSP, in English and French:
   biquad, every program run with `faustprobe` and its quoted figures kept
   true by `crates/cranelift-ffi/tests/tutorial_examples.rs`;
 - [ddsp-examples-en.md](ddsp-examples-en.md) /
-  [ddsp-examples-fr.md](ddsp-examples-fr.md) — fourteen complete DDSP programs
+  [ddsp-examples-fr.md](ddsp-examples-fr.md) — fifteen complete DDSP programs
   (`tests/corpus/ddsp_*.dsp`, run by `crates/compiler/tests/ddsp_examples.rs`):
   an adaptive notch, a mode calibrated by Gauss-Newton, an amp model, a
   diode clipper learned through its implicit Newton solver, an FDN reverb
@@ -52,10 +62,12 @@ machine learning and differentiable DSP, in English and French:
   block gradients handed to a host, a GRU amp model trained by
   block-truncated BPTT from the host and a harmonic synthesizer fitted
   through a per-frame spectral loss inside an `ondemand` block with `rad`;
-  a string that tunes itself from its own pitch estimate (`init_latch`) and
-  an integer delay learned without a gradient (`spsa_1D_clocked`).
+  a string that tunes itself from its own pitch estimate (`init_latch`), an
+  integer delay learned without a gradient (`spsa_1D_clocked`), and a drive
+  pedal that learns its six sliders from a recording without being rewritten
+  (`adaptive_fad`).
 
-Both libraries follow the Faust libraries documentation conventions
+The libraries follow the Faust libraries documentation conventions
 (<https://faustlibraries.grame.fr/contributing/>): a `declare name`/`version`
 header, section banners, and one documented block per public function with
 `Usage`, `Where`, `Test` and `References` entries.

@@ -255,7 +255,7 @@ fn french_tutorial_carries_the_same_programs() {
     }
     assert_eq!(
         en.iter().filter(|b| b.is_program()).count(),
-        33,
+        39,
         "the tutorial's program count changed: update the tests"
     );
 }
@@ -758,6 +758,160 @@ fn s11_4_reverse_mode_clocked() {
             4e-7,
         );
         assert!(rms(&outs[0][3000..4000]) < 1e-8, "fourth window");
+    });
+}
+
+/// §11.5: the program exposes `2, 1000, 50, 5000, 1, 0.5, 0, 2, 0.01`.
+#[test]
+fn s11_5_controls_read_with_cinput() {
+    with_libraries("s11_5_cinput", |root| {
+        let outs = render(&program("11.5", 0), &root, InputMode::Zero, 1);
+        let first: Vec<f64> = outs.iter().map(|o| o[0]).collect();
+        assert_eq!(first, [2.0, 1000.0, 50.0, 5000.0, 1.0, 0.5, 0.0, 2.0, 0.01]);
+    });
+}
+
+/// §11.5: the sensitivity map, each column the derivative times its
+/// slider's range: output 0.174, then depth 0.107, drive 0.443, level
+/// 0.804, rate 0 exactly, tight 0.397, tone 0.0855, trim 0.482 (level and
+/// trim in the ratio 40 / 24 of their ranges).
+#[test]
+fn s11_5_sensitivity_map_with_gradient_fad() {
+    with_libraries("s11_5_map", |root| {
+        let outs = render(&program("11.5", 1), &root, InputMode::Zero, 44_100);
+        let want = [0.174, 0.107, 0.443, 0.804, 0.0, 0.397, 0.0855, 0.482];
+        for (k, w) in want.iter().enumerate() {
+            assert_near(&format!("column {k}"), rms(&outs[k]), *w, 0.002);
+        }
+        assert!(
+            outs[4].iter().all(|&v| v == 0.0),
+            "rate is exactly zero at depth 0"
+        );
+        assert_near(
+            "level / trim",
+            rms(&outs[3]) / rms(&outs[7]),
+            40.0 / 24.0,
+            1e-9,
+        );
+    });
+}
+
+/// §11.5: with the tremolo on, rate reads 1.06 over one second, and the
+/// peak of its column grows with the window: 2.93, 6.02, 12.1 over 0.5, 1
+/// and 2 s.
+#[test]
+fn s11_5_rate_comes_alive_and_grows_with_time() {
+    with_libraries("s11_5_rate", |root| {
+        let outs = render(&program("11.5", 2), &root, InputMode::Zero, 88_200);
+        assert_eq!(outs.len(), 7, "the output, then six sliders");
+        assert_near("rate over one second", rms(&outs[3][..44_100]), 1.06, 0.01);
+        assert_near("peak over 0.5 s", peak(&outs[3][..22_050]), 2.93, 0.01);
+        assert_near("peak over 1 s", peak(&outs[3][..44_100]), 6.02, 0.01);
+        assert_near("peak over 2 s", peak(&outs[3]), 12.1, 0.05);
+    });
+}
+
+/// §11.5: the energy's rad and fad lanes, summed over blocks of 4096: equal
+/// to 1e-14 over the first block (depth -219.7, drive 20.94, rate 0, level
+/// = trim = 29.18 = energy x ln(10)/10), drive 20.196 against 20.206 and
+/// tight -0.7925 against -0.7899 over the second.
+#[test]
+fn s11_5_energy_gradient_rad_against_fad() {
+    with_libraries("s11_5_energy", |root| {
+        let outs = render_with_block(&program("11.5", 3), &root, InputMode::Zero, 8192, 4096);
+        assert_eq!(
+            outs.len(),
+            15,
+            "the energy, seven rad lanes, seven fad lanes"
+        );
+        let sum = |k: usize, b: usize| -> f64 { outs[k][b * 4096..(b + 1) * 4096].iter().sum() };
+        for k in 0..7 {
+            let (r, f) = (sum(1 + k, 0), sum(8 + k, 0));
+            assert!(
+                (r - f).abs() <= 1e-12 * f.abs().max(1.0),
+                "lane {k}, first block: {r} vs {f}"
+            );
+        }
+        assert_near("depth", sum(1, 0), -219.7, 0.05);
+        assert_near("drive", sum(2, 0), 20.94, 0.005);
+        assert_eq!(sum(4, 0), 0.0, "rate");
+        let energy = sum(0, 0);
+        assert_near("energy", energy, 126.7, 0.05);
+        assert_near(
+            "level / energy",
+            sum(3, 0) / energy,
+            std::f64::consts::LN_10 / 10.0,
+            1e-12,
+        );
+        assert_near(
+            "trim / energy",
+            sum(7, 0) / energy,
+            std::f64::consts::LN_10 / 10.0,
+            1e-12,
+        );
+        assert_near("drive by rad, second block", sum(2, 1), 20.196, 0.0005);
+        assert_near("drive by fad, second block", sum(9, 1), 20.206, 0.0005);
+        assert_near("tight by rad, second block", sum(5, 1), -0.7925, 0.00005);
+        assert_near("tight by fad, second block", sum(12, 1), -0.7899, 0.00005);
+    });
+}
+
+/// §11.6, one rate for both sliders: the cutoff reads 1000.40, 1002.00 and
+/// 1002.73 at 10 000, 50 000 and 70 000, the gain 0.875, 1.585 and 1.631;
+/// the residual is still 0.035 rms over the last 10 000 samples.
+#[test]
+fn s11_6_one_rate_leaves_the_cutoff_and_overshoots_the_gain() {
+    with_libraries("s11_6_one_rate", |root| {
+        let outs = render(&program("11.6", 0), &root, InputMode::Zero, 80_000);
+        for (frame, cutoff, gain) in [
+            (10_000, 1000.40, 0.875),
+            (50_000, 1002.00, 1.585),
+            (70_000, 1002.73, 1.631),
+        ] {
+            assert_near(&format!("cutoff at {frame}"), outs[0][frame], cutoff, 0.01);
+            assert_near(&format!("gain at {frame}"), outs[1][frame], gain, 0.001);
+        }
+        assert_near(
+            "residual, last 10 000",
+            rms(&outs[2][70_000..]),
+            0.035,
+            0.002,
+        );
+    });
+}
+
+/// §11.6, a rate per slider from its range: the cutoff reads 2574.69,
+/// 2500.47 and 2499.98 at 10 000, 40 000 and 60 000, the gain 1.1752,
+/// 1.1998 and 1.200001; over the last 10 000 samples 2500.0005 and
+/// 1.1999997, the residual 2.4e-8 rms.
+#[test]
+fn s11_6_a_rate_per_slider_learns_both() {
+    with_libraries("s11_6_rate_per_slider", |root| {
+        let outs = render(&program("11.6", 1), &root, InputMode::Zero, 80_000);
+        for (frame, cutoff, gain) in [
+            (10_000, 2574.69, 1.1752),
+            (40_000, 2500.47, 1.1998),
+            (60_000, 2499.98, 1.200_001),
+        ] {
+            assert_near(&format!("cutoff at {frame}"), outs[0][frame], cutoff, 0.01);
+            assert_near(&format!("gain at {frame}"), outs[1][frame], gain, 1e-4);
+        }
+        assert_near(
+            "cutoff, last 10 000",
+            mean(&outs[0][70_000..]),
+            2500.0005,
+            1e-3,
+        );
+        assert_near(
+            "gain, last 10 000",
+            mean(&outs[1][70_000..]),
+            1.199_999_7,
+            1e-6,
+        );
+        assert!(
+            rms(&outs[2][70_000..]) < 3e-8,
+            "the residual should be about 2.4e-8 rms"
+        );
     });
 }
 
