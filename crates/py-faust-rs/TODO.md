@@ -25,9 +25,8 @@ sample to/from `Vec<f64>`. This is the last open item from `LIMITATIONS.md` (#5)
 - **Type stubs (`.pyi`)** for `Dsp`, `Param`, `compile`, `version` so editors
   and type checkers see the API. maturin can ship a stub alongside the module.
 - **Packaging & CI:** `cibuildwheel` + GitHub Actions to build wheels across
-  platforms and Python versions, toward a PyPI release like cyfaust. Bundling a
-  Faust standard library would let the import tests run in CI instead of
-  skipping.
+  platforms and Python versions, toward a PyPI release like cyfaust. Wheels
+  could bundle the libraries `make faustlib` fetches.
 - **`declare` metadata:** `Dsp.metadata()` and `get_json()["meta"]` lack the
   program's `declare`s: the FIR backends do not carry them (upstream gap).
 - **Validate `args`:** the backends accept unknown flags silently, so a typo in

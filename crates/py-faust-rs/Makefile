@@ -7,6 +7,12 @@
 UV ?= uv
 PYTEST_ARGS ?=
 
+# faustlibraries has no tags; pin the commit Faust 2.88.0, its latest
+# release, ships as its `libraries` submodule.
+FAUSTLIB_REPO ?= https://github.com/grame-cncm/faustlibraries
+FAUSTLIB_REV ?= f1d729e82ff51db9a4c9ecd300c90234448f56e1
+FAUSTLIB_DIR := .faustlibraries
+
 .DEFAULT_GOAL := help
 
 # Self-documenting help: lists every target with a `## ` comment.
@@ -34,6 +40,15 @@ develop: ## Fast in-place (debug) rebuild of the extension into the venv
 build: ## Build a release wheel into target/wheels
 	$(UV) run maturin build --release
 
+# Refetches only when the checkout is not at FAUSTLIB_REV.
+.PHONY: faustlib
+faustlib: ## Fetch the pinned Faust standard libraries into .faustlibraries/
+	@if [ "$$(git -C $(FAUSTLIB_DIR) rev-parse HEAD 2>/dev/null)" != "$(FAUSTLIB_REV)" ]; then \
+		git init -q $(FAUSTLIB_DIR) && \
+		git -C $(FAUSTLIB_DIR) fetch -q --depth 1 $(FAUSTLIB_REPO) $(FAUSTLIB_REV) && \
+		git -C $(FAUSTLIB_DIR) checkout -q --force FETCH_HEAD; \
+	fi
+
 # --- checks ----------------------------------------------------------------
 
 # Rebuild the extension first so the suite runs against current sources rather
@@ -43,11 +58,11 @@ build: ## Build a release wheel into target/wheels
 # (an unchanged version is served from cache). `develop` already synced the dev
 # tools, so skipping the sync here is safe.
 .PHONY: test
-test: develop ## Build the extension, then run the pytest suite
+test: develop faustlib ## Build the extension, then run the pytest suite
 	$(UV) run --no-sync pytest $(PYTEST_ARGS)
 
 .PHONY: demos
-demos: develop ## Build the extension, then run every script in demos/
+demos: develop faustlib ## Build the extension, then run every script in demos/
 	@for f in demos/[0-9]*.py; do echo "=== $$f"; $(UV) run --no-sync python $$f || exit 1; done
 
 .PHONY: fmt

@@ -55,6 +55,10 @@ The suite verifies exact rendered sample values (compile, compute, persistence,
 precision, lifetime/determinism) and exercises a vendored `noise.dsp` fixture.
 If the extension is not built, the suite skips rather than errors.
 
+`make test` also fetches the Faust standard libraries, at the commit
+`FAUSTLIB_REV` in the `Makefile` pins, into `.faustlibraries/`, so the import
+tests run. `FAUST_LIB_PATH`, if set, takes precedence.
+
 ## Usage
 
 ```python
@@ -104,7 +108,7 @@ dsp.compute([], frames=8)                  # a 440 Hz sine block
 
 `backend="interp"` (default) runs the bytecode interpreter. `backend="cranelift"`
 compiles to native code with the Cranelift JIT. Cranelift does not yet lower
-every program; `compile()` raises `InstantiateError` for one it cannot run.
+every program; `compile()` raises `CompileError` for one it cannot lower.
 
 ```python
 jit = faust_rs.compile("process = _ : *(0.5);", backend="cranelift", opt_level=3)
@@ -218,8 +222,8 @@ Each facade error kind has its own exception class, all subclasses of
 
 | Exception | Raised when |
 |-|-|
-| `CompileError` | the program does not compile |
-| `InstantiateError` | the backend cannot instantiate it (e.g. Cranelift cannot lower `compute`) |
+| `CompileError` | the program does not compile (e.g. Cranelift cannot lower `compute`) |
+| `InstantiateError` | the backend refuses to instantiate it |
 | `UnknownParamError` | a key names no parameter |
 | `ReadOnlyParamError` | `set_param` on a bargraph |
 | `BuffersError` | audio buffers do not match the channel or frame counts |

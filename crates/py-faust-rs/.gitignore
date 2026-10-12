@@ -1,5 +1,6 @@
 /target
 /.venv
+/.faustlibraries
 Cargo.lock
 *.so
 __pycache__/

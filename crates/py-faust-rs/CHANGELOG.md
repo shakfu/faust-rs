@@ -90,6 +90,16 @@ tracks the faust-rs workspace and its API may change at any time.
 
 ### Changed
 
+- `make test` and `make demos` fetch the Faust standard libraries into
+  `.faustlibraries/` (`make faustlib`), so the import tests run instead of
+  skipping. faustlibraries has no tags, so the pin is the commit Faust 2.88.0
+  ships. It is fetched, not committed: the workspace forbids committed copies.
+- Compilation runs on the calling thread; the 64 MiB worker thread is gone.
+  faust-rs now grows its own stack per compile stage (fix for
+  [#16](https://github.com/grame-cncm/faust-rs/issues/16)), so Python's ~8 MiB
+  main stack suffices.
+- Cranelift now raises `CompileError`, not `InstantiateError`, for a `compute`
+  it cannot lower. Upstream `c11a5260` moved the refusal to compile time.
 - Wheels are built against the stable ABI (`abi3`), so one wheel serves
   CPython 3.11 and later. `requires-python` rises from 3.9 to 3.11: pyo3
   exposes `PyBuffer`, which `compute_into` needs, under abi3 only from 3.11.

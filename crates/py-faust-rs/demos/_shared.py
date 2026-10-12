@@ -39,6 +39,7 @@ def find_stdlib():
     """Return a directory containing `stdfaust.lib`, or None."""
     candidates = [Path(p) for p in os.environ.get("FAUST_LIB_PATH", "").split(os.pathsep) if p]
     candidates += [
+        Path(__file__).parent.parent / ".faustlibraries",
         Path("/usr/local/share/faust"),
         Path("/opt/homebrew/share/faust"),
         Path("/usr/share/faust"),

@@ -519,17 +519,6 @@ impl Dsp {
     }
 }
 
-/// 64 MiB worker-thread stack for the compile path.
-///
-/// The evaluator's structural-lowering pass recurses deeply for large programs
-/// (notably anything that expands `import("stdfaust.lib")`), and its guarded
-/// recursion budgets are sized against the workspace's 64 MiB stack contract
-/// (see `compiler::main`). Python calls this extension on its main thread, whose
-/// stack (~8 MiB on CPython) is far below that contract, so a stdfaust-based
-/// compile overflows it. Running the compile on a thread with the contract's
-/// headroom keeps the binding within the same envelope as every other embedder.
-const COMPILE_STACK_SIZE: usize = 64 * 1024 * 1024;
-
 fn check_sample_rate(sample_rate: i32) -> PyResult<()> {
     if sample_rate <= 0 {
         return Err(PyValueError::new_err("sample_rate must be positive"));
@@ -543,8 +532,8 @@ enum Source {
     File(PathBuf),
 }
 
-/// Compiles `source` on a worker thread with the workspace stack contract
-/// (see `COMPILE_STACK_SIZE`), the GIL released.
+/// Compiles `source` with the GIL released. The caller's stack suffices:
+/// faust-rs grows its own stack per compile stage (`tlib::stack`).
 fn build_factory(
     py: Python<'_>,
     source: Source,
@@ -593,21 +582,11 @@ fn build_factory(
         args,
     };
 
-    py.detach(move || {
-        std::thread::Builder::new()
-            .name("faust-rs-compile".to_owned())
-            .stack_size(COMPILE_STACK_SIZE)
-            .spawn(move || match source {
-                Source::Text { name, source } => {
-                    faust::Factory::from_source(&name, &source, &options)
-                }
-                Source::File(path) => faust::Factory::from_file(&path, &options),
-            })
-            .map_err(|e| PyValueError::new_err(format!("failed to spawn compile thread: {e}")))?
-            .join()
-            .map_err(|_| PyValueError::new_err("compile thread panicked"))?
-            .map_err(py_err)
+    py.detach(move || match source {
+        Source::Text { name, source } => faust::Factory::from_source(&name, &source, &options),
+        Source::File(path) => faust::Factory::from_file(&path, &options),
     })
+    .map_err(py_err)
 }
 
 /// A compiled Faust program. Compile once, then create any number of

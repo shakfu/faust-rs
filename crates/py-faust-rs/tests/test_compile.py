@@ -5,6 +5,8 @@ The self-contained DSP snippets are drawn from cyfaust's interp tests (e.g.
 the resulting audio-channel layout rather than only that a factory is non-null.
 """
 
+import re
+
 import faust_rs
 import pytest
 
@@ -75,9 +77,9 @@ def test_unknown_backend_raises():
 
 
 def test_unknown_ffunction_refused(faust):
-    # Cranelift cannot lower `compute`; the interpreter rejects it at compile.
+    # Both backends reject it at compile (Cranelift since upstream c11a5260).
     src = 'process = _ : ffunction(float frs_unknown_fn(float), "", "");'
-    with pytest.raises(faust.InstantiateError, match="^Instantiate:"):
+    with pytest.raises(faust.CompileError, match="^Compile:.*CLIF-0002"):
         faust.compile(src, backend="cranelift")
     with pytest.raises(faust.CompileError, match="^Compile:"):
         faust.compile(src, backend="interp")
@@ -93,7 +95,8 @@ def test_args_passed_to_compiler(compile_dsp):
 
 def test_args_reach_cranelift():
     dsp = faust_rs.compile("process = _;", backend="cranelift", args=["-vec", "-vs", "4"])
-    assert "argv=-vec -vs 4" in dsp.factory.get_json()
+    # FAUST_LIB_PATH entries precede `args` as `-I <dir>`.
+    assert re.search(r"argv=[^;]*-vec -vs 4;", dsp.factory.get_json())
 
 
 @pytest.mark.parametrize(
@@ -121,6 +124,15 @@ def test_last_precision_flag_wins(double, args, precision, compile_dsp):
 @pytest.mark.parametrize("level", [0, 1, 2, 3])
 def test_opt_level_accepted(level, compile_dsp):
     assert compile_dsp("process = *(2);", opt_level=level).compute([[1.5]]) == [[3.0]]
+
+
+def test_deep_nesting_on_main_thread(compile_dsp):
+    # Python's ~8 MiB main stack aborted at ~2 700 levels before faust-rs
+    # grew its own stack (grame-cncm/faust-rs#16).
+    folded = "process = " + "+".join(["1"] * 20000) + ";"
+    assert compile_dsp(folded).compute([], frames=1) == [[20000.0]]
+    chain = "process = _" + " : sin" * 1000 + ";"
+    assert compile_dsp(chain).num_outputs == 1
 
 
 @pytest.mark.parametrize("level", [-1, 4])

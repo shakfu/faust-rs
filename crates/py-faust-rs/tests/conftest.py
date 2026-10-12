@@ -26,17 +26,16 @@ DSP_DIR = Path(__file__).parent / "dsp"
 def _find_stdfaust_dir() -> Path | None:
     """Locate a directory containing the Faust standard libraries.
 
-    The faust-rs workspace does not bundle the full stdlib, so import-dependent
-    tests need one discovered from the environment. Searches, in order:
-    `FAUST_LIB_PATH`, the sibling cyfaust project's vendored libraries, and the
-    conventional system install locations. Returns `None` if none is found.
+    Searches, in order: `FAUST_LIB_PATH`, the pinned checkout `make faustlib`
+    fetches, and the conventional system install locations. Returns `None` if
+    none is found.
     """
     candidates: list[Path] = []
     env = os.environ.get("FAUST_LIB_PATH")
     if env:
         candidates += [Path(p) for p in env.split(os.pathsep) if p]
     candidates += [
-        Path.home() / "projects/personal/cyfaust/resources/libraries",
+        Path(__file__).parent.parent / ".faustlibraries",
         Path("/usr/local/share/faust"),
         Path("/opt/homebrew/share/faust"),
         Path("/usr/share/faust"),

@@ -15,7 +15,7 @@ results; `10` and `11` also write WAV files to `demos/out/`.
 | `08_lifecycle.py` | `init`, `instance_init`, `instance_constants`, `instance_reset_user_interface`, `instance_clear` |
 | `09_errors.py` | the `FaustError` exception hierarchy |
 | `10_render_wav.py` | parameter automation between blocks, rendered to `out/melody.wav` |
-| `11_stdlib.py` | `import("stdfaust.lib")` via `search_paths`; needs `FAUST_LIB_PATH` |
+| `11_stdlib.py` | `import("stdfaust.lib")` via `search_paths`; uses `FAUST_LIB_PATH`, else `make faustlib`'s checkout |
 
 `_shared.py` defines `osc`/`phasor` in plain Faust, so only `11` needs the
 standard library.
@@ -24,7 +24,7 @@ standard library.
 
 ```bash
 make develop                      # build the extension into .venv
-make demos                        # run all of them
+make demos                        # fetch the pinned stdlib, run all of them
 uv run --no-sync python demos/03_params.py
 FAUST_LIB_PATH=/path/to/faust/libraries uv run --no-sync python demos/11_stdlib.py
 ```
