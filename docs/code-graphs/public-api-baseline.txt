@@ -191,6 +191,7 @@ enum FbcSerialError
 enum FbcStackKind
 enum ForeignScalarType
 enum HeapType
+enum HostScalarType
 enum JsonBuildError
 enum JsonUiItem
 enum JuliaRealType
@@ -298,8 +299,12 @@ fn ForeignScalarType::from_code
 fn ForeignScalarType::from_fir_type
 fn ForeignSignature::decode
 fn ForeignSignature::encode
+fn HostFunctionSignature::parse
+fn HostFunctionSignature::prototype
+fn HostScalarType::c_name
 fn JitDspModule::compute_body_lowered
 fn JitDspModule::compute_entry_addr
+fn JitDspModule::compute_subset_gap
 fn JitDspModule::compute_symbol_name
 fn JitDspModule::double_precision
 fn JitDspModule::generated_functions_clif
@@ -309,6 +314,7 @@ fn JitDspModule::instance_constants_entry_addr
 fn JitDspModule::jit_module_is_alive
 fn JitDspModule::mem0_analysis
 fn JitDspModule::module_name
+fn JitDspModule::require_lowered_compute
 fn JitDspModule::static_init_entry_addr
 fn JitDspModule::static_memory_slots
 fn JitDspModule::struct_layout
@@ -359,6 +365,7 @@ fn compute_short_names
 fn crate_id
 fn diagnose_cranelift_compute_subset_gap
 fn escape_json_string
+fn foreign_scalar
 fn generate_asc_module
 fn generate_c_module
 fn generate_cmajor_module
@@ -374,11 +381,16 @@ fn generate_wasm_module_with_context
 fn is_lifecycle_function
 fn is_registered_foreign_function
 fn is_supported_signature
+fn libm_signature
 fn lookup_foreign_function
+fn lookup_foreign_function_for_call
 fn math_lib_lookup
 fn optimize_block
 fn read_fbc
 fn register_foreign_function
+fn register_foreign_function_with_signature
+fn registered_foreign_signature
+fn registered_signature_fingerprint
 fn render_flat
 fn unregister_foreign_function
 fn unsupported_sub_modules_message
@@ -403,6 +415,7 @@ mod factory
 mod fbc_to_cpp
 mod fixtures
 mod foreign
+mod host_function
 mod instance
 mod interp
 mod jax
@@ -435,6 +448,7 @@ struct CppOptions
 struct CraneliftBackendError
 struct CraneliftOptions
 struct EvalError
+struct ExternFunction
 struct FbcBlock
 struct FbcBlockArena
 struct FbcCompileResult
@@ -449,6 +463,7 @@ struct FbcUiInstruction
 struct FieldLayout
 struct FirToFbcCompiler
 struct ForeignSignature
+struct HostFunctionSignature
 struct InterpOptions
 struct JitDspModule
 struct JsonBuildOptions
@@ -487,6 +502,7 @@ use api
 use bytecode
 use compiler
 use core
+use crate::backends::host_function
 use executor
 use factory::FbcDspFactory
 use fbc_to_cpp
@@ -528,6 +544,8 @@ fn CompileOptionArgs::real_type
 fn CompileOptionArgs::require_block_compute
 fn CompileOptionArgs::scheduling
 fn CompileOptionArgs::to_argv
+fn Compiler::commit
+fn Compiler::commit_date
 fn Compiler::compile_file
 fn Compiler::compile_file_default
 fn Compiler::compile_file_default_to_asc
@@ -650,6 +668,7 @@ fn CompilerError::diagnostic_bundle
 fn CompilerError::diagnostics
 fn CompilerError::diagnostics_report_json
 fn CompilerError::expand_failed
+fn CompilerError::from_cranelift_backend
 fn CompilerError::import
 fn CompilerError::missing_root
 fn CompilerError::rendered_diagnostics
@@ -1034,10 +1053,13 @@ const CODEGEN_EMISSION_FAILED
 const COMP_EXPAND_FAILED
 const COMP_MISSING_ROOT
 const COMP_TABLE_INIT_SAMPLE_RATE
+const COMP_TIMEOUT
 const COMP_TYPE_FAILED
 const EVAL_ARITY_MISMATCH
+const EVAL_CASE_ARGUMENT_NOT_CONSTANT
 const EVAL_CONTROL_INDEX_INVALID
 const EVAL_DIVISION_BY_ZERO
+const EVAL_EVALUATION_CYCLE
 const EVAL_GENERIC_FAILURE
 const EVAL_ITERATION_INVALID
 const EVAL_MISSING_PROCESS
@@ -1264,6 +1286,8 @@ use schema
 
 ## eval
 const CRATE_NAME
+enum DepthGuard
+enum DepthLimitSource
 enum EvalError
 enum EvalWarning
 enum SamplePrecision
@@ -1310,7 +1334,6 @@ fn Rule::new
 fn Trans::is_const
 fn Trans::is_op
 fn Trans::is_var
-fn apply_pattern_matcher
 fn crate_id
 fn eval
 fn eval_box
@@ -1320,6 +1343,8 @@ fn rank_similar_names
 fn unambiguous_suggestion
 mod suggestions
 struct Automaton
+struct DepthContext
+struct DepthLimit
 struct Environment
 struct EvalRequest
 struct EvalSourceContext
@@ -1458,6 +1483,7 @@ enum AccessType
 enum BargraphType
 enum ButtonType
 enum FirBinOp
+enum FirDependencyKind
 enum FirFunctionSection
 enum FirHygienicCloneError
 enum FirInlineAnalysisError
@@ -1489,6 +1515,7 @@ fn FirBuilder::cast
 fn FirBuilder::close_box
 fn FirBuilder::control
 fn FirBuilder::declare_buffer_iterators
+fn FirBuilder::declare_dependency
 fn FirBuilder::declare_fun
 fn FirBuilder::declare_struct_type
 fn FirBuilder::declare_table
@@ -1605,12 +1632,22 @@ use builder::FirBuilder
 use dump
 use matcher
 use store::FirStore
+use tlib::on_compile_stack
 use types
 
 ## foreign-call
+const MAX_ARGS
 enum ScalarType
+enum TypedFunction
 enum Value
+fn TypedFunction::address
+fn TypedFunction::params
+fn TypedFunction::ret
 fn invoke
+fn is_supported
+fn libm_function
+fn libm_functions
+struct NamedFunction
 
 ## graph
 const CRATE_NAME
@@ -1829,9 +1866,11 @@ fn promote_table_signals
 fn simplify_const
 fn simplify_signals_fastlane
 fn try_simplify_const
+fn try_simplify_const_cached
 mod normalform
 mod rec_merge
 mod table_promote
+struct ConstSimplifyCache
 struct DivisionByZero
 struct NormalFormOpts
 struct TableRangeWarning
@@ -1875,6 +1914,7 @@ fn ParseState::binary_prim
 fn ParseState::cons
 fn ParseState::declare_definition_metadata_from_tokens
 fn ParseState::declare_metadata_from_token
+fn ParseState::definition_name_from_token
 fn ParseState::doc_statement
 fn ParseState::float_from_token
 fn ParseState::foreign_name_slots
@@ -1895,6 +1935,7 @@ fn ParseState::nil
 fn ParseState::node_case_checked
 fn ParseState::node_foreign_function
 fn ParseState::node_lambda
+fn ParseState::note_definition_name
 fn ParseState::note_doc_char
 fn ParseState::note_doc_listing
 fn ParseState::note_doc_metadata_tag_from_token
@@ -1945,6 +1986,7 @@ fn ParserCtx::lst_mdoctags
 fn ParserCtx::new
 fn ParserCtx::note_declared_definition_metadata
 fn ParserCtx::note_declared_metadata
+fn ParserCtx::note_definition_name
 fn ParserCtx::note_doc_block
 fn ParserCtx::note_doc_char
 fn ParserCtx::note_doc_listing
@@ -2105,6 +2147,7 @@ fn control_widgets
 fn crate_id
 fn iir_filter_to_de_bruijn_rec_group
 fn make_sig_input_list
+fn propagate_fold
 fn propagate_typed
 fn propagate_typed_with_ui
 fn transpose_lti_de_bruijn_rec_scaffold
@@ -2122,6 +2165,7 @@ struct ControlWidget
 struct ControlWidgets
 struct DependentSeed
 struct FlatBoxId
+struct FoldSession
 struct PropagateOutput
 struct PropagateUiOptions
 struct SignalOrigins
@@ -2370,9 +2414,13 @@ use rules
 use types
 
 ## tlib
+const COMPILE_STACK_RESERVE
+const COMPILE_STACK_SIZE
 const CRATE_NAME
 const DEBRUIJNREC_TAG
 const DEBRUIJNREF_TAG
+const STACK_RED_ZONE
+const STACK_SEGMENT
 const SYMREC_TAG
 const SYMREF_TAG
 enum ChildList
@@ -2452,6 +2500,8 @@ fn match_de_bruijn_rec
 fn match_de_bruijn_ref
 fn match_sym_rec
 fn match_sym_ref
+fn on_compile_stack
+fn on_deep_stack
 fn sym_rec
 fn sym_ref
 fn tree_to_double
@@ -2461,6 +2511,7 @@ fn validate_closed_de_bruijn_tree
 fn validate_faust_list
 fn validate_symbolic_recursion_tree
 fn vec_to_list
+mod stack
 struct PropertyKey
 struct PropertyStore
 struct TreeArena
@@ -2469,6 +2520,7 @@ struct TreeNode
 use arena
 use property
 use recursion
+use stack
 
 ## transform
 const CRATE_NAME

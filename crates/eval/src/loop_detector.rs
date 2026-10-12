@@ -8,7 +8,7 @@ use tlib::TreeId;
 
 use crate::SymId;
 use crate::environment::{ClosureValue, EnvFrameKey, EvalCacheKey, EvalValue, PatternMatcherValue};
-use crate::error::EvalError;
+use crate::error::{DepthContext, DepthGuard, DepthLimit, DepthLimitSource, EvalError};
 
 /// Infinite loop detector for recursive symbol expansion.
 ///
@@ -51,7 +51,22 @@ use crate::error::EvalError;
 #[derive(Clone, Debug)]
 pub struct LoopDetector {
     pub(crate) call_stack: Vec<LoopFrame>,
+    /// The identifier each `call_stack` frame resolves, index for index:
+    /// the definition of a `SymbolEnv` frame, the name bound to the box of a
+    /// `TreeEnv` frame. Kept apart so that it plays no part in frame identity;
+    /// it is what names the definitions of a cycle
+    /// ([`EvalError::LoopDetected`]).
+    pub(crate) call_names: Vec<SymId>,
+    /// Where on `call_stack` the last cycle started: the index of the frame
+    /// that was entered again. Read by [`Self::cycle_names`].
+    pub(crate) cycle_start: Option<usize>,
     pub(crate) max_depth: usize,
+    /// Where `max_depth` came from, for the diagnostic of an exhausted guard.
+    pub(crate) max_depth_source: DepthLimitSource,
+    /// Where `structural_max_depth` came from.
+    pub(crate) structural_source: DepthLimitSource,
+    /// Where `nesting_max_depth` came from.
+    pub(crate) nesting_source: DepthLimitSource,
     /// Syntactic nesting depth of [`eval_value`](crate::eval_value) calls, and
     /// its budget: see [`Self::enter_eval`].
     pub(crate) eval_depth: usize,
@@ -166,17 +181,58 @@ pub struct LoopDetector {
     /// `RecursionDepthExceeded` gracefully, matching the reference C++
     /// compiler's `"stack overflow in eval"` error.
     pub(crate) structural_depth: usize,
+    /// The `case` applications in progress that dispatch an argument on
+    /// numeric patterns, outermost first.
+    ///
+    /// Pushed and popped with the structural frame of
+    /// `apply_pattern_matcher_value`, only for such a dispatch. When a depth
+    /// budget runs out, they tell a recursion that does not reach its numeric
+    /// base case because its argument is not a compile-time constant
+    /// ([`EvalError::CaseArgumentNotConstant`]) from a recursion that does
+    /// progress on a number but is too deep, or never stops for another
+    /// reason ([`EvalError::RecursionDepthExceeded`]).
+    pub(crate) numeric_dispatches: Vec<NumericDispatch>,
+    /// The caches of constant folding, kept for the pass: a fold costs what
+    /// is new in the expression, as in C++ (`crate::simplify::FoldCache`).
+    pub(crate) fold: crate::simplify::FoldCache,
 }
 
+/// One dispatch of a `case` argument on numeric patterns: see
+/// [`LoopDetector::numeric_dispatches`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NumericDispatch {
+    /// The rules of the `case`, as `PatternMatcherValue::original_rules`.
+    pub(crate) rules: TreeId,
+    /// 1-based position of the argument.
+    pub(crate) position: usize,
+    /// `None` when the argument is a number. Otherwise the argument as the
+    /// matcher dispatched on it, which can reach none of the patterns.
+    pub(crate) nonconstant: Option<NonConstantArgument>,
+}
+
+/// An argument that is not a number, dispatched on numeric patterns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NonConstantArgument {
+    /// The argument as the matcher dispatched on it.
+    pub(crate) argument: TreeId,
+    /// The numeric patterns it cannot reach, rendered.
+    pub(crate) patterns: Vec<String>,
+}
+
+/// How many nested applications of one `case` on a non-constant argument make
+/// a depth overflow a recursion on that argument. A non-recursive function
+/// with a numeric pattern applied to a signal appears once.
+const NONCONSTANT_RECURSION_REPEATS: usize = 3;
+
 /// Environment variable overriding the default evaluator recursion budget.
-const DEFAULT_EVAL_MAX_DEPTH_ENV: &str = "FAUST_RS_DEFAULT_EVAL_MAX_DEPTH";
+const DEFAULT_EVAL_MAX_DEPTH_ENV: &str = crate::error::EVAL_MAX_DEPTH_VAR;
 
 /// Environment variable overriding the structural lowering recursion cap.
-const STRUCTURAL_HARD_MAX_DEPTH_ENV: &str = "FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH";
+const STRUCTURAL_HARD_MAX_DEPTH_ENV: &str = crate::error::STRUCTURAL_MAX_DEPTH_VAR;
 
 /// Environment variable overriding the syntactic nesting budget of the
 /// evaluator, [`DEFAULT_EVAL_NESTING_DEPTH`].
-const DEFAULT_EVAL_NESTING_DEPTH_ENV: &str = "FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH";
+const DEFAULT_EVAL_NESTING_DEPTH_ENV: &str = crate::error::EVAL_NESTING_DEPTH_VAR;
 
 /// Default budget for the syntactic nesting of `eval_value` calls.
 ///
@@ -200,28 +256,11 @@ const DEFAULT_EVAL_NESTING_DEPTH_ENV: &str = "FAUST_RS_DEFAULT_EVAL_NESTING_DEPT
 /// [`DEFAULT_EVAL_NESTING_DEPTH_ENV`] to a positive integer to override.
 const DEFAULT_EVAL_NESTING_DEPTH: usize = 400_000;
 
-/// Stack the evaluator keeps in reserve before it continues on a fresh
-/// segment: the deepest native call chain between two guarded entries must
-/// fit in it, with a wide margin for debug builds.
-const STACK_RED_ZONE: usize = 256 * 1024;
-
-/// Size of the heap-allocated stack segments the evaluator grows onto.
-const STACK_SEGMENT: usize = 8 * 1024 * 1024;
-
-/// Runs `f`, on a freshly allocated stack segment if the current stack has
-/// less than [`STACK_RED_ZONE`] bytes left.
-///
-/// This is what the C++ evaluator's stack-address check becomes in Rust:
-/// instead of throwing when the stack runs low, the evaluator moves to
-/// another one (`stacker::maybe_grow`, the mechanism rustc itself uses), so
-/// no depth of input overflows the native stack, in the CLI's 512 MiB
-/// worker as in an 8 MiB host thread of `libfaust-rs`. On targets without
-/// stack switching the call runs in place. The recursion is bounded
-/// separately, by [`LoopDetector::enter_eval`] and the structural budget.
-#[inline]
-pub(crate) fn on_deep_stack<R>(f: impl FnOnce() -> R) -> R {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, f)
-}
+/// The C++ evaluator's stack-address check becomes, in Rust, a move to a
+/// fresh stack segment instead of a throw ([`tlib::stack`]): no depth of input
+/// overflows the native stack. The recursion is bounded separately, by
+/// [`LoopDetector::enter_eval`] and the structural budget.
+pub(crate) use tlib::on_deep_stack;
 
 /// Default fallback budget for identity-tracked evaluator recursion.
 ///
@@ -280,10 +319,15 @@ pub(crate) fn on_deep_stack<R>(f: impl FnOnce() -> R) -> R {
 /// case. 32 768 lets the whole reference tree compile by default; anything
 /// deeper still gets the clean `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH` opt-in.
 const DEFAULT_EVAL_MAX_DEPTH: usize = if cfg!(debug_assertions) {
-    1_024
+    DEBUG_DEFAULT_EVAL_MAX_DEPTH
 } else {
-    32_768
+    RELEASE_DEFAULT_EVAL_MAX_DEPTH
 };
+
+/// [`DEFAULT_EVAL_MAX_DEPTH`] of each profile, which the diagnostic of a debug
+/// build quotes.
+pub(crate) const DEBUG_DEFAULT_EVAL_MAX_DEPTH: usize = 1_024;
+pub(crate) const RELEASE_DEFAULT_EVAL_MAX_DEPTH: usize = 32_768;
 
 /// Default fallback hard cap for structural lowering recursion.
 ///
@@ -301,10 +345,14 @@ const DEFAULT_EVAL_MAX_DEPTH: usize = if cfg!(debug_assertions) {
 /// that asked for more, which is how a raised evaluator budget would appear to
 /// have no effect. It follows the profile for the same reason.
 const STRUCTURAL_HARD_MAX_DEPTH: usize = if cfg!(debug_assertions) {
-    4_096
+    DEBUG_STRUCTURAL_HARD_MAX_DEPTH
 } else {
-    32_768
+    RELEASE_STRUCTURAL_HARD_MAX_DEPTH
 };
+
+/// [`STRUCTURAL_HARD_MAX_DEPTH`] of each profile.
+pub(crate) const DEBUG_STRUCTURAL_HARD_MAX_DEPTH: usize = 4_096;
+pub(crate) const RELEASE_STRUCTURAL_HARD_MAX_DEPTH: usize = 32_768;
 
 impl LoopDetector {
     /// Creates a detector with the default maximum recursion depth.
@@ -350,7 +398,13 @@ impl LoopDetector {
     /// by `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH` or its compiled fallback.
     #[must_use]
     pub fn with_max_depth(max_depth: usize) -> Self {
-        Self::with_parts(max_depth, Arc::new(AtomicBool::new(false)))
+        Self::with_parts(
+            DepthLimit {
+                value: max_depth,
+                source: DepthLimitSource::Api,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     /// Shared constructor behind [`new`](Self::new), [`with_cancel`](Self::with_cancel)
@@ -359,17 +413,22 @@ impl LoopDetector {
     /// Reads the structural hard-limit from the environment, then initializes all
     /// empty stacks, caches and side-tables from the given `max_depth` and
     /// `cancel` flag.
-    fn with_parts(max_depth: usize, cancel: Arc<AtomicBool>) -> Self {
-        let structural_max_depth =
+    fn with_parts(max_depth: DepthLimit, cancel: Arc<AtomicBool>) -> Self {
+        let structural =
             depth_limit_from_env(STRUCTURAL_HARD_MAX_DEPTH_ENV, STRUCTURAL_HARD_MAX_DEPTH);
-        let nesting_max_depth =
+        let nesting =
             depth_limit_from_env(DEFAULT_EVAL_NESTING_DEPTH_ENV, DEFAULT_EVAL_NESTING_DEPTH);
         Self {
             call_stack: Vec::new(),
-            max_depth,
+            call_names: Vec::new(),
+            cycle_start: None,
+            max_depth: max_depth.value,
+            max_depth_source: max_depth.source,
+            structural_source: structural.source,
+            nesting_source: nesting.source,
             eval_depth: 0,
-            nesting_max_depth,
-            structural_max_depth,
+            nesting_max_depth: nesting.value,
+            structural_max_depth: structural.value,
             cancel,
             def_names: std::collections::HashMap::new(),
             warnings: Vec::new(),
@@ -385,6 +444,69 @@ impl LoopDetector {
             evaluated_boxes: ahash::HashSet::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             structural_depth: 0,
+            numeric_dispatches: Vec::new(),
+            fold: crate::simplify::FoldCache::default(),
+        }
+    }
+
+    /// The error for a depth budget of `max_depth` that ran out.
+    ///
+    /// [`EvalError::CaseArgumentNotConstant`] when one `case` is being
+    /// applied, nested at least [`NONCONSTANT_RECURSION_REPEATS`] times, with
+    /// an argument at the same position that cannot reach its numeric
+    /// patterns, and no application of that `case` from the first of them on
+    /// dispatches any argument on a number: the recursion makes no progress
+    /// a numeric rule could stop. The outermost of those applications is
+    /// reported. Otherwise the generic [`EvalError::RecursionDepthExceeded`]:
+    /// a recursion that descends on a number is too deep or misses its base
+    /// case, whatever its other arguments are.
+    fn depth_exceeded(&self, guard: DepthGuard) -> EvalError {
+        let max_depth = match guard {
+            DepthGuard::Definitions => self.max_depth,
+            DepthGuard::Structural => self.max_depth.min(self.structural_max_depth),
+            DepthGuard::Nesting => self.nesting_max_depth,
+        };
+        let frames = &self.numeric_dispatches;
+        for (i, d) in frames.iter().enumerate() {
+            let Some(arg) = &d.nonconstant else { continue };
+            let mut repeats = 0;
+            let mut stalled = true;
+            for e in frames[i..].iter().filter(|e| e.rules == d.rules) {
+                stalled &= e.nonconstant.is_some();
+                repeats += usize::from(e.position == d.position && e.nonconstant.is_some());
+            }
+            if stalled && repeats >= NONCONSTANT_RECURSION_REPEATS {
+                return EvalError::CaseArgumentNotConstant {
+                    node: d.rules,
+                    position: d.position,
+                    argument: arg.argument,
+                    patterns: arg.patterns.clone(),
+                    max_depth,
+                };
+            }
+        }
+        EvalError::RecursionDepthExceeded {
+            max_depth,
+            context: self.depth_context(guard),
+        }
+    }
+
+    /// The guard that fired and the three limits, with where each came from.
+    fn depth_context(&self, guard: DepthGuard) -> DepthContext {
+        DepthContext {
+            guard,
+            definitions: DepthLimit {
+                value: self.max_depth,
+                source: self.max_depth_source,
+            },
+            structural: DepthLimit {
+                value: self.structural_max_depth,
+                source: self.structural_source,
+            },
+            nesting: DepthLimit {
+                value: self.nesting_max_depth,
+                source: self.nesting_source,
+            },
         }
     }
 
@@ -393,6 +515,7 @@ impl LoopDetector {
     pub(crate) fn with_nesting_max_depth(nesting_max_depth: usize) -> Self {
         let mut detector = Self::new();
         detector.nesting_max_depth = nesting_max_depth;
+        detector.nesting_source = DepthLimitSource::Api;
         detector
     }
 
@@ -406,9 +529,7 @@ impl LoopDetector {
     /// [`on_deep_stack`]). Pair with [`leave_eval`](Self::leave_eval).
     pub(crate) fn enter_eval(&mut self) -> Result<(), EvalError> {
         if self.eval_depth >= self.nesting_max_depth {
-            return Err(EvalError::RecursionDepthExceeded {
-                max_depth: self.nesting_max_depth,
-            });
+            return Err(self.depth_exceeded(DepthGuard::Nesting));
         }
         self.eval_depth += 1;
         Ok(())
@@ -484,8 +605,13 @@ impl LoopDetector {
     /// [`EvalError::LoopDetected`] if the same pair is already on the stack and
     /// [`EvalError::RecursionDepthExceeded`] past `max_depth`. Pair with
     /// [`leave`](Self::leave).
-    pub(crate) fn enter_tree(&mut self, id: TreeId, env_key: EnvFrameKey) -> Result<(), EvalError> {
-        self.enter(LoopFrame::TreeEnv { id, env_key }, id)
+    pub(crate) fn enter_tree(
+        &mut self,
+        id: TreeId,
+        env_key: EnvFrameKey,
+        name: SymId,
+    ) -> Result<(), EvalError> {
+        self.enter(LoopFrame::TreeEnv { id, env_key }, id, name)
     }
 
     /// Pushes a frame keyed by `(symbol, environment)` and checks for a cycle.
@@ -498,7 +624,7 @@ impl LoopDetector {
         env_key: EnvFrameKey,
         node: TreeId,
     ) -> Result<(), EvalError> {
-        self.enter(LoopFrame::SymbolEnv { sym, env_key }, node)
+        self.enter(LoopFrame::SymbolEnv { sym, env_key }, node, sym)
     }
 
     /// Pushes `frame` after the cycle and depth checks shared by both `enter_*`
@@ -506,23 +632,45 @@ impl LoopDetector {
     ///
     /// Returns [`EvalError::LoopDetected`] (blaming `node`) if `frame` is already
     /// on the stack, or [`EvalError::RecursionDepthExceeded`] once `max_depth` is
-    /// reached.
-    fn enter(&mut self, frame: LoopFrame, node: TreeId) -> Result<(), EvalError> {
-        if self.call_stack.contains(&frame) {
-            return Err(EvalError::LoopDetected { node });
-        }
-        if self.call_stack.len() >= self.max_depth {
-            return Err(EvalError::RecursionDepthExceeded {
-                max_depth: self.max_depth,
+    /// reached. The error's cycle is empty: the caller, which has the arena,
+    /// names it with [`Self::cycle_names`].
+    fn enter(&mut self, frame: LoopFrame, node: TreeId, name: SymId) -> Result<(), EvalError> {
+        if let Some(start) = self.call_stack.iter().position(|f| *f == frame) {
+            self.cycle_start = Some(start);
+            return Err(EvalError::LoopDetected {
+                node,
+                cycle: Vec::new(),
             });
         }
+        if self.call_stack.len() >= self.max_depth {
+            return Err(self.depth_exceeded(DepthGuard::Definitions));
+        }
         self.call_stack.push(frame);
+        self.call_names.push(name);
         Ok(())
+    }
+
+    /// The definitions of the cycle last detected, from the one entered again
+    /// to the one that refers back to it, closed by the first: `process`,
+    /// `effect`, `cut`, `process`. Empty when no cycle was detected.
+    pub(crate) fn cycle_names(&self, arena: &tlib::TreeArena) -> Vec<String> {
+        let Some(start) = self.cycle_start else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = self.call_names[start..]
+            .iter()
+            .map(|sym| arena.symbol_name(*sym).unwrap_or("?").to_owned())
+            .collect();
+        if let Some(first) = names.first().cloned() {
+            names.push(first);
+        }
+        names
     }
 
     /// Pops the most recently entered frame, balancing an `enter_*` call.
     pub(crate) fn leave(&mut self) {
         let _ = self.call_stack.pop();
+        let _ = self.call_names.pop();
     }
 
     /// Enters a structural lowering frame (`a2sb` / `a2sb_value`).
@@ -535,7 +683,7 @@ impl LoopDetector {
     pub(crate) fn enter_structural(&mut self) -> Result<(), EvalError> {
         let limit = self.max_depth.min(self.structural_max_depth);
         if self.structural_depth >= limit {
-            return Err(EvalError::RecursionDepthExceeded { max_depth: limit });
+            return Err(self.depth_exceeded(DepthGuard::Structural));
         }
         self.structural_depth += 1;
         Ok(())
@@ -550,14 +698,23 @@ impl LoopDetector {
 
 /// Reads a recursion-depth limit from the environment variable `var_name`,
 /// falling back to `fallback` when it is unset or invalid.
-fn depth_limit_from_env(var_name: &str, fallback: usize) -> usize {
+fn depth_limit_from_env(var_name: &str, fallback: usize) -> DepthLimit {
     depth_limit_from_env_value(std::env::var_os(var_name).as_deref(), fallback)
 }
 
 /// Pure core of [`depth_limit_from_env`], taking the raw value directly so it
 /// can be unit-tested without touching process environment.
-fn depth_limit_from_env_value(raw: Option<&OsStr>, fallback: usize) -> usize {
-    raw.and_then(parse_depth_limit).unwrap_or(fallback)
+fn depth_limit_from_env_value(raw: Option<&OsStr>, fallback: usize) -> DepthLimit {
+    match raw.and_then(parse_depth_limit) {
+        Some(value) => DepthLimit {
+            value,
+            source: DepthLimitSource::Environment,
+        },
+        None => DepthLimit {
+            value: fallback,
+            source: DepthLimitSource::Default,
+        },
+    }
 }
 
 /// Parses a depth limit, accepting only strictly positive integers.
@@ -584,6 +741,247 @@ pub(crate) enum LoopFrame {
 
 #[cfg(test)]
 mod tests {
+    use boxes::{BoxBuilder, BoxMatch, match_box};
+
+    /// Runs `f` on a thread with the CLI's 512 MiB stack: a debug evaluator
+    /// frame costs tens of KiB, more than a test thread holds at budget 64.
+    fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn worker")
+            .join()
+            .expect("the worker should finish, not abort")
+    }
+
+    /// Evaluates `process` of `source` with an identity and structural budget
+    /// of `max_depth`, as `eval_entrypoint_full` does with the default one.
+    fn eval_process_with_budget(source: &str, max_depth: usize) -> Result<(), super::EvalError> {
+        let source = source.to_owned();
+        on_big_stack(move || eval_process_with_budget_here(&source, max_depth))
+    }
+
+    fn eval_process_with_budget_here(
+        source: &str,
+        max_depth: usize,
+    ) -> Result<(), super::EvalError> {
+        let parsed = parser::parse_program(source, "nonconstant_recursion.dsp");
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        let mut arena = parsed.state.arena;
+        let root = parsed.root.expect("a parsed program");
+        let mut env = crate::Environment::empty();
+        crate::definitions::bind_definitions(&mut arena, root, &mut env)?;
+        let mut detector = super::LoopDetector::with_max_depth(max_depth);
+        let entry = BoxBuilder::new(&mut arena).ident("process");
+        let value = crate::eval_value(&mut arena, entry, &env, &mut detector)?;
+        crate::a2sb_value(&mut arena, value, &mut detector)?;
+        assert!(
+            detector.numeric_dispatches.is_empty(),
+            "every dispatch is popped"
+        );
+        Ok(())
+    }
+
+    const CHAIN: &str = "chain(0) = _;\nchain(n) = chain(n-1) : *(0.5);\n";
+
+    /// A recursion whose argument, compared with numbers, is a signal does
+    /// not reach its base case; the error names the argument's position and
+    /// the numbers, and keeps the outermost argument (#21).
+    #[test]
+    fn a_recursion_on_a_signal_compared_with_numbers_is_named() {
+        for (source, position, numbers) in [
+            (
+                format!("{CHAIN}process = chain(hslider(\"order\", 3, 0, 8, 1));"),
+                1,
+                vec!["0"],
+            ),
+            // the shape of fi.bandpass: base cases 0 and 1, step 2
+            (
+                "bp(0) = _;\nbp(1) = *(0.5);\nbp(o) = bp(o-2) : *(0.25);\nprocess = bp(hslider(\"order\", 4, 1, 8, 1));".to_owned(),
+                1,
+                vec!["0", "1"],
+            ),
+            (
+                format!("{CHAIN}smooth = *(0.001) : + ~ *(0.999);\nprocess = chain(hslider(\"order\", 3, 0, 8, 1) : smooth);"),
+                1,
+                vec!["0"],
+            ),
+            (
+                format!("{CHAIN}process = chain(int(hslider(\"order\", 3, 0, 8, 1)));"),
+                1,
+                vec!["0"],
+            ),
+            (
+                "g(x, 0) = x;\ng(x, n) = g(x*0.5, n-1);\nprocess = g(_, nentry(\"n\", 3, 0, 8, 1));".to_owned(),
+                2,
+                vec!["0"],
+            ),
+            (
+                "even(0) = 1;\neven(n) = odd(n-1);\nodd(0) = 0;\nodd(n) = even(n-1);\nprocess = even(button(\"b\"));".to_owned(),
+                1,
+                vec!["0"],
+            ),
+            (format!("{CHAIN}process = _ <: \\(n).(chain(n));"), 1, vec!["0"]),
+        ] {
+            match eval_process_with_budget(&source, 64) {
+                Err(super::EvalError::CaseArgumentNotConstant {
+                    position: got_position,
+                    patterns,
+                    max_depth,
+                    ..
+                }) => {
+                    assert_eq!(got_position, position, "{source}");
+                    assert_eq!(patterns, numbers, "{source}");
+                    assert_eq!(max_depth, 64, "{source}");
+                }
+                other => panic!("{source}: expected CaseArgumentNotConstant, got {other:?}"),
+            }
+        }
+    }
+
+    /// The reported argument is the one the caller passed, before the
+    /// recursion rewrote it (`n - 1 - 1 ...`).
+    #[test]
+    fn the_outermost_argument_is_reported() {
+        on_big_stack(the_outermost_argument_is_reported_here);
+    }
+
+    fn the_outermost_argument_is_reported_here() {
+        let source = format!("{CHAIN}process = chain(hslider(\"order\", 3, 0, 8, 1));");
+        let parsed = parser::parse_program(&source, "outermost.dsp");
+        let mut arena = parsed.state.arena;
+        let root = parsed.root.expect("a parsed program");
+        let mut env = crate::Environment::empty();
+        crate::definitions::bind_definitions(&mut arena, root, &mut env).unwrap();
+        let mut detector = super::LoopDetector::with_max_depth(64);
+        let entry = BoxBuilder::new(&mut arena).ident("process");
+        let err = crate::eval_value(&mut arena, entry, &env, &mut detector)
+            .and_then(|v| crate::a2sb_value(&mut arena, v, &mut detector))
+            .expect_err("a recursion on a slider");
+        let super::EvalError::CaseArgumentNotConstant { argument, .. } = err else {
+            panic!("got {err:?}");
+        };
+        assert!(
+            matches!(match_box(&arena, argument), BoxMatch::HSlider(..)),
+            "the slider itself, not slider - 1 - 1 ..."
+        );
+    }
+
+    /// Valid programs are not affected: a constant, a signal where no number
+    /// is tested, a numeric pattern without recursion, and a finite recursion
+    /// that descends on a number while a signal is also tested.
+    #[test]
+    fn valid_programs_still_evaluate() {
+        for source in [
+            format!("{CHAIN}process = chain(3);"),
+            format!("{CHAIN}N = 2 + 1;\nprocess = chain(N);"),
+            "g(x, 0) = x;\ng(x, n) = g(x*0.5, n-1);\nprocess = g(hslider(\"x\", 0.5, 0, 1, 0.01), 3);".to_owned(),
+            "h(0) = 1;\nh(x) = x*2;\nprocess = h(hslider(\"x\", 0.5, 0, 1, 0.01));".to_owned(),
+            "g(0, x) = x;\ng(n, 0) = 0;\ng(n, x) = g(n-1, x);\nprocess = g(3, hslider(\"x\", 0.5, 0, 1, 0.01));".to_owned(),
+        ] {
+            eval_process_with_budget(&source, 64).unwrap_or_else(|e| panic!("{source}: {e:?}"));
+        }
+    }
+
+    /// A runaway recursion that progresses on a number, or has no numeric
+    /// pattern, keeps the generic error, whatever its other arguments are.
+    #[test]
+    fn other_runaway_recursions_keep_the_generic_error() {
+        for source in [
+            // a real missing base case, on constants
+            "f(0) = _;\nf(n) = f(n+1) : *(0.5);\nprocess = f(3);".to_owned(),
+            // the recursion skips its base case
+            "f(0) = _;\nf(n) = f(n-2) : *(0.5);\nprocess = f(3);".to_owned(),
+            // descends on a number while a signal is tested against 0
+            "g(0, x) = x;\ng(n, 0) = 0;\ng(n, x) = g(n+1, x) : *(0.999);\nprocess = g(3, hslider(\"x\", 0.5, 0, 1, 0.01));".to_owned(),
+            // one dispatch on a signal, then a runaway recursion on constants
+            "f(0) = _;\nf(n) = f(n+1) : *(0.999);\nh(0) = _;\nh(x) = f(3);\nprocess = h(hslider(\"x\", 0.5, 0, 1, 0.01));".to_owned(),
+            // stopped by a run-time test: no numeric pattern
+            "f(n) = select2(n > 0, _, f(n-1) : *(0.5));\nprocess = f(hslider(\"n\", 3, 0, 8, 1));".to_owned(),
+        ] {
+            match eval_process_with_budget(&source, 64) {
+                Err(super::EvalError::RecursionDepthExceeded { .. }) => {}
+                other => panic!("{source}: expected RecursionDepthExceeded, got {other:?}"),
+            }
+        }
+    }
+
+    /// An evaluation cycle names its definitions, closed by the first one
+    /// (#22); a recursion through `~` is not a cycle.
+    #[test]
+    fn an_evaluation_cycle_names_its_definitions() {
+        for (source, cycle) in [
+            ("x = x;\nprocess = x;", vec!["x", "x"]),
+            ("a = b;\nb = a;\nprocess = a;", vec!["a", "b", "a"]),
+            (
+                "a = b + 1;\nb = c * 2;\nc = a;\nprocess = a;",
+                vec!["a", "b", "c", "a"],
+            ),
+            // the shape of the issue: `process` passed to a function
+            (
+                "fade(g) = *(g);\ncut = hslider(\"Cut\", 0, 0, 1, 0.01) : fade(process);\neffect = _ * (1 - cut);\nprocess = effect, cut;",
+                vec!["process", "effect", "cut", "process"],
+            ),
+            (
+                "process = f with { f = g + 1; g = f * 2; };",
+                vec!["f", "g", "f"],
+            ),
+        ] {
+            match eval_process_with_budget(source, 1024) {
+                Err(err @ super::EvalError::LoopDetected { .. }) => {
+                    let super::EvalError::LoopDetected { cycle: got, .. } = &err else {
+                        unreachable!()
+                    };
+                    assert_eq!(got, &cycle, "{source}");
+                    assert_eq!(
+                        err.to_string(),
+                        format!("endless evaluation cycle: {}", cycle.join(" → ")),
+                        "{source}"
+                    );
+                }
+                other => panic!("{source}: expected LoopDetected, got {other:?}"),
+            }
+        }
+        eval_process_with_budget("process = + ~ *(0.5);", 1024).expect("a recursion through ~");
+    }
+
+    /// Folding a pattern argument costs what is new in it (WP2 of the
+    /// runaway-recursion plan): `x` grows by one node per level and is
+    /// compared with 0 at each level. With caches rebuilt at each fold this
+    /// was quadratic, 35 s at 4 000 levels in release; it is now a fraction of
+    /// a second. The budget below is two orders of magnitude above the linear
+    /// cost of a debug build.
+    #[test]
+    fn folding_a_growing_argument_is_linear() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(512 * 1024 * 1024)
+            .spawn(move || {
+                let source = "g(0, x) = x;\ng(n, 0) = 0;\ng(n, x) = g(n-1, x-1);\nprocess = g(2000, hslider(\"x\", 0.5, 0, 1, 0.01));";
+                let parsed = parser::parse_program(source, "linear_folding.dsp");
+                let mut arena = parsed.state.arena;
+                let root = parsed.root.expect("a parsed program");
+                let mut env = crate::Environment::empty();
+                crate::definitions::bind_definitions(&mut arena, root, &mut env).unwrap();
+                // above the debug structural cap of 4 096: 2 000 levels take
+                // about 8 000 frames
+                let mut detector = super::LoopDetector::with_max_depth(1 << 16);
+                detector.structural_max_depth = 1 << 16;
+                let entry = BoxBuilder::new(&mut arena).ident("process");
+                let result = crate::eval_value(&mut arena, entry, &env, &mut detector)
+                    .and_then(|v| crate::a2sb_value(&mut arena, v, &mut detector));
+                let _ = sender.send(result.map(|_| ()));
+            })
+            .expect("spawn worker");
+        let evaluated = receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("2 000 levels of folding a growing argument must finish within the budget");
+        assert!(
+            evaluated.is_ok(),
+            "a finite recursion evaluates: {evaluated:?}"
+        );
+    }
+
     #[test]
     fn eval_nesting_trips_at_its_budget() {
         let mut detector = super::LoopDetector::with_nesting_max_depth(4);
@@ -592,7 +990,7 @@ mod tests {
         }
         assert!(matches!(
             detector.enter_eval(),
-            Err(super::EvalError::RecursionDepthExceeded { max_depth: 4 })
+            Err(super::EvalError::RecursionDepthExceeded { max_depth: 4, .. })
         ));
         // the budget is separate from the call-stack one
         assert!(detector.call_stack.is_empty());
@@ -644,7 +1042,8 @@ mod tests {
         assert!(matches!(
             detector.enter_structural(),
             Err(EvalError::RecursionDepthExceeded {
-                max_depth: DEFAULT_EVAL_MAX_DEPTH
+                max_depth: DEFAULT_EVAL_MAX_DEPTH,
+                ..
             })
         ));
     }
@@ -659,9 +1058,136 @@ mod tests {
         assert!(matches!(
             detector.enter_structural(),
             Err(EvalError::RecursionDepthExceeded {
-                max_depth: STRUCTURAL_HARD_MAX_DEPTH
+                max_depth: STRUCTURAL_HARD_MAX_DEPTH,
+                ..
             })
         ));
+    }
+
+    /// The error of an exhausted guard: its context, and the diagnostic's
+    /// notes, help and facts.
+    fn exhausted(result: Result<(), EvalError>) -> (DepthContext, Vec<String>, String) {
+        use diagnostics::ToDiagnostic;
+        let error = result.expect_err("the guard runs out");
+        let EvalError::RecursionDepthExceeded { context, .. } = error else {
+            panic!("not a depth error: {error:?}");
+        };
+        let diagnostic = error.to_diagnostic();
+        let notes = diagnostic.notes.iter().map(ToString::to_string).collect();
+        let help = diagnostic.help.iter().map(ToString::to_string).collect();
+        (context, notes, help)
+    }
+
+    /// Each guard names itself and the limit that ran out, with where it
+    /// came from (W5 of the 2026-10-08 plan).
+    #[test]
+    fn an_exhausted_guard_names_itself_and_its_limit() {
+        // Definitions, limit from the API.
+        let mut arena = tlib::TreeArena::new();
+        let env = crate::Environment::empty();
+        let name = arena.intern_symbol("f");
+        let mut detector = LoopDetector::with_max_depth(2);
+        let mut result = Ok(());
+        for i in 0..3 {
+            let id = BoxBuilder::new(&mut arena).int(i);
+            result = detector.enter_tree(id, env.frame_key(), name);
+        }
+        let (context, notes, help) = exhausted(result);
+        assert_eq!(context.guard, DepthGuard::Definitions);
+        assert_eq!(context.definitions.source, DepthLimitSource::Api);
+        assert!(
+            notes[0].contains("definitions applied inside one another more than 2"),
+            "{notes:?}"
+        );
+        assert!(
+            notes[1].contains("2 (FAUST_RS_DEFAULT_EVAL_MAX_DEPTH, set by the caller)"),
+            "{notes:?}"
+        );
+        assert!(help.contains("missing base case"), "{help}");
+        assert!(
+            help.contains("`FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=4`"),
+            "{help}"
+        );
+
+        // Structural, bound by the definitions limit.
+        let mut detector = LoopDetector::with_max_depth(2);
+        detector.enter_structural().unwrap();
+        detector.enter_structural().unwrap();
+        let (context, notes, help) = exhausted(detector.enter_structural());
+        assert_eq!(context.guard, DepthGuard::Structural);
+        assert!(
+            notes[1].contains("the smaller of the definitions limit 2"),
+            "{notes:?}"
+        );
+        assert!(
+            help.contains("`FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=4`"),
+            "{help}"
+        );
+        assert!(!help.contains("STRUCTURAL"), "{help}");
+
+        // Structural, bound by the structural cap.
+        let mut detector = LoopDetector::with_max_depth(10);
+        detector.structural_max_depth = 3;
+        for _ in 0..3 {
+            detector.enter_structural().unwrap();
+        }
+        let (_, _, help) = exhausted(detector.enter_structural());
+        assert!(
+            help.contains("`FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH=6`"),
+            "{help}"
+        );
+        assert!(!help.contains("EVAL_MAX_DEPTH"), "{help}");
+
+        // Structural, the two limits equal: both are named.
+        let mut detector = LoopDetector::with_max_depth(3);
+        detector.structural_max_depth = 3;
+        for _ in 0..3 {
+            detector.enter_structural().unwrap();
+        }
+        let (_, _, help) = exhausted(detector.enter_structural());
+        assert!(
+            help.contains(
+                "`FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=6` and `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH=6`"
+            ),
+            "{help}"
+        );
+
+        // Nesting.
+        let mut detector = LoopDetector::with_nesting_max_depth(1);
+        detector.enter_eval().unwrap();
+        let (context, notes, help) = exhausted(detector.enter_eval());
+        assert_eq!(context.guard, DepthGuard::Nesting);
+        assert!(
+            notes[0].contains("nested more than 1 evaluation levels deep"),
+            "{notes:?}"
+        );
+        assert!(
+            help.contains("`FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH=2`"),
+            "{help}"
+        );
+    }
+
+    /// The default limits are attributed to the build profile.
+    #[test]
+    fn a_default_limit_names_the_build_profile() {
+        let mut detector = LoopDetector::with_max_depth(1);
+        detector.max_depth_source = DepthLimitSource::Default;
+        detector.enter_structural().unwrap();
+        let (_, notes, _) = exhausted(detector.enter_structural());
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        assert!(
+            notes[1].contains(&format!("default of this {profile} build")),
+            "{notes:?}"
+        );
+        assert_eq!(
+            notes.iter().any(|n| n.starts_with("build: debug")),
+            cfg!(debug_assertions),
+            "{notes:?}"
+        );
     }
 
     #[test]
@@ -675,7 +1201,7 @@ mod tests {
 
         assert!(matches!(
             detector.enter_structural(),
-            Err(EvalError::RecursionDepthExceeded { max_depth: 3 })
+            Err(EvalError::RecursionDepthExceeded { max_depth: 3, .. })
         ));
     }
 
@@ -683,18 +1209,31 @@ mod tests {
     fn depth_limit_env_parser_accepts_positive_values() {
         assert_eq!(
             depth_limit_from_env_value(Some(OsStr::new(" 2048 ")), 64),
-            2_048
+            DepthLimit {
+                value: 2_048,
+                source: DepthLimitSource::Environment,
+            }
         );
     }
 
     #[test]
     fn depth_limit_env_parser_rejects_missing_zero_or_invalid_values() {
-        assert_eq!(depth_limit_from_env_value(None, 64), 64);
-        assert_eq!(depth_limit_from_env_value(Some(OsStr::new("0")), 64), 64);
-        assert_eq!(depth_limit_from_env_value(Some(OsStr::new("-1")), 64), 64);
+        let fallback = DepthLimit {
+            value: 64,
+            source: DepthLimitSource::Default,
+        };
+        assert_eq!(depth_limit_from_env_value(None, 64), fallback);
+        assert_eq!(
+            depth_limit_from_env_value(Some(OsStr::new("0")), 64),
+            fallback
+        );
+        assert_eq!(
+            depth_limit_from_env_value(Some(OsStr::new("-1")), 64),
+            fallback
+        );
         assert_eq!(
             depth_limit_from_env_value(Some(OsStr::new("not-a-depth")), 64),
-            64
+            fallback
         );
     }
 }

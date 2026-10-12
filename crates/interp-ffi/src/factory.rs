@@ -16,8 +16,10 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use codegen::backends::host_function::HostFunctionSignature;
 use codegen::backends::interp::{
     FAUST_VERSION, clear_foreign_functions, read_fbc, register_foreign_function,
+    register_foreign_function_with_signature, registered_signature_fingerprint,
     unregister_foreign_function,
 };
 use compiler::{
@@ -67,7 +69,9 @@ pub extern "C" fn getCLibFaustVersion() -> *const c_char {
 
 /// Register one host foreign function for interpreter `ffunction(...)` calls.
 ///
-/// This is a Rust extension over the historical interpreter C API.
+/// This is a Rust extension over the historical interpreter C API. A call
+/// uses the types of the `ffunction` declaration, which the host must match;
+/// [`registerCInterpreterForeignFunctionWithSignature`] checks them.
 ///
 /// # Safety
 /// - `name` must be a valid null-terminated C string.
@@ -85,6 +89,48 @@ pub unsafe extern "C" fn registerCInterpreterForeignFunction(
         return;
     };
     register_foreign_function(name, fn_ptr);
+}
+
+/// Register one host foreign function with its C signature, for interpreter
+/// `ffunction(...)` calls.
+///
+/// `signature` is a C prototype, without or with the function's name:
+/// `"float(int, float)"`, `"double w_d(double)"`, `"int(void)"`, with the
+/// types `int`, `float` and `double`. A call then converts its arguments and
+/// its result to these types, as a C prototype makes C do; a declaration of
+/// another shape (argument count, or an `int` result for a real one or the
+/// reverse) fails compilation, naming both. The interpreter calls up to
+/// `foreign_call::MAX_ARGS` arguments. Bytecode compiled under another
+/// signature of the function, read back or cached, fails at the call
+/// (`foreign_function_signature_changed`) rather than calling it wrongly.
+///
+/// Returns `false`, registering nothing, when an argument is null or
+/// `signature` is not such a prototype.
+///
+/// # Safety
+/// - `name` and `signature` must be valid null-terminated C strings.
+/// - `fn_ptr` must be a valid callable function address with that signature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn registerCInterpreterForeignFunctionWithSignature(
+    name: *const c_char,
+    fn_ptr: *mut c_void,
+    signature: *const c_char,
+) -> bool {
+    if name.is_null() || fn_ptr.is_null() || signature.is_null() {
+        return false;
+    }
+    // SAFETY: caller provides valid C strings per the function contract.
+    let (Ok(name), Ok(signature)) = (
+        unsafe { CStr::from_ptr(name) }.to_str(),
+        unsafe { CStr::from_ptr(signature) }.to_str(),
+    ) else {
+        return false;
+    };
+    let Ok(signature) = HostFunctionSignature::parse(signature, Some(name)) else {
+        return false;
+    };
+    register_foreign_function_with_signature(name, fn_ptr, signature);
+    true
 }
 
 /// Unregister one previously registered host foreign function.
@@ -602,14 +648,24 @@ where
 ///   the normalized string before it is hashed, which this reproduces, so a key
 ///   computed here equals the one libfaust computes for the same request.
 ///
-/// Unlike the Cranelift key, this one carries no foreign-function fingerprint,
-/// and does not need one: the interpreter resolves a foreign call by name at
-/// execution time (`executor.rs`, `lookup_foreign_function`), so a re-registered
-/// address reaches a cached factory. A *missing* registration fails compilation
-/// (`compiler/control.rs`, `UnknownMathFunction`) and a failure is never cached.
+/// Unlike the Cranelift key, this one carries no address fingerprint, and
+/// does not need one: the interpreter resolves a foreign call by name at
+/// execution time (`executor.rs`, `lookup_foreign_function_for_call`), so a
+/// re-registered address reaches a cached factory. A *missing* registration
+/// fails compilation (`compiler/control.rs`, `UnknownMathFunction`) and a
+/// failure is never cached. A signature a host registered changes the
+/// bytecode (the arguments are converted to it), so the key holds the
+/// registered signatures when there are any; without them it is the
+/// libfaust key.
 fn source_factory_sha_key(name_app: &str, dsp_content: &str, argv: &[String]) -> String {
     let options = compiler::expand::reorganize_compilation_options(argv);
-    ffi_common::sha1_hex(format!("{name_app}{dsp_content}\"{options}\"").as_bytes())
+    let signatures = registered_signature_fingerprint();
+    let key = format!("{name_app}{dsp_content}\"{options}\"");
+    if signatures.is_empty() {
+        ffi_common::sha1_hex(key.as_bytes())
+    } else {
+        ffi_common::sha1_hex(format!("{key}{signatures}").as_bytes())
+    }
 }
 
 /// Cache identity of a factory read back from bitcode.
@@ -1065,8 +1121,8 @@ mod tests {
         createCInterpreterDSPFactoryFromString, deleteAllCInterpreterDSPFactories,
         deleteCInterpreterDSPFactory, freeCMemory, getCInterpreterDSPFactoryFromSHAKey,
         parse_ffi_compile_args, readCInterpreterDSPFactoryFromBitcode,
-        registerCInterpreterForeignFunction, unregisterCInterpreterForeignFunction,
-        writeCInterpreterDSPFactoryToBitcode,
+        registerCInterpreterForeignFunction, registerCInterpreterForeignFunctionWithSignature,
+        unregisterCInterpreterForeignFunction, writeCInterpreterDSPFactoryToBitcode,
     };
     use crate::instance::createCInterpreterDSPInstance;
     use crate::types::{FbcDspFactoryAny, InterpreterDspFactory};
@@ -1086,6 +1142,247 @@ mod tests {
 
     extern "C" fn ffi_interp_test_gain(x: f32) -> f32 {
         x * 2.0
+    }
+
+    /// The shape of `jn(int, float)`.
+    extern "C" fn ffi_interp_test_jn(n: i32, x: f32) -> f32 {
+        n as f32 * 100.0 + x
+    }
+
+    extern "C" fn ffi_interp_typed_twice_d(x: f64) -> f64 {
+        2.0 * x + 0.25
+    }
+
+    extern "C" fn ffi_interp_typed_mix_d(n: i32, a: f64) -> f64 {
+        f64::from(n) + 10.0 * a
+    }
+
+    fn register_typed(name: &std::ffi::CStr, f: *const (), signature: &std::ffi::CStr) -> bool {
+        unsafe {
+            registerCInterpreterForeignFunctionWithSignature(
+                name.as_ptr(),
+                f.cast_mut().cast(),
+                signature.as_ptr(),
+            )
+        }
+    }
+
+    /// The first output over 4 frames of a single-precision program with one
+    /// input held at 0.5.
+    fn render_first_output(name: &str, source: &str) -> Vec<f32> {
+        use crate::instance::{
+            computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
+            deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
+        };
+        let factory = compile_factory_from_string_fastlane(name, source, &[])
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        let factory_ptr = cache_test_factory(factory);
+        let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
+        assert!(!dsp.is_null(), "instance creation must succeed");
+        unsafe { initCInterpreterDSPInstance(dsp, 44100) };
+        let input = [0.5_f32; 4];
+        let mut output = vec![0.0_f32; 4];
+        let mut inputs = [input.as_ptr().cast_mut()];
+        let mut outputs = [output.as_mut_ptr()];
+        unsafe {
+            computeCInterpreterDSPInstance(dsp, 4, inputs.as_mut_ptr(), outputs.as_mut_ptr());
+            deleteCInterpreterDSPInstance(dsp);
+        }
+        assert!(unsafe { deleteCInterpreterDSPFactory(factory_ptr) });
+        output
+    }
+
+    /// A host function registered with its signature gets its arguments and
+    /// result converted: a `double` function declared `float`, an `int`
+    /// parameter given a real.
+    #[test]
+    fn a_typed_host_function_is_called_with_its_signature() {
+        let _guard = crate::test_serial_guard();
+        clearCInterpreterForeignFunctions();
+        assert!(register_typed(
+            c"ffi_interp_typed_twice_d",
+            ffi_interp_typed_twice_d as *const (),
+            c"double(double)"
+        ));
+        assert!(register_typed(
+            c"ffi_interp_typed_mix_d",
+            ffi_interp_typed_mix_d as *const (),
+            c"double ffi_interp_typed_mix_d(int, double)"
+        ));
+        assert_eq!(
+            render_first_output(
+                "Typed",
+                "f = ffunction(float ffi_interp_typed_twice_d(float), \"t.h\", \"\");\nprocess = f;\n"
+            ),
+            [1.25; 4]
+        );
+        assert_eq!(
+            render_first_output(
+                "TypedMix",
+                "f = ffunction(float ffi_interp_typed_mix_d(float, float), \"t.h\", \"\");\n\
+                 process = f(2.7);\n"
+            ),
+            [7.0; 4]
+        );
+        clearCInterpreterForeignFunctions();
+    }
+
+    #[test]
+    fn a_typed_host_function_declared_with_another_shape_is_refused() {
+        let _guard = crate::test_serial_guard();
+        clearCInterpreterForeignFunctions();
+        assert!(register_typed(
+            c"ffi_interp_typed_twice_d",
+            ffi_interp_typed_twice_d as *const (),
+            c"double(double)"
+        ));
+        for (declaration, call) in [
+            (
+                "float ffi_interp_typed_twice_d(float, float)",
+                "2 arguments and a `float` result",
+            ),
+            (
+                "int ffi_interp_typed_twice_d(float)",
+                "1 argument and an `int` result",
+            ),
+        ] {
+            let source = format!("f = ffunction({declaration}, \"t.h\", \"\");\nprocess = f;\n");
+            let Err(error) = compile_factory_from_string_fastlane("TypedShape", &source, &[])
+            else {
+                panic!("{declaration} compiled");
+            };
+            assert!(
+                error.contains(&format!(
+                    "`ffi_interp_typed_twice_d` does not have the signature of the host function \
+                     registered under that name, `double ffi_interp_typed_twice_d(double)`: the \
+                     call has {call}; declare it `float ffi_interp_typed_twice_d(float)`"
+                )),
+                "{error}"
+            );
+        }
+        for signature in [c"float(long)", c"float(float", c"double other(double)"] {
+            assert!(!register_typed(
+                c"ffi_interp_typed_bad",
+                ffi_interp_typed_twice_d as *const (),
+                signature
+            ));
+        }
+        clearCInterpreterForeignFunctions();
+    }
+
+    /// A registered signature changes the bytecode, so it is in the cache
+    /// key; without one, the key is the libfaust one.
+    #[test]
+    fn a_registered_signature_is_in_the_source_key() {
+        let _guard = crate::test_serial_guard();
+        clearCInterpreterForeignFunctions();
+        let key = || super::source_factory_sha_key("interp_key_parity", "process = _;", &[]);
+        let libfaust = "A3EC7200AD53D7395A75B098F9B2C542393EA3CC";
+        unsafe {
+            registerCInterpreterForeignFunction(
+                c"ffi_interp_typed_twice_d".as_ptr(),
+                (ffi_interp_typed_twice_d as *const ()).cast_mut().cast(),
+            );
+        }
+        assert_eq!(key(), libfaust);
+        assert!(register_typed(
+            c"ffi_interp_typed_twice_d",
+            ffi_interp_typed_twice_d as *const (),
+            c"double(double)"
+        ));
+        let typed = key();
+        assert_ne!(typed, libfaust);
+        assert!(register_typed(
+            c"ffi_interp_typed_twice_d",
+            ffi_interp_typed_twice_d as *const (),
+            c"float(float)"
+        ));
+        assert_ne!(key(), typed);
+        clearCInterpreterForeignFunctions();
+        assert_eq!(key(), libfaust);
+    }
+
+    /// `name(args)` computed by the system's C math library.
+    fn libm(name: &str, args: &[foreign_call::Value]) -> f32 {
+        let function = foreign_call::libm_function(name).expect(name).function;
+        match foreign_call::invoke(function.address(), function.ret(), args) {
+            Some(foreign_call::Value::Float32(x)) => x,
+            Some(foreign_call::Value::Float64(x)) => x as f32,
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+
+    extern "C" fn ffi_interp_host_cbrtf(_: f32) -> f32 {
+        42.0
+    }
+
+    /// The `maths.lib` declarations the interpreter has no opcode for call
+    /// the system's C math library, with the checks and conversions of a
+    /// typed registration; a host registration replaces one.
+    #[test]
+    fn a_c_math_library_function_is_called_by_the_interpreter() {
+        use foreign_call::Value::{Float32 as F, Float64 as D, Int32 as I};
+        let _guard = crate::test_serial_guard();
+        clearCInterpreterForeignFunctions();
+        let program = |declaration: &str, process: &str| {
+            format!("f = ffunction({declaration}, <math.h>, \"\");\nprocess = {process};\n")
+        };
+        for (declaration, process, expected) in [
+            (
+                "float cbrtf|cbrt|cbrtl (float)",
+                "f(8.5)",
+                libm("cbrtf", &[F(8.5)]),
+            ),
+            (
+                "float hypotf|hypot|hypotl (float, float)",
+                "f(2.5, 4.5)",
+                libm("hypotf", &[F(2.5), F(4.5)]),
+            ),
+            ("float ldexpf|ldexp|ldexpl (float, int)", "f(1.5, 3)", 12.0),
+            ("int ilogbf|ilogb|ilogbl (float)", "f(10)", 3.0),
+            ("float j0(float)", "f(1.5)", libm("j0", &[D(1.5)])),
+            (
+                "float jn(int, float)",
+                "f(2, 1.5)",
+                libm("jn", &[I(2), D(1.5)]),
+            ),
+        ] {
+            assert_eq!(
+                render_first_output("Libm", &program(declaration, process)),
+                [expected; 4],
+                "{declaration}"
+            );
+        }
+        let Err(error) = compile_factory_from_string_fastlane(
+            "LibmShape",
+            &program("int cbrtf(float)", "f(8)"),
+            &[],
+        ) else {
+            panic!("`int cbrtf(float)` compiled");
+        };
+        assert!(
+            error.contains(
+                "`cbrtf` does not have the signature of the C math library function \
+                 `float cbrtf(float)`: the call has 1 argument and an `int` result"
+            ),
+            "{error}"
+        );
+        unsafe {
+            registerCInterpreterForeignFunction(
+                c"cbrtf".as_ptr(),
+                (ffi_interp_host_cbrtf as *const ()).cast_mut().cast(),
+            );
+        }
+        assert_eq!(
+            render_first_output("LibmHost", &program("float cbrtf(float)", "f(8)")),
+            [42.0; 4]
+        );
+        clearCInterpreterForeignFunctions();
+    }
+
+    /// Three mixed arguments, as `jn` and `ldexp` together.
+    extern "C" fn ffi_interp_test_mix(x: f32, e: i32, y: f32) -> f32 {
+        x * e as f32 + y
     }
 
     #[test]
@@ -1342,6 +1639,63 @@ mod tests {
         assert!(unsafe { deleteCInterpreterDSPFactory(factory_ptr) });
     }
 
+    /// A host function of mixed argument types is called: `foreign_call`
+    /// enumerated the homogeneous signatures of up to two arguments only, so
+    /// `jn(int, float)`, `ldexp(float, int)` and their kind failed to compile
+    /// ("outside the interpreter foreign-call ABI").
+    #[test]
+    fn a_mixed_signature_foreign_function_executes_in_interp_ffi() {
+        let _guard = crate::test_serial_guard();
+        use crate::instance::{
+            computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
+            deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
+        };
+        clearCInterpreterForeignFunctions();
+        unsafe {
+            registerCInterpreterForeignFunction(
+                c"ffi_interp_test_jn".as_ptr(),
+                (ffi_interp_test_jn as *const ()).cast_mut().cast(),
+            );
+            registerCInterpreterForeignFunction(
+                c"ffi_interp_test_mix".as_ptr(),
+                (ffi_interp_test_mix as *const ()).cast_mut().cast(),
+            );
+        }
+        let factory_any = compile_factory_from_string_fastlane(
+            "ExecMixed",
+            "jn = ffunction(float ffi_interp_test_jn(int, float), \"t.h\", \"\");\n\
+             mix = ffunction(float ffi_interp_test_mix(float, int, float), \"t.h\", \"\");\n\
+             process = _ <: jn(2), mix(_, 3, 0.25);\n",
+            &["-cn".to_owned(), "ExecMixed".to_owned()],
+        )
+        .expect("a mixed signature compiles");
+        let factory_ptr = cache_test_factory(factory_any);
+        let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
+        assert!(!dsp.is_null(), "instance creation must succeed");
+        unsafe { initCInterpreterDSPInstance(dsp, 44100) };
+
+        const FRAMES: usize = 4;
+        let input_data = [0.5_f32; FRAMES];
+        let mut jn_out = vec![0.0_f32; FRAMES];
+        let mut mix_out = vec![0.0_f32; FRAMES];
+        let mut inputs = [input_data.as_ptr().cast_mut()];
+        let mut outputs = [jn_out.as_mut_ptr(), mix_out.as_mut_ptr()];
+        unsafe {
+            computeCInterpreterDSPInstance(
+                dsp,
+                FRAMES as i32,
+                inputs.as_mut_ptr(),
+                outputs.as_mut_ptr(),
+            );
+        }
+        assert_eq!(jn_out, [200.5; FRAMES]);
+        assert_eq!(mix_out, [1.75; FRAMES]);
+
+        clearCInterpreterForeignFunctions();
+        unsafe { deleteCInterpreterDSPInstance(dsp) };
+        assert!(unsafe { deleteCInterpreterDSPFactory(factory_ptr) });
+    }
+
     /// Two different programs alive at once are two factories. Their cache
     /// key used to be the empty `sha_key` the compiler leaves, so the second
     /// `create` coalesced onto the first program's entry and returned it.
@@ -1505,6 +1859,7 @@ mod tests {
 
     #[test]
     fn a_source_key_is_the_digest_libfaust_computes() {
+        let _guard = crate::test_serial_guard();
         // C++ `sha1FromDSP` (`dsp_aux.cpp:216`) hashes
         // `name_app + dsp_content + quote(reorganizeCompilationOptions(argv))`.
         // The two digests below were produced outside this code base from that
@@ -1606,6 +1961,12 @@ mod tests {
             )
         );
         assert!(header.contains("void unregisterCInterpreterForeignFunction(const char* name);"));
+        assert!(header.contains("inline bool registerInterpreterForeignFunction("));
+        assert!(header.contains("bool registerCInterpreterForeignFunctionWithSignature("));
+        assert!(
+            include_str!("../include/interpreter-dsp-c.h")
+                .contains("bool registerCInterpreterForeignFunctionWithSignature(")
+        );
         assert!(header.contains("void clearCInterpreterForeignFunctions(void);"));
         assert!(header.contains("inline void registerInterpreterForeignFunction("));
         assert!(

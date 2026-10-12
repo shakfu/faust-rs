@@ -545,7 +545,10 @@ line — the report C++ prints under `-wall` from its own table promotion.
 
 `--compilation-time` (`-time` compatibility) prints per-phase timing lines to
 stderr. `--timeout` sets a global compilation timeout in seconds (default:
-`120`; `0` disables the watchdog).
+`120`; `0` disables it, for the watchdog and the per-phase check alike). A
+compilation that exceeds it fails with `FRS-COMP-0008`: one `ERROR:
+compilation timeout ...` line on stderr, or, under `--error-format json`, one
+diagnostics document on stdout like any other failure.
 
 ### `--fir-fixture <name>` and `--list-fir-fixtures`
 
@@ -662,7 +665,15 @@ These flags are only meaningful together with `--svg`.
 These print one line and exit before any compilation.
 
 - `-v, --version` (`-version` compatibility): print `faust-rs <version>` plus
-  copyright text.
+  copyright text. A build from a Git checkout follows the version with the
+  short commit hash and its date, `faust-rs 0.8.0 (2199d069 2026-10-06)`; a
+  build from a source archive prints the version alone. The package version
+  only changes at a release, so every commit between two releases prints the
+  same one: to check that a binary is the commit a project pins
+  (`cargo install --git ... --rev <hash>`), compare the commit, or the
+  `compiler.commit` field of the diagnostics JSON (`--check --error-format
+  json`), which carries the full hash. Generated code names the package
+  version only.
 - `--libdir` (`-libdir`): print the directory containing libfaust libraries.
 - `--includedir` (`-includedir`): print the directory containing Faust
   headers.
@@ -730,3 +741,31 @@ parsing, so these historical Faust spellings keep working:
 - Pipeline or I/O error: non-zero exit with diagnostics on stderr.
 - Invalid command line (unusable flag combination, more than one mode, etc.):
   exit code `2`.
+
+## 12. Evaluation depth limits
+
+The evaluator bounds three depths, and stops with `FRS-EVAL-0099`
+("stack overflow in eval") when one runs out. The C++ compiler checks its
+stack address instead; these are logical budgets, and the stack itself grows
+as needed.
+
+| Guard | Counts | Variable | Debug default | Release default |
+|---|---|---|---:|---:|
+| definitions | definitions applied inside one another | `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH` | 1 024 | 32 768 |
+| structural | levels of lowering the evaluated expression to a block diagram; bounded by the smaller of this cap and the definitions limit | `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH` | 4 096 | 32 768 |
+| nesting | syntactic nesting of the expression (two entries per binary operator) | `FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH` | 400 000 | 400 000 |
+
+- A variable is read when the compilation starts. It must be a positive
+  decimal integer; a missing, invalid or zero value keeps the default.
+- An embedding that sets a definitions limit through the API
+  (`LoopDetector::with_max_depth`) replaces the variable; the structural cap
+  still applies.
+- The diagnostic names the guard, the limit and where it came from, and the
+  variable to raise. In a debug build it also gives the release defaults:
+  a program a debug build rejects may compile in release.
+- A recursion that never ends stops at a limit whatever its value: raise one
+  only for a finite program that is this deep.
+
+```bash
+FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=100000 faust-rs deep.dsp -o deep.cpp
+```

@@ -163,6 +163,37 @@ fn assert_diagnostics_v2_shape(value: &serde_json::Value, case: &Path) {
         "compiler for {}",
         case.display()
     );
+    // `commit` and `commit_date` are optional, but come together.
+    let commit = value["compiler"].get("commit");
+    let commit_date = value["compiler"].get("commit_date");
+    assert_eq!(
+        commit.is_some(),
+        commit_date.is_some(),
+        "compiler commit and commit_date for {}",
+        case.display()
+    );
+    if let (Some(commit), Some(date)) = (commit, commit_date) {
+        let commit = commit.as_str().unwrap_or_default();
+        assert!(
+            matches!(commit.len(), 40 | 64)
+                && commit
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "compiler commit for {}: {commit}",
+            case.display()
+        );
+        let date = date.as_str().unwrap_or_default();
+        assert!(
+            date.len() == 10
+                && date.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }),
+            "compiler commit_date for {}: {date}",
+            case.display()
+        );
+    }
     assert!(
         value["request"].is_object(),
         "request for {}",
@@ -310,6 +341,29 @@ fn json_schema_and_every_negative_corpus_entry_are_structurally_valid() {
             );
         }
     }
+}
+
+#[test]
+fn json_compiler_block_names_the_commit_of_the_build() {
+    // grame-cncm/faust-rs#20: the package version is the same for every commit
+    // between two releases, so a downstream pin is checked against the commit.
+    let output = run_check_json(&corpus_path("err_01_parse_missing_rhs.dsp"), &[]);
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("v2 output should be one JSON document");
+    let compiler_block = &value["compiler"];
+    assert_eq!(compiler_block["version"], compiler::Compiler::version());
+    assert_eq!(
+        compiler_block
+            .get("commit")
+            .and_then(serde_json::Value::as_str),
+        compiler::Compiler::commit()
+    );
+    assert_eq!(
+        compiler_block
+            .get("commit_date")
+            .and_then(serde_json::Value::as_str),
+        compiler::Compiler::commit_date()
+    );
 }
 
 // ─── D1 x D2: one failure case per stage-family namespace ──────────────────
@@ -493,6 +547,183 @@ fn codegen_backend_failure_is_structured() {
     );
 }
 
+/// Each of the evaluator's three depth guards names itself and the limit that
+/// ran out, in the JSON facts and the notes (the 2026-10-08 audit, W5). The
+/// budgets are lowered per subprocess, never in this process's environment.
+#[test]
+fn an_exhausted_depth_guard_names_itself_and_its_limit() {
+    let dir = std::env::temp_dir().join(format!("faust_rs_cli_w5_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let aliases: String = std::iter::once("a0 = 1;".to_owned())
+        .chain((1..=100).map(|i| format!("a{i} = a{};", i - 1)))
+        .chain(std::iter::once("process = a100;".to_owned()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let nested = format!("process = {};\n", vec!["1"; 200].join("+"));
+    let chain = "chain(0) = 0;\nchain(n) = chain(n-1) + 1;\nprocess = chain(200);\n";
+    /// A program, the budgets lowered for it, and the guard and variables
+    /// its diagnostic must name.
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        &'a str,
+        &'a [&'a str],
+    );
+    let cases: [Case<'_>; 4] = [
+        (
+            "aliases",
+            &aliases,
+            &[("FAUST_RS_DEFAULT_EVAL_MAX_DEPTH", "64")],
+            "definitions",
+            &["FAUST_RS_DEFAULT_EVAL_MAX_DEPTH"],
+        ),
+        (
+            "chain_cap",
+            chain,
+            &[("FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH", "64")],
+            "structural",
+            &["FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH"],
+        ),
+        (
+            "chain_tie",
+            chain,
+            &[
+                ("FAUST_RS_DEFAULT_EVAL_MAX_DEPTH", "64"),
+                ("FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH", "64"),
+            ],
+            "structural",
+            &[
+                "FAUST_RS_DEFAULT_EVAL_MAX_DEPTH",
+                "FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH",
+            ],
+        ),
+        (
+            "nested",
+            &nested,
+            &[("FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH", "64")],
+            "nesting",
+            &["FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH"],
+        ),
+    ];
+    for (stem, source, env, guard, variables) in cases {
+        let path = dir.join(format!("{stem}.dsp"));
+        std::fs::write(&path, source).expect("write the program");
+        let mut command = Command::new(bin_path());
+        command
+            .arg(&path)
+            .args(["--check", "--error-format", "json"])
+            .env_remove("FAUST_RS_DEFAULT_EVAL_MAX_DEPTH")
+            .env_remove("FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH")
+            .env_remove("FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("run faust-rs");
+        assert!(!output.status.success(), "{stem}");
+        let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
+        let parsed: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{stem}: one JSON document: {e}\n{stdout}"));
+        let diag = &parsed["diagnostics"][0];
+        assert_eq!(diag["code"], "FRS-EVAL-0099", "{stem}");
+        assert_eq!(
+            diag["facts"]["depth_guard"]["value"], guard,
+            "{stem}: {diag}"
+        );
+        assert_eq!(diag["facts"]["depth_limit"]["value"], 64, "{stem}: {diag}");
+        assert_eq!(
+            diag["facts"]["depth_limit_variables"]["value"],
+            serde_json::json!(variables),
+            "{stem}: {diag}"
+        );
+        let notes = diag["notes"].to_string();
+        assert!(notes.contains("set in the environment"), "{stem}: {notes}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `-lang cranelift` fails on a foreign function the JIT cannot call, rather
+/// than reporting a successful compilation of a no-op `compute` (the
+/// 2026-10-08 audit, W1). A math function the backend implements still
+/// compiles. The headers are named, never read: the programs are
+/// self-contained.
+#[test]
+fn cranelift_rejects_an_unbound_foreign_call_and_keeps_supported_math() {
+    let dir = std::env::temp_dir().join(format!("faust_rs_cli_w1_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let unbound = dir.join("unbound.dsp");
+    std::fs::write(
+        &unbound,
+        "f = ffunction(float w1_unbound(float), \"w1.h\", \"\");\nprocess = f;\n",
+    )
+    .expect("write the program");
+    let output = Command::new(bin_path())
+        .arg(&unbound)
+        .args(["-lang", "cranelift", "--error-format", "json"])
+        .output()
+        .expect("run faust-rs");
+    assert!(!output.status.success(), "a no-op compute must not succeed");
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one clean JSON document: {e}\n{stdout}"));
+    let diag = &parsed["diagnostics"][0];
+    assert_eq!(diag["code"], "FRS-CODEGEN-0001");
+    assert_eq!(diag["detail_code"], "FRS-CGEN-CLIF-0002");
+    let message = diag["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("`w1_unbound` has no Cranelift implementation"),
+        "{diag}"
+    );
+
+    let tanh = dir.join("tanh.dsp");
+    std::fs::write(
+        &tanh,
+        "t = ffunction(float tanhf|tanh|tanhl(float), <math.h>, \"\");\nprocess = t;\n",
+    )
+    .expect("write the program");
+    for precision in [None, Some("-double")] {
+        let output = Command::new(bin_path())
+            .arg(&tanh)
+            .args(["-lang", "cranelift"])
+            .args(precision)
+            .output()
+            .expect("run faust-rs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("compute_body_lowered: true"),
+            "{precision:?}: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // A math function declared with another shape names both signatures.
+    let shape = dir.join("shape.dsp");
+    std::fs::write(
+        &shape,
+        "t = ffunction(int tanhf(int), <math.h>, \"\");\nprocess = t;\n",
+    )
+    .expect("write the program");
+    let output = Command::new(bin_path())
+        .arg(&shape)
+        .args(["-lang", "cranelift", "--error-format", "json"])
+        .output()
+        .expect("run faust-rs");
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one clean JSON document: {e}\n{stdout}"));
+    let diag = &parsed["diagnostics"][0];
+    assert_eq!(diag["detail_code"], "FRS-CGEN-CLIF-0002");
+    let message = diag["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(
+            "implements, `float tanhf(float)`: the call has 1 argument and an `int` result"
+        ),
+        "{diag}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Division by a constant zero must be a structured diagnostic, not a panic.
 ///
 /// Parity: the reference C++ compiler rejects `process = _ / (0 : *(0));`
@@ -664,4 +895,45 @@ fn error_format_json_failure_with_dump_mode_is_clean_json_on_stdout() {
          --error-format json, got stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+// ─── --timeout 0 disables the deadline (W2 of the 2026-10-08 plan) ─────────
+
+#[test]
+fn zero_timeout_disables_the_deadline_in_source_and_fixture_modes() {
+    // the phase timer used to reject every compilation against a zero-second
+    // limit while the watchdog took 0 as "disabled"
+    let dir = std::env::temp_dir().join(format!("faust-rs-zero-timeout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let tiny = dir.join("tiny_zero_timeout.dsp");
+    std::fs::write(&tiny, "process = _ : *(0.5);\n").expect("write the program");
+    for flag in ["--timeout", "-timeout"] {
+        let output = Command::new(bin_path())
+            .args(["--check", flag, "0"])
+            .arg(&tiny)
+            .output()
+            .expect("run faust-rs");
+        assert!(
+            output.status.success(),
+            "{flag} 0: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = Command::new(bin_path())
+        .args([
+            "--fir-fixture",
+            "sine_phasor",
+            "--timeout",
+            "0",
+            "-lang",
+            "cpp",
+        ])
+        .output()
+        .expect("run faust-rs");
+    assert!(
+        output.status.success(),
+        "fixture mode: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

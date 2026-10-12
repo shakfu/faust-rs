@@ -195,7 +195,9 @@ use simplify::*;
 use ui_widgets::*;
 
 pub use environment::Environment;
-pub use error::{EvalError, EvalStats, EvalWarning};
+pub use error::{
+    DepthContext, DepthGuard, DepthLimit, DepthLimitSource, EvalError, EvalStats, EvalWarning,
+};
 pub use loop_detector::LoopDetector;
 use loop_detector::on_deep_stack;
 pub use source_context::{EvalSourceContext, SamplePrecision};
@@ -504,7 +506,7 @@ fn a2sb(
     }
 
     loop_detector.enter_structural()?;
-    let outcome = a2sb_match(arena, expr, loop_detector);
+    let outcome = on_deep_stack(|| a2sb_match(arena, expr, loop_detector));
     loop_detector.leave_structural();
     let result = outcome?;
     loop_detector.symbolic_box_cache.insert(expr, result);
@@ -1192,7 +1194,9 @@ fn eval_ident_value(
                 // Shadowing sentinel used for lambda parameters in lexical scopes.
                 return Ok(EvalValue::Box(expr));
             }
-            loop_detector.enter_tree(value, env.frame_key())?;
+            loop_detector
+                .enter_tree(value, env.frame_key(), binding_sym)
+                .map_err(|e| e.with_cycle_names(loop_detector, arena))?;
             let out = eval_value(arena, value, env, loop_detector);
             loop_detector.leave();
             out
@@ -1204,11 +1208,11 @@ fn eval_ident_value(
             ) {
                 return Ok(EvalValue::Closure(closure));
             }
-            loop_detector.enter_symbol_env(
-                binding_sym,
-                env.frame_key_for(binding_env_id),
-                closure.expr,
-            )?;
+            loop_detector
+                // a cycle is blamed on the use that closes it, the identifier,
+                // not on the body it re-enters
+                .enter_symbol_env(binding_sym, env.frame_key_for(binding_env_id), expr)
+                .map_err(|e| e.with_cycle_names(loop_detector, arena))?;
             let out = eval_value(arena, closure.expr, &closure.env, loop_detector);
             loop_detector.leave();
             // Record def-name → box mapping for SVG folding (C++ setDefNameProperty).
@@ -1973,7 +1977,7 @@ mod simplify_helpers_tests {
     fn simplify_pattern_literal_int() {
         let mut arena = TreeArena::default();
         let b7 = BoxBuilder::new(&mut arena).int(7);
-        let result = super::simplify_pattern(&mut arena, b7);
+        let result = super::simplify::simplify_pattern_in(&mut arena, b7, &mut Default::default());
         assert!(matches!(match_box(&arena, result), BoxMatch::Int(7)));
     }
 
@@ -1984,7 +1988,8 @@ mod simplify_helpers_tests {
     fn simplify_pattern_arithmetic_expression() {
         let mut arena = TreeArena::default();
         let box_add = make_int_add(&mut arena, 2, 3);
-        let result = super::simplify_pattern(&mut arena, box_add);
+        let result =
+            super::simplify::simplify_pattern_in(&mut arena, box_add, &mut Default::default());
         assert!(
             matches!(match_box(&arena, result), BoxMatch::Int(5)),
             "expected boxInt(5)"
@@ -2005,7 +2010,7 @@ mod simplify_helpers_tests {
             let op = b.div();
             b.seq(args, op)
         };
-        let result = super::simplify_pattern(&mut arena, div);
+        let result = super::simplify::simplify_pattern_in(&mut arena, div, &mut Default::default());
         match match_box(&arena, result) {
             BoxMatch::Real(v) => assert!((v - (1.0 / 3.0)).abs() < 1e-12),
             other => panic!("expected boxReal(1/3), got {other:?}"),
@@ -2017,7 +2022,8 @@ mod simplify_helpers_tests {
     fn simplify_pattern_wire_unchanged() {
         let mut arena = TreeArena::default();
         let wire = BoxBuilder::new(&mut arena).wire();
-        let result = super::simplify_pattern(&mut arena, wire);
+        let result =
+            super::simplify::simplify_pattern_in(&mut arena, wire, &mut Default::default());
         assert_eq!(result, wire, "Wire should be returned unchanged");
     }
 
@@ -2387,7 +2393,10 @@ mod simplify_helpers_tests {
         assert!(
             matches!(
                 err,
-                crate::EvalError::RecursionDepthExceeded { max_depth: 1_000 }
+                crate::EvalError::RecursionDepthExceeded {
+                    max_depth: 1_000,
+                    ..
+                }
             ),
             "got {err:?}"
         );

@@ -56,13 +56,15 @@ mod core;
 mod host;
 mod jit_data;
 mod lowering;
+mod math;
 mod subset;
 
+pub use crate::backends::host_function::{HostFunctionSignature, HostScalarType};
 pub use api::{diagnose_cranelift_compute_subset_gap, generate_cranelift_module};
 pub use core::{
     BACKEND_NAME, CraneliftBackendError, CraneliftBackendErrorCode, CraneliftOptLevel,
-    CraneliftOptions, JitDspModule, StaticMemorySlot, StructFieldKind, StructFieldLayout,
-    StructLayoutPlan, backend_id,
+    CraneliftOptions, ExternFunction, JitDspModule, StaticMemorySlot, StructFieldKind,
+    StructFieldLayout, StructLayoutPlan, backend_id,
 };
 
 pub(crate) use core::*;

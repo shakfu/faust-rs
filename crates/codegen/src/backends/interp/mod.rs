@@ -53,7 +53,8 @@ pub use factory::FbcDspFactory;
 pub use fbc_to_cpp::{FbcCppError, FbcCppOptions, generate_cpp_from_fbc};
 pub use foreign::{
     ForeignScalarType, ForeignSignature, clear_foreign_functions, is_registered_foreign_function,
-    lookup_foreign_function, register_foreign_function, unregister_foreign_function,
+    lookup_foreign_function, register_foreign_function, register_foreign_function_with_signature,
+    registered_signature_fingerprint, unregister_foreign_function,
 };
 pub use instance::{FbcDspInstance, FbcDspRuntimeError};
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
@@ -179,6 +180,14 @@ impl std::error::Error for CodegenError {}
 /// - `InterpreterInstVisitor<REAL>` + `interpreter_dsp_factory_aux` in
 ///   `interpreter_instructions.hh` / `interpreter_dsp_aux.hh`.
 pub fn generate_interp_module<R: real::FbcReal>(
+    store: &fir::FirStore,
+    module: fir::FirId,
+    options: &InterpOptions,
+) -> Result<FbcDspFactory<R>, CodegenError> {
+    fir::on_compile_stack(|| generate_interp_module_step(store, module, options))
+}
+
+fn generate_interp_module_step<R: real::FbcReal>(
     store: &fir::FirStore,
     module: fir::FirId,
     options: &InterpOptions,

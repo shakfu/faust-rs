@@ -2,7 +2,7 @@
 
 Status: living compatibility registry
 
-Last reviewed: 2026-10-01 (soundfile channel wrap); full review 2026-08-13
+Last reviewed: 2026-10-10 (runaway recursion and evaluation cycles); full review 2026-08-13
 
 C++ reference: `master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`
 
@@ -207,6 +207,8 @@ must run unchanged with Faust C++ should not pass them.
 | DIFF-CLI-006 | compilation-options text | `adapted` | Rust prints flags only when they differ from the CLI default, except precision, which is always printed. C++ prints some defaults, notably `-mcd`, unconditionally. Rust also records its own `-table-init`, `--table-init-sample-rate`, and `-dlt` settings. |
 | DIFF-CLI-007 | `-ec`/`-os` capability validation | `adapted` | Rust rejects unsupported backend combinations and block-sensitive one-sample programs with stable typed diagnostics. `-ec` on FIR is intentionally exposed as a Rust diagnostic/inspection extension. |
 | DIFF-CLI-008 | unknown or invalid combinations | `adapted` | The Rust CLI generally fails early through typed option validation rather than relying on permissive legacy parsing or a later backend failure. Scripts depending on C++ option coercion must be corrected. |
+| DIFF-CLI-012 | `--timeout` / `-timeout` deadline machinery | `adapted` | Rust combines a cooperative cancellation flag, a CLI watchdog, and phase-boundary checks. Both read one deadline rule (`cli/timer.rs`: `deadline`, `expired`), and `0` disables the limit for both; until 2026-10-10 the phase timer rejected every compilation under `--timeout 0`. A compilation that exceeds the limit fails with `FRS-COMP-0008`, also as a diagnostics-v2 document on stdout under `--error-format json` (it printed nothing on stdout before). C++ `-t` stops the process with a text message. Evidence: the tests of `cli/timer.rs` and `zero_timeout_disables_the_deadline_in_source_and_fixture_modes` in `crates/compiler/tests/cli_diagnostics_channel.rs`. |
+| DIFF-CLI-013 | `-v` / `--version` text and the build commit | `adapted` | Rust prints `faust-rs <version>` where C++ prints `FAUST Version <version>`. Both name the build's commit, since the version is the same for every commit between two releases ([grame-cncm/faust-rs#20](https://github.com/grame-cncm/faust-rs/issues/20)), but differently: C++ adds a second line, `Source commit: <9 digits>` (`-modified` for an uncommitted tree, `unknown` without git); Rust appends `(<8 digits> <commit date>)` to the first line, as `rustc` and `cargo` do, and prints the version alone without git. Uncommitted changes are not reflected. The diagnostics JSON `compiler` block carries the full hash and date in optional `commit`/`commit_date` fields. Generated code names the package version only, in both. Scripts parsing the C++ lines must be adapted. Evidence: `crates/compiler/build.rs`, `version_text_reports_this_build_commit`, `json_compiler_block_names_the_commit_of_the_build`. |
 
 ### 4.4 Rust-only companion tool
 
@@ -304,9 +306,62 @@ must run unchanged with Faust C++ should not pass them.
   the parity objective for portable cases.
 - Duplicate UI paths, FIR verification, backend limitations, and const-table SR
   freezing have dedicated Rust diagnostics.
+- Evaluator limits are logical resource budgets rather than the reference's
+  stack-address check: default identity depth is 1,024 in debug and 32,768 in
+  release; structural lowering also applies a 4,096/32,768 cap; syntactic nesting
+  has a separate 400,000-entry budget. Each guard reports `FRS-EVAL-0099`
+  ("stack overflow in eval", the C++ wording) naming itself, the limit that
+  ran out and where it came from (profile default, environment variable, or
+  API), with the variable to raise; for structural lowering, which of its two
+  limits bound, both on a tie. JSON facts: `depth_guard`, `depth_limit`,
+  `depth_limit_variables` (since 2026-10-10, W5 of
+  [the 2026-10-08 audit](foreign-functions-cli-depth-and-cost-correction-plan-2026-10-08-en.md#w5--explain-the-active-depth-guard-and-build-profile-p2);
+  the variables are documented in the [CLI guide](../docs/user-cli-guide-en.md#12-evaluation-depth-limits)).
+  The exception is a recursion on a non-constant numeric-pattern argument, reported as
+  `FRS-EVAL-0012` ([DIFF-BEH-017](#diff-beh-017--a-recursion-on-a-non-constant-numeric-pattern-argument)).
+  An evaluation cycle is `FRS-EVAL-0013`
+  ([DIFF-BEH-018](#diff-beh-018--an-evaluation-cycle-names-its-definitions)).
+- Native stack: C++ runs each compilation on a thread whose stack it sizes
+  itself (`callFun`, `MAX_STACK_SIZE`). Rust does the same without a thread
+  (`tlib::stack`). Each pipeline stage entered with less than 256 MiB of
+  stack left runs on a fresh 512 MiB stack, the stack of the CLI's worker
+  thread: the frontend after parsing, propagation, signal preparation, FIR
+  lowering and verification, and each backend's code generation. The
+  evaluator and the parser's import expansion, which no budget bounds, grow
+  8 MiB segments as they recurse. A host thread of 8 MiB therefore compiles
+  what the CLI compiles, at any depth the budgets accept
+  ([#16](https://github.com/grame-cncm/faust-rs/issues/16)). Until
+  2026-10-10, an 8 MiB thread aborted the process (`SIGABRT`, no diagnostic)
+  between 2 000 and 8 000 levels of a chain no pass simplifies
+  (`_ : +(1) : ...`) in a release build, in whichever pass came first, and
+  the parser aborted even the CLI between 400 000 and 600 000 levels of
+  `1+1+...+1`.
+  Since 2026-10-10 every evaluator error a program, the API or a run can cause
+  (a non-constant expression, a cancellation or timeout, a non-identifier
+  parameter) has its own cause; the "internal: malformed or unsupported
+  intermediate form" cause is left to internal forms.
+- Constant folding during evaluation (pattern dispatch, box simplification,
+  the patterns of rules) keeps its propagation and simplification caches for
+  the whole pass (`propagate::FoldSession`, `normalize::ConstSimplifyCache`),
+  as C++ 2.84.3 memoizes them on the trees. Before 2026-10-10 each fold
+  started from empty caches, so a recursion on a growing argument compared
+  with a number was quadratic: `g(n-1, x-1)` with `x` a slider took 35 s at
+  `n = 4000` (C++ 2.84.3: 0.1 s), and in release the simplest runaway
+  recursions reached the 120 s timeout before their depth budget. C++
+  `master-dev` regressed the same way in `536ff8ca7`
+  ([grame-cncm/faust#1345](https://github.com/grame-cncm/faust/issues/1345)).
+  A bare `ffunction`/`fconstant`/`fvariable` statement is a syntax error in
+  both grammars. Rust says it is an expression, and to name it or use it in
+  `process`. A definition whose name lrpar's recovery inserted is dropped, so
+  two such statements no longer report "multiple definitions of symbol ''"
+  (until 2026-10-10;
+  [the 2026-10-08 audit, W6](foreign-functions-cli-depth-and-cost-correction-plan-2026-10-08-en.md#w6--diagnose-bare-foreign-statements-without-invented-definitions-p2)).
+  No accepted syntax changed.
 - Evidence: [`docs/faust-error-model-en.md`](../docs/faust-error-model-en.md)
   and
-  [`docs/diagnostics-codes-reference-en.md`](../docs/diagnostics-codes-reference-en.md).
+  [`docs/diagnostics-codes-reference-en.md`](../docs/diagnostics-codes-reference-en.md);
+  for the native stack, `crates/compiler/tests/deep_expressions.rs` (every
+  backend on an 8 MiB thread) and `crates/parser/tests/deep_nesting.rs`.
 
 ### DIFF-BEH-006 — `-e` expansion and `expandDSP` result
 
@@ -604,7 +659,105 @@ must run unchanged with Faust C++ should not pass them.
   vector; C++ text wraps every channel but 0); the `sound` impulse test on all
   backend lanes.
 
+### DIFF-BEH-017 — a recursion on a non-constant numeric-pattern argument
+
+- Status: `extension` (same rejection, a diagnostic C++ does not have), added
+  2026-10-10 ([#21](https://github.com/grame-cncm/faust-rs/issues/21)).
+- A function defined by numeric patterns, `f(0) = ...; f(n) = f(n-1) ...`,
+  applied to a signal (a UI control, an input, `fi.bandpass` with a slider as
+  its order) can never reach its numeric base case. Both compilers reject it
+  when a depth limit runs out. C++ reports `ERROR : stack overflow in eval`
+  (2.84.3, 16 MB stack), or runs until its timeout (2.90.6, 256 MB stack and
+  quadratic folding; `fi.bandpass` in both). Rust reports `FRS-EVAL-0012`,
+  naming the argument's position, the numbers it is compared with, and the
+  controls or inputs it depends on.
+- The diagnostic is chosen only once a depth budget has run out, so no
+  accepted program changes. It requires the same `case` nested at least three
+  times on a non-numeric argument at one position, and no numeric dispatch of
+  that `case` from the first of them on. A recursion that descends on a number
+  while another argument is a signal keeps `FRS-EVAL-0099`.
+- Compatibility impact: none on accepted programs. Scripts matching the C++
+  text see another message.
+- Evidence: [`err_34_case_argument_not_constant.dsp`](../tests/corpus/err_34_case_argument_not_constant.dsp),
+  `a_recursion_on_a_non_constant_pattern_argument_names_it` in
+  `crates/compiler/tests/diagnostic_errors.rs`, the tests of
+  `crates/eval/src/loop_detector.rs`, and the
+  [analysis](eval-runaway-recursion-and-cycle-diagnostics-analysis-and-plan-2026-10-10-en.md).
+
+### DIFF-BEH-018 — an evaluation cycle names its definitions
+
+- Status: `adapted` (same rejection, a different report), 2026-10-10
+  ([#22](https://github.com/grame-cncm/faust-rs/issues/22)).
+- A definition that needs itself, directly or through other definitions
+  (`x = x;`, `a = b + 1; b = c * 2; c = a;`, `process` passed to a function
+  that `process` uses), is rejected by both compilers. C++
+  `loopDetector::detect` samples the last 1024 evaluations every 400 steps and
+  reports `ERROR : after <n> evaluation steps, the compiler has detected an
+  endless evaluation cycle of <k> steps`. Rust detects the re-entered frame at
+  once on its call stack and reports `FRS-EVAL-0013 endless evaluation cycle:
+  process → effect → cut → process`, with a label on each top-level definition
+  of the cycle. The primary label is the use that closes the cycle, the
+  `process` written in `cut`, inside its definition.
+- Until 2026-10-10 Rust reported `FRS-EVAL-0099 recursive evaluation loop on
+  node <n>`, with the catch-all cause of malformed internal forms.
+- Compatibility impact: none on accepted programs. Scripts matching the C++
+  text see another message.
+- Evidence: [`err_35_evaluation_cycle.dsp`](../tests/corpus/err_35_evaluation_cycle.dsp),
+  `an_evaluation_cycle_names_its_definitions` in
+  `crates/compiler/tests/diagnostic_errors.rs` and in
+  `crates/eval/src/loop_detector.rs`;
+  `an_evaluation_cycle_is_blamed_on_the_use_that_closes_it` in
+  `diagnostic_errors.rs`.
+
+### DIFF-BEH-019 — a signal proved constant by its interval keeps its widgets
+
+- Status: `parity-gap`, 2026-10-10.
+- C++ `1aafc196a` (2026-10-06, first released in 2.90.4) runs
+  `newConstantPropagation` in `InstructionsCompiler::prepare`, as the `ocpp`
+  compiler has done since 2024. A signal whose interval is a single value
+  becomes that value, and the widgets it alone used leave the interface, since
+  Faust builds the interface from the simplified signals. Rust has no
+  interval-driven constant propagation: such a signal is computed, and its
+  widgets stay.
+- Observed on `process = ["a" -> r] ~ _;` with
+  `r = + : *(hslider("a", 0.5, 0, 1, 0.01));`. The recursion
+  y = a·(x₁+x₂)·y' starts at 0 and stays 0. C++ 2.90.4 and later emits
+  `output0 = 0.0f` with no slider; Rust computes `fRec0` (always 0) and
+  keeps `/…/a`. The samples are equal (all zero), but the interface differs.
+- Compatibility impact: none on samples. A host that reads the interface
+  (JSON, UI, OSC paths) sees widgets that C++ ≥ 2.90.4 drops, on programs
+  whose output does not depend on them.
+- Evidence: until 2026-10-10 this was the fixture
+  `modulation_35_in_recursion.dsp`, and the live differential of
+  `crates/compiler/tests/modulation_corpus.rs` failed against any local
+  `faust` ≥ 2.90.4. Its block now adds the slider (y = x₁ + x₂ + a·y'), which
+  both compilers compute: the interface is the one frozen from 2.88.1, equal
+  in 2.90.6, and the 15 000 impulse-test samples are equal to the bit.
+
 ## 6. Additional backends and delivery forms
+
+### DIFF-BACK-006 — headers and libraries of foreign functions in C and C++
+
+- Status: `adapted`, 2026-10-10.
+- As in C++, the header of every `ffunction` and `fvariable` the program
+  reaches, table generators included, is printed once as `#include`, before
+  the class, and a header of two characters or fewer (`""`) is not. The
+  libraries are printed as a `/* link with : ... */` comment; nothing is
+  linked. In FIR they are `DeclareDependency` nodes in `globals`.
+- Differences: the program's headers follow the backend's fixed prelude
+  (minus the headers it already has) instead of being sorted together with
+  it; an empty library is not printed (C++ prints `/* link with : "" */`);
+  `ma.SR` (`fconstant(int fSamplingFreq, <math.h>)`) adds no `#include
+  <math.h>`, the prelude having `<cmath>` (C++) or `<math.h>` (C).
+- A foreign variable is not declared by the generated code: its header
+  declares it, as in C++. Until 2026-10-10 the C++ backend declared it as a
+  member, which shadowed the header's global.
+- It replaces `DIFF-GAP-018` (until 2026-10-10 the headers were dropped and
+  the generated code calling a custom `ffunction` did not build).
+- Evidence: `crates/compiler/tests/foreign_dependencies.rs` builds and runs
+  the generated C and C++ (scalar and `-vec`) against the minimal architecture
+  with a test-local header; the design is the W3 amendment of
+  [the 2026-10-08 audit](foreign-functions-cli-depth-and-cost-correction-plan-2026-10-08-en.md#w3-design-amendment-2026-10-10-agreed-with-the-user-implemented).
 
 ### DIFF-BACK-001 — Cranelift
 
@@ -615,8 +768,57 @@ must run unchanged with Faust C++ should not pass them.
   adapts LLVM-specific target, IR, machine-code, and object families. Its
   `-mem0` manager is an implemented Rust extension using the shared aligned C
   ABI; there is no direct C++ Cranelift oracle.
-- Evidence: [`cranelift-backend-plan-en.md`](cranelift-backend-plan-en.md) and
-  [`cranelift-dsp-ffi-parity-matrix-en.md`](cranelift-dsp-ffi-parity-matrix-en.md).
+- Foreign host functions use an explicit registered name-to-address map; a
+  header supplied by `ffunction` is not compiled into a JIT binding. Math
+  functions run through backend host wrappers, one inventory (`HOST_MATH` in
+  `backends/cranelift/host.rs`, 65 C symbols) that the subset pre-check, the
+  lowering and the JIT registration all read. The other functions of
+  `maths.lib` (`cbrt`, `hypot`, `erf`, `erfc`, `tgamma`, `lgamma`, `logb`,
+  `ilogb`, `ldexp`, `scalbn`, `nextafter`, the Bessel `j0` to `yn`; 28 C
+  symbols) are the system's C math library (`foreign_call::libm_functions`,
+  since 2026-10-11), as the C++ LLVM JIT finds them among the process's
+  symbols: the results are those of the C and C++ code generated on the same
+  machine. They come after host registrations, which may replace them; the
+  Bessel functions are `double` only, `_j0`... under MSVC, and wasm32 has
+  none. This is not all of `<math.h>`. A declaration
+  names a math function by its C symbol, `float sinf(float)` included since
+  2026-10-10. As in the C code the other backends generate, where the
+  `<math.h>` declaration decides, the arguments convert to the parameter
+  types and the result to the declared one, precision included
+  (`float tanhf(float)` under `-double` calls `tanhf`). A different argument
+  count is refused, as the generated C fails to compile. So is an `int` result
+  declared for a real function or the reverse (`int tanhf(int)`), naming both
+  signatures; the generated C++ compiles that one, keeping the real result
+  against the Faust typing of the call. A math name now takes precedence over
+  a host registration of the same name. A host may give the C signature of
+  the function it registers (`registerCCraneliftForeignFunctionWithSignature`,
+  `"float(int, float, float)"`, a Rust extension since 2026-10-10); the call
+  then follows the same rule against it. Registered by name and address only,
+  as C++ `registerForeignFunction` takes a name only, the function is called
+  with the types of its `ffunction` declaration, unchecked. A
+  call the JIT cannot lower (a foreign function with no registered binding)
+  makes the backend's non-strict default emit a no-op `compute`, with
+  `compute_body_lowered=false` and the reason in `compute_subset_gap()`.
+  Until `2199d069`, `faustprobe` rendered that body's zeros as a successful
+  result and `-lang cranelift` exited 0. Both now fail with
+  `FRS-CGEN-CLIF-0002`, naming the function: `-lang cranelift` and
+  `--dump-cranelift` compile in strict mode, and every probe mode refuses an
+  unlowered factory (`JitDspModule::require_lowered_compute`). A JIT panic no
+  longer gets past strict mode. The C factory constructors and the bitcode
+  restore compile in strict mode too, with no scaffold opt-in (the user's
+  decision on
+  [the 2026-10-08 audit, W1](foreign-functions-cli-depth-and-cost-correction-plan-2026-10-08-en.md#w1--reject-non-executable-probe-factories-p0)):
+  factory creation fails and `error_msg` names the function. Since
+  2026-10-11 a backend error also has its diagnostics-v2 report in
+  `getCCraneliftDSPFactoryErrorDiagnostics`, the CLI's `FRS-CODEGEN-0001`
+  with `detail_code` `FRS-CGEN-CLIF-*` (it was text only), and `faustprobe
+  --error-format json` prints it. Only the Rust backend API keeps the
+  non-strict default, for corpus diagnostics.
+- Evidence: [`cranelift-backend-plan-en.md`](cranelift-backend-plan-en.md),
+  [`cranelift-dsp-ffi-parity-matrix-en.md`](cranelift-dsp-ffi-parity-matrix-en.md),
+  `crates/cranelift-ffi/tests/math_signature_probe.rs` (the C math library
+  functions included) and
+  `crates/cranelift-ffi/tests/typed_foreign_function_probe.rs`.
 
 ### DIFF-BACK-002 — textual WAT and raw embedded compiler module
 
@@ -678,6 +880,43 @@ must run unchanged with Faust C++ should not pass them.
   companion JSON does not read the extra key as drift.
 - Evidence: `porting/wasm-julia-maturity-diff-gap-005-analysis-and-plan-2026-08-14-en.md`
   (`G5-W4`).
+
+### DIFF-BACK-007 — host functions called by the interpreter
+
+- Status: `extension`.
+- The C++ FBC interpreter calls no host function: an `ffunction` outside its
+  math table is an error. faust-rs keeps that table and adds a registry
+  (`registerCInterpreterForeignFunction`, name and address), which the
+  executor calls through `foreign_call::invoke`.
+- Rust has no call whose signature is built at run time, so `invoke` calls
+  the signatures it enumerates: up to four arguments, each `int`, `float` or
+  `double` in any combination, returning one of these or nothing, and the
+  `bool` shapes of its first version (`foreign_call::is_supported`, which the
+  bytecode compiler checks). The functions of the system's C math library that
+  Cranelift calls (DIFF-BACK-001) are called the same way when no host
+  registered the name, checked and converted as typed registrations; the C++
+  interpreter has none of them (since 2026-10-11). Until 2026-10-10 it enumerated the homogeneous
+  shapes of up to two arguments only, so `jn(int, float)`, `ldexp(float,
+  int)` or `ilogb(float) -> int` from `maths.lib` failed to compile ("outside
+  the interpreter foreign-call ABI"), and `void(int)`, accepted by the
+  compiler, failed at execution. Cranelift calls any signature.
+- As for Cranelift (DIFF-BACK-001), a host may give the C signature of the
+  function it registers (`registerCInterpreterForeignFunctionWithSignature`,
+  since 2026-10-10): the bytecode converts each argument to its parameter's
+  kind and calls with the registered types, and a call of another shape is a
+  compile error naming both signatures. Bytecode compiled under another
+  signature of the function (read back, or cached) fails at the call
+  (`foreign_function_signature_changed`). The registered signatures enter
+  the factory cache key; without any, the key is the libfaust one.
+- Evidence: the tests of `crates/foreign-call/src/lib.rs`;
+  `a_mixed_signature_foreign_function_executes_in_interp_ffi`,
+  `a_typed_host_function_is_called_with_its_signature`,
+  `a_typed_host_function_declared_with_another_shape_is_refused` and
+  `a_registered_signature_is_in_the_source_key` and
+  `a_c_math_library_function_is_called_by_the_interpreter`
+  (`crates/interp-ffi/src/factory.rs`);
+  `test_typed_foreign_call_is_refused_after_its_signature_changes`
+  (`crates/codegen/src/backends/interp/compiler/tests.rs`).
 
 ## 7. Public API and representation adaptations
 
@@ -963,6 +1202,7 @@ remain visible until closed or explicitly reclassified.
 | DIFF-GAP-015 | `narrower` | `rep_37_table_rwtable_negative_indices` has different numerical behavior for negative read/write table indices. |
 | DIFF-GAP-016 | `narrower` | `rep_67_variable_delay_shifted_slider` differs for a variable delay whose shifted slider produces a negative intermediate delay expression. |
 | DIFF-GAP-017 | `parity-gap` | A division by a zero that is constant without being a literal when its sequence is evaluated (`z = 0 <: _, !;`), used as a **pattern-matching argument whose value is then unused** (`f(0) = 1; f(n) = 2; process = f(1 / z);`), compiles in Rust and fails in C++ (`ERROR : division by 0 in 1 / 0`): C++ simplifies the argument eagerly and its exception is fatal, Rust folds a pattern argument as an optimization and gives up on this one. With a literal divisor both fail, and wherever the quotient is used (a signal, an iteration count, a route size, a label) Rust reports the division too. Pinned by `a_known_divergence_an_unused_late_zero_division_in_a_pattern_argument` in `crates/compiler/tests/diagnostic_errors.rs`; see `DIFF-BEH-010`. |
+
 For a time-stamped quantitative snapshot rather than this durable registry,
 use [`faust-rs-supported-faust-subset-en.md`](faust-rs-supported-faust-subset-en.md),
 the reports under `porting/phases/`, and `tests/golden/METADATA.toml`.

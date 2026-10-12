@@ -4,6 +4,7 @@
 //! This module provides the deterministic pre-checks and first-gap reasons used
 //! by strict validation and progress reports.
 
+use super::math::resolve_call;
 use super::*;
 
 /// Fast pre-check: returns `true` when the current subset matcher accepts the
@@ -16,7 +17,7 @@ pub(crate) fn function_body_matches_current_subset(
     store: &FirStore,
     function_decl: FirId,
     extern_data_symbols: &HashMap<String, *const c_void>,
-    extern_function_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, ExternFunction>,
 ) -> bool {
     function_body_subset_gap_reason_from_decl(
         store,
@@ -39,7 +40,7 @@ pub(crate) fn compute_body_subset_gap_reason_from_compute_decl(
     store: &FirStore,
     compute_decl: FirId,
     extern_data_symbols: &HashMap<String, *const c_void>,
-    extern_function_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, ExternFunction>,
 ) -> Option<String> {
     function_body_subset_gap_reason_from_decl(
         store,
@@ -61,7 +62,7 @@ pub(crate) fn function_body_subset_gap_reason_from_decl(
     store: &FirStore,
     function_decl: FirId,
     extern_data_symbols: &HashMap<String, *const c_void>,
-    extern_function_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, ExternFunction>,
 ) -> Option<String> {
     let body = match match_fir(store, function_decl) {
         FirMatch::DeclareFun {
@@ -81,7 +82,7 @@ pub(crate) fn subset_stmt_gap_reason(
     store: &FirStore,
     id: FirId,
     extern_data_symbols: &HashMap<String, *const c_void>,
-    extern_function_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, ExternFunction>,
 ) -> Option<String> {
     match match_fir(store, id) {
         FirMatch::Block(items) => items.into_iter().find_map(|x| {
@@ -250,7 +251,7 @@ pub(crate) fn subset_expr_gap_reason(
     store: &FirStore,
     id: FirId,
     extern_data_symbols: &HashMap<String, *const c_void>,
-    extern_function_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, ExternFunction>,
 ) -> Option<String> {
     match match_fir(store, id) {
         FirMatch::Int32 { .. }
@@ -335,43 +336,20 @@ pub(crate) fn subset_expr_gap_reason(
         FirMatch::Neg { value, .. } => {
             subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols)
         }
-        FirMatch::FunCall { name, args, .. } => {
-            if extern_function_symbols.contains_key(&name) {
-                args.into_iter().find_map(|x| {
-                    subset_expr_gap_reason(store, x, extern_data_symbols, extern_function_symbols)
+        FirMatch::FunCall { name, args, typ } => {
+            // The precision only picks between two math variants of one shape.
+            resolve_call(&name, &typ, args.len(), false, extern_function_symbols)
+                .err()
+                .or_else(|| {
+                    args.into_iter().find_map(|x| {
+                        subset_expr_gap_reason(
+                            store,
+                            x,
+                            extern_data_symbols,
+                            extern_function_symbols,
+                        )
+                    })
                 })
-            } else if fir::FirMathOp::from_symbol(&name).is_none()
-                && !matches!(
-                    name.as_str(),
-                    "abs"
-                        | "min_i"
-                        | "max_i"
-                        | "isnanf"
-                        | "isnan"
-                        | "isinff"
-                        | "isinf"
-                        | "copysignf"
-                        | "copysign"
-                        | "acoshf"
-                        | "acosh"
-                        | "asinhf"
-                        | "asinh"
-                        | "atanhf"
-                        | "atanh"
-                        | "coshf"
-                        | "cosh"
-                        | "sinhf"
-                        | "sinh"
-                        | "tanhf"
-                        | "tanh"
-                )
-            {
-                Some(format!("unsupported math call in subset: {name}"))
-            } else {
-                args.into_iter().find_map(|x| {
-                    subset_expr_gap_reason(store, x, extern_data_symbols, extern_function_symbols)
-                })
-            }
         }
         FirMatch::Cast { value, .. } => {
             subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols)

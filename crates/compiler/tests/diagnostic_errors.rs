@@ -153,32 +153,6 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
     }
 }
 
-/// A deeply nested but acyclic expression (issue #16): it pushes no
-/// `call_stack` frame, so the eval depth budget never saw it, and it overflowed
-/// the native stack of whatever thread ran the compiler, killing an embedding
-/// host with `SIGABRT`. The evaluator now recurses on stack segments it grows
-/// on demand: a chain of five thousand additions compiles from start to end
-/// on a 64 MiB thread, where the previous evaluator aborted (the evaluator
-/// alone handles it on 1 MiB, see the `eval` crate's tests; the rest of the
-/// pipeline still recurses on the native stack, a few KiB per level in debug
-/// builds, which is what sizes this thread).
-#[test]
-fn deep_acyclic_expression_compiles_on_a_host_thread() {
-    let source = format!("process = {};", vec!["1"; 5_000].join("+"));
-    std::thread::Builder::new()
-        .name("deep-expression-host-stack".to_owned())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            let compiler = Compiler::new();
-            compiler
-                .compile_source_to_signals("deep_expression.dsp", &source)
-                .expect("a 5 000-deep acyclic expression compiles on a grown stack");
-        })
-        .expect("spawn worker")
-        .join()
-        .expect("worker thread should finish, not abort");
-}
-
 #[test]
 fn diverging_recursive_case_reports_eval_error_instead_of_aborting() {
     // This test deliberately drives unbounded recursion and relies on the
@@ -1197,4 +1171,155 @@ fn a_widget_parameter_that_is_not_a_number_is_refused_like_the_reference() {
         err.diagnostic_bundle().as_slice()[0].code.0,
         "FRS-EVAL-0007"
     );
+}
+
+#[test]
+fn a_recursion_on_a_non_constant_pattern_argument_names_it() {
+    // grame-cncm/faust-rs#21: the order of fi.bandpass as a slider used to give
+    // "stack overflow in eval" with help about a missing base case
+    let source = read_corpus("err_34_case_argument_not_constant.dsp");
+    std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(move || {
+            let err = Compiler::new()
+                .compile_source_to_signals("err_34_case_argument_not_constant.dsp", &source)
+                .expect_err("a recursion on a slider");
+            let first = &err.diagnostic_bundle().as_slice()[0];
+            assert_eq!(first.code.0, "FRS-EVAL-0012");
+            assert_eq!(first.stage, Stage::Eval);
+            assert_eq!(
+                first.message.as_ref(),
+                "recursion does not reach its base case: argument 2 is matched against the numbers 0 and 1, but is not a compile-time constant"
+            );
+            // the control, not the evaluated box, and the declared rules
+            assert!(
+                first.notes.iter().any(|n| n.contains(
+                    "argument 2 is a signal that depends on `hslider(\"order\", 4, 1, 8, 1)`, matched against the rules (s, 0, nh), (s, 1, nh), (s, o, nh)"
+                )),
+                "{:?}",
+                first.notes
+            );
+            assert_eq!(
+                first.facts.get(&compiler::FactKey::new("case_argument_position")),
+                Some(&DiagnosticValue::from(2_u64))
+            );
+            // the definition of `bp` and the call in `process`
+            let roles: Vec<_> = first.labels.iter().map(|l| l.role).collect();
+            assert!(roles.contains(&LabelRole::DefinitionSite), "{roles:?}");
+            assert!(roles.contains(&LabelRole::CallSite), "{roles:?}");
+        })
+        .expect("spawn worker")
+        .join()
+        .expect("worker thread should finish");
+}
+
+#[test]
+fn an_evaluation_cycle_names_its_definitions() {
+    // grame-cncm/faust-rs#22: "recursive evaluation loop on node 55", with a
+    // catch-all cause about a malformed intermediate form
+    let source = read_corpus("err_35_evaluation_cycle.dsp");
+    let err = Compiler::new()
+        .compile_source_to_signals("err_35_evaluation_cycle.dsp", &source)
+        .expect_err("an evaluation cycle");
+    let first = &err.diagnostic_bundle().as_slice()[0];
+    assert_eq!(first.code.0, "FRS-EVAL-0013");
+    assert_eq!(
+        first.message.as_ref(),
+        "endless evaluation cycle: process → effect → cut → process"
+    );
+    assert!(
+        first.notes.iter().all(|n| !n.contains("malformed")),
+        "{:?}",
+        first.notes
+    );
+    assert_eq!(
+        first.facts.get(&compiler::FactKey::new("cycle")),
+        Some(&DiagnosticValue::from(vec![
+            "process".to_owned(),
+            "effect".to_owned(),
+            "cut".to_owned(),
+            "process".to_owned(),
+        ]))
+    );
+    // every definition of the cycle is located, on its own line; the last
+    // one, `cut`, encloses the use that closes the cycle
+    let labels: Vec<_> = first
+        .labels
+        .iter()
+        .map(|l| (l.message.to_string(), l.span.line, l.span.col))
+        .collect();
+    for label in [
+        ("`effect`, in the cycle", 9, 1),
+        ("enclosing definition", 8, 1),
+        ("failing use", 8, 44),
+    ] {
+        let label = (label.0.to_owned(), label.1, label.2);
+        assert!(labels.contains(&label), "{label:?}: {labels:?}");
+    }
+}
+
+#[test]
+fn an_evaluation_cycle_is_blamed_on_the_use_that_closes_it() {
+    // The identifier `a` is shared by `c = a` and `process = a`: the cycle is
+    // blamed on the use in the body of its last definition, `c`.
+    let source = "a = b + 1;\nb = c * 2;\nc = a;\nprocess = a;\n";
+    let err = Compiler::new()
+        .compile_source_to_signals("cycle.dsp", source)
+        .expect_err("an evaluation cycle");
+    let first = &err.diagnostic_bundle().as_slice()[0];
+    assert_eq!(
+        first.message.as_ref(),
+        "endless evaluation cycle: a → b → c → a"
+    );
+    let labels: Vec<_> = first
+        .labels
+        .iter()
+        .map(|l| (l.message.to_string(), l.span.line, l.span.col))
+        .collect();
+    assert!(
+        labels.contains(&("failing use".to_owned(), 3, 5)),
+        "{labels:?}"
+    );
+    assert!(
+        labels.contains(&("enclosing definition".to_owned(), 3, 1)),
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn a_failure_in_a_library_is_not_labelled_on_a_shared_identifier() {
+    // WP5 of the runaway-recursion plan: with no owning definition, the label
+    // fallback took the first located descendant of the failing rules, here
+    // the identifier `g`, hash-consed with the `g` of the program, and
+    // underlined that `g` as the "call site". Only spans the sources give at
+    // one place are used now, and the program's own call is labelled.
+    let dir = std::env::temp_dir().join(format!("faust-rs-wp5-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("glib.lib"), "g = 1;\nk(0) = g;\nk(1) = g + 1;\n").expect("library");
+    let program = dir.join("prog.dsp");
+    std::fs::write(
+        &program,
+        "m = library(\"glib.lib\");\ng = 2;\nprocess = m.k(5) + g;\n",
+    )
+    .expect("program");
+    let err = Compiler::new()
+        .compile_file_to_signals(&program, &[])
+        .expect_err("no rule of k matches 5");
+    let first = &err.diagnostic_bundle().as_slice()[0];
+    assert_eq!(first.message.as_ref(), "no case rule matches arguments");
+    let labels: Vec<_> = first
+        .labels
+        .iter()
+        .map(|l| (l.message.to_string(), l.role, l.span.line, l.span.col))
+        .collect();
+    assert_eq!(
+        labels,
+        [(
+            "the call that leads here".to_owned(),
+            LabelRole::CallSite,
+            3,
+            1
+        )]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

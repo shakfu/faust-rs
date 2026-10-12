@@ -27,7 +27,7 @@
 //! | FIR-S02 | E | Duplicate struct field name in `dsp_struct` |
 //! | FIR-S03 | E | Struct field has `Void` type |
 //! | FIR-S04 | W | Struct array field has size 0 |
-//! | FIR-G01 | E | Globals block contains a non-`DeclareVar`/`DeclareTable`/`DeclareFun` node |
+//! | FIR-G01 | E | Globals block contains a non-`DeclareVar`/`DeclareTable`/`DeclareFun`/`DeclareDependency` node |
 //! | FIR-G02 | E | Global declaration has wrong access type |
 //! | FIR-G03 | E | Duplicate global variable name |
 //! | FIR-F01 | E | Function type is not `FirType::Fun` |
@@ -465,6 +465,10 @@ impl ScopeStack {
 /// symbols, then walks all function bodies for scope and type checks.
 #[must_use]
 pub fn verify_fir_module(store: &FirStore, module_id: FirId) -> FirVerifyReport {
+    tlib::on_compile_stack(|| verify_fir_module_step(store, module_id))
+}
+
+fn verify_fir_module_step(store: &FirStore, module_id: FirId) -> FirVerifyReport {
     let (report, _symbols) = verify_module_structure(store, module_id);
     report
 }
@@ -476,6 +480,13 @@ pub fn verify_fir_module(store: &FirStore, module_id: FirId) -> FirVerifyReport 
 /// phase 1, phase 2, and phase 3.
 #[must_use]
 pub fn verify_module_structure(
+    store: &FirStore,
+    module_id: FirId,
+) -> (FirVerifyReport, ModuleSymbols) {
+    tlib::on_compile_stack(|| verify_module_structure_step(store, module_id))
+}
+
+fn verify_module_structure_step(
     store: &FirStore,
     module_id: FirId,
 ) -> (FirVerifyReport, ModuleSymbols) {
@@ -501,6 +512,14 @@ pub fn verify_module_structure(
 /// a diagnostic is emitted in the returned report.
 #[must_use]
 pub fn verify_fir_function(
+    store: &FirStore,
+    fun_id: FirId,
+    symbols: &ModuleSymbols,
+) -> FirVerifyReport {
+    tlib::on_compile_stack(|| verify_fir_function_step(store, fun_id, symbols))
+}
+
+fn verify_fir_function_step(
     store: &FirStore,
     fun_id: FirId,
     symbols: &ModuleSymbols,

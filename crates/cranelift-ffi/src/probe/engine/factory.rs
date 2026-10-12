@@ -125,10 +125,58 @@ impl Factory {
         })
     }
 
+    /// [`Factory::create_unchecked`], then [`Factory::require_executable`]:
+    /// every probe compiles through here, so no mode renders a no-op body.
+    fn create(
+        import_dirs: &[String],
+        extra_args: &[String],
+        double: bool,
+        create: impl FnOnce(c_int, *const *const c_char, *mut c_char) -> *mut CraneliftDspFactory,
+    ) -> Result<Self, String> {
+        Self::create_unchecked(import_dirs, extra_args, double, create)?.require_executable()
+    }
+
+    /// Fails unless the factory's `compute` was lowered.
+    ///
+    /// A `compute` the JIT cannot lower (a foreign function with no registered
+    /// host binding, a JIT panic on a huge body) has a no-op body that writes
+    /// nothing, so a render of it reads as silence, a plausible result. The C
+    /// constructors already refuse it; this check keeps every probe mode safe
+    /// on its own. The failure is recorded as the last compile failure,
+    /// without typed diagnostics, the backend having none for it.
+    ///
+    /// # Errors
+    /// The backend's `[FRS-CGEN-CLIF-0002] Cranelift cannot lower `compute`: ...`,
+    /// naming the first construct it could not lower.
+    fn require_executable(self) -> Result<Self, String> {
+        // SAFETY: `self.factory` is live for as long as `self`.
+        let ready = match unsafe { (*self.factory).compiled_jit.as_ref() } {
+            Some(jit) => jit
+                .require_lowered_compute()
+                .map_err(|error| error.to_string()),
+            None => Err("the Cranelift factory has no JIT-compiled code".to_owned()),
+        };
+        let Err(error) = ready else {
+            return Ok(self);
+        };
+        let text = format!(
+            "{error}\n  the factory's `compute` would be a no-op that writes no output, \
+             so it is not rendered"
+        );
+        LAST_COMPILE_FAILURE.with(|last| {
+            *last.borrow_mut() = Some(CompileFailure {
+                text: text.clone(),
+                diagnostics_json: None,
+            });
+        });
+        Err(text)
+    }
+
     /// Builds the compiler's `argv` (`-I DIR`..., `-double`, the extra
     /// arguments verbatim), calls `create` with it and with the buffer the
-    /// error summary goes to, and owns the factory that comes back.
-    fn create(
+    /// error summary goes to, and owns the factory that comes back, executable
+    /// or not.
+    fn create_unchecked(
         import_dirs: &[String],
         extra_args: &[String],
         double: bool,

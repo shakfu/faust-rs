@@ -302,7 +302,8 @@ against the schema for every entry of the negative corpus, enforced by
 ```jsonc
 {
   "schema_version": 2,
-  "compiler": { "name": "faust-rs", "version": "...", "target": "..." },
+  "compiler": { "name": "faust-rs", "version": "...", "target": "...",
+                "commit": "...", "commit_date": "YYYY-MM-DD" },
   "request": { "mode": null, "backend": null, "normalized_options": [] },
   "status": "failed",
   "sources": [
@@ -312,6 +313,10 @@ against the schema for every entry of the negative corpus, enforced by
   "diagnostics": [ /* ... */ ]
 }
 ```
+
+`compiler.commit` (the full hash) and `compiler.commit_date` identify the build
+when it comes from a Git checkout, and are absent otherwise: `version` is the
+same for every commit between two releases.
 
 `sources` is the immutable snapshot of what was actually compiled. Diagnostic
 ranges index into it by `source_id`, and `content_hash` lets a tool detect that
@@ -967,6 +972,8 @@ may be correct and your search path wrong.
 | `FRS-EVAL-0005` | `eval` | A symbol redefined with a different value in the same scope. |
 | `FRS-EVAL-0006` | `eval` | A slider or `nentry` whose init value is outside its `[min, max]` range. |
 | `FRS-EVAL-0007` | `eval` | A constant expression divides by a constant zero, in integers or in reals (§6.11). |
+| `FRS-EVAL-0012` | `eval` | A recursion that does not reach its base case because an argument compared with numbers is a signal (a UI control, an input): names the position, the numbers and the controls. |
+| `FRS-EVAL-0013` | `eval` | An evaluation cycle: definitions that need each other with nothing in between that ends the recursion. Names the definitions of the cycle. |
 | `FRS-EVAL-0099` | `eval` | Any other evaluation failure, including a failed `case` match, an unresolvable `component`/`library`, and evaluator recursion limits. |
 
 ### 7.3 Connecting the blocks (`FRS-PROP-*`)
@@ -988,6 +995,7 @@ may be correct and your search path wrong.
 | `FRS-COMP-0005` | `compiler` | An internal invariant guard. Reaching it means a compiler bug, not a DSP mistake. |
 | `FRS-COMP-0006` | `transform` | Under `--warn`, a const generated table has frozen `ma.SR` to the explicitly requested `--table-init-sample-rate` value rather than using the host initialization rate. |
 | `FRS-COMP-0007` | `compiler` | `-e` expansion cannot serialize the evaluated program: no output signal, or a box shape with no Faust source syntax. |
+| `FRS-COMP-0008` | `compiler` | The compilation exceeded `--timeout` (0 disables it); a JSON document under `--error-format json`. |
 | `FRS-UI-0001` | `propagate` | Two or more controls claim the same runtime address. Every conflicting declaration is located. |
 
 ### 7.5 Lowering and code generation (`FRS-SFIR-*`, `FRS-FIR-*`, `FRS-CODEGEN-*`)

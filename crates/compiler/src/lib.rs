@@ -1082,6 +1082,25 @@ impl Compiler {
         env!("CARGO_PKG_VERSION")
     }
 
+    #[must_use]
+    /// Returns the full hash of the Git commit this build comes from, or
+    /// `None` when it was not built from a Git checkout of the repository
+    /// (see `crates/compiler/build.rs`).
+    ///
+    /// The package version is the same for every commit between two
+    /// releases; the commit tells them apart. It is reported by `--version`
+    /// and the diagnostics JSON, never written into generated code.
+    pub fn commit() -> Option<&'static str> {
+        option_env!("FAUST_RS_COMMIT")
+    }
+
+    #[must_use]
+    /// Returns the committer date (`YYYY-MM-DD`) of [`Compiler::commit`],
+    /// present exactly when the commit is.
+    pub fn commit_date() -> Option<&'static str> {
+        option_env!("FAUST_RS_COMMIT_DATE")
+    }
+
     /// Parses one source string through the production parser crate.
     ///
     /// Returns [`CompilerError::Parse`] when parser recovery/errors are present.
@@ -1505,6 +1524,15 @@ impl Compiler {
     fn pipeline_to_boxes(
         &self,
         source: &str,
+        output: ParseOutput,
+        eval_source_context: Option<eval::EvalSourceContext>,
+    ) -> Result<BoxCompileOutput, CompilerError> {
+        tlib::on_compile_stack(|| self.pipeline_to_boxes_step(source, output, eval_source_context))
+    }
+
+    fn pipeline_to_boxes_step(
+        &self,
+        source: &str,
         mut output: ParseOutput,
         eval_source_context: Option<eval::EvalSourceContext>,
     ) -> Result<BoxCompileOutput, CompilerError> {
@@ -1539,13 +1567,29 @@ impl Compiler {
         });
         let (process_box, eval_stats) = eval_result.map_err(|error| {
             let node = eval_error_node(&error);
-            let owner = node.and_then(|n| {
-                reachable_owner_definition_name_for_node(
-                    &output.state.arena,
-                    root,
-                    n,
-                    self.entrypoint_name.as_ref(),
-                )
+            // The use that closes a cycle is in the body of its last
+            // definition, `c` in `a → b → c → a`: the identifier is shared by
+            // every use of `a`, so a search for its owner could find another.
+            let cycle_owner = match &error {
+                eval::EvalError::LoopDetected { cycle, .. } => cycle
+                    .len()
+                    .checked_sub(2)
+                    .map(|last| cycle[last].as_str())
+                    .filter(|name| {
+                        find_definition_name_and_expr(&output.state.arena, root, name).is_some()
+                    })
+                    .map(Box::<str>::from),
+                _ => None,
+            };
+            let owner = cycle_owner.or_else(|| {
+                node.and_then(|n| {
+                    reachable_owner_definition_name_for_node(
+                        &output.state.arena,
+                        root,
+                        n,
+                        self.entrypoint_name.as_ref(),
+                    )
+                })
             });
             let mut diagnostic = error.to_diagnostic();
             if let Some(n) = node {
@@ -1557,15 +1601,27 @@ impl Compiler {
                     owner.as_deref(),
                     self.entrypoint_name.as_ref(),
                 );
-                diagnostic = maybe_add_eval_source_labels(
-                    diagnostic,
-                    &output.state.ctx,
-                    &output.state.arena,
-                    root,
-                    n,
-                    owner.as_deref(),
-                    self.entrypoint_name.as_ref(),
-                );
+                diagnostic = if matches!(error, eval::EvalError::CaseArgumentNotConstant { .. })
+                    && owner.is_none()
+                {
+                    add_library_recursion_call_label(
+                        diagnostic,
+                        &output.state.ctx,
+                        &output.state.arena,
+                        root,
+                        self.entrypoint_name.as_ref(),
+                    )
+                } else {
+                    maybe_add_eval_source_labels(
+                        diagnostic,
+                        &output.state.ctx,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                        self.entrypoint_name.as_ref(),
+                    )
+                };
             }
             if matches!(error, eval::EvalError::MissingProcessDefinition { .. }) {
                 diagnostic = maybe_add_missing_entrypoint_label(
@@ -1584,6 +1640,7 @@ impl Compiler {
                 &error,
                 &output.state.ctx,
                 &output.state.arena,
+                root,
                 &source_map,
             );
             let mut diagnostics =
@@ -1683,6 +1740,14 @@ impl Compiler {
     /// reusing its arity cache and flattened box so the split costs no repeated
     /// work.
     fn pipeline_boxes_to_signals(
+        &self,
+        source: &str,
+        boxes: BoxCompileOutput,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        tlib::on_compile_stack(|| self.pipeline_boxes_to_signals_step(source, boxes))
+    }
+
+    fn pipeline_boxes_to_signals_step(
         &self,
         source: &str,
         boxes: BoxCompileOutput,
@@ -2364,6 +2429,39 @@ impl CompilerError {
     pub fn import(err: SourceReaderError) -> Self {
         let diagnostics = err.to_diagnostics();
         Self::Import(Box::new(err), diagnostics)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Builds the [`CompilerError::CodegenCranelift`] of a Cranelift backend
+    /// failure on `source`, with the `FRS-CODEGEN-0001` diagnostic the CLI
+    /// reports (`detail_code` the backend's `FRS-CGEN-CLIF-*` code).
+    ///
+    /// For the embedding layers, which compile FIR to Cranelift themselves:
+    /// the C factory constructors publish its diagnostics-v2 report. The
+    /// backend's errors name no FIR node, so the error carries no source
+    /// label, through the CLI either.
+    #[must_use]
+    pub fn from_cranelift_backend(source: &str, error: CraneliftBackendError) -> Self {
+        Self::CodegenCranelift {
+            source: source.into(),
+            diagnostics: Self::cranelift_backend_diagnostics(source, &error),
+            error,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// The diagnostics of a Cranelift backend failure, before any FIR trace.
+    pub(crate) fn cranelift_backend_diagnostics(
+        source: &str,
+        error: &CraneliftBackendError,
+    ) -> DiagnosticBundle {
+        Self::codegen_diagnostics(
+            source,
+            "cranelift",
+            error.code.as_str(),
+            &error.message,
+            DiagnosticCategory::UnsupportedFeature,
+        )
     }
 
     /// Builds the `FRS-CODEGEN-0001` bundle for one backend emission failure.

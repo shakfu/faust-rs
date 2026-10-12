@@ -499,8 +499,12 @@ impl<'a> SignalToFirLower<'a> {
         _sig: SigId,
         kind: SigId,
         name: SigId,
-        _file: SigId,
+        file: SigId,
     ) -> Result<FirId, SignalFirError> {
+        // C++ `generateFVar` records the header before the `count` case.
+        let file = tree_to_str(self.arena, file).unwrap_or_default().to_owned();
+        self.used_protos
+            .note_dependency(fir::FirDependencyKind::Include, &file);
         let name = self.label_text(name);
         let typ = self.foreign_sig_type(kind);
         let mut b = FirBuilder::new(&mut self.store);
@@ -563,6 +567,12 @@ impl<'a> SignalToFirLower<'a> {
         for arg in args {
             lowered_args.push(self.lower_signal(arg)?);
         }
+        // C++ `generateFFun`: `addIncludeFile`, `addLibrary`, at every call,
+        // so two descriptors of one symbol keep both their headers.
+        self.used_protos
+            .note_dependency(fir::FirDependencyKind::Include, &proto.include);
+        self.used_protos
+            .note_dependency(fir::FirDependencyKind::Library, &proto.library);
         self.used_protos
             .foreign_fun_protos
             .entry(proto.name.clone())
@@ -575,15 +585,15 @@ impl<'a> SignalToFirLower<'a> {
     /// Decodes one Faust `FFUN(signature, incfile, libfile)` descriptor.
     /// Extracts a [`ForeignFunProto`] from a Faust `FFUN(signature, _, _)` descriptor.
     ///
-    /// The `signature` list has the layout `[ret_type, [name_f32, name_f64], arg0_type, …]`:
+    /// The `signature` list has the layout `[ret_type, [name_f32, name_f64], argN_type, …, arg0_type]`:
     /// index 0 is the return type code, index 1 is the name list (0=float32 name,
-    /// 1=float64 name), and indices 2+ are argument type codes.  Type codes follow
+    /// 1=float64 name), and indices 2+ are argument type codes, last argument first.  Type codes follow
     /// `foreign_sig_type`: `0` → `Int32`, any other value → `real_ty`.
     pub(super) fn decode_foreign_fun_proto(
         &self,
         ff: SigId,
     ) -> Result<ForeignFunProto, SignalFirError> {
-        let Some((signature, _, _)) = match_ffunction_node(self.arena, ff) else {
+        let Some((signature, incfile, libfile)) = match_ffunction_node(self.arena, ff) else {
             return self.unsupported_node(ff, "SIGFFUN descriptor is not an FFUNCTION node");
         };
         let items = list_to_vec(self.arena, signature).ok_or_else(|| {
@@ -620,12 +630,25 @@ impl<'a> SignalToFirLower<'a> {
             })?
             .to_owned();
         let ret = self.foreign_sig_type(items[0]);
+        // The parser stores the argument types last first: C++ reads argument
+        // `i` as `ffargtype(ff, len - i)` (`generateFFun`).
         let args = items[2..]
             .iter()
+            .rev()
             .copied()
             .map(|ty| self.foreign_sig_type(ty))
             .collect();
-        Ok(ForeignFunProto { name, ret, args })
+        Ok(ForeignFunProto {
+            name,
+            ret,
+            args,
+            include: tree_to_str(self.arena, incfile)
+                .unwrap_or_default()
+                .to_owned(),
+            library: tree_to_str(self.arena, libfile)
+                .unwrap_or_default()
+                .to_owned(),
+        })
     }
 
     /// Decodes one Faust foreign signature type code (`0=int`, otherwise real).

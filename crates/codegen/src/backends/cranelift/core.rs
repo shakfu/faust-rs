@@ -29,6 +29,22 @@ pub enum CraneliftOptLevel {
     SpeedAndSize,
 }
 
+/// A foreign function a host binds for the JIT.
+///
+/// API mapping status: `adapted`. C++ LLVM's `registerForeignFunction` takes
+/// a name and lets the JIT find the symbol in the process; here the host
+/// gives the address, and may give the signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternFunction {
+    /// The address the JIT calls.
+    pub address: *const c_void,
+    /// The signature the host declared, if any. With one, a call converts
+    /// its arguments and result to it, as a C prototype makes C do, and a
+    /// call of another shape is refused. Without one, the JIT trusts the
+    /// `ffunction` declaration, as C++ does.
+    pub signature: Option<HostFunctionSignature>,
+}
+
 /// Options controlling Cranelift backend compilation (scaffold).
 ///
 /// This mirrors the shape planned in `porting/cranelift-backend-plan-en.md`,
@@ -62,13 +78,13 @@ pub struct CraneliftOptions {
     /// The backend imports these as external data symbols and loads them
     /// directly from JIT-resolved storage during `compute` lowering.
     pub extern_data_symbols: HashMap<String, *const c_void>,
-    /// Optional host addresses for foreign function symbols referenced by FIR
-    /// `FunCall` nodes that are not covered by the built-in math registry.
+    /// Host functions for foreign function symbols referenced by FIR
+    /// `FunCall` nodes that are not math functions the backend implements.
     ///
     /// This provides the Cranelift equivalent of LLVM's
-    /// `registerForeignFunction`, but uses an explicit name -> pointer map
+    /// `registerForeignFunction`, but uses an explicit name -> function map
     /// rather than process-global symbol lookup.
-    pub extern_function_symbols: HashMap<String, *const c_void>,
+    pub extern_function_symbols: HashMap<String, ExternFunction>,
     /// Use 64-bit (`double`) precision for `FAUSTFLOAT` I/O, UI zones and state.
     ///
     /// When `true`, the abstract [`FirType::FaustFloat`] maps to Cranelift `F64`
@@ -131,6 +147,12 @@ impl CraneliftBackendError {
             code: CraneliftBackendErrorCode::UnsupportedModuleShape,
             message: message.into(),
         }
+    }
+
+    /// The `UnsupportedModuleShape` error of a function the backend cannot
+    /// lower, shared by strict mode and [`JitDspModule::require_lowered_compute`].
+    pub(crate) fn not_lowered(function: &str, reason: &str) -> Self {
+        Self::unsupported_module_shape(format!("Cranelift cannot lower `{function}`: {reason}"))
     }
 
     /// Builds a `MissingCompute` backend error.
@@ -196,6 +218,8 @@ pub struct JitDspModule {
     pub(crate) instance_constants_entry_addr: usize,
     pub(crate) instance_clear_entry_addr: usize,
     pub(crate) compute_body_lowered: bool,
+    /// Why `compute` is the no-op fallback; `None` when it was lowered.
+    pub(crate) compute_subset_gap: Option<String>,
     pub(crate) generated_functions_clif: Vec<(String, String)>,
     pub(crate) struct_layout: StructLayoutPlan,
     pub(crate) mem0_analysis: Option<Mem0Analysis>,
@@ -296,6 +320,36 @@ impl JitDspModule {
     #[must_use]
     pub fn compute_body_lowered(&self) -> bool {
         self.compute_body_lowered
+    }
+
+    /// Why `compute` is the no-op fallback (the first subset gap, or the JIT
+    /// panic that forced the stub); `None` when it was lowered.
+    #[must_use]
+    pub fn compute_subset_gap(&self) -> Option<&str> {
+        self.compute_subset_gap.as_deref()
+    }
+
+    /// Fails unless `compute` was lowered: the fallback returns without
+    /// writing its outputs, so running it renders whatever the buffers held
+    /// (zeros, in a fresh host) as if the program had produced it.
+    ///
+    /// A host that executes the module calls this first; only the
+    /// non-strict default of [`CraneliftOptions::fail_on_subset_gap`] can
+    /// produce such a module.
+    ///
+    /// # Errors
+    /// `UnsupportedModuleShape`, naming `compute` and the reason of the
+    /// fallback.
+    pub fn require_lowered_compute(&self) -> Result<(), CraneliftBackendError> {
+        if self.compute_body_lowered {
+            return Ok(());
+        }
+        Err(CraneliftBackendError::not_lowered(
+            "compute",
+            self.compute_subset_gap
+                .as_deref()
+                .unwrap_or("unknown subset-gap reason"),
+        ))
     }
 
     /// Returns textual CLIF IR generated for all backend-defined DSP functions.
@@ -822,6 +876,9 @@ pub(crate) fn build_struct_layout_for_module(
             // Fast-lane FIR may place helper math prototypes (`fmin`, `pow`, ...)
             // in module globals. They are declarations, not `dsp*` state fields.
             FirMatch::DeclareFun { body: None, .. } => {}
+            // A foreign function's header or library: no `dsp*` field (the
+            // JIT does not compile headers).
+            FirMatch::DeclareDependency { .. } => {}
             other => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "unsupported globals entry for Cranelift dsp* layout: {other:?}"

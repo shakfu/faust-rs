@@ -570,6 +570,7 @@ pub(crate) fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
         | eval::EvalError::IterationCountNotInt { node }
         | eval::EvalError::PatternArityMismatch { node, .. }
         | eval::EvalError::PatternMatchFailed { node, .. }
+        | eval::EvalError::CaseArgumentNotConstant { node, .. }
         | eval::EvalError::TooManyArguments { node, .. }
         | eval::EvalError::DivisionByZero { node, .. }
         | eval::EvalError::InvalidControlListOperand { node, .. }
@@ -577,7 +578,7 @@ pub(crate) fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
         | eval::EvalError::ControlIndexNotConstant { node, .. }
         | eval::EvalError::ModulationWildcardNoMatch { node, .. }
         | eval::EvalError::WidgetParameterNotConstant { node, .. }
-        | eval::EvalError::LoopDetected { node } => Some(*node),
+        | eval::EvalError::LoopDetected { node, .. } => Some(*node),
         _ => None,
     }
 }

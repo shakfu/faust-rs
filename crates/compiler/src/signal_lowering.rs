@@ -335,9 +335,9 @@ pub(crate) fn lower_signals_to_cranelift_report(
         origins: lowered.origins.clone(),
     })?;
 
-    // A subset gap is a lowering *limitation* to report, not a failure: the
-    // module still compiles, with an unlowered compute body. Only a hard
-    // backend error stops the report.
+    // Outside strict mode a subset gap is a lowering *limitation* to report,
+    // not a failure: the module still compiles, with an unlowered compute
+    // body. The CLI compiles in strict mode, where the gap is the error.
     let subset_gap = diagnose_cranelift_compute_subset_gap(&lowered.store, lowered.module)
         .map_err(|error| LowerToCraneliftError::Codegen {
             error,
@@ -727,6 +727,43 @@ pub(crate) fn lower_signals_to_fir_transform_fastlane(
 /// timing API; it does not participate in FIR construction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_signals_to_fir_transform_fastlane_with_timing(
+    output: &SignalCompileOutput,
+    module_name: String,
+    real_type: RealType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
+    bra_tape_block_size: usize,
+    compute_mode: ComputeMode,
+    scheduling_strategy: SchedulingStrategy,
+    control_rate_mode: ControlRateMode,
+    processing_api: ProcessingApi,
+    table_init_mode: transform::signal_fir::TableInitMode,
+    table_init_sample_rate: Option<i32>,
+    check_table: bool,
+    timing_sink: Option<&TimingSink>,
+) -> Result<FirCompileOutput, SignalFirError> {
+    tlib::on_compile_stack(|| {
+        lower_signals_to_fir_transform_fastlane_with_timing_step(
+            output,
+            module_name,
+            real_type,
+            max_copy_delay,
+            delay_line_threshold,
+            bra_tape_block_size,
+            compute_mode,
+            scheduling_strategy,
+            control_rate_mode,
+            processing_api,
+            table_init_mode,
+            table_init_sample_rate,
+            check_table,
+            timing_sink,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_signals_to_fir_transform_fastlane_with_timing_step(
     output: &SignalCompileOutput,
     module_name: String,
     real_type: RealType,

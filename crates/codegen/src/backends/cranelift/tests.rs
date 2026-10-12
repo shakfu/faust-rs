@@ -1,11 +1,27 @@
 use super::{
-    BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions, StructFieldKind, backend_id,
-    generate_cranelift_module,
+    BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions, ExternFunction, StructFieldKind,
+    backend_id, generate_cranelift_module,
 };
 use crate::fixtures::build_sine_phasor_test_module;
 use crate::memory_layout::MemoryManagerMode;
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirType, NamedType};
+use std::cell::Cell;
 use std::ffi::c_void;
+
+thread_local! {
+    /// Makes the first compilation attempt of `generate_cranelift_module`
+    /// panic, as Cranelift does on AArch64 when a body exceeds its branch
+    /// range, without needing such a body.
+    pub(super) static INJECT_JIT_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` with [`INJECT_JIT_PANIC`] set on this thread.
+fn with_injected_jit_panic<T>(f: impl FnOnce() -> T) -> T {
+    INJECT_JIT_PANIC.set(true);
+    let result = f();
+    INJECT_JIT_PANIC.set(false);
+    result
+}
 
 #[test]
 /// Verifies the public backend identifier remains stable.
@@ -378,6 +394,15 @@ fn compile_module_falls_back_to_stub_without_strict_subset_mode() {
     let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .expect("default mode should allow subset-gap fallback");
     assert!(!compiled.compute_body_lowered());
+    // The fallback is not executable, and says why.
+    let gap = compiled.compute_subset_gap().expect("a stub has a reason");
+    assert!(gap.contains("std::erf"), "{gap}");
+    let err = compiled
+        .require_lowered_compute()
+        .expect_err("a stub must not pass as executable");
+    assert_eq!(err.code, CraneliftBackendErrorCode::UnsupportedModuleShape);
+    assert!(err.message.contains("cannot lower `compute`"), "{err}");
+    assert!(err.message.contains("std::erf"), "{err}");
 }
 
 #[test]
@@ -391,7 +416,36 @@ fn compile_module_fails_on_subset_gap_with_strict_mode() {
     let err = generate_cranelift_module(&store, module, &options)
         .expect_err("strict mode must reject subset-gap fallback");
     assert_eq!(err.code, CraneliftBackendErrorCode::UnsupportedModuleShape);
-    assert!(err.message.contains("strict mode rejected fallback"));
+    assert!(err.message.contains("cannot lower `compute`"), "{err}");
+}
+
+#[test]
+/// A JIT panic falls back to the stub only outside strict mode, and the stub
+/// carries the panic as its reason.
+fn a_jit_panic_is_a_stub_with_its_reason_or_a_strict_error() {
+    let (store, module) = build_subset_lowerable_compute_module();
+    let compiled = with_injected_jit_panic(|| {
+        generate_cranelift_module(&store, module, &CraneliftOptions::default())
+    })
+    .expect("default mode falls back to the stub after a JIT panic");
+    assert!(!compiled.compute_body_lowered());
+    let gap = compiled.compute_subset_gap().expect("a stub has a reason");
+    assert!(gap.contains("panicked"), "{gap}");
+    assert!(compiled.require_lowered_compute().is_err());
+
+    let strict = CraneliftOptions {
+        fail_on_subset_gap: true,
+        ..CraneliftOptions::default()
+    };
+    let err = with_injected_jit_panic(|| generate_cranelift_module(&store, module, &strict))
+        .expect_err("strict mode must not turn a JIT panic into a stub");
+    assert_eq!(err.code, CraneliftBackendErrorCode::JitFailure);
+    assert!(err.message.contains("panicked"), "{err}");
+
+    // Without the injected panic the same module lowers.
+    let compiled = generate_cranelift_module(&store, module, &strict).expect("lowerable");
+    assert!(compiled.require_lowered_compute().is_ok());
+    assert_eq!(compiled.compute_subset_gap(), None);
 }
 
 #[test]
@@ -666,7 +720,10 @@ fn compile_module_lowers_custom_foreign_fun_with_extern_function_symbol() {
     let options = CraneliftOptions {
         extern_function_symbols: [(
             "test_foreign_gain".to_string(),
-            (test_foreign_gain as *const ()).cast::<c_void>(),
+            ExternFunction {
+                address: (test_foreign_gain as *const ()).cast::<c_void>(),
+                signature: None,
+            },
         )]
         .into_iter()
         .collect(),
@@ -683,6 +740,18 @@ fn compile_module_falls_back_when_custom_foreign_fun_symbol_is_missing() {
     let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .expect("missing foreign function binding should fall back to the stub in default mode");
     assert!(!compiled.compute_body_lowered());
+    let err = compiled
+        .require_lowered_compute()
+        .expect_err("not executable");
+    assert!(
+        err.message
+            .contains("`test_foreign_gain` has no Cranelift implementation"),
+        "{err}"
+    );
+    assert!(
+        err.message.contains("registerCCraneliftForeignFunction"),
+        "{err}"
+    );
 }
 
 /// Builds a minimal `compute` body that reads one FIR `AccessType::Global`
@@ -2281,4 +2350,40 @@ fn struct_layout_offsets_are_not_limited_to_four_gigabytes() {
         four_gib
     );
     assert_eq!(layout.size_bytes(), four_gib + 8);
+}
+
+#[test]
+fn a_host_signature_parses_from_a_c_prototype() {
+    use super::{HostFunctionSignature, HostScalarType};
+    let parse = |text| HostFunctionSignature::parse(text, Some("w"));
+    let signature = parse("double ( int , float,double )").expect("parses");
+    assert_eq!(signature.ret, HostScalarType::Double);
+    assert_eq!(
+        signature.params,
+        [
+            HostScalarType::Int,
+            HostScalarType::Float,
+            HostScalarType::Double
+        ]
+    );
+    assert_eq!(signature.to_string(), "double(int, float, double)");
+    assert_eq!(signature.prototype("w"), "double w(int, float, double)");
+    assert_eq!(parse("float w(float)"), parse("float(float)"));
+    for empty in ["int()", "int(void)", "int w( )"] {
+        assert_eq!(parse(empty).expect(empty).params, []);
+    }
+    for (text, reason) in [
+        ("float(long)", "`long` is not a host function type"),
+        ("void(float)", "`void` is not a host function type"),
+        ("float", "is not a C prototype"),
+        ("float(float", "is not a C prototype"),
+        ("float w y(float)", "is not a C prototype"),
+        ("float other(float)", "names `other`, not `w`"),
+        ("float(float,)", "`` is not a host function type"),
+    ] {
+        let error = parse(text).expect_err(text);
+        assert!(error.contains(reason), "{text}: {error}");
+    }
+    // Without a name to check, any name is accepted.
+    assert!(HostFunctionSignature::parse("float other(float)", None).is_ok());
 }

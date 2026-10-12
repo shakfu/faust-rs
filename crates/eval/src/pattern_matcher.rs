@@ -843,6 +843,7 @@ fn apply_pattern_matcher_internal(
     s: usize,
     x: TreeId,
     substs: &mut [Subst],
+    fold: &mut crate::simplify::FoldCache,
 ) -> Option<usize> {
     let state = &automaton.states[s];
 
@@ -851,7 +852,7 @@ fn apply_pattern_matcher_internal(
     // recursive sub-tree matching inside Op patterns — e.g., matching the `2`
     // inside `seq(max(1,min(2,4)), x)` against a constant transition.
     let x = if state.match_num {
-        crate::simplify_pattern(arena, x)
+        crate::simplify::simplify_pattern_in(arena, x, fold)
     } else {
         x
     };
@@ -870,19 +871,32 @@ fn apply_pattern_matcher_internal(
             if let Some((op1, x0, x1, x2)) = is_box_pattern_op_ternary(arena, x) {
                 if op == op1 {
                     add_subst(automaton, s, substs);
+                    let cur = apply_pattern_matcher_internal(
+                        arena,
+                        automaton,
+                        trans.state,
+                        x0,
+                        substs,
+                        fold,
+                    )?;
                     let cur =
-                        apply_pattern_matcher_internal(arena, automaton, trans.state, x0, substs)?;
-                    let cur = apply_pattern_matcher_internal(arena, automaton, cur, x1, substs)?;
-                    return apply_pattern_matcher_internal(arena, automaton, cur, x2, substs);
+                        apply_pattern_matcher_internal(arena, automaton, cur, x1, substs, fold)?;
+                    return apply_pattern_matcher_internal(arena, automaton, cur, x2, substs, fold);
                 }
             // Binary match (Seq, Par, …)
             } else if let Some((op1, x0, x1)) = is_box_pattern_op_binary(arena, x)
                 && op == op1
             {
                 add_subst(automaton, s, substs);
-                let cur =
-                    apply_pattern_matcher_internal(arena, automaton, trans.state, x0, substs)?;
-                return apply_pattern_matcher_internal(arena, automaton, cur, x1, substs);
+                let cur = apply_pattern_matcher_internal(
+                    arena,
+                    automaton,
+                    trans.state,
+                    x0,
+                    substs,
+                    fold,
+                )?;
+                return apply_pattern_matcher_internal(arena, automaton, cur, x1, substs, fold);
             }
         }
     }
@@ -897,6 +911,59 @@ fn apply_pattern_matcher_internal(
 }
 
 // ── Public matching API ───────────────────────────────────────────────────────
+
+/// The argument as state `s` dispatches on it: folded to a numeric literal
+/// when the state has numeric constant transitions, unchanged otherwise.
+pub(crate) fn simplify_dispatch_argument(
+    arena: &mut TreeArena,
+    automaton: &Automaton,
+    s: usize,
+    x: TreeId,
+    fold: &mut crate::simplify::FoldCache,
+) -> TreeId {
+    if automaton.states[s].match_num {
+        crate::simplify::simplify_pattern_in(arena, x, fold)
+    } else {
+        x
+    }
+}
+
+/// Whether state `s` dispatches the argument `x` (as returned by
+/// [`simplify_dispatch_argument`]) on numeric patterns, and `x` is a number.
+pub(crate) fn dispatches_on_number(
+    arena: &TreeArena,
+    automaton: &Automaton,
+    s: usize,
+    x: TreeId,
+) -> bool {
+    automaton.states[s].match_num && is_box_num(arena, x)
+}
+
+/// The numeric patterns of state `s` that the dispatched argument `x` (as
+/// returned by [`simplify_dispatch_argument`]) cannot reach, because it is not
+/// a number: the argument then goes to the state's variable rule. Empty when
+/// `x` is a number, when the state has no numeric pattern, or when it has no
+/// variable rule (the match then fails instead).
+///
+/// A recursion that keeps taking this path does not reach its numeric base
+/// case: `f(0) = a; f(n) = f(n-1);` applied to a UI control.
+pub(crate) fn unreachable_numeric_patterns(
+    arena: &TreeArena,
+    automaton: &Automaton,
+    s: usize,
+    x: TreeId,
+) -> Vec<TreeId> {
+    let state = &automaton.states[s];
+    if !state.match_num || is_box_num(arena, x) || !state.trans.first().is_some_and(Trans::is_var) {
+        return Vec::new();
+    }
+    state
+        .trans
+        .iter()
+        .filter_map(Trans::is_const)
+        .filter(|cst| is_box_num(arena, *cst))
+        .collect()
+}
 
 /// Applies the automaton to a single argument, advancing the state machine.
 ///
@@ -917,7 +984,12 @@ fn apply_pattern_matcher_internal(
 /// * `arena` — mutable arena, needed to intern pattern-variable names.
 /// * `automaton` — the compiled automaton (from [`make_pattern_matcher`]).
 /// * `s` — current automaton state (starts at `0` for the first argument).
-/// * `x` — the evaluated argument tree to match.
+/// * `x` — the evaluated argument tree to match, as returned by
+///   [`simplify_dispatch_argument`] (C++ parity: folded to a numeric literal
+///   when the state has numeric constant transitions, so that variable
+///   bindings also receive the folded value; without it, a variable `i`
+///   matched against `sub(max(1,min(2,4)),1)` would bind the unfolded
+///   expression and recurse for ever in rules like `factorial(i-1)`).
 /// * `env_out` — per-rule environment slots (slice, not `Vec`, for API clarity);
 ///   `env_out[r]` is `Some` while rule `r` is still a candidate, `None` if disqualified.
 ///
@@ -931,29 +1003,18 @@ fn apply_pattern_matcher_internal(
 /// # C++ correspondence
 ///
 /// `int apply_pattern_matcher(Automaton*, int s, Tree X, Tree& C, vector<Tree>& E)`.
-pub fn apply_pattern_matcher(
+pub(crate) fn apply_pattern_matcher(
     arena: &mut TreeArena,
     automaton: &Automaton,
     s: usize,
     x: TreeId,
     env_out: &mut [Option<Environment>],
+    fold: &mut crate::simplify::FoldCache,
 ) -> (Option<usize>, Option<TreeId>) {
     let n = automaton.n_rules();
     let mut substs: Vec<Subst> = vec![Vec::new(); n];
 
-    // C++ parity: simplify the argument to a numeric literal when the current
-    // state has numeric constant transitions. This must happen HERE (not just
-    // inside `apply_pattern_matcher_internal`) so that variable bindings also
-    // receive the simplified value. Without this, a variable `i` matched against
-    // `sub(max(1,min(2,4)),1)` would bind the unsimplified expression, causing
-    // infinite recursion in recursive case rules like `factorial(i-1)`.
-    let x = if automaton.states[s].match_num {
-        crate::simplify_pattern(arena, x)
-    } else {
-        x
-    };
-
-    let s_idx = match apply_pattern_matcher_internal(arena, automaton, s, x, &mut substs) {
+    let s_idx = match apply_pattern_matcher_internal(arena, automaton, s, x, &mut substs, fold) {
         None => return (None, None),
         Some(s) => s,
     };

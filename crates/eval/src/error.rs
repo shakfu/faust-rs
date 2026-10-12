@@ -105,8 +105,171 @@ pub struct EvalStats {
 /// | `MissingProcessDefinition` | `evalerror("... process is not defined")` in `eval.cpp` |
 /// | `UndefinedSymbol` | `evalerror("... unknown id")` in `eval.cpp` |
 /// | `RedefinedSymbol` | `throw faustexception("redefinition of symbols …")` in `environment.cpp` |
-/// | `LoopDetected` | `faustassert` in C++ loop detector (aborts rather than throws) |
+/// | `LoopDetected` | `loopDetector::detect` in `loopDetector.cpp`: `endless evaluation cycle of <k> steps` |
 /// | `RecursionDepthExceeded` | `stackOverflowDetector::detect()` in C++ loop detector |
+/// Which depth guard of the evaluator stopped it
+/// ([`EvalError::RecursionDepthExceeded`]).
+///
+/// API mapping status: `adapted`. C++ has one guard, a check of the stack
+/// address (`stackOverflowDetector`); Rust bounds three logical depths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthGuard {
+    /// Nested applications of definitions, the frames the cycle detector
+    /// tracks by identity (`FAUST_RS_DEFAULT_EVAL_MAX_DEPTH`).
+    Definitions,
+    /// Lowering the evaluated expression to a box (`a2sb`), bounded by the
+    /// smaller of the definitions limit and the structural cap
+    /// (`FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH`).
+    Structural,
+    /// The syntactic nesting of the expression, entries of `eval`
+    /// (`FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH`).
+    Nesting,
+}
+
+/// Where a depth limit of the evaluator came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthLimitSource {
+    /// The compiled default of this build profile.
+    Default,
+    /// The environment variable of the limit.
+    Environment,
+    /// The caller, through `LoopDetector::with_max_depth`.
+    Api,
+}
+
+/// One depth limit and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthLimit {
+    /// The limit, in the guard's unit (frames or entries).
+    pub value: usize,
+    /// Where it came from.
+    pub source: DepthLimitSource,
+}
+
+/// The depth guard that fired, and the three limits of the detector then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthContext {
+    /// The guard that fired.
+    pub guard: DepthGuard,
+    /// `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH`, or the caller's limit.
+    pub definitions: DepthLimit,
+    /// `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH`.
+    pub structural: DepthLimit,
+    /// `FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH`.
+    pub nesting: DepthLimit,
+}
+
+/// The variables of the three limits.
+pub(crate) const EVAL_MAX_DEPTH_VAR: &str = "FAUST_RS_DEFAULT_EVAL_MAX_DEPTH";
+pub(crate) const STRUCTURAL_MAX_DEPTH_VAR: &str = "FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH";
+pub(crate) const EVAL_NESTING_DEPTH_VAR: &str = "FAUST_RS_DEFAULT_EVAL_NESTING_DEPTH";
+
+impl DepthContext {
+    /// The guard's name in the diagnostics JSON facts.
+    fn guard_name(&self) -> &'static str {
+        match self.guard {
+            DepthGuard::Definitions => "definitions",
+            DepthGuard::Structural => "structural",
+            DepthGuard::Nesting => "nesting",
+        }
+    }
+
+    /// The variables whose limit bound, one unless the structural guard's
+    /// two limits are equal.
+    fn binding_variables(&self) -> Vec<&'static str> {
+        match self.guard {
+            DepthGuard::Definitions => vec![EVAL_MAX_DEPTH_VAR],
+            DepthGuard::Nesting => vec![EVAL_NESTING_DEPTH_VAR],
+            DepthGuard::Structural => {
+                let (d, s) = (self.definitions.value, self.structural.value);
+                match d.cmp(&s) {
+                    std::cmp::Ordering::Less => vec![EVAL_MAX_DEPTH_VAR],
+                    std::cmp::Ordering::Greater => vec![STRUCTURAL_MAX_DEPTH_VAR],
+                    std::cmp::Ordering::Equal => {
+                        vec![EVAL_MAX_DEPTH_VAR, STRUCTURAL_MAX_DEPTH_VAR]
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a limit that bound is the compiled default, whose value
+    /// depends on the build profile.
+    fn binds_a_profile_default(&self) -> bool {
+        let defaults = |limit: DepthLimit| limit.source == DepthLimitSource::Default;
+        match self.guard {
+            DepthGuard::Definitions => defaults(self.definitions),
+            DepthGuard::Nesting => false,
+            DepthGuard::Structural => self.binding_variables().iter().any(|var| match *var {
+                EVAL_MAX_DEPTH_VAR => defaults(self.definitions),
+                _ => defaults(self.structural),
+            }),
+        }
+    }
+
+    fn describe(var: &str, limit: DepthLimit) -> String {
+        let source = match limit.source {
+            DepthLimitSource::Default if cfg!(debug_assertions) => "default of this debug build",
+            DepthLimitSource::Default => "default of this release build",
+            DepthLimitSource::Environment => "set in the environment",
+            DepthLimitSource::Api => "set by the caller",
+        };
+        format!("{} ({var}, {source})", limit.value)
+    }
+
+    /// What the guard counts, for the cause note.
+    fn cause(&self, max_depth: usize) -> String {
+        match self.guard {
+            DepthGuard::Definitions => format!(
+                "cause: definitions applied inside one another more than {max_depth} deep (frames of the cycle detector)"
+            ),
+            DepthGuard::Structural => format!(
+                "cause: lowering the evaluated expression to a block diagram went more than {max_depth} levels deep"
+            ),
+            DepthGuard::Nesting => format!(
+                "cause: the expression is nested more than {max_depth} evaluation levels deep (a binary operator costs two)"
+            ),
+        }
+    }
+
+    /// The limit that ran out, and where it came from.
+    fn limit_note(&self, max_depth: usize) -> String {
+        match self.guard {
+            DepthGuard::Definitions => format!(
+                "limit: {}",
+                Self::describe(EVAL_MAX_DEPTH_VAR, self.definitions)
+            ),
+            DepthGuard::Nesting => format!(
+                "limit: {}",
+                Self::describe(EVAL_NESTING_DEPTH_VAR, self.nesting)
+            ),
+            DepthGuard::Structural => format!(
+                "limit: {max_depth}, the smaller of the definitions limit {} and the structural cap {}",
+                Self::describe(EVAL_MAX_DEPTH_VAR, self.definitions),
+                Self::describe(STRUCTURAL_MAX_DEPTH_VAR, self.structural),
+            ),
+        }
+    }
+
+    /// The help: what to check, and how to raise the limit that bound.
+    fn help(&self, max_depth: usize) -> String {
+        let raise = self
+            .binding_variables()
+            .iter()
+            .map(|var| format!("`{var}={}`", max_depth.saturating_mul(2)))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        match self.guard {
+            DepthGuard::Nesting => format!(
+                "a finite expression this deeply nested compiles with a higher limit ({raise}); a long chain is better written with an iteration (`sum`, `par`, `seq`)"
+            ),
+            DepthGuard::Definitions | DepthGuard::Structural => format!(
+                "if the recursion is meant to end, check for a missing base case or a recursive call that does not move towards it; a finite program this deep compiles with a higher limit ({raise})"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Typed evaluator failure surface.
 pub enum EvalError {
@@ -271,10 +434,52 @@ pub enum EvalError {
         /// The `TreeId` of the conflicting second definition.
         second_def: TreeId,
     },
+    /// An evaluation cycle: a definition is entered again, in the same
+    /// environment, while its own evaluation is in progress. `x = x;`, or
+    /// `a = b + 1; b = c * 2; c = a;`.
+    ///
+    /// C++ `loopDetector::detect` finds it by sampling (every 400 steps, over
+    /// the last 1024) and reports `endless evaluation cycle of <k> steps`;
+    /// Rust detects it at once, by frame identity on `LoopDetector`, and
+    /// names it.
     LoopDetected {
+        /// The use that closes the cycle: the identifier of the definition
+        /// entered again.
         node: TreeId,
+        /// The definitions of the cycle, closed by the first one:
+        /// `["process", "effect", "cut", "process"]`. Empty when unknown.
+        cycle: Vec<String>,
     },
+    /// A depth guard of the evaluator ran out ("stack overflow in eval", as
+    /// C++ says when its stack check fires).
     RecursionDepthExceeded {
+        /// The limit that ran out.
+        max_depth: usize,
+        /// Which guard fired, and the detector's limits.
+        context: DepthContext,
+    },
+    /// A depth budget ran out in a recursion through a `case` whose argument
+    /// is matched against numeric patterns but is not a compile-time number:
+    /// no numeric rule can match it, every call takes the variable rule, and
+    /// the recursion does not reach its base case. `f(0) = _; f(n) = f(n-1);`
+    /// applied to a UI control, or a library filter whose order is one
+    /// (`fi.bandpass(hslider("Q", ...), fl, fu)`).
+    ///
+    /// Raised instead of [`Self::RecursionDepthExceeded`] when the same rules
+    /// are being applied, nested several times, at the same argument
+    /// position on such an argument (see `LoopDetector::depth_exceeded`).
+    /// The C++ reference has no such check: it evaluates until its stack
+    /// check or its timeout stops it.
+    CaseArgumentNotConstant {
+        /// Rules of the recursing `case`.
+        node: TreeId,
+        /// 1-based position of the argument.
+        position: usize,
+        /// The argument at the outermost application, as dispatched on.
+        argument: TreeId,
+        /// The numeric patterns it cannot reach, rendered.
+        patterns: Vec<String>,
+        /// The budget the recursion exhausted.
         max_depth: usize,
     },
     /// A box expression was expected to evaluate to a compile-time numeric
@@ -395,6 +600,24 @@ fn with_symbol_suggestions(diagnostic: Diagnostic, suggestions: &[SymbolSuggesti
             "suggestion_distance",
             u64::try_from(suggestions[0].distance).unwrap_or(u64::MAX),
         )
+}
+
+impl EvalError {
+    /// Names the cycle of a [`Self::LoopDetected`] from the call stack of
+    /// `detector`; every other error is returned unchanged.
+    pub(crate) fn with_cycle_names(
+        self,
+        detector: &crate::LoopDetector,
+        arena: &tlib::TreeArena,
+    ) -> Self {
+        match self {
+            Self::LoopDetected { node, .. } => Self::LoopDetected {
+                node,
+                cycle: detector.cycle_names(arena),
+            },
+            other => other,
+        }
+    }
 }
 
 impl Display for EvalError {
@@ -524,17 +747,33 @@ impl Display for EvalError {
                     "symbol `{symbol}` redefined with a different value in the same scope"
                 )
             }
-            Self::LoopDetected { node } => {
-                write!(f, "recursive evaluation loop on node {}", node.as_u32())
+            Self::LoopDetected { cycle, .. } => {
+                if cycle.is_empty() {
+                    write!(f, "endless evaluation cycle")
+                } else {
+                    write!(f, "endless evaluation cycle: {}", cycle.join(" → "))
+                }
             }
-            Self::RecursionDepthExceeded { max_depth } => {
+            Self::RecursionDepthExceeded { max_depth, .. } => {
                 write!(f, "stack overflow in eval (depth budget {max_depth})")
             }
-            Self::NotAConstantExpression { node } => {
+            Self::CaseArgumentNotConstant {
+                position, patterns, ..
+            } => {
+                let numbers = match patterns.as_slice() {
+                    [one] => format!("the number {one}"),
+                    [init @ .., last] => format!("the numbers {} and {last}", init.join(", ")),
+                    [] => "numbers".to_owned(),
+                };
                 write!(
                     f,
-                    "expression is not a compile-time numeric constant (type 0→1): node {}",
-                    node.as_u32()
+                    "recursion does not reach its base case: argument {position} is matched against {numbers}, but is not a compile-time constant"
+                )
+            }
+            Self::NotAConstantExpression { .. } => {
+                write!(
+                    f,
+                    "expression is not a compile-time numeric constant (type 0→1)"
                 )
             }
             Self::WidgetParameterNotConstant {
@@ -969,17 +1208,70 @@ impl ToDiagnostic for EvalError {
                 "rule: iterator count must be integer, non-negative, and within supported range",
             )
             .with_help("iteration count must be a non-negative integer in target range"),
-            Self::RecursionDepthExceeded { max_depth } => Diagnostic::new(
+            Self::LoopDetected { cycle, .. } => {
+                let definitions = cycle.len().saturating_sub(1);
+                let diagnostic = Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_EVALUATION_CYCLE,
+                    message,
+                )
+                .with_note("cause: evaluating each of these definitions requires the next one, and the last requires the first: nothing in between ends the recursion")
+                .with_note("rule: a definition cannot depend on itself, directly or through other definitions; a signal that feeds back goes through the recursive composition `~`");
+                let diagnostic = if cycle.is_empty() {
+                    diagnostic
+                } else {
+                    diagnostic
+                        .with_note(format!(
+                            "computed: a cycle of {definitions} definition(s), entered again in the same environment"
+                        ))
+                        .with_fact("cycle", cycle.clone())
+                };
+                diagnostic.with_help("break the cycle: to feed a signal back, write the loop with `~` (`process = + ~ f;`); otherwise compute the shared part once, without referring back to the definition that uses it")
+            }
+            Self::RecursionDepthExceeded { max_depth, context } => {
+                let mut diagnostic = Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_GENERIC_FAILURE,
+                    message,
+                )
+                .with_note(context.cause(*max_depth))
+                .with_note(context.limit_note(*max_depth));
+                if context.binds_a_profile_default() && cfg!(debug_assertions) {
+                    diagnostic = diagnostic.with_note(format!(
+                        "build: debug, whose defaults are lower than release: {EVAL_MAX_DEPTH_VAR} {} and {STRUCTURAL_MAX_DEPTH_VAR} {} (release: {} and {})",
+                        crate::loop_detector::DEBUG_DEFAULT_EVAL_MAX_DEPTH,
+                        crate::loop_detector::DEBUG_STRUCTURAL_HARD_MAX_DEPTH,
+                        crate::loop_detector::RELEASE_DEFAULT_EVAL_MAX_DEPTH,
+                        crate::loop_detector::RELEASE_STRUCTURAL_HARD_MAX_DEPTH,
+                    ));
+                }
+                diagnostic
+                    .with_fact("depth_guard", context.guard_name())
+                    .with_fact("depth_limit", *max_depth as u64)
+                    .with_fact(
+                        "depth_limit_variables",
+                        context
+                            .binding_variables()
+                            .iter()
+                            .map(|var| (*var).to_owned())
+                            .collect::<Vec<_>>(),
+                    )
+                    .with_help(context.help(*max_depth))
+            }
+            Self::CaseArgumentNotConstant { max_depth, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
-                codes::EVAL_GENERIC_FAILURE,
+                codes::EVAL_CASE_ARGUMENT_NOT_CONSTANT,
                 message,
             )
-            .with_note("cause: evaluator recursion exhausted the guarded stack budget")
+            .with_note("cause: the function chooses its rule by comparing this argument with numbers, and the argument is a signal known only at run time, so no numeric rule can match and every call takes the general rule")
+            .with_note("rule: an argument matched against numeric patterns must fold to a number at compile time for the recursion to end")
             .with_note(format!(
-                "computed: the evaluator crossed its recursion budget before finishing ({max_depth} frames)"
+                "computed: the recursion went past its budget of {max_depth} frames with the argument still not a number"
             ))
-            .with_help("check recursive definitions for a missing base case or non-decreasing recursive call"),
+            .with_help("pass a constant number here: a literal, a constant expression or a constant definition. A UI control, an input or a smoothed control is not one; in a library function, such an argument (a filter order, a number of stages) is documented as a constant"),
             Self::DivisionByZero { detail, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -1040,13 +1332,95 @@ impl ToDiagnostic for EvalError {
                     diagnostic.with_help("pass a single constant number")
                 }
             }
+            Self::NotAConstantExpression { .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("cause: an expression the compiler evaluates at compile time does not fold to a number")
+            .with_note("rule: it must reduce to a single number: a literal, a constant expression, or a constant definition")
+            .with_help("pass a constant; a UI control, an input, or the argument of a function applied with `:` is a signal known only at run time"),
+            Self::Cancelled => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("cause: the compilation was cancelled before evaluation finished: the `--timeout` limit was reached, or the host asked for it")
+            .with_help("raise `--timeout` if the program is large; a recursion whose argument never becomes a constant can also run until the limit"),
+            Self::NonIdentifierParameter { .. } | Self::NonIdentifierIterationVariable { .. } => {
+                Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_GENERIC_FAILURE,
+                    message,
+                )
+                .with_note("cause: a lambda parameter or an iteration variable is not an identifier; the parser rejects this in source, so the box was built through the API")
+                .with_help("use an identifier: `\\(x).(...)`, `par(i, N, ...)`")
+            }
+            // internal forms only: every error a program or a run can cause has
+            // its own arm above
             _ => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_GENERIC_FAILURE,
                 message,
             )
-            .with_note("cause: evaluator reached an unsupported or malformed intermediate form"),
+            .with_note("cause: internal: the evaluator reached a malformed or unsupported intermediate form"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EvalError;
+    use diagnostics::ToDiagnostic;
+
+    fn notes(error: &EvalError) -> Vec<String> {
+        error
+            .to_diagnostic()
+            .notes
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Only internal forms get the catch-all cause; every error a program, the
+    /// API or a run can cause has its own (#22, WP4 of the runaway-recursion
+    /// plan).
+    #[test]
+    fn the_catch_all_cause_is_for_internal_forms_only() {
+        let arena = tlib::TreeArena::new();
+        let node = arena.nil();
+        let internal =
+            "cause: internal: the evaluator reached a malformed or unsupported intermediate form";
+        for error in [
+            EvalError::NotAConstantExpression { node },
+            EvalError::Cancelled,
+            EvalError::NonIdentifierParameter { node },
+            EvalError::NonIdentifierIterationVariable { node },
+            EvalError::LoopDetected {
+                node,
+                cycle: vec!["x".to_owned(), "x".to_owned()],
+            },
+        ] {
+            let notes = notes(&error);
+            assert!(notes.iter().any(|n| n.starts_with("cause: ")), "{error:?}");
+            assert!(!notes.iter().any(|n| n == internal), "{error:?}: {notes:?}");
+        }
+        for error in [
+            EvalError::MalformedListNode { node },
+            EvalError::InternalError {
+                message: "test".to_owned(),
+            },
+        ] {
+            assert!(notes(&error).iter().any(|n| n == internal), "{error:?}");
+        }
+        // no internal node number in the message
+        assert_eq!(
+            EvalError::NotAConstantExpression { node }.to_string(),
+            "expression is not a compile-time numeric constant (type 0→1)"
+        );
     }
 }

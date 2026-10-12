@@ -211,6 +211,14 @@ pub fn generate_cpp_module(
     module: FirId,
     options: &CppOptions,
 ) -> Result<String, CodegenError> {
+    fir::on_compile_stack(|| generate_cpp_module_step(store, module, options))
+}
+
+fn generate_cpp_module_step(
+    store: &FirStore,
+    module: FirId,
+    options: &CppOptions,
+) -> Result<String, CodegenError> {
     let module_id = module;
     let module = decode_module(store, module_id)?;
     let module_name = module.name.clone();
@@ -248,6 +256,7 @@ pub fn generate_cpp_module(
         class_name,
         metadata_name,
         options.compile_options.as_deref(),
+        &crate::backends::c_family::ForeignDependencies::of(store, module_id),
     );
     if let Some(namespace) = options.namespace.as_deref() {
         let _ = writeln!(out, "namespace {namespace} {{");
@@ -1031,12 +1040,24 @@ fn collect_module_function_names(
     Ok(names)
 }
 
+/// The headers the C++ prelude always includes.
+const CPP_PRELUDE_HEADERS: &[&str] = &[
+    "<algorithm>",
+    "<cstddef>",
+    "<cmath>",
+    "<cstdint>",
+    "<cstring>",
+    "<exception>",
+    "<new>",
+];
+
 /// Emits the generated-file prologue and platform macros.
 fn emit_cpp_header(
     out: &mut String,
     class_name: &str,
     module_name: &str,
     compile_options: Option<&str>,
+    dependencies: &crate::backends::c_family::ForeignDependencies,
 ) {
     let _ = writeln!(
         out,
@@ -1072,6 +1093,9 @@ fn emit_cpp_header(
     let _ = writeln!(out, "#include <cstring>");
     let _ = writeln!(out, "#include <exception>");
     let _ = writeln!(out, "#include <new>");
+    // The foreign functions' headers, where C++ `produceClass` prints them:
+    // before the class, so before every use, with or without `-a`.
+    dependencies.emit(out, CPP_PRELUDE_HEADERS);
     let _ = writeln!(out);
     let _ = writeln!(out, "#ifndef FAUSTCLASS");
     let _ = writeln!(out, "#define FAUSTCLASS {class_name}");
@@ -1129,8 +1153,20 @@ fn emit_section(
     };
 
     for item in items {
+        // Prototypes, dependencies and foreign variables are not members: the
+        // headers went to the prelude (`ForeignDependencies`), and they
+        // declare the variables. A member of the same name would shadow the
+        // header's global (C++ `generateFVar` declares nothing either).
         if section_name == "globals"
-            && matches!(match_fir(store, item), FirMatch::DeclareFun { .. })
+            && matches!(
+                match_fir(store, item),
+                FirMatch::DeclareFun { .. }
+                    | FirMatch::DeclareDependency { .. }
+                    | FirMatch::DeclareVar {
+                        access: fir::AccessType::Global,
+                        ..
+                    }
+            )
         {
             continue;
         }
