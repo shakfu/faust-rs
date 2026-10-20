@@ -36,11 +36,11 @@ implementation remain explicit zero-interval placeholders in `ops::missing`.
 
 | Item | Description |
 |---|---|
-| `ops::arithmetic` | `+`, `-`, `*`, `/`, `%`, `abs`, `floor`, `ceil`, … |
+| `ops::arithmetic` | `+`, `-`, `*`, `/`, `%`, `abs`, `neg`, `inv` |
 | `bitwise` | Signed/unsigned `&`, `\|`, `^`, `~`, and shift interval operations |
 | `ops::logic` | Boolean algebra on intervals |
-| `ops::math` | `pow`, `sqrt`, `exp`, `log`, … |
-| `ops::trig` | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2` |
+| `ops::math` | `floor`, `ceil`, `round`, `rint`, `pow`, `sqrt`, `exp`, `log`, … |
+| `ops::trig` | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, and the hyperbolic `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh` |
 | `ops::delay_table` | Delay and memory interval propagation |
 | `ops::missing` | C++-compatible zero placeholders for unimplemented operator families |
 | `ops::ui` | UI-widget interval constraints |
@@ -56,6 +56,8 @@ implementation remain explicit zero-interval placeholders in `ops::missing`.
 
 ## Position in the pipeline
 
-```
-signals  →  normalize  →  [interval inference]  →  transform
-```
+Canonical pipeline (AGENTS.md): parse → boxes → eval → propagate → normalize → type/interval → transform → fir → backend.
+
+`interval` is pure arithmetic with no workspace dependencies. Interval
+inference over signals lives in `sigtype::rules` (`TypeAnnotator`), which
+calls these operators and stores the result in each `SimpleType`.

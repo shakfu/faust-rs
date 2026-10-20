@@ -1,4 +1,6 @@
-//! Backend-neutral local reverse-AD rules for Signal nodes.
+//! Backend-neutral local AD rules for Signal nodes: the reverse-AD
+//! contribution formulas, and the folding of literal zeros in derivative
+//! expressions ([`DerivativeZeroFolder`]).
 //!
 //! `signals` normally owns the Signal IR representation and builder/matcher
 //! surface. This module is the narrow exception where the crate also hosts
@@ -13,7 +15,11 @@
 //! loops, or inspect temporal/recursive structure. Those remain owned by the
 //! caller.
 
-use crate::{BinOp, SigBuilder, SigId, SigMatch};
+use std::collections::HashMap;
+
+use tlib::TreeArena;
+
+use crate::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 
 /// Unary math rules with a non-zero local reverse-AD contribution.
 ///
@@ -205,14 +211,15 @@ impl RadFormulaBuilder for SigBuilder<'_> {
 /// Returns the local contribution for one unary math rule.
 ///
 /// `primal` is the forward value of the matched node. Builders that lower
-/// block-reverse AD can pass a tape load for `exp`, `sqrt`, and `abs`, while
-/// symbolic builders can pass the reconstructed primal expression.
+/// block-reverse AD can pass a tape load for `exp`, `exp10`, `sqrt` and
+/// `tan`, while symbolic builders can pass the reconstructed primal
+/// expression (hash-consed onto the forward node).
 ///
 /// Formulas:
 ///
 /// - `sin(x)`: `y_bar * cos(x)`
 /// - `cos(x)`: `-y_bar * sin(x)`
-/// - `tan(x)`: `y_bar / cos(x)^2`
+/// - `tan(x)`: `y_bar * (1 + tan(x)^2)` using `primal` (no `cos` call)
 /// - `exp(x)`: `y_bar * exp(x)` using `primal`
 /// - `log(x)`: `y_bar / x`
 /// - `log10(x)`: `y_bar / (x * ln(10))`
@@ -239,9 +246,10 @@ pub fn rad_unary_contribution<B: RadFormulaBuilder>(
             b.mul(y_bar, neg_sin)
         }
         RadUnaryMathRule::Tan => {
-            let cos_x = b.cos(x);
-            let cos_sq = b.mul(cos_x, cos_x);
-            b.div(y_bar, cos_sq)
+            let one = b.one();
+            let tan_sq = b.mul(primal, primal);
+            let sec_sq = b.add(one, tan_sq);
+            b.mul(y_bar, sec_sq)
         }
         RadUnaryMathRule::Exp => b.mul(y_bar, primal),
         RadUnaryMathRule::Exp10 => {
@@ -458,11 +466,167 @@ pub fn rad_binop_rule(op: BinOp) -> RadBinOpRule {
     }
 }
 
+/// Whether `sig` is the literal zero a derivative is spelled as
+/// (`real(0.0)` or `int(0)`).
+pub fn is_literal_zero(arena: &TreeArena, sig: SigId) -> bool {
+    matches!(match_sig(arena, sig), SigMatch::Real(v) if v == 0.0)
+        || matches!(match_sig(arena, sig), SigMatch::Int(0))
+}
+
+/// Folds the literal zeros of derivative expressions as they are built.
+///
+/// | node | fold |
+/// |---|---|
+/// | `0 · x`, `x · 0`, `0 / x` | `0` |
+/// | `x + 0`, `0 + x`, `x − 0` | `x` |
+/// | `TempVar(0)`, `PermVar(0)`, `Clocked(τ, 0)`, `Seq(B, 0)`, `ZeroPad(0, h)`, `delay1(0)`, `delay(0, d)` | `0` |
+/// | `float_cast(0)` | `real(0)` |
+/// | `select2(c, 0, 0)` | `0` |
+///
+/// These are folds the signal simplifier (`normalize`) applies to bare
+/// literals; a differentiation pass needs them earlier and through the
+/// clock-domain wrappers, because it decides from the shape of a
+/// derivative what a block must hold: a zero wrapped as `Clocked(τ, 0)`
+/// became a held value read at the audio rate
+/// (porting/fad-zero-tangent-folding-plan-2026-10-18-en.md). Only a zero
+/// goes through a wrapper: `PermVar(c)` reads 0 before its block first
+/// fires, so it equals `c` only for `c = 0`.
+///
+/// The folder walks the nodes it has not seen and stops at those it has
+/// folded or been told to [`keep`](Self::keep): a pass that folds each
+/// derivative it builds over already-folded operands, and keeps its
+/// primals, visits only the nodes its rule just built. Folding is
+/// structural (a node is replaced by an equal-valued node of the same
+/// scope), so one memo is valid at every de Bruijn depth.
+#[derive(Debug, Default)]
+pub struct DerivativeZeroFolder {
+    memo: HashMap<SigId, SigId>,
+}
+
+impl DerivativeZeroFolder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks `sig` as a fixed point: the folder will not look inside it.
+    pub fn keep(&mut self, sig: SigId) {
+        self.memo.entry(sig).or_insert(sig);
+    }
+
+    /// The derivative expression `sig` with its literal zeros folded.
+    pub fn fold(&mut self, arena: &mut TreeArena, sig: SigId) -> SigId {
+        if let Some(&folded) = self.memo.get(&sig) {
+            return folded;
+        }
+        let folded = match match_sig(arena, sig) {
+            SigMatch::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div), x, y) => {
+                let fx = self.fold(arena, x);
+                let fy = self.fold(arena, y);
+                let zx = is_literal_zero(arena, fx);
+                let zy = is_literal_zero(arena, fy);
+                match op {
+                    BinOp::Add if zx => fy,
+                    BinOp::Add | BinOp::Sub if zy => fx,
+                    BinOp::Mul | BinOp::Div if zx => fx,
+                    BinOp::Mul if zy => fy,
+                    _ if fx == x && fy == y => sig,
+                    _ => SigBuilder::new(arena).binop(op, fx, fy),
+                }
+            }
+            SigMatch::TempVar(u)
+            | SigMatch::PermVar(u)
+            | SigMatch::Clocked(_, u)
+            | SigMatch::Seq(_, u)
+            | SigMatch::ZeroPad(u, _)
+            | SigMatch::Delay1(u)
+            | SigMatch::Delay(u, _) => {
+                let fu = self.fold(arena, u);
+                if is_literal_zero(arena, fu) { fu } else { sig }
+            }
+            SigMatch::FloatCast(u) => {
+                let fu = self.fold(arena, u);
+                if is_literal_zero(arena, fu) {
+                    SigBuilder::new(arena).real(0.0)
+                } else {
+                    sig
+                }
+            }
+            SigMatch::Select2(_, a, b) => {
+                let fa = self.fold(arena, a);
+                let fb = self.fold(arena, b);
+                if is_literal_zero(arena, fa) && is_literal_zero(arena, fb) {
+                    fa
+                } else {
+                    sig
+                }
+            }
+            _ => sig,
+        };
+        self.memo.insert(sig, folded);
+        folded
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{SigBuilder, dump_sig_readable};
     use tlib::TreeArena;
+
+    #[test]
+    fn derivative_zero_folder_folds_zeros_through_arithmetic_and_wrappers() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let zero = b.real(0.0);
+        let one = b.real(1.0);
+        let x = b.input(0);
+        let env = b.clock_env_token(0);
+        let wrapped = b.clocked(env, zero);
+        let held = b.perm_var(wrapped);
+        let snap = b.temp_var(held);
+        let prod = b.mul(x, snap);
+        let sum = b.add(prod, one);
+        let quot = b.div(snap, x);
+        let diff = b.sub(x, quot);
+        let both = b.select2(x, snap, zero);
+        let padded = b.zero_pad(wrapped, one);
+        let cast = b.float_cast(padded);
+        let delayed = b.delay1(cast);
+        let mut folder = DerivativeZeroFolder::new();
+        assert_eq!(folder.fold(&mut arena, snap), zero);
+        assert_eq!(folder.fold(&mut arena, sum), one, "x·0 + 1 is 1");
+        assert_eq!(folder.fold(&mut arena, diff), x, "x − 0/x is x");
+        assert_eq!(folder.fold(&mut arena, both), zero);
+        assert_eq!(folder.fold(&mut arena, delayed), zero);
+    }
+
+    #[test]
+    fn derivative_zero_folder_keeps_non_zero_holds_and_kept_nodes() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let zero = b.real(0.0);
+        let one = b.real(1.0);
+        let x = b.input(0);
+        let env = b.clock_env_token(0);
+        let wrapped_one = b.clocked(env, one);
+        let held_one = b.perm_var(wrapped_one);
+        let zero_minus_x = b.sub(zero, x);
+        let primal = b.mul(x, zero);
+        let tangent = b.add(primal, one);
+        let mut folder = DerivativeZeroFolder::new();
+        assert_eq!(
+            folder.fold(&mut arena, held_one),
+            held_one,
+            "a held 1 reads 0 before its first firing: not the literal 1"
+        );
+        assert_eq!(folder.fold(&mut arena, zero_minus_x), zero_minus_x);
+        folder.keep(primal);
+        assert_eq!(
+            folder.fold(&mut arena, tangent),
+            tangent,
+            "a kept node is not looked into"
+        );
+    }
 
     #[test]
     fn ad_rules_classify_unary_and_binary_math_nodes() {
@@ -550,6 +714,112 @@ mod tests {
                 && asin_dump.contains("op=sub (-)")
                 && asin_dump.contains("op=mul (*)"),
             "asin derivative should use sqrt(1 - x*x), got {asin_dump}"
+        );
+    }
+
+    /// Plain-`f64` builder so the shared formulas can be evaluated directly.
+    struct F64Builder;
+
+    impl RadFormulaBuilder for F64Builder {
+        type Value = f64;
+        fn zero(&mut self) -> f64 {
+            0.0
+        }
+        fn one(&mut self) -> f64 {
+            1.0
+        }
+        fn ln_10(&mut self) -> f64 {
+            std::f64::consts::LN_10
+        }
+        fn add(&mut self, x: f64, y: f64) -> f64 {
+            x + y
+        }
+        fn sub(&mut self, x: f64, y: f64) -> f64 {
+            x - y
+        }
+        fn mul(&mut self, x: f64, y: f64) -> f64 {
+            x * y
+        }
+        fn div(&mut self, x: f64, y: f64) -> f64 {
+            x / y
+        }
+        fn pow(&mut self, x: f64, y: f64) -> f64 {
+            x.powf(y)
+        }
+        fn log(&mut self, x: f64) -> f64 {
+            x.ln()
+        }
+        fn cos(&mut self, x: f64) -> f64 {
+            x.cos()
+        }
+        fn sin(&mut self, x: f64) -> f64 {
+            x.sin()
+        }
+        fn sqrt(&mut self, x: f64) -> f64 {
+            x.sqrt()
+        }
+        fn abs(&mut self, x: f64) -> f64 {
+            x.abs()
+        }
+        fn floor(&mut self, x: f64) -> f64 {
+            x.floor()
+        }
+        fn round(&mut self, x: f64) -> f64 {
+            x.round()
+        }
+        fn lt(&mut self, x: f64, y: f64) -> f64 {
+            f64::from(u8::from(x < y))
+        }
+        fn le(&mut self, x: f64, y: f64) -> f64 {
+            f64::from(u8::from(x <= y))
+        }
+        fn gt(&mut self, x: f64, y: f64) -> f64 {
+            f64::from(u8::from(x > y))
+        }
+        fn ge(&mut self, x: f64, y: f64) -> f64 {
+            f64::from(u8::from(x >= y))
+        }
+        fn select_nonzero(&mut self, cond: f64, when_true: f64, when_false: f64) -> f64 {
+            if cond != 0.0 { when_true } else { when_false }
+        }
+    }
+
+    /// `tan' = 1 + tan²` built on the primal agrees with the analytic
+    /// `1 / cos²` at points spread over `(-π/2, π/2)`, including near the
+    /// poles where both grow large.
+    #[test]
+    fn ad_rules_tan_contribution_matches_analytic_derivative() {
+        for x in [-1.5, -0.9, -0.25, 0.0, 0.3, 0.785, 1.2, 1.55] {
+            let y_bar = 0.75;
+            let primal = f64::tan(x);
+            let got =
+                rad_unary_contribution(&mut F64Builder, RadUnaryMathRule::Tan, x, primal, y_bar);
+            let expected = y_bar / (x.cos() * x.cos());
+            let rel = ((got - expected) / expected).abs();
+            assert!(
+                rel < 1e-12,
+                "tan'({x}): got {got}, expected {expected}, rel {rel}"
+            );
+        }
+    }
+
+    /// The symbolic `tan` contribution reads the primal and never calls `cos`.
+    #[test]
+    fn ad_rules_tan_contribution_reuses_primal_without_cos() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let y_bar = b.real(2.0);
+        let primal = b.tan(x);
+        let grad = rad_unary_contribution(&mut b, RadUnaryMathRule::Tan, x, primal, y_bar);
+        let dump = dump_sig_readable(&arena, grad);
+        assert!(
+            !dump.contains("SIGCOS") && !dump.contains("op=div (/)"),
+            "tan derivative should not rebuild cos(x)^2 or divide, got {dump}"
+        );
+        assert!(
+            dump.contains("SIGTAN") && dump.contains("op=add (+)"),
+            "tan derivative should be y_bar * (1 + tan(x)^2), got {dump}"
         );
     }
 

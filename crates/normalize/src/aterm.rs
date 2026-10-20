@@ -1,7 +1,7 @@
 //! Additive term: a sum of [`Mterm`]s — `m₁ + m₂ + m₃ + …`
 //!
 //! Ported from C++ `compiler/normalize/aterm.cpp`.
-// Internal module — wired into the simplify/normalform pipeline in Phase 2.
+// Internal module, used by `normalize`.
 #![allow(dead_code)]
 //!
 //! An [`Aterm`] decomposes an additive signal expression into its canonical
@@ -25,7 +25,7 @@ use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::SigType;
 use tlib::TreeArena;
 
-use crate::mterm::{self, Mterm, add_nums, gcd, is_num, is_zero, sig_order, sub_nums};
+use crate::mterm::{self, Mterm, add_nums, gcd, is_num, is_zero, state_order, sub_nums};
 
 // ─── Aterm ────────────────────────────────────────────────────────────────────
 
@@ -178,9 +178,18 @@ impl Aterm {
     /// Reconstruct the canonical additive signal tree.
     ///
     /// Terms are separated into positive (`P`) and negative (`N`) buckets by
-    /// variability order (0=Konst, 1=Block, 2=Samp).  The buckets are then
-    /// folded from highest to lowest order using [`add_terms_with_sign`], with
-    /// the constant bucket at order 0 forming the initial sum via subtraction.
+    /// order ([`state_order`]: 0=Konst, 1=Block, 2=Samp, 3=depends on state).
+    /// The constant bucket at order 0 forms the initial sum; the buckets of
+    /// orders 2 and 1 are folded onto it from highest to lowest, each term
+    /// joining as the left operand, using [`add_terms_with_sign`]; the terms
+    /// that depend on state join last, as the right operand.
+    ///
+    /// That late state join (upstream commit `d4d51e5ed`, posterior to the
+    /// pinned reference; registry DIFF-BEH-023) keeps the state-to-state path
+    /// of a recursion clear of any foreign addition and leaves the slow part
+    /// of the sum one subtree, which can be hoisted: `1 - c - o` is
+    /// `(1 - c) - o`, where the reference builds `(1 - o) - c`. A two-term sum
+    /// `{slow, state}` keeps its historical operand order `slow + state`.
     ///
     /// C++: `Tree aterm::normalizedTree() const`.
     pub(crate) fn normalized_tree(
@@ -188,7 +197,9 @@ impl Aterm {
         arena: &mut TreeArena,
         types: &HashMap<SigId, SigType>,
     ) -> SigId {
-        const ORDERS: usize = 3;
+        // Orders 0..=2 are folded as in the reference; order 3 joins last.
+        const STATE: usize = 3;
+        const ORDERS: usize = STATE + 1;
         let zero = SigBuilder::new(arena).int(0);
         let mut p = [zero; ORDERS]; // positive terms by order
         let mut n = [zero; ORDERS]; // negative terms (made positive) by order
@@ -200,11 +211,11 @@ impl Aterm {
             if m.is_negative(arena) {
                 // negative_mode=true: invert sign for the tree
                 let t = m.normalized_tree(arena, types, false, true);
-                let ord = sig_order(types, t) as usize;
+                let ord = state_order(arena, types, t) as usize;
                 n[ord] = simplifying_add(arena, n[ord], t);
             } else {
                 let t = m.normalized_tree(arena, types, false, false);
-                let ord = sig_order(types, t) as usize;
+                let ord = state_order(arena, types, t) as usize;
                 p[ord] = simplifying_add(arena, p[ord], t);
             }
         }
@@ -222,9 +233,9 @@ impl Aterm {
             add_terms_with_sign(arena, true, p[0], false, n[0])
         };
 
-        // Fold from highest to lowest order.
-        // C++: loop from order=3 down to 1; here from (ORDERS-1) down to 1.
-        for order in (1..ORDERS).rev() {
+        // Fold from highest to lowest order, the state terms excepted.
+        // C++: loop from order=3 down to 1; here from Samp (2) down to 1.
+        for order in (1..STATE).rev() {
             let (s, r) = add_terms_with_sign(arena, false, n[order], sign, sum);
             sign = s;
             sum = r;
@@ -233,6 +244,14 @@ impl Aterm {
             sign = s;
             sum = r;
         }
+
+        // The state terms join last, as the right operand (SUM first).
+        let (s, r) = add_terms_with_sign(arena, sign, sum, false, n[STATE]);
+        sign = s;
+        sum = r;
+        let (s, r) = add_terms_with_sign(arena, sign, sum, true, p[STATE]);
+        sign = s;
+        sum = r;
 
         if !sign {
             // Result is negative: wrap in -1 * SUM.
@@ -245,8 +264,16 @@ impl Aterm {
 
     /// Return the greatest common divisor of any two mterms.
     ///
-    /// Iterates all pairs and returns the [`Mterm`] with the highest complexity.
-    /// Returns `1` (no common factor) when there are fewer than two terms.
+    /// Returns the gcd of highest complexity over all pairs of terms, the
+    /// first pair in map order winning ties. Returns `1` (no common factor)
+    /// when no pair has a gcd of non-zero complexity, in particular when there
+    /// are fewer than two terms.
+    ///
+    /// C++ scans every pair (O(k²) per call, and `normalizeAddTerm` runs on
+    /// every partial sum of a `:>` chain, so O(n³) for a sum of n terms).
+    /// This scans only the pairs [`DivisorPairs`] reports, a superset of those
+    /// whose gcd has a non-zero complexity, in the same order: the result, the
+    /// tie-break and the nodes created are those of the full scan.
     ///
     /// C++: `mterm aterm::greatestDivisor() const`.
     pub(crate) fn greatest_divisor(
@@ -256,11 +283,23 @@ impl Aterm {
     ) -> Mterm {
         let mut max_complexity = 0i32;
         let mut max_gcd = Mterm::from_int(arena, 1);
+        // Most calls see one term (simplify normalizes every product as an
+        // add-term): no pair, and no index to build.
+        if self.terms.len() < 2 {
+            return max_gcd;
+        }
 
-        let mterms: Vec<Mterm> = self.terms.values().cloned().collect();
+        let mterms: Vec<&Mterm> = self.terms.values().collect();
+        let pairs = DivisorPairs::new(arena, &mterms);
+        let mut partners = Vec::new();
         for i in 0..mterms.len() {
-            for j in (i + 1)..mterms.len() {
-                let g = gcd(arena, &mterms[i], &mterms[j]);
+            // Ascending partners for ascending `i`: pairs are visited in the
+            // order of the full scan, so the first strictly greater one wins.
+            pairs.partners_after(i, mterms[i], &mut partners);
+            for &j in &partners {
+                #[cfg(test)]
+                gcd_evaluations::record();
+                let g = gcd(arena, mterms[i], mterms[j]);
                 let c = g.complexity(arena, types);
                 if c > max_complexity {
                     max_complexity = c;
@@ -342,6 +381,121 @@ pub(crate) fn simplifying_add(arena: &mut TreeArena, t1: SigId, t2: SigId) -> Si
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
+/// The pairs of terms of an [`Aterm`] whose [`gcd`] can have a non-zero
+/// complexity, for [`Aterm::greatest_divisor`].
+///
+/// `gcd(m1, m2).complexity()` adds 1 when the coefficients have the same
+/// magnitude and that magnitude is not 1, and `(1 + order) · |e|` (order from
+/// [`state_order`], at least 0, so the term is positive) for each
+/// factor common to both terms with exponents of the same sign (`e` their
+/// common exponent, never 0 then). It is 0 for every other pair, and a pair of
+/// complexity 0 never replaces the current best. So the candidate pairs are
+/// those sharing a factor with same-sign exponents, found through an inverted
+/// index, or sharing a coefficient magnitude other than 1, found by bucket.
+///
+/// A sum of `k` independent terms (`:>` over `k` distinct signals, each with
+/// coefficient ±1) has no candidate pair, where the full scan evaluates
+/// `k(k-1)/2` of them.
+///
+/// The index is built per call and holds term positions only: no node is
+/// created, and the candidates are a superset of the pairs of non-zero
+/// complexity, every one still evaluated by [`gcd`] as before.
+struct DivisorPairs {
+    /// `(factor, exponent > 0)` → positions of the terms carrying that factor
+    /// with an exponent of that sign, ascending.
+    by_factor: HashMap<(SigId, bool), Vec<usize>>,
+    /// Coefficient magnitude (`f64` bits) → positions of the terms with that
+    /// magnitude, ascending. Magnitude 1 and NaN are left out: a gcd of
+    /// magnitude 1 has no coefficient complexity, and `same_magnitude` never
+    /// holds for NaN.
+    by_magnitude: HashMap<u64, Vec<usize>>,
+    /// Magnitude key of each term, by position.
+    magnitudes: Vec<Option<u64>>,
+}
+
+impl DivisorPairs {
+    fn new(arena: &TreeArena, mterms: &[&Mterm]) -> Self {
+        let mut by_factor: HashMap<(SigId, bool), Vec<usize>> = HashMap::new();
+        let mut by_magnitude: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut magnitudes = Vec::with_capacity(mterms.len());
+        for (pos, m) in mterms.iter().enumerate() {
+            for (&base, &exp) in &m.factors {
+                if exp != 0 {
+                    by_factor.entry((base, exp > 0)).or_default().push(pos);
+                }
+            }
+            let key = magnitude_key(arena, m.coef);
+            if let Some(key) = key {
+                by_magnitude.entry(key).or_default().push(pos);
+            }
+            magnitudes.push(key);
+        }
+        Self {
+            by_factor,
+            by_magnitude,
+            magnitudes,
+        }
+    }
+
+    /// Fill `out` with the candidate partners `j > i` of term `i` (`m`),
+    /// ascending and without duplicates.
+    fn partners_after(&self, i: usize, m: &Mterm, out: &mut Vec<usize>) {
+        fn after(i: usize, positions: &[usize], out: &mut Vec<usize>) {
+            let start = positions.partition_point(|&pos| pos <= i);
+            out.extend_from_slice(&positions[start..]);
+        }
+        out.clear();
+        for (&base, &exp) in &m.factors {
+            if exp != 0
+                && let Some(positions) = self.by_factor.get(&(base, exp > 0))
+            {
+                after(i, positions, out);
+            }
+        }
+        if let Some(positions) = self.magnitudes[i].and_then(|key| self.by_magnitude.get(&key)) {
+            after(i, positions, out);
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+/// Bucket key of a numeric coefficient for [`DivisorPairs`]: the bits of its
+/// absolute value as an `f64`, or `None` when it cannot contribute to a gcd's
+/// complexity (magnitude 1, NaN, or not a number).
+///
+/// [`same_magnitude`](crate::mterm::same_magnitude) of two coefficients
+/// implies equal keys (`i32 → f64` is exact and `abs` maps `-0.0` to `0.0`),
+/// so the buckets miss no pair it accepts.
+fn magnitude_key(arena: &TreeArena, coef: SigId) -> Option<u64> {
+    let magnitude = match match_sig(arena, coef) {
+        SigMatch::Int(n) => f64::from(n).abs(),
+        SigMatch::Real(r) => r.abs(),
+        _ => return None,
+    };
+    (magnitude != 1.0 && !magnitude.is_nan()).then(|| magnitude.to_bits())
+}
+
+/// Counts the [`gcd`] evaluations of [`Aterm::greatest_divisor`] on the
+/// current thread, so tests can bound the work of a normalization.
+#[cfg(test)]
+pub(crate) mod gcd_evaluations {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn record() {
+        COUNT.with(|count| count.set(count.get() + 1));
+    }
+
+    /// Evaluations since the last call on this thread.
+    pub(crate) fn take() -> u64 {
+        COUNT.with(|count| count.replace(0))
+    }
+}
+
 /// Combine two signed partial sums into a new signed partial sum.
 ///
 /// Implements the following truth table (0 denotes the zero signal):
@@ -383,7 +537,9 @@ fn add_terms_with_sign(
 
 #[cfg(test)]
 mod tests {
+    use interval::Interval;
     use signals::SigMatch;
+    use sigtype::{Boolean, Computability, Nature, Variability, Vectorability, make_simple};
 
     use super::*;
 
@@ -548,6 +704,251 @@ mod tests {
         let at = Aterm::from_sig(&mut a, &t, add);
         let g = at.greatest_divisor(&mut a, &t);
         assert_eq!(g.complexity(&a, &t), 0, "gcd of x and y has complexity 0");
+    }
+
+    /// The full pair scan of C++ `aterm::greatestDivisor`, the oracle of the
+    /// pruned [`Aterm::greatest_divisor`].
+    fn greatest_divisor_full_scan(
+        at: &Aterm,
+        a: &mut TreeArena,
+        t: &HashMap<SigId, SigType>,
+    ) -> Mterm {
+        let mut max_complexity = 0i32;
+        let mut max_gcd = Mterm::from_int(a, 1);
+        let mterms: Vec<&Mterm> = at.terms.values().collect();
+        for i in 0..mterms.len() {
+            for j in (i + 1)..mterms.len() {
+                let g = gcd(a, mterms[i], mterms[j]);
+                let c = g.complexity(a, t);
+                if c > max_complexity {
+                    max_complexity = c;
+                    max_gcd = g;
+                }
+            }
+        }
+        max_gcd
+    }
+
+    /// Deterministic xorshift generator for the property test below.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    fn simple(variability: Variability) -> SigType {
+        make_simple(
+            Nature::Real,
+            variability,
+            Computability::Init,
+            Vectorability::Vect,
+            Boolean::Num,
+            Interval::new_default(),
+        )
+    }
+
+    /// `proj(0, SYMREF(v))'`: the delayed output of a recursion, as a
+    /// symbolic recursive body reads its own state.
+    fn state_term(a: &mut TreeArena) -> SigId {
+        let var = a.symbol("W");
+        let self_ref = tlib::sym_ref(a, var);
+        let proj = SigBuilder::new(a).proj(0, self_ref);
+        SigBuilder::new(a).delay1(proj)
+    }
+
+    /// `1`, a control `c`, an audio input `x` and a state term `o`, typed.
+    fn late_join_terms(a: &mut TreeArena, t: &mut HashMap<SigId, SigType>) -> [SigId; 4] {
+        let one = SigBuilder::new(a).int(1);
+        let c = SigBuilder::new(a).input(1);
+        let x = SigBuilder::new(a).input(2);
+        let o = state_term(a);
+        t.insert(one, simple(Variability::Konst));
+        t.insert(c, simple(Variability::Block));
+        t.insert(x, simple(Variability::Samp));
+        t.insert(o, simple(Variability::Samp));
+        [one, c, x, o]
+    }
+
+    #[test]
+    fn a_state_term_joins_the_sum_last() {
+        // `1 - c - o`: the reference builds `(1 - o) - c`, so `1 - o` rounds
+        // and the slow `1 - c` cannot be hoisted; upstream d4d51e5ed builds
+        // `(1 - c) - o` (faust-coopiano's damper openness never reached 0).
+        let mut a = arena();
+        let mut t = types();
+        let [one, c, _, o] = late_join_terms(&mut a, &mut t);
+        let one_minus_c = SigBuilder::new(&mut a).sub(one, c);
+        let sum = SigBuilder::new(&mut a).sub(one_minus_c, o);
+        let tree = Aterm::from_sig(&mut a, &t, sum).normalized_tree(&mut a, &t);
+        assert_eq!(tree, sum, "{}", signals::dump_sig_readable(&a, tree));
+    }
+
+    #[test]
+    fn a_slow_and_a_state_term_keep_their_operand_order() {
+        // `{slow, state}` keeps `slow + state`, its historical shape.
+        let mut a = arena();
+        let mut t = types();
+        let [_, c, _, o] = late_join_terms(&mut a, &mut t);
+        for sum in [
+            SigBuilder::new(&mut a).add(c, o),
+            SigBuilder::new(&mut a).add(o, c),
+        ] {
+            let tree = Aterm::from_sig(&mut a, &t, sum).normalized_tree(&mut a, &t);
+            let expected = SigBuilder::new(&mut a).add(c, o);
+            assert_eq!(tree, expected, "{}", signals::dump_sig_readable(&a, tree));
+        }
+    }
+
+    #[test]
+    fn the_state_term_comes_after_the_audio_and_slow_terms() {
+        // `o + x + c`: the off-path terms form `c + x`, then `+ o`.
+        let mut a = arena();
+        let mut t = types();
+        let [_, c, x, o] = late_join_terms(&mut a, &mut t);
+        let ox = SigBuilder::new(&mut a).add(o, x);
+        let sum = SigBuilder::new(&mut a).add(ox, c);
+        let tree = Aterm::from_sig(&mut a, &t, sum).normalized_tree(&mut a, &t);
+        let cx = SigBuilder::new(&mut a).add(c, x);
+        let expected = SigBuilder::new(&mut a).add(cx, o);
+        assert_eq!(tree, expected, "{}", signals::dump_sig_readable(&a, tree));
+        // A negative state term joins as a subtraction on the right.
+        let x_minus_o = SigBuilder::new(&mut a).sub(x, o);
+        let sum = SigBuilder::new(&mut a).add(x_minus_o, c);
+        let tree = Aterm::from_sig(&mut a, &t, sum).normalized_tree(&mut a, &t);
+        let expected = SigBuilder::new(&mut a).sub(cx, o);
+        assert_eq!(tree, expected, "{}", signals::dump_sig_readable(&a, tree));
+    }
+
+    #[test]
+    fn a_state_factor_weighs_one_more_than_an_audio_one() {
+        let mut a = arena();
+        let mut t = types();
+        let [_, c, x, o] = late_join_terms(&mut a, &mut t);
+        let one = SigBuilder::new(&mut a).int(1);
+        let weight = |a: &mut TreeArena, f: SigId| {
+            Mterm {
+                coef: one,
+                factors: BTreeMap::from([(f, 1)]),
+            }
+            .complexity(a, &t)
+        };
+        assert_eq!(weight(&mut a, c), 2);
+        assert_eq!(weight(&mut a, x), 3);
+        assert_eq!(weight(&mut a, o), 4);
+    }
+
+    #[test]
+    fn greatest_divisor_matches_the_full_pair_scan() {
+        // Random aterms over a few factors of different orders, exponents of
+        // both signs (0 included: `Mterm::from_sig` does not clean up), and
+        // coefficients mixing ±1, zero, equal magnitudes and Int/Real twins,
+        // so ties and coefficient-only gcds are frequent. The pruned scan must
+        // return the same gcd (hence the same tie-break) and create no node.
+        let mut a = arena();
+        let mut t = types();
+        let mut pool: Vec<SigId> = (0..6).map(|i| SigBuilder::new(&mut a).input(i)).collect();
+        // A factor that depends on state, which weighs one more.
+        pool.push(state_term(&mut a));
+        t.insert(pool[0], simple(Variability::Konst));
+        t.insert(pool[1], simple(Variability::Block));
+        let mut coefs: Vec<SigId> = [1, -1, 2, -2, 3, 0]
+            .into_iter()
+            .map(|k| SigBuilder::new(&mut a).int(k))
+            .collect();
+        coefs.extend(
+            [1.0, -1.0, 2.0, 0.5, -0.5, 0.0, -0.0]
+                .into_iter()
+                .map(|k| SigBuilder::new(&mut a).real(k)),
+        );
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut nontrivial = 0;
+        for _ in 0..2000 {
+            let mut at = Aterm::zero();
+            for _ in 0..rng.below(12) {
+                let mut factors = BTreeMap::new();
+                for _ in 0..rng.below(4) {
+                    let exp = rng.below(5) as i32 - 2;
+                    factors.insert(pool[rng.below(pool.len())], exp);
+                }
+                let coef = coefs[rng.below(coefs.len())];
+                at.add_mterm(&mut a, &Mterm { coef, factors });
+            }
+            let nodes = a.len();
+            let pruned = at.greatest_divisor(&mut a, &t);
+            let full = greatest_divisor_full_scan(&at, &mut a, &t);
+            assert_eq!(a.len(), nodes, "greatest_divisor must create no node");
+            assert_eq!(pruned.coef, full.coef);
+            assert_eq!(pruned.factors, full.factors);
+            if full.complexity(&a, &t) > 0 {
+                nontrivial += 1;
+            }
+        }
+        assert!(nontrivial > 1000, "too few non-trivial gcds: {nontrivial}");
+    }
+
+    #[test]
+    fn long_sum_normalization_evaluates_no_trivial_gcd() {
+        // `:>` over N signals builds `((x0 + x1) + x2) + …` and simplify
+        // normalizes every partial sum. The full pair scan evaluated
+        // Σ k(k-1)/2 ≈ N³/6 gcds over the chain (22 million for N = 512),
+        // all of complexity 0 here: the terms share no factor, and their
+        // coefficients are ±1 or of distinct magnitudes.
+        const N: i32 = 512;
+        let mut a = arena();
+        let t = types();
+        let mut b = SigBuilder::new(&mut a);
+        let mut sum = b.input(0);
+        for k in 1..N {
+            let x = b.input(k);
+            let term = match k % 3 {
+                0 => x,
+                1 => {
+                    let c = b.real(0.5 + f64::from(k) / 1024.0);
+                    b.mul(c, x)
+                }
+                _ => {
+                    let c = b.int(-1);
+                    b.mul(c, x)
+                }
+            };
+            sum = b.add(sum, term);
+        }
+        gcd_evaluations::take();
+        let simplified = crate::simplify::simplify(&mut a, &t, sum);
+        assert_eq!(gcd_evaluations::take(), 0);
+        let at = Aterm::from_sig(&mut a, &t, simplified);
+        assert_eq!(at.terms.len(), N as usize, "no term may be lost or merged");
+    }
+
+    #[test]
+    fn long_sum_with_a_shared_coefficient_stays_linear() {
+        // `0.5·x0 + 0.5·x1 + …`: every partial sum factorizes to `0.5·(…)`,
+        // so each level sees two terms and evaluates one gcd per divisor
+        // search (two searches: one finds 0.5, one finds nothing).
+        const N: i32 = 512;
+        let mut a = arena();
+        let t = types();
+        let mut b = SigBuilder::new(&mut a);
+        let half = b.real(0.5);
+        let x0 = b.input(0);
+        let mut sum = b.mul(half, x0);
+        for k in 1..N {
+            let x = b.input(k);
+            let term = b.mul(half, x);
+            sum = b.add(sum, term);
+        }
+        gcd_evaluations::take();
+        crate::simplify::simplify(&mut a, &t, sum);
+        let evaluations = gcd_evaluations::take();
+        assert!(
+            evaluations <= 2 * N as u64,
+            "{evaluations} gcd evaluations for a chain of {N} terms"
+        );
     }
 
     // ── factorize ─────────────────────────────────────────────────────────────

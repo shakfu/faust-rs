@@ -1,145 +1,129 @@
 # Session Handoff
 
-Date: 2026-10-10 (evening)
+Date: 2026-10-18
 
 ## Repo State
 
-- Branch: `main-dev`, HEAD: this handoff commit on top of `4024d172`.
-- **Pushed** on 2026-10-10 at 19:58 (`push_main.sh`): `origin/main` is
-  `4024d172`, and tag `0.9.0` (annotated, "Release 0.9.0") is on `origin`, on
-  `5856b1eb`. The tag contains none of the commits listed below after it
-  (the tutorial figures, the audit documentation, the #16/#21/#22 work).
-  The user chose to leave it there rather than rewrite a published tag:
-  these fixes go into a later release (0.9.1).
-- `4024d172` was amended locally after the push. The amend was undone, and
-  its handoff change is this new commit (the history stays linear).
+- Branch: `codegen-factorization` (from `main-dev` at `d4f3f6a5`), checked
+  out in the main checkout. Not pushed. The user asked for the work to be
+  done on this branch and to stay visible to them.
+- HEAD: the commit containing this handoff update. Its parent is
+  `e5bd488d` (five-key banner).
 
-Commits pushed on 2026-10-10 (most recent first):
+Commits since `main-dev` (oldest first):
 
-- `4024d172` `modulation_35_in_recursion` no longer has an identically zero
-  output (`DIFF-BEH-019`)
-- `984f7ef6` #16, every pipeline stage runs on the compile stack (`tlib::stack`)
-- `fd5f6e73` an evaluation cycle is blamed on the use that closes it
-  (follow-up to WP3, #22)
-- `015d2a6e` WP5: an eval failure in library code is not labelled on a
-  hash-consed occurrence
-- `c535bd3c` WP6 + W2: one deadline rule, `--timeout 0` disables it, a
-  timeout is a diagnostic in JSON too (`FRS-COMP-0008`)
-- `15ad1d02` WP2: constant folding keeps its caches for the evaluation pass
-  (quadratic → linear)
-- `ac35afcd` WP4: the catch-all cause is left to internal forms
-- `f0f0a424` WP3: an evaluation cycle names its definitions
-  (`FRS-EVAL-0013`, #22)
-- `8c5e262c` parser: a definition is located at its name, even when the name
-  is used earlier
-- `a06cf99a` WP1: a recursion on a non-constant numeric-pattern argument is
-  named (`FRS-EVAL-0012`, #21)
-- `5c7ac277` the analysis and correction plan for #21 and #22
-- `20669a61` the 2026-10-08 audit documentation and the `nffunction` proposal
-- `8fb34c45` Tutorial: figures of 13.1/13.2 after two library fixes
-- `5856b1eb` Release 0.9.0 (tag)
-- `58bee35b` `--version` and the diagnostics JSON name the build's commit (#20)
+- `2c91ac52` — the analysis.
+- 32 code commits, `43b650f1` … `6c481627`; the list and the outcome are in
+  `porting/codegen-factorization-analysis-2026-10-18-en.md` §9.
+- `f459ec95` — the outcome, registry, journal and handoff.
+- The §9.5 follow-up, done at the user's request:
+  - `550ea14b`: the metadata transport for `RustOptions`/`CmajorOptions`;
+  - `e5bd488d`: the five-key banner.
 
 ## Working Tree
 
-- Tracked changes: none.
-- Untracked local scripts `build_all`, `dummy_fdn` and `push_main.sh`, listed
-  in `.git/info/exclude` (local, not versioned).
+- Tracked changes: none after this commit.
+- Untracked: `tests/impulse-tests/reference-spectral/`. It belongs to the
+  user, was present before the session, and was not touched.
 
-## What Changed (2026-10-10)
+## Current Goal(s)
 
-- [#20](https://github.com/grame-cncm/faust-rs/issues/20): `--version` prints
-  `faust-rs 0.9.0 (<hash> <date>)`; the JSON `compiler` block has
-  `commit`/`commit_date` (`DIFF-CLI-013`). Replied on the issue; it is still
-  open, to close once pushed.
-- [#21](https://github.com/grame-cncm/faust-rs/issues/21) and
-  [#22](https://github.com/grame-cncm/faust-rs/issues/22): the
-  [analysis and plan](eval-runaway-recursion-and-cycle-diagnostics-analysis-and-plan-2026-10-10-en.md)
-  is fully carried out (WP1 to WP6). Registry `DIFF-BEH-017`, `DIFF-BEH-018`,
-  `DIFF-CLI-012` updated. Fixtures `err_34_case_argument_not_constant.dsp` and
-  `err_35_evaluation_cycle.dsp`.
-- WP2 also fixes valid programs: `g(n-1, x-1)` with a slider took 35 s at 4000
-  levels, now 0.10 s (C++ 2.84.3: 0.08 s).
-- The same quadratic regression in C++ `master-dev` (commit `536ff8ca7`,
-  `PropagateMemoScope`) is reported as
-  [grame-cncm/faust#1345](https://github.com/grame-cncm/faust/issues/1345),
-  Yann pinged. That issue also proposes a regression methodology for
-  `tests/TESTING.md`.
-- W2 of the 2026-10-08 plan is done (with WP6). W1 and W3 to W7 are still
-  open.
+- Factor `crates/codegen` per the analysis (R1–R4, Q1–Q4) and fix the drifts
+  it found. Done; see §9 for what was built, what was rejected on reading the
+  code, and what was left.
 
-## Issue #16 (deep programs abort the host)
+## What Changed This Session
 
-`2d477161` (2026-09-08, in `origin/main`) grew the evaluator's stack. This
-commit does the rest (journal entry "#16: a deep program compiles on a host
-thread"):
+- **New shared modules:**
+  - `backends/module_view.rs`: decode, lookups, module-shape diagnostics,
+    function collectors, the flatten/schedule/survivor preamble, sub-module
+    views.
+  - `backends/literals.rs`: `RealSpelling`, string dialects, the C-comment
+    banner.
+  - `backends/table_bytes.rs`: the static-table encoder.
+  - `textual::c_like_token*`.
+  - `fir`: `FirBinOp::is_comparison` and `FirMathOp::arity`.
+- **Drift fixes.** D1–D20 (minus §9.5), each with a failing-before test. The
+  ones that change output on the corpus:
+  - D13: foreign variables in rust, julia and asc;
+  - D7: codebox `min`/`max`;
+  - D18: banners;
+  - D17: JSON addresses equal upstream's.
+- **New contract test:** `crates/codegen/tests/textual_backend_contract.rs`
+  (9 tests over the seven textual backends).
+- **Public API:**
+  - `WasmBackendError` is an alias of `BackendError<…>`.
+  - `RealPrecision` replaces three identical enums, which remain as aliases.
+  - code-graphs regenerated.
+- **Documentation:**
+  - Registry: DIFF-BACK-006, DIFF-BEH-005 and the "Last reviewed" line.
+  - Journal: `porting/journal/2026-10-18.md`.
+  - `crates/codegen/README.md`: the error-code ranges.
+  - `structure_check.rs`: asc, cmajor and julia exceptions removed.
 
-- `tlib::stack::on_compile_stack`, the C++ `callFun` without a thread: a
-  stage entered with less than 256 MiB left runs on a fresh 512 MiB stack.
-  It is at the entry of 23 stages: the compiler's `pipeline_to_boxes`,
-  `pipeline_boxes_to_signals` and FIR lowering, then propagation, signal
-  preparation, FIR lowering and verification, and every backend's
-  `generate_*_module`. `codegen` reaches it through `fir::on_compile_stack`.
-- `on_deep_stack` (8 MiB segments) only where no budget bounds the
-  recursion: the evaluator (plus `a2sb`) and the parser's import expansion.
-- A per-function guard in every recursive pass was tried and dropped (the
-  decision agreed with the user): too many functions, and every new pass
-  would be exposed.
-- Measured on an 8 MiB worker: all 12 CLI backends compile 30 000-level
-  chains, and `1+1+...+1` at 1 000 000 levels reports `FRS-EVAL-0099`.
+## Decisions / Constraints (important for resume)
 
-Left open, noted in the journal: 7 500 `~` in series and 30 000 `sin` in
-parallel hit the 120 s timeout (a cost problem; no issue filed yet). C++ 2.90.6
-accepts `s+s+...` at 30 000 terms, which the structural budget rejects.
-
-## Decisions / Constraints
-
-- Diagnostic codes: `FRS-EVAL-0012` (non-constant numeric-pattern argument),
-  `FRS-EVAL-0013` (evaluation cycle), `FRS-COMP-0008` (timeout).
-- `FRS-EVAL-0012` is chosen only once a depth budget has run out, so no
-  accepted program changes. The conditions are: the same `case`, nested at
-  least three times, a non-numeric argument at one position, and no numeric
-  dispatch in those applications.
-- A cycle is blamed on the identifier that re-enters the definition. Its
-  owner is the cycle's last definition when that is top-level, since the
-  identifier is hash-consed.
-- **Security**: the Faust interval/memory-safety exploit witness must not be
-  published; it goes to Yann privately.
-- The `rustc` form for the commit in `--version` (user choice).
-- 56 CLI transcripts already differed from the CLI at `2199d069`. That drift
-  is still unrecorded and needs its own reviewed commit.
+- The user's choices for the six decision points are in analysis §9.1.
+- Rejected after trying or reading:
+  - the error-code macro, because the text-based API baseline cannot see
+    macro-generated items;
+  - a `TextTarget` walker trait;
+  - merging cranelift's layout into `memory_layout`;
+  - a shared scalar-math module.
+- wasm keeps `_acosh` for both precisions, because that is the JS host
+  contract; a module needing both precisions is refused.
+- **Compile budget:** the local gate cannot conclude on this machine, so a
+  manual A/B was run instead (below).
 
 ## Validation Run
 
-- `cargo fmt`, `clippy --workspace --all-targets -D warnings`, the five
-  structure gates and `code-graphs --check`: pass.
-- `cargo test --workspace --all-targets --no-fail-fast` on the final tree
-  (the #22 and #16 commits): 157 targets, 3142 passed. The one failure was
-  the live modulation differential against the local `/usr/local/bin/faust`
-  (CI skips it). The fixture commit fixes it: the fixture's output was
-  identically zero, and C++ ≥ 2.90.4 (`1aafc196a`, found by bisection) folds
-  it and drops its slider. `modulation_corpus` and `golden-check` pass. The intermediate commit `fd5f6e73` was checked alone with
-  fmt, clippy, the `eval` tests, `diagnostic_errors` and the gates.
-- `compile-budget-check` cannot measure on this machine. Its calibration DSP
-  takes 3 ms, below the 4 ms floor, so it stops before measuring.
-- The CLI timeout (`FRS-COMP-0008` in JSON) was checked by hand only. An
-  automated test would depend on machine speed.
+- **Codegen-identity differential, per commit:** 632 `.dsp` × 23
+  configurations against the base binary. 0 diffs for every move; the
+  intentional diffs were reviewed and re-baselined. The harness is in the
+  session scratchpad (`identity/run.py`, `check.sh`). It is not in the repo.
+- **Literal equivalence:** old and new real formatters agree on 600,035
+  values (0 mismatches).
+- **Workspace and gates:**
+  - `cargo test --workspace --all-targets --no-fail-fast`: 0 failures.
+  - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+  - `cargo fmt --all --check`: clean.
+  - The five structure gates: OK.
+  - `cargo run -p xtask -- golden-check`: 292 OK.
+- **Compile-budget A/B** (best of 5, base vs new, both baskets): every case
+  at ratio 1.00. APF scalar showed 1.10 at 8.7 ms; re-timed over 30 runs it
+  is 7.81 vs 7.86 ms, i.e. noise.
+- **Impulse harness**, after `make clean` (the `ir/` outputs are cached and
+  give false greens otherwise), with `make -k -j8 <lane>`: all nine lanes
+  pass. interp, cranelift, wasm, cpp, c, rust, julia and assemblyscript run
+  93 comparisons each; cmajor runs 87.
 
-## Next Steps
+## Open Issues / Blockers
 
-1. Replies posted on 2026-10-10: #16 (issuecomment-6100525725), #21
-   (issuecomment-6100525893), #22 (issuecomment-6100526119). Each says the fix
-   is on `main-dev` and reaches `main` with the next push (already done).
-2. Close #16, #20, #21 and #22, and push this handoff commit.
-3. File the cost issue for long series of `~` and wide `par` (120 s timeout).
-4. The 2026-10-08 audit work packages W1 and W3 to W7, in the plan's order.
-5. Look at `compile-budget-check`'s calibration floor on fast machines.
+- Nothing blocks the branch.
+- Left as is, recorded in §9.5:
+  - codebox NaN/infinity spelling;
+  - cpp alone synthesizes the empty UI box;
+  - the interpreter's name heuristics;
+  - the six UI tree walkers are not merged.
+- `tests/cli-transcripts` were stale before the branch (recorded
+  2026-10-10). Re-recording them is the user's call.
+
+## Next Steps (ordered)
+
+1. Review the branch and push it (the user pushes).
+2. Optionally re-record the CLI transcripts:
+   `cargo run -p xtask -- cli-transcript-gen`.
+3. Optional follow-up from §9.5: one UI tree iterator.
 
 ## Useful Commands to Resume
 
-```sh
-git status --short
-git log --oneline main..main-dev
-./target/debug/faust-rs --check tests/corpus/err_35_evaluation_cycle.dsp
-cargo test -p compiler --test diagnostic_errors cycle
-```
+- `cargo test -p codegen`
+- `cargo test -p codegen --test textual_backend_contract`
+- `cargo run -p xtask -- code-graphs --check`
+- `cd tests/impulse-tests && make clean && make -k -j8 interp cranelift wasm cpp c rust`
+
+## Notes
+
+- A `make <lane>` right after a rebuild prints "Nothing to be done" when
+  `ir/` already holds outputs: run `make clean` first. It removes `ir` and
+  `build`, never `reference`.

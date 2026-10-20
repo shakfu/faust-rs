@@ -1,6 +1,6 @@
 # eval
 
-Box-level evaluator — Phase 4, section 2.2 of the Faust compiler pipeline.
+Box-level evaluator — Phase 4, stage 4.2 of the porting plan.
 
 Takes a parsed box environment and reduces the `process` definition to a fully
 evaluated box tree ready for `propagate`.
@@ -10,8 +10,9 @@ evaluated box tree ready for `propagate`.
 | C++ file | Role |
 |---|---|
 | `compiler/evaluate/eval.hh` / `eval.cpp` | Core evaluation logic |
-| `compiler/evaluate/environment.hh` | Lexical environment model |
-| `compiler/evaluate/loopDetector.hh` | Recursive-expansion loop detection |
+| `compiler/evaluate/environment.hh` / `environment.cpp` | Lexical environment model |
+| `compiler/evaluate/loopDetector.hh` / `loopDetector.cpp` | Evaluation loop and stack-depth detection |
+| `compiler/patternmatcher/patternmatcher.hh` / `patternmatcher.cpp` | Case-rule automaton, merged into `eval` (`pattern_matcher.rs`) |
 
 ## What this crate does
 
@@ -29,38 +30,43 @@ evaluated box tree ready for `propagate`.
 
 | Function | Description |
 |---|---|
-| `eval_process(arena, root)` | Evaluate `process` from a parsed program |
-| `eval_entrypoint(arena, root, name)` | Evaluate a named definition instead of `process` |
-| `eval_process_with_stats(arena, root)` | Like `eval_process`, also returns `EvalStats` |
-| `eval_entrypoint_with_stats(arena, root, name)` | Like `eval_entrypoint`, also returns `EvalStats` |
-| `eval_process_with_source_context(arena, root, ctx)` | With source location tracking |
-| `eval_entrypoint_with_source_context(arena, root, name, ctx)` | With source location tracking |
-| `eval_process_with_stats_and_source_context(arena, root, ctx)` | Stats + source context |
-| `eval_entrypoint_with_stats_and_source_context(arena, root, name, ctx)` | Stats + source context |
-| `eval_entrypoint_with_source_context_and_cancel(arena, root, name, ctx, token)` | Cooperative cancellation |
+| `eval(arena, definitions, &request) -> Result<(TreeId, EvalStats), EvalError>` | Evaluate an entry point described by an `EvalRequest` |
+| `eval_process(arena, definitions) -> Result<TreeId, EvalError>` | Shorthand: `process`, in memory, uncancellable, statistics dropped |
+| `eval_box(arena, expr, &env, &mut loop_detector) -> Result<TreeId, EvalError>` | Evaluate one box expression in an explicit environment |
+
+`EvalRequest::default()` evaluates `process` with an in-memory source context;
+`with_entrypoint(name)`, `with_source_context(ctx)` and `with_cancel(flag)`
+select another entry point, file resolution for `component`/`library`, and
+cooperative cancellation.
 
 ### Types
 
 | Item | Description |
 |---|---|
+| `EvalRequest` | Entry point, source context and cancellation flag of one run |
 | `EvalError` | Typed error covering all evaluation failure modes |
-| `EvalStats` | Environment, lookup, node-visit, loop-depth, and definition-name statistics |
-| `Environment` | Lexical environment (name → `TreeId`) |
-| `EvalSourceContext` | Source-location tracking context passed to evaluator |
-| `LoopDetector` | Per-symbol expansion depth guard (mirrors C++ `loopDetector`) |
+| `EvalWarning` | Non-fatal finding (unmatched modulation target) |
+| `EvalStats` | Side results: warnings, definition names, composition origins |
+| `DepthGuard`, `DepthLimit`, `DepthLimitSource`, `DepthContext` | Depth-budget diagnostics |
+| `Environment` | Lexical environment (name → box, closure or pattern-matcher value) |
+| `EvalSourceContext` | Source-resolution context for `component` / `library` loading |
+| `LoopDetector` | Cycle and depth guard (adapted from C++ `loopDetector` + `stackOverflowDetector`) |
 | `SamplePrecision` | `Float32` / `Float64` precision selector |
 | `SymId` | Interned symbol identifier |
 | `EnvId` | Environment frame identifier |
 
+### Suggestions
+
+The public `suggestions` module (`SymbolSuggestion`, `rank_similar_names`,
+`unambiguous_suggestion`, also re-exported at the crate root) ranks near names
+for undefined-symbol diagnostics.
+
 ### Pattern matcher
 
-| Item | Description |
-|---|---|
-| `make_pattern_matcher(rules)` | Build a deterministic automaton from a list of case-rules |
-| `apply_pattern_matcher(matcher, args, env)` | Run the automaton against argument list; returns matched body or `None` |
-| `Rule` | A single `(patterns, body)` case-rule |
-| `Automaton` | Compiled deterministic pattern-matching automaton |
-| `State`, `Trans`, `TransKind` | Automaton internals (states and transitions) |
+The case-rule automaton (`make_pattern_matcher`, `apply_pattern_matcher`,
+`Automaton`, `State`, `Trans`, `Rule`) lives in the private
+`pattern_matcher` module: a port of `compiler/patternmatcher/patternmatcher.cpp`
+merged into `eval`. It is not part of the public API.
 
 ### Utilities
 
@@ -71,10 +77,14 @@ evaluated box tree ready for `propagate`.
 ## Parity notes
 
 - Non-closure partial application follows C++ `applyList` semantics (implicit wire insertion).
-- Loop detection mirrors C++ `loopDetector` (per-symbol expansion depth guard).
+- Loop detection is adapted from C++ `loopDetector` (a periodically checked window of recent
+  evaluations) into an exact stack of in-flight `(node or symbol, environment)` frames with
+  depth budgets.
 
 ## Position in the pipeline
 
-```
-parser  →  boxes  →  [eval]  →  propagate  →  signals
-```
+Canonical pipeline (AGENTS.md): parse → boxes → eval → propagate → normalize → type/interval → transform → fir → backend.
+
+`eval` already depends on `propagate` and `normalize` for constant folding: a
+closed box is propagated to signals (`propagate::propagate_fold` /
+`propagate_typed`) and simplified (`normalize::try_simplify_const`).

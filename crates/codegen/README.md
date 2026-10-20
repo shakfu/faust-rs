@@ -9,33 +9,26 @@ live here.
 
 ## Position in the pipeline
 
-```text
-parser → boxes → eval → propagate → signals → transform → fir → [codegen]
-                                                                → AssemblyScript source
-                                                                → C source
-                                                                → C++ source
-                                                                → Cmajor source
-                                                                → Codebox (RNBO) source
-                                                                → Rust source
-                                                                → .fbc bytecode
-                                                                → native C++ (AOT from .fbc)
-                                                                → Cranelift JIT
-                                                                → WASM binary/WAT + JSON
-                                                                → Julia source
-                                                                → … (scaffolded)
-```
+Canonical pipeline (AGENTS.md): parse → boxes → eval → propagate → normalize → type/interval → transform → fir → backend.
+
+`codegen` is the backend stage: every backend receives a FIR module that
+`transform::signal_fir` lowered from signals and `fir` represents, and emits
+AssemblyScript, C, C++, Cmajor, Codebox (RNBO), Julia or Rust source, `.fbc`
+bytecode (plus native C++ generated from it), a WASM binary with its companion
+JSON, or Cranelift JIT code.
 
 ## C++ provenance
 
 | Rust path | C++ origin |
 |---|---|
-| `backends::asc` | `compiler/generator/asc/` |
+| `backends::asc` | `compiler/generator/assemblyscript/` (upstream `master-dev`; absent from the pinned reference `8eebea429`) |
 | `backends::c` | `compiler/generator/c/` |
 | `backends::cpp` | `compiler/generator/cpp/` |
 | `backends::cmajor` | `compiler/generator/cmajor/` |
 | `backends::codebox` | `compiler/generator/codebox/` |
 | `backends::cranelift` | *(new — no C++ equivalent)* |
 | `backends::interp` | `compiler/generator/interpreter/` |
+| `backends::interp::fbc_to_cpp` | `compiler/generator/interpreter/fbc_cpp_compiler.hh` (`FBCCPPCompiler`) |
 | `backends::julia` | `compiler/generator/julia/` |
 | `backends::rust` | `compiler/generator/rust/` |
 | `backends::wasm` | `compiler/generator/wasm/` + `code_container.hh` JSON path |
@@ -65,6 +58,10 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `llvm` | 🗂 Scaffolded | — |
 | `sdf3` | 🗂 Scaffolded | — |
 | `vhdl` | 🗂 Scaffolded | — |
+
+`interp`, `cranelift` and `wasm` reorder `compute` with `fir::schedule` (W3
+store forwarding, W2 read sinking, W7 local reuse) before emission; their
+`keep_fir_order` option disables it. The textual backends keep FIR order.
 
 ---
 
@@ -165,7 +162,7 @@ let c_source = generate_c_module(&store, root_id, &opts)?;
 |---|---|
 | `COptions` | Class/type names, precision, and `memory_manager_mode` |
 | `generate_c_module` | `(&FirStore, FirId, &COptions) → Result<String, CodegenError>` |
-| `CodegenError` | Codes `FRS-CGEN-C-0001..0003` |
+| `CodegenError` | Codes `FRS-CGEN-C-0001..0004` (`0004`: `mem0` memory layout) |
 
 With `memory_manager_mode: MemoryManagerMode::Mem0`, eligible instance buffers
 and writable generated tables are allocated through the embedded, versioned
@@ -195,7 +192,7 @@ let cpp_source = generate_cpp_module(&store, root_id, &opts)?;
 |---|---|
 | `CppOptions` | Class/namespace/type names, precision, and `memory_manager_mode` |
 | `generate_cpp_module` | `(&FirStore, FirId, &CppOptions) → Result<String, CodegenError>` |
-| `CodegenError` | Codes `FRS-CGEN-CPP-0001..0003` |
+| `CodegenError` | Codes `FRS-CGEN-CPP-0001..0004` (`0004`: `mem0` memory layout) |
 
 `MemoryManagerMode::Mem0` emits the compatible `dsp_memory_manager` surface,
 external buffer/table allocation, deep clone, captured-manager destruction,
@@ -222,7 +219,7 @@ let jit = generate_cranelift_module(&store, root_id, &opts)?;
 
 | Item | Description |
 |---|---|
-| `CraneliftOptions` | Optimization, target/debug, strict-subset, external symbol, precision, and `memory_manager_mode` settings |
+| `CraneliftOptions` | Optimization, target/debug, strict-subset, external symbol, precision, `memory_manager_mode`, and `keep_fir_order` settings |
 | `CraneliftOptLevel` | `None`, `Speed` (default), `SpeedAndSize` |
 | `generate_cranelift_module` | Main entry point; returns compiled JIT module |
 | `diagnose_cranelift_compute_subset_gap` | Reports unsupported FIR nodes |
@@ -256,15 +253,18 @@ emitter (see below).
 2. `generate_interp_module` — maps the FIR DSP lifecycle functions into
    `FbcDspFactory` code blocks, splitting `compute` into `compute_block` and
    `compute_dsp_block` when possible.
-3. `FbcDspFactory::optimize(level)` — runs peephole bytecode optimizer
-   (levels 0–6; `MAX_OPT_LEVEL = 6`).
+3. `FbcDspFactory::optimize()` — runs the peephole bytecode optimizer once,
+   up to the factory's `opt_level` (levels 0–6; `MAX_OPT_LEVEL = 6`).
 4. `write_fbc` / `read_fbc` — serialize/deserialize to/from `.fbc` text.
 5. `FbcDspInstance` — in-process DSP runtime (`init`, `compute`).
 
 ```rust
 use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
 
-let opts = InterpOptions { opt_level: 4, module_name: None };
+let opts = InterpOptions {
+    opt_level: 4,
+    ..Default::default()
+};
 let factory = generate_interp_module::<f32>(&store, root_id, &opts)?;
 let mut buf = Vec::new();
 write_fbc(&factory, &mut buf)?;
@@ -284,8 +284,8 @@ write_fbc(&factory, &mut buf)?;
 
 | Item | Description |
 |---|---|
-| `InterpOptions` | `opt_level: i32`, `module_name: Option<String>` |
-| `generate_interp_module` | `(&FirStore, FirId, &InterpOptions) → Result<FbcDspFactory<f32>, CodegenError>` |
+| `InterpOptions` | `opt_level: i32`, `module_name: Option<String>`, `compile_options`, `keep_fir_order` |
+| `generate_interp_module::<R: FbcReal>` | `(&FirStore, FirId, &InterpOptions) → Result<FbcDspFactory<R>, CodegenError>` (`R` = `f32` or `f64`) |
 | `FbcDspFactory<R>` | Compiled bytecode program with lifecycle/data blocks |
 | `FbcDspInstance` | Runtime DSP state; provides `init` and `compute` |
 | `FbcBlockArena` | Arena of `FbcBlock`s indexed by `BlockId` |
@@ -309,7 +309,9 @@ at the output side.
 
 The generator performs a single pass over each of the 6 code blocks,
 maintaining a **virtual stack** of named C++ temporaries (`fRN` for reals,
-`iIN` for integers). All 298 FBC opcodes are covered.
+`iIN` for integers). All 298 FBC opcodes are handled: foreign calls and
+soundfile field loads return `FbcCppError::Unsupported`, and `AddSoundfile` is
+emitted as a comment.
 
 #### Control-flow translation
 
@@ -317,7 +319,7 @@ maintaining a **virtual stack** of named C++ temporaries (`fRN` for reals,
 |---|---|
 | `Loop(init, body)` | `{ <init>; while (true) { <body> } }` |
 | `CondBranch` | `if (!<cond>) { break; }` |
-| `If(b1, b2)` | `if (<cond>) { <b1> } else { <b2> }` |
+| `If(b1, b2)` | `if (<cond>) { <b1> } else { <b2> }`; a `Return`-only branch is omitted, and the condition is inverted when only the false branch has statements |
 | `SelectReal/Int(b1, b2)` | pre-declared merge variable + `if/else` |
 | `Return` | end of block (no explicit `return` emitted) |
 
@@ -397,6 +399,7 @@ use codegen::backends::julia::{JuliaOptions, JuliaRealType, generate_julia_modul
 let opts = JuliaOptions {
     class_name: Some("mydsp".to_owned()),
     real_type: JuliaRealType::Float64,
+    ..Default::default()
 };
 let julia = generate_julia_module(&store, root_id, &opts)?;
 std::fs::write("mydsp.jl", julia)?;
@@ -414,7 +417,7 @@ Important emitter rules:
 
 | Item | Description |
 |---|---|
-| `JuliaOptions` | `class_name`, `real_type` |
+| `JuliaOptions` | `class_name`, `real_type`, `compile_options`, `metadata_name`, `metadata_filename`, `metadata_entries`, `dsp_json` |
 | `JuliaRealType` | `Float32` (default) or `Float64` |
 | `generate_julia_module` | `(&FirStore, FirId, &JuliaOptions) -> Result<String, CodegenError>` |
 | `CodegenError` | Codes `FRS-CGEN-JULIA-0001..0003` |
@@ -441,13 +444,14 @@ use codegen::backends::rust::{RustOptions, RustRealType, generate_rust_module};
 let opts = RustOptions {
     class_name: Some("mydsp".to_owned()),
     faust_float_type: RustRealType::Float32,
+    ..Default::default()
 };
 let rust_source = generate_rust_module(&store, root_id, &opts)?;
 ```
 
 | Item | Description |
 |---|---|
-| `RustOptions` | `class_name`, `faust_float_type` |
+| `RustOptions` | `class_name`, `faust_float_type`, `compile_options` |
 | `RustRealType` | `Float32` (default) or `Float64` |
 | `generate_rust_module` | `(&FirStore, FirId, &RustOptions) -> Result<String, CodegenError>` |
 | `CodegenError` | Codes `FRS-CGEN-RUST-0001..0003` |
@@ -518,19 +522,25 @@ together. In particular:
 #### Memory layout
 
 `backends::wasm::layout::WasmMemoryLayout` exposes the current linear-memory
-contract shared by code generation and companion JSON:
+contract shared by code generation and companion JSON. The emitted module lays
+out its runtime prefix small fields first:
 
-- static tables first,
-- mutable DSP/global fields next,
+- `Soundfile*` fields first,
+- then the mutable DSP/global fields by increasing byte size,
+- then the static tables,
+- then the compute-local arrays,
 - then the I/O zone / audio heap start,
 - then the embedded JSON segment.
+
+`WasmMemoryLayout::from_module` instead returns the declaration-order layout
+(static tables first) that the C++-style JSON of the other backends follows.
 
 This is the source of truth for exported UI offsets and host-side parameter
 access.
 
 | Item | Description |
 |---|---|
-| `WasmOptions` | `double_precision`, `emit_wat`, `memory_pages`, `internal_memory` |
+| `WasmOptions` | `double_precision`, `emit_wat`, `memory_pages`, `internal_memory`, `keep_fir_order` |
 | `WasmJsonContext` | JSON-only provenance: `filename`, `version`, `compile_options`, include/library lists, top-level metadata |
 | `WasmModule` | `wasm_binary`, `wat_text`, `dsp_json`, `memory_layout` |
 | `generate_wasm_module` | `(&FirStore, FirId, &WasmOptions) -> Result<WasmModule, WasmBackendError>` |
@@ -577,7 +587,7 @@ let source = generate_codebox_module(&store, root_id, &CodeboxOptions::default()
 |---|---|
 | `CodeboxOptions` | `double_precision`, `test_labels` |
 | `generate_codebox_module` | `(&FirStore, FirId, &CodeboxOptions) -> Result<String, CodegenError>` |
-| `CodegenError` | Codes `FRS-CGEN-CBOX-0001..0002` |
+| `CodegenError` | Codes `FRS-CGEN-CBOX-0001..0003` (`0003`: malformed module section) |
 | `eval::Program` | Parser/evaluator for the emitted subset, used by numeric backend tests |
 
 CLI entry points live in `compiler`:
@@ -623,7 +633,7 @@ CMAJ_BIN=/path/to/cmaj CMAJ_CXX=/path/to/c++ \
 |---|---|
 | `CmajorOptions` | public processor name and `CmajorRealType` |
 | `generate_cmajor_module` | `(&FirStore, FirId, &CmajorOptions) -> Result<String, CodegenError>` |
-| `CodegenError` | Codes `FRS-CGEN-CMAJ-0001..0005` |
+| `CodegenError` | Codes `FRS-CGEN-CMAJ-0001..0006` (`0006`: malformed module section) |
 
 Port and test contract:
 `porting/cmajor-backend-port-and-test-plan-2026-08-04-en.md`.
@@ -632,8 +642,9 @@ Port and test contract:
 
 ### Fixtures — `fixtures`
 
-Shared FIR modules for backend-agnostic parity testing. All backends are
-exercised against the same 8 canonical fixtures, preventing test drift.
+Shared FIR modules for backend-agnostic parity testing. The C, C++, Rust,
+Julia, WASM and Cranelift backend tests share the same 8 canonical fixtures,
+preventing test drift.
 
 ```rust
 use codegen::fixtures::backend_test_fixtures;

@@ -401,7 +401,7 @@ impl<'a> FirBuilder<'a> {
     }
 
     /// A header or library the generated code depends on; see
-    /// [`FirMatch::DeclareDependency`](crate::FirMatch::DeclareDependency).
+    /// [`FirMatch::DeclareDependency`].
     #[must_use]
     pub fn declare_dependency(
         &mut self,
@@ -809,7 +809,7 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
-    /// C++ parity: `LoadSoundfileInst` / `fSoundN->fLength[part]`.
+    /// C++ parity: `InstructionsCompiler::generateSoundfileLength` / `fSoundN->fLength[part]`.
     /// Always returns `Int32` (length is stored as `int` in the Soundfile struct).
     #[must_use]
     pub fn load_soundfile_length(&mut self, var: impl Into<String>, part: FirId) -> FirId {
@@ -822,7 +822,7 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
-    /// C++ parity: `LoadSoundfileInst` / `fSoundN->fSR[part]`.
+    /// C++ parity: `InstructionsCompiler::generateSoundfileRate` / `fSoundN->fSR[part]`.
     /// Always returns `Int32` (sample-rate is stored as `int` in the Soundfile struct).
     #[must_use]
     pub fn load_soundfile_rate(&mut self, var: impl Into<String>, part: FirId) -> FirId {
@@ -837,7 +837,8 @@ impl<'a> FirBuilder<'a> {
 
     /// C++ parity: `fSoundN->fChannels`, the `Soundfile::kChannels` field load
     /// `InstructionsCompiler::generateSoundfileBuffer` divides the requested
-    /// channel by. Always returns `Int32` (`int` in the Soundfile struct).
+    /// channel by (upstream `master-dev`; the pinned reference `8eebea429` has
+    /// no channel wrap). Always returns `Int32` (`int` in the Soundfile struct).
     #[must_use]
     pub fn load_soundfile_channels(&mut self, var: impl Into<String>) -> FirId {
         let typ_id = encode_type(&mut self.store.arena, &FirType::Int32);
@@ -849,7 +850,7 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
-    /// C++ parity: `LoadSoundfileInst` / `((FAUSTFLOAT**)fSoundN->fBuffers)[chan][fSoundN->fOffset[part] + idx]`.
+    /// C++ parity: `InstructionsCompiler::generateSoundfileBuffer` / `((FAUSTFLOAT**)fSoundN->fBuffers)[chan][fSoundN->fOffset[part] + idx]`.
     ///
     /// `chan` indexes `fBuffers` as is: the wrap of a channel beyond the real
     /// channel count (`chan % fChannels`) is built by the lowerer into `chan`

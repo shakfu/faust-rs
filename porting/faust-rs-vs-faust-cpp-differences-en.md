@@ -2,7 +2,7 @@
 
 Status: living compatibility registry
 
-Last reviewed: 2026-10-10 (runaway recursion and evaluation cycles); full review 2026-08-13
+Last reviewed: 2026-10-18 (codegen factorization, [analysis §9](codegen-factorization-analysis-2026-10-18-en.md#9-outcome-2026-10-18): JSON widget `address` built as C++ `PathBuilder::buildPath` builds it, an unrecorded difference closed; codebox `min`/`max` and cmajor/codebox `>>>` now as upstream; DIFF-BACK-006 extended to rust, julia and asc; DIFF-BEH-005 backend module-shape diagnostics unified; the c, cpp, rust and cmajor banners copy upstream's `author`/`copyright`/`license`/`name`/`version` keys and the rust `metadata()` replays the compilation metadata, unrecorded differences closed); 2026-10-18 (reference spelling of the applied Box constructors: DIFF-API-009 narrowed; RAD through bargraphs: DIFF-SRC-002 gap closed; partial C++ Box/Signal headers: DIFF-API-009 recorded; `freeCMemory` missing from `libfaust-c.h`: DIFF-API-010 recorded, then closed (the header now declares it); `-mdoc` not ported: DIFF-GAP-020 recorded); 2026-10-17 (block-rate work in a boolean `ondemand`: DIFF-BEH-024 recorded; `pow(x, 1)` of an init-local constant: DIFF-BEH-022 updated); 2026-10-16 (shared pattern matchers: DIFF-GAP-018 recorded, then closed; isomorphic recursion merging: DIFF-BEH-021 recorded; small real powers: DIFF-BEH-022 recorded; late state join in sums: DIFF-BEH-023 recorded; reserved-word, unary-minus and arity-location diagnostics added to DIFF-SRC-001/002 and DIFF-BEH-005); full review 2026-08-13
 
 C++ reference: `master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`
 
@@ -78,7 +78,11 @@ verified Rust extension must not be presented as a proof of C++ parity.
   `crates/compiler/src/tests.rs`, described in
   [`docs/fad-note-en.md`](../docs/fad-note-en.md) §2.1.
 - Compatibility impact: DSPs using this form are `faust-rs` programs and must
-  not be expected to compile with the pinned C++ compiler.
+  not be expected to compile with the pinned C++ compiler. `fad` is a
+  reserved word of the faust-rs grammar, where both C++ compilers accept it
+  as an identifier: a C++ program naming something `fad` fails to parse, and
+  since 2026-10-16 the parse error says so and proposes a rename
+  (`crates/compiler/tests/diagnostic_hints.rs`).
 - Evidence:
   [`docs/fad-rad-synthesis-en.md`](../docs/fad-rad-synthesis-en.md),
   [`faust-rs-supported-faust-subset-en.md`](faust-rs-supported-faust-subset-en.md),
@@ -92,14 +96,23 @@ verified Rust extension must not be presented as a proof of C++ parity.
   seed, using an implicit all-ones cotangent for a multi-output body. Temporal
   and recursive bodies use the finite-horizon `BlockReverseAD` fallback; the
   specialized reverse-time recursion route remains disabled.
-- Known gap at `f18a50c8`: the symbolic bargraph path still returns zero
-  contribution despite the bargraph's signal identity. The FAD correction
-  does not fix this RAD path; a numerical witness is recorded in the
+- Implemented correction (2026-10-18): a bargraph is the identity on its
+  signal under `rad` too. The symbolic sweep gave it a zero adjoint, and the
+  `BlockReverseAD` lowering of temporal and recursive bodies rejected it
+  (`FRS-SFIR-0004`); both now pass the adjoint to the metered signal and do
+  not replay the meter, as FAD has done since `f18a50c8`. Pinned by
+  `rad_adjoint_passes_through_a_bargraph` (finite difference, symbolic) and
+  `rad_adjoint_passes_through_a_bargraph_in_a_recursive_body` (block-total
+  finite difference, `BlockReverseAD`) in `crates/compiler/tests/rad_runtime.rs`.
+  The gap was first recorded in the
   [2026-09-19 review, §10](fad-clock-domains-explanation-and-review-2026-09-19-en.md#10-what-these-results-do-not-establish).
 - Compatibility impact: the source form and `BlockReverseAD` semantics have no
   pinned C++ source/backend oracle. Validation uses symbolic identities,
   FAD/RAD agreement, finite differences, and optimized/unoptimized runtime
-  comparisons.
+  comparisons. `rad` is a reserved word of the faust-rs grammar, where both C++ compilers
+  accept it as an identifier: a C++ program naming something `rad` (an angle,
+  a radius) fails to parse, and since 2026-10-16 the parse error says so and
+  proposes a rename (`crates/compiler/tests/diagnostic_hints.rs`).
 - Evidence: [`docs/rad-note-en.md`](../docs/rad-note-en.md),
   [`docs/rad-usage-en.md`](../docs/rad-usage-en.md), and
   `crates/compiler/tests/rad_runtime.rs`.
@@ -305,7 +318,12 @@ must run unchanged with Faust C++ should not pass them.
   C++ stderr. Exit success/failure and the underlying semantic rejection remain
   the parity objective for portable cases.
 - Duplicate UI paths, FIR verification, backend limitations, and const-table SR
-  freezing have dedicated Rust diagnostics.
+  freezing have dedicated Rust diagnostics. A malformed FIR module (root not
+  a module, a section not a block, a `sub_modules` entry not a sub-module)
+  reads the same in every textual backend and carries its FIR node, each
+  backend keeping its own code; cmajor and codebox gained
+  `FRS-CGEN-CMAJ-0006`/`FRS-CGEN-CBOX-0003` for it (2026-10-18,
+  `backends/module_view.rs`).
 - Evaluator limits are logical resource budgets rather than the reference's
   stack-address check: default identity depth is 1,024 in debug and 32,768 in
   release; structural lowering also applies a 4,096/32,768 cap; syntactic nesting
@@ -357,6 +375,19 @@ must run unchanged with Faust C++ should not pass them.
   (until 2026-10-10;
   [the 2026-10-08 audit, W6](foreign-functions-cli-depth-and-cost-correction-plan-2026-10-08-en.md#w6--diagnose-bare-foreign-statements-without-invented-definitions-p2)).
   No accepted syntax changed.
+  Since 2026-10-16 three parse and propagation errors say more than C++
+  (points 7 to 9 of the faust-coopiano port's `faust-rs-issues/RAPPORT.md`,
+  outside this repository): a faust-rs reserved word used as a name (`fad`, `rad`,
+  `cinput(s)`, `coutput(s)`, and `ondemand`, `upsampling`, `downsampling`,
+  which the C++ reference branch reserves too but the C++ releases do not)
+  is named as such with a rename proposed; a unary minus before a primitive
+  (`-max(1, 2)`) or before an access (`-L.g(2, k)`, read `(0 - L).g`) states
+  the rule and proposes `0 - …`, the access error now located at the `-`;
+  and an arity error on a composition built by evaluation is located at the
+  composition the program writes, through the evaluator's
+  `EvalStats::composition_origins`, instead of the first located node inside
+  the function it called (none when two places built it). C++ gives no
+  position for the last two. Evidence: `crates/compiler/tests/diagnostic_hints.rs`.
 - Evidence: [`docs/faust-error-model-en.md`](../docs/faust-error-model-en.md)
   and
   [`docs/diagnostics-codes-reference-en.md`](../docs/diagnostics-codes-reference-en.md);
@@ -651,9 +682,11 @@ must run unchanged with Faust C++ should not pass them.
   longer duplicates channels, reads out of bounds.
 - The impulse fixtures follow the C++ branch's `TestMemoryReader`: each
   channel has its own phase (`sin(part + chan + ...)`) and only the real
-  channels are provided. The `sound` reference therefore has to be produced by
-  a C++ compiler and `tests/impulse-tests/archs` from that branch; against the
-  pinned checkout, `sound` differs on its odd channels.
+  channels are provided. The C/C++ impulse paths, reference generation
+  included, take that fixture from faust-rs's
+  `tests/impulse-tests/archs/faustrs_soundfile_fixture.h` rather than from the
+  C++ checkout. With the pinned checkout, the regenerated `sound` reference is
+  byte-identical, and the `cpp` and `c` lanes pass `sound`.
 - Evidence: `crates/compiler/tests/soundfile_channel_wrap.rs` (a 1-, 2- and
   3-channel soundfile read as 70 outputs by the interpreter, scalar and
   vector; C++ text wraps every channel but 0); the `sound` impulse test on all
@@ -734,6 +767,207 @@ must run unchanged with Faust C++ should not pass them.
   both compilers compute: the interface is the one frozen from 2.88.1, equal
   in 2.90.6, and the 15 000 impulse-test samples are equal to the bit.
 
+### DIFF-BEH-020 — integer powers with a runtime exponent
+
+- Status: `reference-fix` relative to the pinned `8eebea429`; aligned with
+  C++ correction `eb21fcccff1ead7fe286f35614a464bea70a5fe2` (2026-10-08).
+- Implemented: `pow` preserves the union of its operand natures, as C++
+  `PowPrim::inferSigType` does. Integer runtime powers lower to double `pow`,
+  double `rint`, then an int32 cast in both scalar and checked vector FIR.
+  The pinned compiler computes at sample precision and truncates, which can
+  lose a unit under fast math or beyond 2^24 in single precision.
+- Positive integer constant folding preserves int32 wrapping arithmetic;
+  small nonnegative constant exponents use wrapping multiplies. Compile-time
+  table generators follow the same prepared integer semantics. Mixed/real
+  powers retain sample precision. FIR uses `powf`/`rintf` for single-precision
+  calls and `pow`/`rint` for double calls to avoid conflicting prototypes.
+  `FirMathOp::from_symbol` accepts these two additional C spellings (`adapted`
+  internal API; no signature or host DSP API change).
+- Compatibility impact: integer arithmetic consuming `pow` now runs before
+  conversion to an audio sample. For example, `pow(25, 6*s) - (1 + 244140624*s)`
+  is exactly zero for `s` in {0, 1} in generated C++, including fast math.
+  This does not define a new policy for NaN, infinity, or out-of-range casts.
+- Scope limit shared with the C++ interpreter: FBC has one real precision per
+  factory, so a single-precision FBC program cannot retain these double
+  intermediates. Double FBC is covered with optimization levels 0 and max;
+  a mixed-precision FBC extension is not implemented by this change. Source:
+  C++ `interpreter_instructions.hh::visit(CastInst*)`, Rust
+  `codegen/backends/interp/compiler/expressions.rs::compile_cast`.
+- Evidence: `crates/compiler/tests/integer_pow.rs`,
+  `crates/compiler/tests/integer_pow_rust.rs`, sigtype/normalization unit tests,
+  and [the journal entry](journal/2026-10-11.md).
+
+### DIFF-BEH-021 — recursions identical after simplification share one state
+
+- Status: `extension`, implemented 2026-05-01; recorded 2026-10-16.
+- Implemented: `normalize::merge_isomorphic_symrec_groups`
+  (`crates/normalize/src/rec_merge.rs`, step 2.8 of
+  `prepare_signals_for_fir_unverified`) runs between the two simplify passes
+  and replaces every recursion group whose body, with its own references
+  masked, is identical to another group's by that group (the one of
+  smallest node id). The second simplify then folds what the sharing
+  exposes, e.g. `x - x` to `0`. Faust C++ has no such pass: it shares two
+  recursions only when their de Bruijn trees are already identical, which
+  Rust does too through hash-consing, so the difference is limited to
+  bodies that become identical only once simplified. The pass was added for
+  `fad`, whose chain-rule bodies (`1·y + g·Dy`) equal a hand-written
+  derivative (`y + g·Dy`) only after simplification
+  ([plan](normalize-rec-isomorphism-merge-plan-2026-05-01-en.md)).
+- Observed with the pinned `8eebea429` on
+  `process = _ <: (+ ~ *(0.5)), (+ ~ (*(1.0) : *(0.5))) : -;`: C++ keeps
+  two recursion states and emits their difference
+  (`fVec0SE[0] + -(fVec2SE[0])`); Rust keeps one and emits `0`. Without the
+  final `-`, Rust writes both outputs from one state where C++ computes
+  two.
+- Compatibility impact: fewer recursion states and less code than C++ on
+  such programs; the sample values are those of C++, since the merged
+  bodies compute the same expression, except where a difference of two
+  merged recursions is folded: `x - x` is `0` in Rust where C++ gives NaN
+  once the recursion has diverged to an infinity or a NaN. The generated
+  C++ text is not a byte-identity contract (`DIFF-BACK-004`).
+- Evidence: the unit tests of `crates/normalize/src/rec_merge.rs`
+  (`merge_followed_by_simplify_gives_zero`,
+  `pruned_opening_matches_the_full_walk`), the corpus fixtures
+  `tests/corpus/rep_83_isomorphic_filter.dsp`,
+  `rep_84_isomorphic_symrec_mutual.dsp` and
+  `rep_85_isomorphic_symrec_nested.dsp`, and the
+  [journal entry](journal/2026-10-16.md) of the cost fix.
+
+### DIFF-BEH-022 — small integral real powers are inline products on every backend
+
+- Status: `adapted`, 2026-10-16.
+- C++ `powprim.hh::generateCode` expands `pow(x, n)` for a literal `n`
+  whose value is an integer from 0 to 8 (an integer literal, or a real one
+  without fractional part, constant and computable) into a call to a
+  generated `<Klass>_faustpower<n>_{i|f}` helper whose body is the
+  left-associated product `((x·x)·x)…`, but only where `gNeedManualPow`
+  holds: C, C++, Rust, Java, Julia, C#, LLVM. Interp, WASM/WAST, JSFX,
+  Codebox, Cmajor and JAX keep `pow`.
+- Implemented: `leaf_emit::emit_pow` writes the same left-associated product
+  inline, for a real result, on every backend and in scalar and vector code.
+  The base is the same FIR value in every factor, so FIR
+  common-subexpression materialization evaluates a non-trivial base once,
+  as the helper's argument is: `pow(x + 0.5, 3)` becomes
+  `fTemp0 = x + 0.5; … (fTemp0 * fTemp0) * fTemp0`. An integer base is
+  converted to the real type before multiplying, as it is for `pow` (the C++
+  helper takes an `int` argument and multiplies in `int`). Integer results
+  keep the inline wrapping product of DIFF-BEH-020. A negative integer
+  literal keeps `pow`: C++ accepts it, and its expansion returns the base
+  unchanged. `pow(x, 1)` is `x` itself, so a `Konst` power read by
+  `compute` whose base is an init-local `fConst*` is still copied into a
+  struct field (`fConst1 = fConst0;`), where C++ stores the helper's result:
+  the placement gate lifts its trivial-load exemption only for a load of an
+  init-local constant (`reads_init_local_constant`) (2026-10-17; before,
+  the local leaked into `compute`, FRS-FIR-0001 on faustlibraries
+  `an.spectral_centroid`/`an.spectral_spread`).
+- Compatibility impact: no helper function in the generated text, and no
+  `pow`/`powf` call for these powers on any backend, the Cranelift JIT and
+  the interpreter included (`pow(x, 2)`, which normalization makes of `x*x`,
+  was a libm call there: 256 squares ran at 29× real time under faustprobe,
+  133× now). Values are those of the C++ helper bit for bit; on the
+  backends where C++ keeps `pow`, a power of 3 or more can differ from it in
+  the last unit of precision (one rounding per product against one for
+  `pow`). An integer base whose product overflows `int` gives the real
+  product here, where the C++ helper overflows.
+- Evidence: `crates/compiler/tests/real_pow_expansion.rs` (products in
+  scalar and vector code with a certified vector plan, a foreign base
+  evaluated once, exponents that keep `pow`, interpreter results equal to
+  the left-associated products bit for bit at optimization levels 0 and
+  max, an identity power of an init-local constant stored for `compute`
+  and computing its value at both levels),
+  `signal_fir::tests::placement::escaping_konst_lowered_to_an_init_local_load_gets_a_struct_field`,
+  faust-coopiano `faust-rs-issues/RAPPORT.md` point 4, and the journal
+  entries of [2026-10-16](journal/2026-10-16.md) and
+  [2026-10-17](journal/2026-10-17.md).
+
+### DIFF-BEH-023 — normalized sums join the terms that depend on state last
+
+- Status: `adapted` (follows upstream Faust 2.90, not the pinned reference),
+  2026-10-16.
+- The pinned reference (`8eebea429`, Faust 2.84.3) buckets the terms of a
+  normalized sum by order (numbers, constants, user interface, audio) and
+  folds them from the highest order down. A sum mixing a constant, a control
+  and a recursion's state, such as `1 - c - o`, is therefore
+  `(1 - o) - c`: the slow `1 - c` is not one subtree and cannot be hoisted,
+  and `1 - o` rounds. Upstream commit `d4d51e5ed` (Yann Orlarey,
+  2026-08-09) adds a fifth order, "audio-recursive", for the terms that a
+  recursion node reaches (tlib's `kContainsRec` bit). Those terms join the
+  sum last, as the right operand: `(1 - c) - o`.
+- Implemented, as upstream:
+  - `TreeArena::contains_recursion`, the same bit, set when a node is
+    interned. It is true for `SYMREC`, `SYMREF`, `DEBRUIJNREC` and
+    `DEBRUIJNREF`, `SYMREF` included because faust-rs writes a
+    self-reference as `proj(i, SYMREF(var))`.
+  - `Aterm::normalized_tree` joins those terms last.
+  - `Mterm::complexity` weighs such a factor one more than an audio-rate
+    one, which steers `greatest_divisor` as upstream's uncapped `sigOrder`
+    does.
+  - The grouping of products keeps the audio level (upstream's cap).
+  - A two-term sum `{slow, state}` keeps its operand order.
+- Compatibility impact: generated code differs from the pinned reference in
+  the programs whose sums mix a state term with several other terms:
+  210 of the 632 programs under `tests/` and `examples/` (215 in `-vec`,
+  five of them by renamed temporaries only). On the changed programs,
+  faustprobe in single precision gives:
+  - 191 bit-exact;
+  - 12 that differ by rounding, at most 1e-4 of the peak;
+  - 3 sensitive to rounding (a phase reading a noise table, phase
+    unwrapping, an optimizer that restarts on thresholds), which diverge in
+    single precision; the first two agree in double, and the third already
+    diverges between single and double with the old normal form.
+
+  The slow part of such sums is hoisted to block rate. Values
+  change by rounding: a rate-limited follower now reaches 0 exactly where it
+  stopped at the rounding error of `1 - o`. That rounding error kept
+  faust-coopiano's damped sympathetic strings awake after the first pedal.
+  Golden C++ snapshots taken from the pinned reference differ where these
+  sums occur.
+- Evidence:
+  - `crates/normalize/src/aterm.rs` tests (`a_state_term_joins_the_sum_last`,
+    operand order, mixed sums, complexity weight; the `greatest_divisor`
+    property test now includes a state factor);
+  - `crates/tlib/tests/recursive_trees.rs`
+    (`contains_recursion_marks_recursion_nodes_and_everything_above_them`);
+  - `crates/compiler/tests/late_state_join.rs` (the hoisted `1 - c` in C++,
+    and the follower reaching 0 exactly in the interpreter at optimization
+    levels 0 and max);
+  - [plan](aterm-late-state-join-port-plan-2026-10-16-en.md),
+    faust-coopiano `faust-rs-issues/RAPPORT.md` point 15, and the
+    [journal entry](journal/2026-10-16.md).
+
+### DIFF-BEH-024 — block-rate work in a boolean `ondemand` runs at its first fire
+
+- Status: `adapted` (generated code; outputs unchanged).
+- C++ `generateOD` (branch `8eebea429`) hoists every control-rate (`Block`)
+  value a domain's payload needs before the sample loop, like any `fSlow`. A
+  boolean `ondemand` whose payload depends only on controls therefore computes
+  it at every block, even when the clock never fires.
+- faust-rs computes such values at the first fire of each block, in one prologue
+  at the top of the guard:
+  `if (iSlowODDone<n> == 0) { {f|i}SlowOD<k> = …; fPerm<i> = …; iSlowODDone<n> = 1; }`.
+  The hold store of such a value is made there, once per block, when nothing
+  else in the guard uses its field. The flag, and the values the rest of the
+  guard reads, are declared, zeroed, before the loop; the other values are
+  locals of the prologue. A value also needed outside the guard's payload stays
+  hoisted, as in C++.
+- The scope is the boolean `ondemand` (`if (clock)` guard) only. Integer
+  `ondemand`, `upsampling` and `downsampling` keep the C++ hoisting, and so
+  does external control (`-ec`), whose control section lives in `control()`.
+- Compatibility impact:
+  - The outputs are bit-identical: a control-rate value is constant within a
+    block.
+  - The generated text differs from C++'s for such programs (15 corpus
+    programs, all `ondemand_*` impulse tests).
+  - The work runs at most once per block, and not at all in a block where the
+    clock does not fire. This is what `docs/ondemand-note-en.md` promises:
+    "the body genuinely does not execute".
+- Evidence:
+  - `porting/ondemand-block-rate-in-domain-analysis-and-plan-2026-10-17-en.md`
+    (point 6 of faust-coopiano's RAPPORT.md);
+  - `crates/compiler/tests/ondemand_lazy_block.rs`;
+  - the `cpp`, `c`, `wasm`, `interp`, `cranelift`, `cpp-vec0` and `cpp-vec1`
+    impulse lanes on the `ondemand_*` corpus.
+
 ## 6. Additional backends and delivery forms
 
 ### DIFF-BACK-006 — headers and libraries of foreign functions in C and C++
@@ -751,7 +985,10 @@ must run unchanged with Faust C++ should not pass them.
   <math.h>`, the prelude having `<cmath>` (C++) or `<math.h>` (C).
 - A foreign variable is not declared by the generated code: its header
   declares it, as in C++. Until 2026-10-10 the C++ backend declared it as a
-  member, which shadowed the header's global.
+  member, which shadowed the header's global. Until 2026-10-18 the rust,
+  julia and asc backends declared it as a struct field initialized to zero;
+  they now read it by name like c and cpp (test
+  `a_foreign_variable_is_read_never_declared_as_state`).
 - It replaces `DIFF-GAP-018` (until 2026-10-10 the headers were dropped and
   the generated code calling a custom `ffunction` did not build).
 - Evidence: `crates/compiler/tests/foreign_dependencies.rs` builds and runs
@@ -917,6 +1154,83 @@ must run unchanged with Faust C++ should not pass them.
   (`crates/interp-ffi/src/factory.rs`);
   `test_typed_foreign_call_is_refused_after_its_signature_changes`
   (`crates/codegen/src/backends/interp/compiler/tests.rs`).
+
+### DIFF-BACK-008 — WASM struct layout: small fields first, static tables last
+
+- Status: `adapted`.
+- The C++ WASM backend builds its field table in declaration order
+  (`WASMInstVisitor`, `compiler/generator/wasm/wasm_instructions.hh`).
+  faust-rs's WASM emitter lays the runtime prefix out as:
+  - `Soundfile*` fields;
+  - the mutable fields by increasing byte size, declaration order among equal
+    sizes;
+  - the static tables;
+  - the compute-local arrays.
+
+  `WasmMemoryLayout::from_module`, which the C++-style JSON of the other
+  backends uses, keeps the declaration order.
+- Why: V8 encodes a memory offset up to 32,760 bytes in the load itself and
+  builds a larger one with one or two extra instructions. The declaration
+  order puts every table and delay line before the per-sample state. On the
+  faust-coopiano voice the new order removes 34 % of the instructions per
+  sample; outputs are bit-identical.
+- Compatibility impact:
+  - The JSON `index` values of a `-lang wasm` module (and its `size`-relative
+    layout) differ from those Faust C++ emits for the same program.
+  - Hosts that read `ui[*].index` from the module's own JSON are unaffected,
+    as are `getParamValue`/`setParamValue` and the I/O zone at `size`.
+  - A host that hard-codes C++ offsets, or pairs a faust-rs `.wasm` with a C++
+    JSON, breaks. Mixing is already unsupported (`wasm/mod.rs` header).
+- Evidence: W5 of
+  [`wasm-compute-speed-analysis-and-plan-2026-10-16-en.md`](wasm-compute-speed-analysis-and-plan-2026-10-16-en.md);
+  tests `wasm_emitter_lays_out_small_fields_first_and_static_tables_last` and
+  `wasm_json_indices_follow_the_emitted_layout` in
+  `crates/codegen/src/backends/wasm/tests.rs`.
+
+### DIFF-BACK-009 — `compute` scheduled for the JIT backends (W2/W3/W7)
+
+- Status: `adapted`.
+- The interp, Cranelift and wasm backends emit `compute` after a FIR-to-FIR
+  pass, `fir::schedule::schedule_compute`; C, C++ and the other text backends
+  keep FIR order, as Faust C++ does for every backend.
+  - W3: after a store of a single-assigned local or a constant to a constant
+    struct address, a later load of that address in the same straight-line
+    region reads the stored value instead of memory.
+  - W2: a pure declaration (`double fTemp36 = fRec2[1];`) is emitted shortly
+    before its first reader — eight solid statements before it — or before
+    the first statement that may write what it reads.
+  - W7: stack scalars whose lifetimes do not overlap share one variable
+    (`fReuseN`, `iReuseN`...) declared at the top of `compute`; their
+    declarations become stores to it. faust-coopiano's voice goes from 37,720
+    wasm locals in `compute` to 2,177.
+  - Each rewrite is accepted only if an independent checker re-derives it;
+    otherwise `compute` keeps FIR order. `keep_fir_order` in `InterpOptions`,
+    `CraneliftOptions` and `WasmOptions` turns the pass off (for differential
+    tests).
+- Why: V8 (TurboFan) keeps wasm loads in program order and does no load
+  elimination on linear memory, so a state read at the top of the sample stays
+  live across the loop body and is spilled; LLVM, which compiles Faust C++'s
+  output, sinks and forwards on its own. Measured on 2026-10-17 (wasm, cycles
+  per sample in V8): faust-coopiano's light body −35 %, imaged body −10 %,
+  voice −7 %, a 400-mode resonator bank −16 %; Cranelift (faustprobe) compute
+  −17 % to −31 % on the same programs. W7: JavaScriptCore (Safari) gives each
+  wasm local its own stack slot, and the voice's `compute` overflowed the
+  512 KB stack of Safari's AudioWorklet thread (the page was silent); after
+  W7 the whole faust-coopiano processor runs in 256 KB under `jsc`, and
+  JavaScriptCore computes the voice 17 % and the light body 11 % faster. V8,
+  Cranelift and the interpreter run at the same speed.
+- Compatibility impact: none on outputs, which are bit-identical (impulse
+  tests of the three backends, faust-coopiano's modules, faustprobe `--ref`).
+  The generated wasm, interpreter bytecode and Cranelift code differ from Faust
+  C++'s in statement order and in some loads. Compile time of the imaged body
+  rises by about 10 % (wasm) and 12 % (Cranelift) with W2/W3, and by 3 % more
+  with W7.
+- Evidence:
+  [`wasm-w2-w3-sinking-forwarding-design-2026-10-17-en.md`](wasm-w2-w3-sinking-forwarding-design-2026-10-17-en.md),
+  [`fir-local-reuse-w7-design-2026-10-17-en.md`](fir-local-reuse-w7-design-2026-10-17-en.md);
+  tests in `crates/fir/src/schedule/tests.rs` and `tests_reuse.rs` (producers
+  and the checkers' mutations) and `crates/compiler/tests/fir_schedule.rs` (interpreter outputs
+  with and without the pass, FIR verification).
 
 ## 7. Public API and representation adaptations
 
@@ -1129,6 +1443,53 @@ must run unchanged with Faust C++ should not pass them.
   `crates/faust/tests/ddsp.rs`, `crates/faust/tests/allocation.rs`,
   [`docs/embedding-layers-en.md`](../docs/embedding-layers-en.md).
 
+### DIFF-API-009 — `libfaust-box.h` and `libfaust-signal.h` cover a subset of the reference
+
+- Status: `narrower`.
+- The C APIs (`libfaust-box-c.h`, `libfaust-signal-c.h`) follow the
+  reference. The C++ headers
+  [`crates/box-ffi/include/libfaust-box.h`](../crates/box-ffi/include/libfaust-box.h)
+  and
+  [`crates/signal-ffi/include/libfaust-signal.h`](../crates/signal-ffi/include/libfaust-signal.h)
+  are inline wrappers over them (see `DIFF-API-004` for why) and wrap mainly
+  the constructors. Compared after preprocessing with the pinned reference's
+  `architecture/faust/dsp/libfaust-box.h` and `libfaust-signal.h`, they do not
+  declare:
+  - Box: most of the 78 `isBox*` overloads — 13 are wrapped (`isBoxAbstr`,
+    `isBoxAccess`, `isBoxAppl`, `isBoxButton`, `isBoxInt`, `isBoxReal`, ...),
+    none of the one-argument predicate forms (`isBoxAbstr(Box t)`) —,
+    `DSPToBoxes`, `boxesToSignals`/`2`, `createSourceFromBoxes`,
+    `getBoxType`, `boxPrim2`, `extractName`, `ffname`/`ffarity`,
+    `prim0name`–`prim5name`, `getDefNameProperty`;
+  - Signal: most `isSig*` matchers (`isSigHSlider`, `isSigRDTbl`,
+    `isSigWRTbl`, `isSigSoundfile*`, `isSigControl`, `isSigEnable`, ...),
+    `getSigInterval`/`setSigInterval`, `getSigNature`, `sigBranches`,
+    `xtendedName`/`xtendedArity`, `printBox`/`printSignal`.
+- Box labels are `const char*` where the reference takes
+  `const std::string&` (`boxVSlider`, `boxHBargraph`, `boxVGroup`, ...): a
+  call with a string literal compiles against both, one with a `std::string`
+  needs `.c_str()` here.
+- Closed 2026-10-18: the applied constructors (`boxAdd(Box, Box)`,
+  `boxSin(Box)`, `boxDelay(Box, Box)`, `boxSelect2(Box, Box, Box)`,
+  `boxHBargraph(label, min, max, x)`, `boxAttach(Box, Box)`, ... — 50
+  overloads) existed only under the C spelling `boxAddAux(Box, Box)`, so a
+  reference client composing boxes that way did not compile. The reference
+  spelling is now declared, the `...Aux` forms are kept as aliases, and
+  `boxPar3`–`boxPar5` are wrapped. A C++ client of the built library
+  (`box-overloads.cpp` in `libfaust-export-check`) checks each applied
+  overload against the tree the reference builds, `(x, y) : prim`. It found
+  that `CboxPar3`–`CboxPar5` nested to the left where the reference nests to
+  the right, fixed in `2f0d598b`.
+- The headers also declare the Rust-only `CboxFad`/`CboxRad` constructors of
+  `DIFF-SRC-001`/`002` in the C API.
+- Compatibility impact: C clients are unaffected. A C++ client of the
+  reference headers that uses the constructors compiles; one that uses a
+  missing function must call its C name (`CisBoxHSlider`, `CboxesToSignals`,
+  ...) instead.
+- Evidence: the comparison above (reference `8eebea429`); the headers'
+  syntax check and the `box-overloads.cpp` client in
+  `cargo run -p xtask -- libfaust-export-check`.
+
 ## 8. Internal architectural adaptations
 
 These differences normally preserve Faust semantics, but matter to maintainers
@@ -1202,6 +1563,7 @@ remain visible until closed or explicitly reclassified.
 | DIFF-GAP-015 | `narrower` | `rep_37_table_rwtable_negative_indices` has different numerical behavior for negative read/write table indices. |
 | DIFF-GAP-016 | `narrower` | `rep_67_variable_delay_shifted_slider` differs for a variable delay whose shifted slider produces a negative intermediate delay expression. |
 | DIFF-GAP-017 | `parity-gap` | A division by a zero that is constant without being a literal when its sequence is evaluated (`z = 0 <: _, !;`), used as a **pattern-matching argument whose value is then unused** (`f(0) = 1; f(n) = 2; process = f(1 / z);`), compiles in Rust and fails in C++ (`ERROR : division by 0 in 1 / 0`): C++ simplifies the argument eagerly and its exception is fatal, Rust folds a pattern argument as an optimization and gives up on this one. With a literal divisor both fail, and wherever the quotient is used (a signal, an iteration count, a route size, a label) Rust reports the division too. Pinned by `a_known_divergence_an_unused_late_zero_division_in_a_pattern_argument` in `crates/compiler/tests/diagnostic_errors.rs`; see `DIFF-BEH-010`. |
+| DIFF-GAP-020 | `narrower` | The automatic mathematical documentation of C++ `-mdoc` (`compiler/documentator/`) is not ported: `faust-rs` has no `-mdoc` option and rejects it as an unknown argument, and `crates/doc`, the crate the porting plan assigns to it, is an empty scaffold. |
 
 For a time-stamped quantitative snapshot rather than this durable registry,
 use [`faust-rs-supported-faust-subset-en.md`](faust-rs-supported-faust-subset-en.md),

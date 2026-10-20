@@ -46,7 +46,10 @@ fn faustfloat_ptr_ptr_type() -> FirType {
 }
 
 /// Canonical named-argument list for the DSP `compute` method.
-fn compute_fun_args() -> [NamedType; 4] {
+///
+/// Shared with the backend unit tests, which spelled it out inline about
+/// forty times.
+pub(crate) fn compute_fun_args() -> [NamedType; 4] {
     [
         NamedType {
             name: "dsp".to_string(),
@@ -68,7 +71,7 @@ fn compute_fun_args() -> [NamedType; 4] {
 }
 
 /// Canonical FIR type for the DSP `compute` method.
-fn compute_fun_type() -> FirType {
+pub(crate) fn compute_fun_type() -> FirType {
     FirType::Fun {
         args: vec![
             obj_ptr_type(),
@@ -81,7 +84,7 @@ fn compute_fun_type() -> FirType {
 }
 
 /// Canonical named-argument list for `buildUserInterface`.
-fn build_ui_fun_args() -> [NamedType; 2] {
+pub(crate) fn build_ui_fun_args() -> [NamedType; 2] {
     [
         NamedType {
             name: "dsp".to_string(),
@@ -95,7 +98,7 @@ fn build_ui_fun_args() -> [NamedType; 2] {
 }
 
 /// Canonical FIR type for `buildUserInterface`.
-fn build_ui_fun_type() -> FirType {
+pub(crate) fn build_ui_fun_type() -> FirType {
     FirType::Fun {
         args: vec![obj_ptr_type(), FirType::UI],
         ret: Box::new(FirType::Void),

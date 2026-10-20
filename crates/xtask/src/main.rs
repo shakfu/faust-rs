@@ -32,7 +32,8 @@
 //! # Design invariants
 //! - Deterministic corpus file ordering.
 //! - Normalized output text before snapshot comparison.
-//! - Fail-fast behavior when one case diverges to preserve CI signal quality.
+//! - Golden checks report every diverging case before failing; runtime trace
+//!   checks stop at the first mismatch.
 //! - Generated documentation uses repository-relative paths where practical.
 //! - Command dispatch and validation are declared once in the typed Clap tree;
 //!   workflow modules receive validated option values.
@@ -57,13 +58,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
 use wasmparser::{ExternalKind, Parser as WasmParser, Payload};
-
-/// Local checkout of the reference C++ Faust source tree used by static parser
-/// report generation.
-///
-/// Runtime workflows that need a C++ Faust executable use `FAUST_CPP_BIN` or an
-/// explicit `--faust-bin` instead.
-const CPP_SOURCE_ROOT: &str = "/Users/letz/Developpements/RUST/faust";
 
 /// Parser parity report output path, relative to the workspace root.
 const PARITY_REPORT_REL_PATH: &str = "porting/phases/phase-3-parser-parity-report-en.md";

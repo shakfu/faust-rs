@@ -1,4 +1,7 @@
-use super::{WasmJsonDescription, WasmMemoryLayout, WasmOptions, generate_wasm_module};
+use super::{
+    LocalSpecs, WasmJsonDescription, WasmMemoryLayout, WasmOptions, collect_compute_locals,
+    generate_wasm_module,
+};
 use crate::fixtures::{
     build_control_flow_test_module, build_gain_bias_ui_meta_test_module,
     build_math_intrinsics_test_module, build_passthrough_test_module,
@@ -392,6 +395,83 @@ fn wasm_compute_loads_static_tables() {
     assert!(ops.iter().any(|op| matches!(op, Operator::F32Store { .. })));
 }
 
+/// W1 of `porting/wasm-compute-speed-analysis-and-plan-2026-10-16-en.md`: a
+/// constant address goes whole into the memarg `offset=` over a bare base, and
+/// a dynamic index keeps the wrapping sum `base + (index * size + K)`.
+#[test]
+fn wasm_constant_addresses_fold_into_memarg_offset() {
+    for internal_memory in [true, false] {
+        let (store, module) = build_region_address_module();
+        let options = WasmOptions {
+            internal_memory,
+            ..WasmOptions::default()
+        };
+        let out = generate_wasm_module(&store, module, &options)
+            .expect("WASM backend should lower every region address form");
+        Validator::new()
+            .validate_all(&out.wasm_binary)
+            .expect("generated module should validate");
+        let offset = |name: &str| {
+            out.memory_layout
+                .field_offsets
+                .get(name)
+                .unwrap_or_else(|| panic!("`{name}` should be in the layout"))
+                .offset
+        };
+        let (state, rec, idx, wav) = (
+            offset("fState"),
+            offset("fRec"),
+            offset("fIdx"),
+            offset("wav"),
+        );
+        assert!(
+            rec > 0 && wav > 0,
+            "the checks below need non-zero region offsets"
+        );
+
+        let ops = decode_ops(code_body_at(&out.wasm_binary, 1));
+        let tokens = address_tokens(&ops);
+        let has = |window: &[String]| tokens.windows(window.len()).any(|w| w == window);
+        let t = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+        // Struct scalar, and struct table at constant indices 1 and 0.
+        assert!(has(&t(&["local.get 0", &format!("f32.load {state}")])));
+        assert!(has(&t(&["local.get 0", &format!("f32.load {}", rec + 4)])));
+        assert!(has(&t(&["local.get 0", &format!("f32.load {rec}")])));
+        assert!(tokens.contains(&format!("f32.store {rec}")));
+        assert!(tokens.contains(&format!("f32.store {state}")));
+        // Struct table at a dynamic index: dsp + (fIdx * 4 + K), offset 0.
+        let dynamic = t(&[
+            "local.get 0",
+            "local.get 0",
+            &format!("i32.load {idx}"),
+            "i32.const 4",
+            "i32.mul",
+            &format!("i32.const {rec}"),
+            "i32.add",
+            "i32.add",
+        ]);
+        assert!(has(&[dynamic.clone(), t(&["f32.load 0"])].concat()));
+        // Static table: absolute, constant index over `i32.const 0`, dynamic
+        // index as the scaled index plus the table's address.
+        assert!(has(&t(&["i32.const 0", &format!("f32.load {}", wav + 4)])));
+        assert!(has(&t(&[
+            "local.get 0",
+            &format!("i32.load {idx}"),
+            "i32.const 4",
+            "i32.mul",
+            &format!("i32.const {wav}"),
+            "i32.add",
+            "f32.load 0",
+        ])));
+        // The former `dsp + K` sequence is gone.
+        assert!(
+            !has(&t(&["local.get 0", "i32.const", "i32.add"])),
+            "no `local.get 0; i32.const K; i32.add` address may remain"
+        );
+    }
+}
+
 #[test]
 fn wasm_module_emits_static_table_data_segments() {
     let (store, module) = build_static_table_layout_module();
@@ -399,6 +479,10 @@ fn wasm_module_emits_static_table_data_segments() {
         .expect("WASM scaffold should emit static table data segment");
 
     assert!(out.dsp_json.contains("\"size\": 16"));
+    // The emitter places the static tables after the mutable fields (W5).
+    let wav_offset = out.memory_layout.field_offsets["wav"].offset;
+    assert_eq!(wav_offset, out.memory_layout.tables_offset);
+    assert!(wav_offset > out.memory_layout.field_offsets["fGain"].offset);
 
     let mut saw_json = false;
     let mut saw_table = false;
@@ -427,7 +511,7 @@ fn wasm_module_emits_static_table_data_segments() {
                     saw_json = true;
                     json_offset = Some(offset);
                 }
-                if offset == 0 && data == [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64] {
+                if offset == wav_offset as i32 && data == [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64] {
                     saw_table = true;
                     table_offset = Some(offset);
                 }
@@ -436,7 +520,7 @@ fn wasm_module_emits_static_table_data_segments() {
     }
     assert!(saw_json);
     assert!(saw_table);
-    assert_eq!(table_offset, Some(0));
+    assert_eq!(table_offset, Some(wav_offset as i32));
     assert!(
         json_offset.expect("json data segment offset should be recorded")
             >= out.memory_layout.io_zone_offset as i32
@@ -502,6 +586,141 @@ fn wasm_module_imports_external_math_functions_for_compute() {
     }
 
     assert_eq!(imports, vec!["_atan2", "_cos", "_pow", "_sin"]);
+}
+
+/// A math call found only under a `WhileLoop` is imported: the import walk
+/// used a hand-rolled child list that stopped at `WhileLoop`, `Switch`,
+/// `TeeVar`, `Bitcast` and the soundfile loads.
+#[test]
+fn wasm_imports_a_math_call_found_only_inside_a_while_loop() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let x = b.float32(0.5);
+    let call = b.fun_call("sin", &[x], FirType::Float32);
+    let scratch = b.declare_var("fScratch", FirType::Float32, AccessType::Stack, Some(call));
+    let loop_body = b.block(&[scratch]);
+    let never = b.int32(0);
+    let while_loop = b.while_loop(never, loop_body);
+    let body = b.block(&[while_loop]);
+    let compute = b.declare_fun(
+        "compute",
+        crate::fixtures::compute_fun_type(),
+        &crate::fixtures::compute_fun_args(),
+        Some(body),
+        false,
+    );
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "while_import",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+        &[],
+    );
+
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("a sin call under a while loop compiles");
+    let mut imports = Vec::new();
+    for payload in Parser::new(0).parse_all(&out.wasm_binary) {
+        if let Payload::ImportSection(section) = payload.expect("payload should decode") {
+            for import in section {
+                imports.push(import.expect("import should decode").name.to_owned());
+            }
+        }
+    }
+    assert_eq!(imports, vec!["_sinf"]);
+}
+
+/// A `Switch` condition is evaluated once into a local, not re-lowered per
+/// case: the imported call in it runs once whatever the number of cases.
+#[test]
+fn wasm_switch_evaluates_its_condition_once() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let x = b.float32(0.5);
+    let call = b.fun_call("sin", &[x], FirType::Float32);
+    let cond = b.cast(FirType::Int32, call);
+    let first = b.block(&[]);
+    let second = b.block(&[]);
+    let switch = b.switch(cond, &[(1, first), (2, second)], None);
+    let body = b.block(&[switch]);
+    let compute = b.declare_fun(
+        "compute",
+        crate::fixtures::compute_fun_type(),
+        &crate::fixtures::compute_fun_args(),
+        Some(body),
+        false,
+    );
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "switch_once",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+        &[],
+    );
+
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("a switch on a call compiles");
+    let ops = decode_ops(code_body_at(&out.wasm_binary, 1));
+    let calls = ops
+        .iter()
+        .filter(|op| matches!(op, Operator::Call { function_index: 0 }))
+        .count();
+    assert_eq!(calls, 1);
+}
+
+/// The hyperbolic imports have one name for both precisions (`_acosh`),
+/// the name the JS hosts provide. A module calling both precisions is
+/// refused instead of binding both calls to one signature.
+#[test]
+fn wasm_refuses_one_import_name_at_two_precisions() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let x32 = b.float32(2.0);
+    let single = b.fun_call("acoshf", &[x32], FirType::Float32);
+    let x64 = b.float64(2.0);
+    let double = b.fun_call("acosh", &[x64], FirType::Float64);
+    let drop_single = b.drop_(single);
+    let drop_double = b.drop_(double);
+    let body = b.block(&[drop_single, drop_double]);
+    let compute = b.declare_fun(
+        "compute",
+        crate::fixtures::compute_fun_type(),
+        &crate::fixtures::compute_fun_args(),
+        Some(body),
+        false,
+    );
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "mixed",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+        &[],
+    );
+
+    let err = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect_err("one import name at two signatures");
+    assert!(err.message().contains("`_acosh`"), "{}", err.message());
 }
 
 #[test]
@@ -761,7 +980,7 @@ fn wasm_layout_places_static_tables_after_struct_region() {
 }
 
 #[test]
-fn wasm_json_indices_follow_runtime_offsets_after_static_tables() {
+fn wasm_json_indices_follow_the_emitted_layout() {
     let (store, module) = build_static_table_ui_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
         .expect("WASM backend should expose UI indices as runtime byte offsets");
@@ -770,7 +989,41 @@ fn wasm_json_indices_follow_runtime_offsets_after_static_tables() {
         out.dsp_json
             .contains("\"address\": \"/StaticTableUI/gain\"")
     );
-    assert!(out.dsp_json.contains("\"index\": 12"));
+    // The control is a 4-byte field: it precedes the static table, which the
+    // emitter places last, and its JSON index is its emitted offset.
+    let gain = out.memory_layout.field_offsets["fGain"].offset;
+    assert_eq!(gain, 0);
+    assert!(out.memory_layout.tables_offset > gain);
+    assert!(out.dsp_json.contains(&format!("\"index\": {gain}")));
+}
+
+/// W5 of `porting/wasm-compute-speed-analysis-and-plan-2026-10-16-en.md`: the
+/// emitter lays the mutable fields out by increasing size, then the static
+/// tables, while `WasmMemoryLayout::from_module` keeps the declaration order
+/// (static tables first) that the C++-style JSON of the other backends uses.
+#[test]
+fn wasm_emitter_lays_out_small_fields_first_and_static_tables_last() {
+    let (store, module) = build_mixed_size_fields_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM backend should lay out the mixed-size fixture");
+    Validator::new()
+        .validate_all(&out.wasm_binary)
+        .expect("generated module should validate");
+    let emitted = |name: &str| out.memory_layout.field_offsets[name].offset;
+    assert_eq!(emitted("fState"), 0);
+    assert_eq!(emitted("fRec"), 4);
+    assert_eq!(emitted("fDelay"), 12);
+    assert_eq!(out.memory_layout.tables_offset, 12 + 64 * 4);
+    assert_eq!(emitted("wav"), out.memory_layout.tables_offset);
+    assert_eq!(out.memory_layout.struct_size, 12 + 64 * 4 + 12);
+
+    let declared = WasmMemoryLayout::from_module(&store, module, &WasmOptions::default(), 0)
+        .expect("declaration-order layout should compute");
+    let declared = |name: &str| declared.field_offsets[name].offset;
+    assert_eq!(declared("wav"), 0);
+    assert_eq!(declared("fDelay"), 12);
+    assert_eq!(declared("fState"), 12 + 64 * 4);
+    assert_eq!(declared("fRec"), 12 + 64 * 4 + 4);
 }
 
 #[test]
@@ -947,24 +1200,7 @@ fn build_soundfile_access_module() -> (FirStore, FirId) {
     );
 
     let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let zero_output = b.int32(0);
     let output0_ptr = b.load_table("outputs", AccessType::FunArgs, zero_output, ptr_ty.clone());
     let output0 = b.declare_var(
@@ -996,15 +1232,7 @@ fn build_soundfile_access_module() -> (FirStore, FirId) {
     let compute_body = b.block(&[output0, loop_stmt]);
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1274,35 +1502,10 @@ fn build_labeled_passthrough_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let label = b.label("signal_fir_fastlane_step2a: executable base slice");
     let compute_body = b.block(&[label, in_alias, out_alias, sample_loop]);
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1350,24 +1553,7 @@ fn build_local_array_buffer_module() -> (FirStore, FirId) {
     let loop_body = b.block(&[store_vbuf, write_out]);
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[out_alias, vbuf, sample_loop]);
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
         FirType::Fun {
@@ -1488,35 +1674,10 @@ fn build_struct_state_cast_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
 
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1566,35 +1727,10 @@ fn build_native_math_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
 
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1634,35 +1770,10 @@ fn build_internal_max_i_module() -> (FirStore, FirId) {
     let loop_body = b.block(&[write]);
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[out_alias, sample_loop]);
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1702,35 +1813,10 @@ fn build_int_abs_module() -> (FirStore, FirId) {
     let loop_body = b.block(&[write]);
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[out_alias, sample_loop]);
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1782,35 +1868,10 @@ fn build_loop_statement_module() -> (FirStore, FirId) {
     let for_loop = b.for_loop("i", init, end, step, for_body, false);
 
     let compute_body = b.block(&[out_alias, acc_decl, while_loop, for_loop]);
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -1892,6 +1953,133 @@ fn build_static_table_layout_module() -> (FirStore, FirId) {
     (store, module)
 }
 
+/// `compute` touching every address form of `emit_region_address`: a struct
+/// scalar (`fState`), a struct table at constant and dynamic indices (`fRec`,
+/// indexed by the struct scalar `fIdx`) and a static table at a constant and a
+/// dynamic index (`wav`, after a leading static table `lead`).
+fn build_region_address_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let z = b.float32(0.0);
+    let zero_i = b.int32(0);
+    let state = b.declare_var("fState", FirType::FaustFloat, AccessType::Struct, Some(z));
+    let rec = b.declare_table("fRec", AccessType::Struct, FirType::FaustFloat, &[z, z]);
+    let idx = b.declare_var("fIdx", FirType::Int32, AccessType::Struct, Some(zero_i));
+    let dsp_struct = b.block(&[state, rec, idx]);
+    let globals = b.block(&[]);
+    let w0 = b.float32(0.0);
+    let w1 = b.float32(1.0);
+    let w2 = b.float32(2.0);
+    // Static tables are laid out first: `lead` puts `wav` at a non-zero address.
+    let lead = b.declare_table("lead", AccessType::Static, FirType::FaustFloat, &[w0]);
+    let wav = b.declare_table(
+        "wav",
+        AccessType::Static,
+        FirType::FaustFloat,
+        &[w0, w1, w2],
+    );
+    let static_decls = b.block(&[lead, wav]);
+
+    let ff = FirType::FaustFloat;
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+
+    let one = b.int32(1);
+    let rec1 = b.load_table("fRec", AccessType::Struct, one, ff.clone());
+    let state_cur = b.load_var("fState", AccessType::Struct, ff.clone());
+    let sum = b.binop(fir::FirBinOp::Add, rec1, state_cur, ff.clone());
+    let write_rec0 = b.store_table("fRec", AccessType::Struct, zero_i, sum);
+    let rec0 = b.load_table("fRec", AccessType::Struct, zero_i, ff.clone());
+    let write_state = b.store_var("fState", AccessType::Struct, rec0);
+    let dyn_idx = b.load_var("fIdx", AccessType::Struct, FirType::Int32);
+    let rec_dyn = b.load_table("fRec", AccessType::Struct, dyn_idx, ff.clone());
+    let wav_const = b.load_table("wav", AccessType::Static, one, ff.clone());
+    let wav_dyn = b.load_table("wav", AccessType::Static, dyn_idx, ff.clone());
+    let mix = b.binop(fir::FirBinOp::Add, rec_dyn, wav_const, ff.clone());
+    let mix = b.binop(fir::FirBinOp::Add, mix, wav_dyn, ff);
+    let tmp = b.declare_var("tmpMix", FirType::FaustFloat, AccessType::Stack, Some(mix));
+    let tmp_cur = b.load_var("tmpMix", AccessType::Stack, FirType::FaustFloat);
+    let write_rec_dyn = b.store_table("fRec", AccessType::Struct, dyn_idx, tmp_cur);
+    let write_out = b.store_table("output0", AccessType::Stack, i0, tmp_cur);
+    let loop_body = b.block(&[write_rec0, write_state, tmp, write_rec_dyn, write_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+
+    let args = crate::fixtures::compute_fun_args();
+    let compute = b.declare_fun(
+        "compute",
+        crate::fixtures::compute_fun_type(),
+        &args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        0,
+        1,
+        "region_address",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+        &[],
+    );
+    (store, module)
+}
+
+/// A delay line (64 floats), a scalar and a two-slot state, declared in that
+/// order, plus one static table: the fields `from_module` and the emitter
+/// order differently.
+fn build_mixed_size_fields_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let z = b.float32(0.0);
+    let delay = b.declare_var(
+        "fDelay",
+        FirType::Array(Box::new(FirType::FaustFloat), 64),
+        AccessType::Struct,
+        None,
+    );
+    let state = b.declare_var("fState", FirType::FaustFloat, AccessType::Struct, Some(z));
+    let rec = b.declare_var(
+        "fRec",
+        FirType::Array(Box::new(FirType::FaustFloat), 2),
+        AccessType::Struct,
+        None,
+    );
+    let dsp_struct = b.block(&[delay, state, rec]);
+    let globals = b.block(&[]);
+    let w0 = b.float32(0.0);
+    let w1 = b.float32(1.0);
+    let w2 = b.float32(2.0);
+    let wav = b.declare_table(
+        "wav",
+        AccessType::Static,
+        FirType::FaustFloat,
+        &[w0, w1, w2],
+    );
+    let static_decls = b.block(&[wav]);
+    let compute = declare_trivial_compute(&mut b);
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        0,
+        1,
+        "mixed_size_fields",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+        &[],
+    );
+    (store, module)
+}
+
 fn build_static_table_compute_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
@@ -1922,35 +2110,10 @@ fn build_static_table_compute_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[out_alias, sample_loop]);
 
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -2032,33 +2195,8 @@ fn build_struct_table_instance_constants_module() -> (FirStore, FirId) {
 
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
-        &[
-            NamedType {
-                name: "dsp".to_owned(),
-                typ: FirType::Ptr(Box::new(FirType::Obj)),
-            },
-            NamedType {
-                name: "count".to_owned(),
-                typ: FirType::Int32,
-            },
-            NamedType {
-                name: "inputs".to_owned(),
-                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            },
-            NamedType {
-                name: "outputs".to_owned(),
-                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            },
-        ],
+        crate::fixtures::compute_fun_type(),
+        &crate::fixtures::compute_fun_args(),
         Some(compute_body),
         false,
     );
@@ -2139,35 +2277,10 @@ fn build_foreign_float_helper_module() -> (FirStore, FirId) {
         sample_loop,
     ]);
 
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -2229,35 +2342,10 @@ fn build_generic_foreign_function_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[in0_alias, out0_alias, sample_loop]);
 
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(compute_body),
         false,
@@ -2278,36 +2366,11 @@ fn build_generic_foreign_function_module() -> (FirStore, FirId) {
 }
 
 fn declare_trivial_compute(b: &mut FirBuilder<'_>) -> FirId {
-    let args = [
-        NamedType {
-            name: "dsp".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_owned(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_owned(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let args = crate::fixtures::compute_fun_args();
     let body = b.block(&[]);
     b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &args,
         Some(body),
         false,
@@ -2334,35 +2397,10 @@ fn build_foreign_global_var_module() -> (FirStore, FirId) {
     let loop_body = b.block(&[store_out]);
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
     let compute_body = b.block(&[out_alias, sample_loop]);
-    let compute_args = [
-        NamedType {
-            name: "dsp".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_string(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
+    let compute_args = crate::fixtures::compute_fun_args();
     let compute = b.declare_fun(
         "compute",
-        FirType::Fun {
-            args: vec![
-                FirType::Ptr(Box::new(FirType::Obj)),
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            ret: Box::new(FirType::Void),
-        },
+        crate::fixtures::compute_fun_type(),
         &compute_args,
         Some(compute_body),
         false,
@@ -2413,10 +2451,64 @@ fn code_body_at<'a>(wasm: &'a [u8], index: usize) -> wasmparser::FunctionBody<'a
     panic!("code body index {index} not found");
 }
 
+/// Renders the operators that build and use addresses as short tokens
+/// (`local.get 0`, `i32.const 4`, `f32.load 12`, ...); every other operator
+/// becomes `_`, so a window of tokens matches one exact emitted sequence.
+fn address_tokens(ops: &[Operator<'_>]) -> Vec<String> {
+    ops.iter()
+        .map(|op| match op {
+            Operator::LocalGet { local_index } => format!("local.get {local_index}"),
+            Operator::I32Const { value } => format!("i32.const {value}"),
+            Operator::I32Add => "i32.add".to_owned(),
+            Operator::I32Mul => "i32.mul".to_owned(),
+            Operator::I32Load { memarg } => format!("i32.load {}", memarg.offset),
+            Operator::F32Load { memarg } => format!("f32.load {}", memarg.offset),
+            Operator::F64Load { memarg } => format!("f64.load {}", memarg.offset),
+            Operator::I32Store { memarg } => format!("i32.store {}", memarg.offset),
+            Operator::F32Store { memarg } => format!("f32.store {}", memarg.offset),
+            Operator::F64Store { memarg } => format!("f64.store {}", memarg.offset),
+            _ => "_".to_owned(),
+        })
+        .collect()
+}
+
 fn decode_ops(body: wasmparser::FunctionBody<'_>) -> Vec<Operator<'_>> {
     body.get_operators_reader()
         .expect("operators reader")
         .into_iter()
         .map(|op| op.expect("operator should decode"))
         .collect()
+}
+
+/// Locals are collected once each, in first-declaration order, with the type
+/// of their first declaration: the WASM local indices follow that order.
+#[test]
+fn compute_locals_are_collected_once_in_first_declaration_order() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let one = b.float32(1.0);
+    let fa = b.declare_var("fA", FirType::Float32, AccessType::Stack, Some(one));
+    let two = b.int32(2);
+    let ib = b.declare_var("iB", FirType::Int32, AccessType::Stack, Some(two));
+    let three = b.float64(3.0);
+    let fa_again = b.declare_var("fA", FirType::Float64, AccessType::Stack, Some(three));
+    let four = b.float64(4.0);
+    let fc = b.declare_var("fC", FirType::Float64, AccessType::Stack, Some(four));
+    let count = b.int32(8);
+    let first_body = b.block(&[fa_again, fc]);
+    let first = b.simple_for_loop("i0", count, first_body, false);
+    let second_body = b.block(&[ib]);
+    let second = b.simple_for_loop("i0", count, second_body, false);
+    let body = b.block(&[fa, ib, first, second]);
+
+    let mut locals = LocalSpecs::default();
+    collect_compute_locals(&store, body, &mut locals).expect("supported FIR");
+    let expected = [
+        ("fA", FirType::Float32),
+        ("iB", FirType::Int32),
+        ("i0", FirType::Int32),
+        ("fC", FirType::Float64),
+    ]
+    .map(|(name, typ)| (name.to_owned(), typ));
+    assert_eq!(locals.specs, expected);
 }

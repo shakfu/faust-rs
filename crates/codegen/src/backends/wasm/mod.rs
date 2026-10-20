@@ -42,7 +42,7 @@
 //! than silently emitting a lossy module.
 
 use fir::{AccessType, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
@@ -92,6 +92,11 @@ pub struct WasmOptions {
     pub memory_pages: u32,
     /// Enable internal memory (`true`) or import memory from the host (`false`).
     pub internal_memory: bool,
+    /// Emit `compute` in FIR order, without the W3/W2/W7 scheduling of
+    /// `fir::schedule` (forwarding stores, sinking reads, reusing locals).
+    /// `false` by default: this is for differential tests, which compare both
+    /// orders.
+    pub keep_fir_order: bool,
 }
 
 impl Default for WasmOptions {
@@ -101,6 +106,7 @@ impl Default for WasmOptions {
             emit_wat: false,
             memory_pages: 0,
             internal_memory: true,
+            keep_fir_order: false,
         }
     }
 }
@@ -163,41 +169,17 @@ impl WasmBackendErrorCode {
     }
 }
 
-/// Typed backend error returned by the WASM emitter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WasmBackendError {
-    code: WasmBackendErrorCode,
-    message: String,
-}
-
-impl WasmBackendError {
-    #[must_use]
-    pub fn new(code: WasmBackendErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-
-    #[must_use]
-    pub fn code(&self) -> WasmBackendErrorCode {
-        self.code
-    }
-
-    /// Returns the backend-specific message without the bracketed code.
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
+impl crate::backends::codegen_error::CodegenErrorCode for WasmBackendErrorCode {
+    fn as_str(&self) -> &'static str {
+        Self::as_str(*self)
     }
 }
 
-impl std::fmt::Display for WasmBackendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {}", self.code.as_str(), self.message)
-    }
-}
-
-impl std::error::Error for WasmBackendError {}
+/// Typed backend error returned by the WASM emitter: the shared carrier
+/// ([`crate::backends::codegen_error::BackendError`]) over the wasm codes, so
+/// it renders `[code] message` and carries FIR provenance like the textual
+/// backends.
+pub type WasmBackendError = crate::backends::codegen_error::BackendError<WasmBackendErrorCode>;
 
 /// Canonical exported/runtime helper functions emitted by the backend.
 ///
@@ -321,23 +303,16 @@ fn generate_wasm_module_with_context_step(
     // §5.9). The table stays in `static_decls`: static memory is shared by
     // every instance here exactly as C++'s file-scope array is, so `classInit`
     // fills it once.
-    let flattened = if fir::subcontainer::has_sub_modules(store, module) {
-        let (owned, root) = fir::subcontainer::flatten_sub_modules_owned(
-            store,
-            module,
-            fir::subcontainer::SubModuleStatePolicy::MergedStructFields,
-        )
-        .map_err(|err| {
-            WasmBackendError::new(
-                WasmBackendErrorCode::UnsupportedFirNode,
-                format!("flattening generated tables failed: {err}"),
-            )
-        })?;
-        Some((owned, root))
-    } else {
-        None
-    };
-    let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+    // W3/W2/W7: `compute` scheduled for a JIT that keeps loads in program order
+    // (`fir::schedule`; the text backends keep FIR order).
+    let prepared = crate::backends::module_view::prepare_flat_module(
+        store,
+        module,
+        fir::subcontainer::SubModuleStatePolicy::MergedStructFields,
+        !options.keep_fir_order,
+    )
+    .map_err(|message| WasmBackendError::new(WasmBackendErrorCode::UnsupportedFirNode, message))?;
+    let (store, module) = prepared.as_ref().map_or((store, module), |(s, m)| (s, *m));
 
     let FirMatch::Module {
         num_inputs,
@@ -346,7 +321,6 @@ fn generate_wasm_module_with_context_step(
         globals,
         functions,
         static_decls,
-        sub_modules,
         ..
     } = match_fir(store, module)
     else {
@@ -355,19 +329,6 @@ fn generate_wasm_module_with_context_step(
             "WASM backend expects a FIR Module root",
         ));
     };
-
-    // Flattening removed them; a survivor is an internal error, and must not
-    // reach the output — a table declared and never filled reads as zeros.
-    let sub_module_names = crate::backends::sub_module_names(store, sub_modules);
-    if !sub_module_names.is_empty() {
-        return Err(WasmBackendError::new(
-            WasmBackendErrorCode::UnsupportedFirNode,
-            format!(
-                "sub-modules survived flattening ({}); this is an internal error",
-                sub_module_names.join(", ")
-            ),
-        ));
-    }
 
     let FirMatch::Block(function_items) = match_fir(store, functions) else {
         return Err(WasmBackendError::new(
@@ -388,12 +349,19 @@ fn generate_wasm_module_with_context_step(
         ));
     }
 
-    let compute_body = find_function_body(store, &function_items, "compute");
-    let instance_constants_body = find_function_body(store, &function_items, "instanceConstants");
-    let instance_clear_body = find_function_body(store, &function_items, "instanceClear");
-    let static_init_body = find_function_body(store, &function_items, "staticInit");
-    let instance_reset_ui_body =
-        find_function_body(store, &function_items, "instanceResetUserInterface");
+    let compute_body =
+        crate::backends::module_view::function_body(store, &function_items, "compute");
+    let instance_constants_body =
+        crate::backends::module_view::function_body(store, &function_items, "instanceConstants");
+    let instance_clear_body =
+        crate::backends::module_view::function_body(store, &function_items, "instanceClear");
+    let static_init_body =
+        crate::backends::module_view::function_body(store, &function_items, "staticInit");
+    let instance_reset_ui_body = crate::backends::module_view::function_body(
+        store,
+        &function_items,
+        "instanceResetUserInterface",
+    );
     let foreign_fun_imports = collect_foreign_fun_imports(store, globals, options)?;
 
     let has_soundfiles = module_has_soundfiles(store, module, &function_items);
@@ -405,7 +373,15 @@ fn generate_wasm_module_with_context_step(
         ValType::F32
     };
 
-    let mut memory_layout = WasmMemoryLayout::from_module(store, module, options, 0)?;
+    // The emitter lays out small fields first (W5); `from_module` keeps the
+    // declaration order for the C++-style JSON of the other backends.
+    let mut memory_layout = WasmMemoryLayout::from_module_with_order(
+        store,
+        module,
+        options,
+        0,
+        layout::FieldOrder::SmallFirst,
+    )?;
     let dsp_json = build_wasm_json_description(
         store,
         name,
@@ -416,7 +392,13 @@ fn generate_wasm_module_with_context_step(
         json_context,
     )?
     .render();
-    memory_layout = WasmMemoryLayout::from_module(store, module, options, dsp_json.len())?;
+    memory_layout = WasmMemoryLayout::from_module_with_order(
+        store,
+        module,
+        options,
+        dsp_json.len(),
+        layout::FieldOrder::SmallFirst,
+    )?;
     let pages = if options.memory_pages == 0 {
         memory_layout.pages.max(DEFAULT_MEMORY_PAGES)
     } else {
@@ -972,6 +954,15 @@ struct WasmLocal {
     typ: FirType,
 }
 
+/// Base of a region addressed by [`ComputeSubsetLowerer::emit_region_address`].
+#[derive(Clone, Copy, Debug)]
+enum RegionBase {
+    /// The DSP struct, at the `dsp` pointer (local 0 of every lowered body).
+    Dsp,
+    /// An absolute linear-memory address (static tables).
+    Absolute,
+}
+
 #[derive(Clone, Debug)]
 enum WasmLocalStorage {
     Local(u32),
@@ -1076,8 +1067,9 @@ fn lower_function_subset(
     options: &WasmOptions,
     param_count: u32,
 ) -> Result<Function, WasmBackendError> {
-    let mut local_specs = Vec::new();
-    collect_compute_locals(store, body, &mut local_specs)?;
+    let mut locals = LocalSpecs::default();
+    collect_compute_locals(store, body, &mut locals)?;
+    let local_specs = locals.specs;
 
     let mut local_map = HashMap::with_capacity(local_specs.len());
     let mut wasm_locals = Vec::with_capacity(local_specs.len());
@@ -1127,6 +1119,32 @@ fn lower_function_subset(
     Ok(function)
 }
 
+/// The stack/loop locals of a function body, in first-declaration order.
+#[derive(Default)]
+struct LocalSpecs {
+    /// `(name, type)` in first-declaration order, which is the WASM local
+    /// order.
+    specs: Vec<(String, FirType)>,
+    /// The names in `specs`. A linear scan of `specs` made the collection
+    /// quadratic in the number of locals: 4.8 s of a 6.2 s compile at 64,000
+    /// locals.
+    known: HashSet<String>,
+}
+
+impl LocalSpecs {
+    /// Records `name` unless it is already known; its first type wins.
+    fn declare(&mut self, name: String, typ: FirType) {
+        if self.known.insert(name.clone()) {
+            self.specs.push((name, typ));
+        }
+    }
+}
+
+/// The local a `Switch` node evaluates its condition into.
+fn switch_local_name(switch: FirId) -> String {
+    format!("switch{}", switch.as_u32())
+}
+
 /// Collects stack/loop locals that need explicit WASM local slots.
 ///
 /// The traversal is intentionally conservative and only accepts FIR nodes that
@@ -1134,7 +1152,7 @@ fn lower_function_subset(
 fn collect_compute_locals(
     store: &FirStore,
     id: FirId,
-    out: &mut Vec<(String, FirType)>,
+    out: &mut LocalSpecs,
 ) -> Result<(), WasmBackendError> {
     match match_fir(store, id) {
         FirMatch::Block(items) => {
@@ -1155,9 +1173,7 @@ fn collect_compute_locals(
             access: AccessType::Loop,
             ..
         } => {
-            if !out.iter().any(|(known, _)| known == &name) {
-                out.push((name, typ));
-            }
+            out.declare(name, typ);
             Ok(())
         }
         FirMatch::SimpleForLoop {
@@ -1166,9 +1182,7 @@ fn collect_compute_locals(
             is_reverse: false | true,
             ..
         } => {
-            if !out.iter().any(|(known, _)| known == &var) {
-                out.push((var, FirType::Int32));
-            }
+            out.declare(var, FirType::Int32);
             collect_compute_locals(store, body, out)
         }
         FirMatch::ForLoop {
@@ -1177,9 +1191,7 @@ fn collect_compute_locals(
             is_reverse: false | true,
             ..
         } => {
-            if !out.iter().any(|(known, _)| known == &var) {
-                out.push((var, FirType::Int32));
-            }
+            out.declare(var, FirType::Int32);
             collect_compute_locals(store, body, out)
         }
         FirMatch::If {
@@ -1195,7 +1207,15 @@ fn collect_compute_locals(
         }
         FirMatch::Control { stmt, .. } => collect_compute_locals(store, stmt, out),
         FirMatch::WhileLoop { body, .. } => collect_compute_locals(store, body, out),
-        FirMatch::Switch { cases, default, .. } => {
+        FirMatch::Switch {
+            cond,
+            cases,
+            default,
+        } => {
+            // The condition is evaluated once, into its own local.
+            if let Some(cond_ty) = store.value_type(cond) {
+                out.declare(switch_local_name(id), cond_ty);
+            }
             for (_, case_stmt) in cases {
                 collect_compute_locals(store, case_stmt, out)?;
             }
@@ -1334,7 +1354,7 @@ impl ComputeSubsetLowerer<'_> {
                 cond,
                 cases,
                 default,
-            } => self.lower_switch_stmt(cond, &cases, default, function),
+            } => self.lower_switch_stmt(id, cond, &cases, default, function),
             FirMatch::Drop(value) => {
                 self.lower_expr(value, function)?;
                 function.instruction(&Instruction::Drop);
@@ -1495,26 +1515,27 @@ impl ComputeSubsetLowerer<'_> {
         function: &mut Function,
     ) -> Result<(), WasmBackendError> {
         let local = self.local(name)?.clone();
-        let (elem_type, storage_type) = match &local.storage {
+        let (elem_type, storage_type, memarg_offset) = match &local.storage {
             WasmLocalStorage::Local(local_index) => {
                 let elem_type = stack_alias_pointee(&local.typ)?;
                 function.instruction(&Instruction::LocalGet(*local_index));
                 self.lower_index_offset(index, &elem_type, function)?;
                 function.instruction(&Instruction::I32Add);
                 let storage_type = wasm_val_type_for_fir(&elem_type, self.options)?;
-                (elem_type, storage_type)
+                (elem_type, storage_type, 0)
             }
             WasmLocalStorage::Memory {
                 offset,
                 elem_type,
                 storage_type,
             } => {
-                function.instruction(&Instruction::LocalGet(0));
-                function.instruction(&Instruction::I32Const(*offset as i32));
-                function.instruction(&Instruction::I32Add);
-                self.lower_index_offset(index, elem_type, function)?;
-                function.instruction(&Instruction::I32Add);
-                (elem_type.clone(), *storage_type)
+                let memarg_offset = self.emit_region_address(
+                    RegionBase::Dsp,
+                    *offset,
+                    Some((index, elem_type)),
+                    function,
+                )?;
+                (elem_type.clone(), *storage_type, memarg_offset)
             }
         };
         self.lower_expr(value, function)?;
@@ -1528,7 +1549,7 @@ impl ComputeSubsetLowerer<'_> {
         if matches!(local.storage, WasmLocalStorage::Local(_)) {
             function.instruction(&store_instruction_for_type(&elem_type, self.options)?);
         } else {
-            function.instruction(&store_instruction_for_valtype(storage_type)?);
+            function.instruction(&store_instruction_at(storage_type, memarg_offset)?);
         }
         Ok(())
     }
@@ -1542,9 +1563,8 @@ impl ComputeSubsetLowerer<'_> {
     ) -> Result<(), WasmBackendError> {
         let field = self.struct_field(name)?.clone();
         let field_val_type = wasm_val_type_for_field(&field);
-        function.instruction(&Instruction::LocalGet(0));
-        function.instruction(&Instruction::I32Const(field.offset as i32));
-        function.instruction(&Instruction::I32Add);
+        let memarg_offset =
+            self.emit_region_address(RegionBase::Dsp, field.offset, None, function)?;
         self.lower_expr(value, function)?;
         let value_type = self.store.value_type(value).ok_or_else(|| {
             WasmBackendError::new(
@@ -1553,7 +1573,7 @@ impl ComputeSubsetLowerer<'_> {
             )
         })?;
         self.emit_cast_if_needed(&value_type, field_val_type, function)?;
-        function.instruction(&store_instruction_for_valtype(field_val_type)?);
+        function.instruction(&store_instruction_at(field_val_type, memarg_offset)?);
         Ok(())
     }
 
@@ -1586,11 +1606,13 @@ impl ComputeSubsetLowerer<'_> {
     ) -> Result<(), WasmBackendError> {
         let field = self.struct_field(name)?.clone();
         let field_val_type = wasm_val_type_for_field(&field);
-        function.instruction(&Instruction::LocalGet(0));
-        function.instruction(&Instruction::I32Const(field.offset as i32));
-        function.instruction(&Instruction::I32Add);
-        self.lower_index_offset(index, &field_fir_type(&field, self.options), function)?;
-        function.instruction(&Instruction::I32Add);
+        let field_fir = field_fir_type(&field, self.options);
+        let memarg_offset = self.emit_region_address(
+            RegionBase::Dsp,
+            field.offset,
+            Some((index, &field_fir)),
+            function,
+        )?;
         self.lower_expr(value, function)?;
         let value_type = self.store.value_type(value).ok_or_else(|| {
             WasmBackendError::new(
@@ -1599,16 +1621,17 @@ impl ComputeSubsetLowerer<'_> {
             )
         })?;
         self.emit_cast_if_needed(&value_type, field_val_type, function)?;
-        function.instruction(&store_instruction_for_valtype(field_val_type)?);
+        function.instruction(&store_instruction_at(field_val_type, memarg_offset)?);
         Ok(())
     }
 
     /// Stores one element of a static table.
     ///
     /// A static table sits at an absolute address in linear memory rather than
-    /// at an offset from the `dsp` pointer, so — unlike the struct form — no
-    /// base is pushed. This mirrors the `LoadTable(kStatic)` case; it exists so
-    /// a generated table's fill loop can write the table it was built to fill.
+    /// at an offset from the `dsp` pointer, so — unlike the struct form — the
+    /// base is `i32.const 0` (constant index) or the scaled index alone. This
+    /// mirrors the `LoadTable(kStatic)` case; it exists so a generated table's
+    /// fill loop can write the table it was built to fill.
     fn lower_store_table_static(
         &mut self,
         name: &str,
@@ -1618,9 +1641,13 @@ impl ComputeSubsetLowerer<'_> {
     ) -> Result<(), WasmBackendError> {
         let field = self.struct_field(name)?.clone();
         let field_val_type = wasm_val_type_for_field(&field);
-        function.instruction(&Instruction::I32Const(field.offset as i32));
-        self.lower_index_offset(index, &field_fir_type(&field, self.options), function)?;
-        function.instruction(&Instruction::I32Add);
+        let field_fir = field_fir_type(&field, self.options);
+        let memarg_offset = self.emit_region_address(
+            RegionBase::Absolute,
+            field.offset,
+            Some((index, &field_fir)),
+            function,
+        )?;
         self.lower_expr(value, function)?;
         let value_type = self.store.value_type(value).ok_or_else(|| {
             WasmBackendError::new(
@@ -1629,7 +1656,7 @@ impl ComputeSubsetLowerer<'_> {
             )
         })?;
         self.emit_cast_if_needed(&value_type, field_val_type, function)?;
-        function.instruction(&store_instruction_for_valtype(field_val_type)?);
+        function.instruction(&store_instruction_at(field_val_type, memarg_offset)?);
         Ok(())
     }
 
@@ -1653,9 +1680,11 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
-    /// Dispatches FIR `Switch` lowering after resolving the condition type.
+    /// Lowers a FIR `Switch`: the condition is evaluated once into its own
+    /// local, as C's `switch` evaluates it once, then tested case by case.
     fn lower_switch_stmt(
         &mut self,
+        id: FirId,
         cond: FirId,
         cases: &[(i64, FirId)],
         default: Option<FirId>,
@@ -1667,17 +1696,23 @@ impl ComputeSubsetLowerer<'_> {
                 "missing value type for WASM switch condition",
             )
         })?;
-        self.lower_switch_cases(cond, &cond_ty, cases, default, function)
+        let WasmLocalStorage::Local(local) = self.local(&switch_local_name(id))?.storage else {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                "WASM switch condition local is not a scalar local",
+            ));
+        };
+        self.lower_expr(cond, function)?;
+        function.instruction(&Instruction::LocalSet(local));
+        self.lower_switch_cases(local, &cond_ty, cases, default, function)
     }
 
-    /// Emits `Switch` as a recursive `if/else` chain of equality tests.
-    ///
-    /// Each recursive call re-lowers `cond` and re-emits one case comparison,
-    /// nesting the remaining cases (and the optional `default`) inside the
-    /// `else` branch, until no cases remain.
+    /// Emits `Switch` as a recursive `if/else` chain of equality tests on the
+    /// condition's local, nesting the remaining cases (and the optional
+    /// `default`) inside the `else` branch, until no cases remain.
     fn lower_switch_cases(
         &mut self,
-        cond: FirId,
+        cond_local: u32,
         cond_ty: &FirType,
         cases: &[(i64, FirId)],
         default: Option<FirId>,
@@ -1689,14 +1724,14 @@ impl ComputeSubsetLowerer<'_> {
             }
             return Ok(());
         };
-        self.lower_expr(cond, function)?;
+        function.instruction(&Instruction::LocalGet(cond_local));
         emit_switch_case_const(*case_value, cond_ty, function)?;
         function.instruction(&switch_eq_instruction(cond_ty)?);
         function.instruction(&Instruction::If(BlockType::Empty));
         self.lower_stmt(*case_stmt, function)?;
         if !rest.is_empty() || default.is_some() {
             function.instruction(&Instruction::Else);
-            self.lower_switch_cases(cond, cond_ty, rest, default, function)?;
+            self.lower_switch_cases(cond_local, cond_ty, rest, default, function)?;
         }
         function.instruction(&Instruction::End);
         Ok(())
@@ -1747,14 +1782,13 @@ impl ComputeSubsetLowerer<'_> {
                 access: AccessType::Struct,
                 typ,
             } => {
-                let field = self.struct_field(&name)?;
-                function.instruction(&Instruction::LocalGet(0));
-                function.instruction(&Instruction::I32Const(field.offset as i32));
-                function.instruction(&Instruction::I32Add);
-                let storage_ty = wasm_val_type_for_field(field);
-                function.instruction(&load_instruction_for_valtype(storage_ty)?);
+                let field = self.struct_field(&name)?.clone();
+                let memarg_offset =
+                    self.emit_region_address(RegionBase::Dsp, field.offset, None, function)?;
+                let storage_ty = wasm_val_type_for_field(&field);
+                function.instruction(&load_instruction_at(storage_ty, memarg_offset)?);
                 self.emit_cast_if_needed(
-                    &field_fir_type(field, self.options),
+                    &field_fir_type(&field, self.options),
                     wasm_val_type_for_fir(&typ, self.options)?,
                     function,
                 )?;
@@ -1817,10 +1851,13 @@ impl ComputeSubsetLowerer<'_> {
                 let field = self.struct_field(&name)?.clone();
                 let field_fir = field_fir_type(&field, self.options);
                 let storage_ty = wasm_val_type_for_field(&field);
-                function.instruction(&Instruction::I32Const(field.offset as i32));
-                self.lower_index_offset(index, &field_fir, function)?;
-                function.instruction(&Instruction::I32Add);
-                function.instruction(&load_instruction_for_valtype(storage_ty)?);
+                let memarg_offset = self.emit_region_address(
+                    RegionBase::Absolute,
+                    field.offset,
+                    Some((index, &field_fir)),
+                    function,
+                )?;
+                function.instruction(&load_instruction_at(storage_ty, memarg_offset)?);
                 self.emit_cast_if_needed(
                     &field_fir,
                     wasm_val_type_for_fir(&typ, self.options)?,
@@ -1848,12 +1885,13 @@ impl ComputeSubsetLowerer<'_> {
                         elem_type,
                         storage_type,
                     } => {
-                        function.instruction(&Instruction::LocalGet(0));
-                        function.instruction(&Instruction::I32Const(*offset as i32));
-                        function.instruction(&Instruction::I32Add);
-                        self.lower_index_offset(index, elem_type, function)?;
-                        function.instruction(&Instruction::I32Add);
-                        function.instruction(&load_instruction_for_valtype(*storage_type)?);
+                        let memarg_offset = self.emit_region_address(
+                            RegionBase::Dsp,
+                            *offset,
+                            Some((index, elem_type)),
+                            function,
+                        )?;
+                        function.instruction(&load_instruction_at(*storage_type, memarg_offset)?);
                         self.emit_cast_if_needed(
                             elem_type,
                             wasm_val_type_for_fir(&typ, self.options)?,
@@ -1872,12 +1910,13 @@ impl ComputeSubsetLowerer<'_> {
                 let field = self.struct_field(&name)?.clone();
                 let field_fir = field_fir_type(&field, self.options);
                 let storage_ty = wasm_val_type_for_field(&field);
-                function.instruction(&Instruction::LocalGet(0));
-                function.instruction(&Instruction::I32Const(field.offset as i32));
-                function.instruction(&Instruction::I32Add);
-                self.lower_index_offset(index, &field_fir, function)?;
-                function.instruction(&Instruction::I32Add);
-                function.instruction(&load_instruction_for_valtype(storage_ty)?);
+                let memarg_offset = self.emit_region_address(
+                    RegionBase::Dsp,
+                    field.offset,
+                    Some((index, &field_fir)),
+                    function,
+                )?;
+                function.instruction(&load_instruction_at(storage_ty, memarg_offset)?);
                 self.emit_cast_if_needed(
                     &field_fir,
                     wasm_val_type_for_fir(&typ, self.options)?,
@@ -1994,7 +2033,7 @@ impl ComputeSubsetLowerer<'_> {
             FirMatch::BinOp { op, lhs, rhs, typ } => {
                 self.lower_expr(lhs, function)?;
                 self.lower_expr(rhs, function)?;
-                let op_typ = if is_comparison_binop(op) {
+                let op_typ = if op.is_comparison() {
                     // C++ parity: FIR comparison binops produce an integer/bool-like
                     // result, so the node result type describes the output on the
                     // WASM stack, not the operand lane used by the comparison opcode.
@@ -2080,6 +2119,68 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Pushes the address operand of one access into a memory region that
+    /// starts `offset` bytes past `base`, element `index` if any, and returns
+    /// the static offset the load or store must carry in its memarg.
+    ///
+    /// A constant address (a scalar field, or a constant index) goes whole
+    /// into the memarg `offset=`, so the operand is just `local.get 0` (or
+    /// `i32.const 0`). Emitting `dsp + K` as an explicit `i32.add` instead lets
+    /// V8's TurboFan value-number every distinct `dsp + K` into a long-lived
+    /// value it spills and reloads around the sample loop: 23 % to 45 % of the
+    /// cycles of the coopiano programs
+    /// (`porting/wasm-compute-speed-analysis-and-plan-2026-10-16-en.md`, W1).
+    /// The effective address is unchanged: `zext(dsp) + K` equals the wrapped
+    /// `dsp + K` for any DSP that fits in memory.
+    ///
+    /// A dynamic index keeps the wrapping i32 sum `dsp + (index * size + K)`
+    /// with a zero memarg offset. That is the value the former
+    /// `(dsp + K) + index * size` computed, so an index out of its table (only
+    /// possible with `-ct 0`) still reads the same bytes rather than trapping.
+    ///
+    /// Faust C++ (`WASMInstVisitor`, `NamedAddress`/`IndexedAddress`) emits an
+    /// absolute `i32.const K` when the memory is internal; faust-rs keeps the
+    /// `dsp` base in both memory modes, so a host passing a non-zero `dsp` is
+    /// served as before.
+    fn emit_region_address(
+        &mut self,
+        base: RegionBase,
+        offset: u32,
+        index: Option<(FirId, &FirType)>,
+        function: &mut Function,
+    ) -> Result<u32, WasmBackendError> {
+        let push_base = |function: &mut Function| {
+            function.instruction(&match base {
+                RegionBase::Dsp => Instruction::LocalGet(0),
+                RegionBase::Absolute => Instruction::I32Const(0),
+            });
+        };
+        let Some((index, elem_type)) = index else {
+            push_base(function);
+            return Ok(offset);
+        };
+        if let FirMatch::Int32 { value, .. } = match_fir(self.store, index) {
+            let size = i64::from(elem_size_bytes(elem_type, self.options)?);
+            let byte = i64::from(offset) + i64::from(value) * size;
+            if let Ok(byte) = u32::try_from(byte) {
+                push_base(function);
+                return Ok(byte);
+            }
+        }
+        if matches!(base, RegionBase::Dsp) {
+            function.instruction(&Instruction::LocalGet(0));
+        }
+        self.lower_index_offset(index, elem_type, function)?;
+        if offset != 0 {
+            function.instruction(&Instruction::I32Const(offset as i32));
+            function.instruction(&Instruction::I32Add);
+        }
+        if matches!(base, RegionBase::Dsp) {
+            function.instruction(&Instruction::I32Add);
+        }
+        Ok(0)
+    }
+
     /// Emits the zero/default literal for one local type.
     fn emit_default_value(
         &self,
@@ -2131,11 +2232,10 @@ impl ComputeSubsetLowerer<'_> {
         soundfile_field_offset: u32,
         function: &mut Function,
     ) -> Result<(), WasmBackendError> {
-        let field = self.struct_field(var)?;
-        function.instruction(&Instruction::LocalGet(0));
-        function.instruction(&Instruction::I32Const(field.offset as i32));
-        function.instruction(&Instruction::I32Add);
-        function.instruction(&Instruction::I32Load(memarg(0)));
+        let field_offset = self.struct_field(var)?.offset;
+        let memarg_offset =
+            self.emit_region_address(RegionBase::Dsp, field_offset, None, function)?;
+        function.instruction(&Instruction::I32Load(memarg(memarg_offset)));
         function.instruction(&Instruction::I32Const(soundfile_field_offset as i32));
         function.instruction(&Instruction::I32Add);
         function.instruction(&Instruction::I32Load(memarg(0)));
@@ -2408,22 +2508,30 @@ fn collect_wasm_imports(
     for body in bodies.iter().flatten() {
         collect_wasm_imports_in_node(store, *body, foreign_fun_imports, options, &mut imports)?;
     }
+    // Calls are bound to imports by field name. The hyperbolic functions
+    // import one name for both precisions (`_acosh` for `acoshf` and
+    // `acosh`), which is what the JS hosts provide, upstream's included; a
+    // module calling both would bind every call to whichever came last.
+    let mut signatures: HashMap<&str, &WasmImport> = HashMap::new();
+    for import in &imports {
+        if let Some(previous) = signatures.insert(&import.field_name, import)
+            && previous != import
+        {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!(
+                    "the WASM import `{}` is needed with two signatures ({:?} -> {:?} and {:?} -> {:?}); \
+                     a module cannot call it at both precisions",
+                    import.field_name,
+                    previous.params,
+                    previous.results,
+                    import.params,
+                    import.results
+                ),
+            ));
+        }
+    }
     Ok(imports.into_iter().collect())
-}
-
-/// Finds the FIR body id for one named function declaration inside a module.
-fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) -> Option<FirId> {
-    function_items
-        .iter()
-        .copied()
-        .find_map(|id| match match_fir(store, id) {
-            FirMatch::DeclareFun {
-                name: ref fun_name,
-                body: Some(body),
-                ..
-            } if fun_name == name => Some(body),
-            _ => None,
-        })
 }
 
 /// Serializes FIR static tables into WASM data segments.
@@ -2474,36 +2582,19 @@ fn append_static_scalar_bytes(
     options: &WasmOptions,
     out: &mut Vec<u8>,
 ) -> Result<(), WasmBackendError> {
-    match (elem_type, match_fir(store, value)) {
-        (FirType::Bool, FirMatch::Bool { value, .. }) => {
-            out.extend_from_slice(&u32::from(value).to_le_bytes());
-        }
-        (FirType::Int32, FirMatch::Int32 { value, .. }) => {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        (FirType::Float32 | FirType::FaustFloat, FirMatch::Float32 { value, .. }) => {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        (FirType::Float64, FirMatch::Float64 { value, .. }) => {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        (FirType::FaustFloat, FirMatch::Float64 { value, .. }) if !options.double_precision => {
-            out.extend_from_slice(&(value as f32).to_le_bytes());
-        }
-        (FirType::FaustFloat, FirMatch::Float64 { value, .. }) if options.double_precision => {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        _ => {
-            return Err(WasmBackendError::new(
-                WasmBackendErrorCode::UnsupportedModuleShape,
-                format!(
-                    "unsupported static table initializer for WASM data segment: elem_type={elem_type:?}, value={:?}",
-                    match_fir(store, value)
-                ),
-            ));
-        }
-    }
-    Ok(())
+    crate::backends::table_bytes::append_element(
+        store,
+        value,
+        elem_type,
+        options.double_precision,
+        out,
+    )
+    .map_err(|m| {
+        WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedModuleShape,
+            format!("unsupported static table initializer for WASM data segment: {m}"),
+        )
+    })
 }
 
 /// Recursive helper used by [`collect_wasm_imports`] to discover imported
@@ -2529,53 +2620,13 @@ fn collect_wasm_imports_in_node(
             out.insert(import.clone());
         }
     }
-    for child in fir_children(store, id) {
+    // Every child, through the shared walker: a hand-rolled list here missed
+    // `WhileLoop`, `Switch`, `TeeVar`, `Bitcast` and the soundfile loads, so a
+    // call found only under one of them was never imported.
+    for child in fir::fir_match_children(store, id) {
         collect_wasm_imports_in_node(store, child, foreign_fun_imports, options, out)?;
     }
     Ok(())
-}
-
-/// Returns the direct child nodes visited by backend-local FIR traversals.
-fn fir_children(store: &FirStore, id: FirId) -> Vec<FirId> {
-    match match_fir(store, id) {
-        FirMatch::Block(items) => items,
-        FirMatch::DeclareVar { init, .. } => init.into_iter().collect(),
-        FirMatch::StoreVar { value, .. } => vec![value],
-        FirMatch::StoreTable { index, value, .. } => vec![index, value],
-        FirMatch::LoadTable { index, .. } => vec![index],
-        FirMatch::SimpleForLoop { upper, body, .. } => vec![upper, body],
-        FirMatch::ForLoop {
-            init,
-            end,
-            step,
-            body,
-            ..
-        } => vec![init, end, step, body],
-        FirMatch::BinOp { lhs, rhs, .. } => vec![lhs, rhs],
-        FirMatch::Cast { value, .. } => vec![value],
-        FirMatch::Neg { value, .. } => vec![value],
-        FirMatch::Select2 {
-            cond,
-            then_value,
-            else_value,
-            ..
-        } => vec![cond, then_value, else_value],
-        FirMatch::FunCall { args, .. } => args,
-        FirMatch::Return(Some(value)) => vec![value],
-        FirMatch::Drop(value) => vec![value],
-        FirMatch::Control { cond, stmt } => vec![cond, stmt],
-        FirMatch::If {
-            cond,
-            then_block,
-            else_block,
-        } => else_block
-            .into_iter()
-            .fold(vec![cond, then_block], |mut acc, item| {
-                acc.push(item);
-                acc
-            }),
-        _ => Vec::new(),
-    }
 }
 
 /// Returns `true` when an intrinsic can map directly to a native WASM opcode.
@@ -2994,11 +3045,20 @@ fn store_instruction_for_type(
 
 /// Returns the scalar load instruction for one WASM value type.
 fn load_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, WasmBackendError> {
+    load_instruction_at(typ, 0)
+}
+
+/// Returns the scalar load instruction for one WASM value type, with a static
+/// memarg `offset`.
+fn load_instruction_at(
+    typ: ValType,
+    offset: u32,
+) -> Result<Instruction<'static>, WasmBackendError> {
     match typ {
-        ValType::I32 => Ok(Instruction::I32Load(memarg(0))),
-        ValType::I64 => Ok(Instruction::I64Load(memarg(0))),
-        ValType::F32 => Ok(Instruction::F32Load(memarg(0))),
-        ValType::F64 => Ok(Instruction::F64Load(memarg(0))),
+        ValType::I32 => Ok(Instruction::I32Load(memarg(offset))),
+        ValType::I64 => Ok(Instruction::I64Load(memarg(offset))),
+        ValType::F32 => Ok(Instruction::F32Load(memarg(offset))),
+        ValType::F64 => Ok(Instruction::F64Load(memarg(offset))),
         other => Err(WasmBackendError::new(
             WasmBackendErrorCode::UnsupportedFirNode,
             format!("unsupported load type in WASM subset: {other:?}"),
@@ -3008,11 +3068,20 @@ fn load_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, Wa
 
 /// Returns the scalar store instruction for one WASM value type.
 fn store_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, WasmBackendError> {
+    store_instruction_at(typ, 0)
+}
+
+/// Returns the scalar store instruction for one WASM value type, with a static
+/// memarg `offset`.
+fn store_instruction_at(
+    typ: ValType,
+    offset: u32,
+) -> Result<Instruction<'static>, WasmBackendError> {
     match typ {
-        ValType::I32 => Ok(Instruction::I32Store(memarg(0))),
-        ValType::I64 => Ok(Instruction::I64Store(memarg(0))),
-        ValType::F32 => Ok(Instruction::F32Store(memarg(0))),
-        ValType::F64 => Ok(Instruction::F64Store(memarg(0))),
+        ValType::I32 => Ok(Instruction::I32Store(memarg(offset))),
+        ValType::I64 => Ok(Instruction::I64Store(memarg(offset))),
+        ValType::F32 => Ok(Instruction::F32Store(memarg(offset))),
+        ValType::F64 => Ok(Instruction::F64Store(memarg(offset))),
         other => Err(WasmBackendError::new(
             WasmBackendErrorCode::UnsupportedFirNode,
             format!("unsupported store type in WASM subset: {other:?}"),
@@ -3097,19 +3166,6 @@ fn binop_instruction(
             format!("unsupported WASM binop in compute subset: {op:?} / {val_ty:?}"),
         )),
     }
-}
-
-/// Returns `true` when the FIR binop is a comparison producing a condition.
-fn is_comparison_binop(op: fir::FirBinOp) -> bool {
-    matches!(
-        op,
-        fir::FirBinOp::Eq
-            | fir::FirBinOp::Ne
-            | fir::FirBinOp::Lt
-            | fir::FirBinOp::Le
-            | fir::FirBinOp::Gt
-            | fir::FirBinOp::Ge
-    )
 }
 
 /// Returns the equality opcode used by switch-case comparisons.

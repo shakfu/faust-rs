@@ -175,7 +175,7 @@ same closed-form derivatives as FAD:
 |-----------|---------|
 | `sin(x)` | `cos(x)` |
 | `cos(x)` | `-sin(x)` |
-| `tan(x)` | `1 / cos²(x)` |
+| `tan(x)` | `1 + tan²(x)` (built on the primal `tan(x)`; no `cos`) |
 | `exp(x)` | `exp(x)` |
 | `log(x)` | `1 / x` |
 | `log10(x)` | `1 / (x · ln 10)` |
@@ -271,9 +271,11 @@ function inside a temporal body is rejected with `FRS-SFIR-0004`.
 
 `Attach`, `Enable`, `Control`, and `Output` are transparent to
 differentiation: the adjoint is forwarded to the signal-carrying
-operand only. Bargraphs (`vbargraph` / `hbargraph`) are metering
-sinks — they are walked so seed-reachability is correctly classified
-but propagate no adjoint.
+operand only. Bargraphs (`vbargraph` / `hbargraph`) are the identity
+on their signal, the meter being a side effect: the adjoint passes
+through to the metered signal, in the symbolic sweep and in
+`BlockReverseAD`, as the tangent does under `fad` (until 2026-10-18 they
+propagated no adjoint, and `BlockReverseAD` rejected them).
 
 `Clocked(env, x)` is passed through like `Attach`: inside an `ondemand`
 body it wraps the boundary values, and the adjoint flows to the payload.

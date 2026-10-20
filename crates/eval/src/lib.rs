@@ -8,12 +8,12 @@
 //! |---|---|
 //! | `Environment` | `compiler/evaluate/environment.hh/.cpp` |
 //! | `LoopDetector` | `compiler/evaluate/loopDetector.hh` |
-//! | `EvalStats` | `gGlobal->gStats` fields (`fEnvLayersPushed`, `fEnvLookups`, …) |
-//! | `eval_process` | `compiler/evaluate/eval.cpp` — `eval()` entry point |
+//! | `EvalStats` | the side results C++ keeps in `gGlobal` (warnings, `setDefNameProperty` names) |
+//! | `eval_process` | `compiler/evaluate/eval.cpp` — `evalprocess()` entry point |
 //! | `eval_box` | `compiler/evaluate/eval.cpp` — `eval()` recursive dispatch |
 //! | `bind_definitions` | `pushMultiClosureDefs()` in `environment.cpp` |
 //! | `apply_list` | `applyList()` in `eval.cpp` |
-//! | `apply_case_rules` | `evalCase()` in `eval.cpp` |
+//! | `eval_case_value` | `evalCase()` in `eval.cpp` |
 //!
 //! # Environment architecture — C++ vs Rust
 //!
@@ -38,9 +38,10 @@
 //!       nil
 //! ```
 //!
-//! When the evaluator encounters a closure during `evalClosure()`, it evaluates `expr` in the
-//! **captured environment** `lenv`, not the current one. This is the classical demand-driven
-//! denotational semantics with explicit environment threading.
+//! When the evaluator meets a `closure(...)` node (`isClosure` in `realeval`, `real_a2sb` and
+//! `applyList`), it evaluates `expr` in the **captured environment** `lenv`, not the current one.
+//! This is the classical demand-driven denotational semantics with explicit environment
+//! threading.
 //!
 //! Special features:
 //! - **`BARRIER` nodes** (`pushEnvBarrier`) stop pattern-matcher scope search at a sentinel,
@@ -105,33 +106,28 @@
 //! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | `push_barrier_scope()` + `lookup_until_barrier()` | Same semantics |
 //! | `copyEnvReplaceDefs` | Present (env rewiring) | Present | `copy_env_replace_defs(...)` + `rewrite_captured_env(...)` |
 //! | Redefinition check | `addLayerDef` throws on conflict | `bind_definitions` returns `EvalError::RedefinedSymbol` | Same semantics, typed error |
-//! | Profiling | `gGlobal->gStats` (global mutable) | `EvalStats` (returned value) | Safer, composable |
+//! | Side results | `gGlobal` (global mutable) | `EvalStats` (returned value) | Safer, composable |
 //!
 //! # Performance comparison — C++ vs Rust
 //!
 //! | Operation | C++ implementation | C++ cost | Rust implementation | Rust cost |
 //! |---|---|---|---|---|
 //! | **Scope push** | `tree(unique("ENV_LAYER"), lenv)` — alloc in hash-cons pool | O(1) amortized + hash | arena layer allocation + `EnvId` handle clone | O(1) |
-//! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((sym, value))` | O(1) amortized |
-//! | **Lookup (found at depth d)** | Walk d layers, `getProperty` hash probe per layer | O(d) hash probes | Reverse `u32` scan per layer O(n_local), recurse O(d) | O(d × n_local) — O(1) per compare |
+//! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((sym, value))` + per-layer `binding_index` insert | O(1) amortized |
+//! | **Lookup (found at depth d)** | Walk d layers, `getProperty` hash probe per layer | O(d) hash probes | Per-layer `binding_index` hash probe, recurse to the parent | O(d) hash probes |
 //! | **Value size per binding** | `Tree*` pointer to closure node (~64 bytes closure) | Large | `SymId + EvalValue` in one arena layer | Moderate, but explicit and cache-friendly |
 //! | **Cache locality** | Pointer-chased linked list through hash-cons pool | Poor (pointer indirection) | Contiguous `Vec<(SymId, EvalValue)>` per layer | Good |
-//! | **Concurrency** | Global `gGlobal` state, not thread-safe | N/A | Fully `Send`/`Sync`, no global state | Thread-safe |
+//! | **Concurrency** | Global `gGlobal` state, not thread-safe | N/A | No global state; evaluator values use `Rc`/`RefCell` and are not `Send` | One evaluation per thread |
 //!
-//! **In practice**: for typical Faust programs (< 200 top-level definitions, scope depth ≤ 5,
-//! ≤ 30 bindings per scope), the Rust reverse scan over one compact per-layer vector is expected
-//! to be competitive with, and often faster than, the C++ hash-probe walk because the working set
-//! stays tiny and contiguous. The important point is not the asymptotic notation alone, but that
-//! the common Rust case pays a handful of integer comparisons inside one hot cache line instead of
-//! multiple pointer-chased table probes.
+//! **In practice**: both sides walk the scope chain with one hash probe per layer. The Rust
+//! layers are dense arena entries keyed by integer `SymId`s, so a probe hashes one `u32` instead
+//! of chasing tree-node property tables.
 //!
 //! This remains a workload claim, not a semantic guarantee. It is representative for the current
 //! evaluator design and local release micro-benchmarks, but it is not enforced by a CI benchmark
 //! gate and should be re-validated if environment representation changes materially.
 //!
-//! The current Rust representation already uses stable `EnvId` layer identities in a shared
-//! environment arena. This matches the next closure-porting requirement while keeping the public
-//! evaluator API unchanged.
+//! The Rust representation uses stable `EnvId` layer identities in a shared environment arena.
 //!
 //! # Scope of this crate
 //! - Name resolution against definition environments with redefinition detection.
@@ -155,6 +151,7 @@
 //! (`propagate`, typing, signal transforms). It does not emit signals directly.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -181,7 +178,7 @@ pub(crate) mod source_context;
 pub mod suggestions;
 mod ui_widgets;
 
-use environment::{ClosureValue, EvalCacheKey, EvalValue, PatternMatcherValue};
+use environment::{ApplyMemoKey, ClosureValue, EvalCacheKey, EvalValue, PatternMatcherValue};
 use source_context::CachedLoadedSource;
 
 use apply::*;
@@ -212,10 +209,8 @@ pub const CRATE_NAME: &str = "eval";
 /// use [`TreeArena::get_symbol`] (which takes `&self`) to retrieve the id in O(1), then compare
 /// it as a plain integer. This achieves:
 ///
-/// - **O(1)** symbol comparison (was O(len) with `Box<str>`)
-/// - **8 bytes** per binding in `Vec<(SymId, TreeId)>` (was ~24 bytes with `Box<str>` + padding)
-/// - **SIMD-friendly** scan: the `Vec<(u32, u32)>` layout lets the CPU compare 4 bindings per
-///   16-byte vector register in a typical environment of < 32 bindings.
+/// - **O(1)** symbol comparison and hashing (was O(len) with `Box<str>`)
+/// - a 4-byte key per binding in each layer's `Vec<(SymId, EvalValue)>` and `binding_index`.
 ///
 /// **C++ parallel**: C++ uses hash-consed `Tree` pointers as symbol keys, achieving O(1)
 /// comparison by pointer equality. This `u32` id pool achieves the same O(1) cost without
@@ -230,16 +225,15 @@ pub const CRATE_NAME: &str = "eval";
 /// | Operation | Method | Borrow | Use case |
 /// |---|---|---|---|
 /// | Bind (new name) | [`intern_symbol(&mut self)`](TreeArena::intern_symbol) | `&mut` | `bind_definitions`, `apply_list`, Abstr |
-/// | Lookup (known name) | [`get_symbol(&self)`](TreeArena::get_symbol) | `&` | `eval_box` Ident, `match_pattern` |
+/// | Lookup (known name) | [`get_symbol(&self)`](TreeArena::get_symbol) | `&` | `eval_box` Ident |
 /// | Name resolution | [`symbol_name(&self)`](TreeArena::symbol_name) | `&` | Diagnostics only |
 pub type SymId = u32;
 
 /// Stable identifier of one evaluator environment layer.
 ///
 /// The C++ evaluator uses the `Tree` pointer identity of each `ENV_LAYER` node as the semantic
-/// environment identity. The Rust port uses a dense arena index instead. This is the first step
-/// toward the full captured-closure port because recursion tracking and closure forcing need a
-/// stable `(symbol, environment)` key, not just a raw expression id.
+/// environment identity. The Rust port uses a dense arena index instead: recursion tracking and
+/// closure forcing key on `(symbol, environment)`, not just on a raw expression id.
 pub type EnvId = usize;
 
 /// Evaluates one Faust program root list and returns the resolved `process` expression.
@@ -263,18 +257,20 @@ pub type EnvId = usize;
 ///
 /// # C++ correspondence
 ///
-/// Corresponds to the `eval()` entry point in `compiler/evaluate/eval.cpp`:
+/// Corresponds to the `evalprocess()` entry point in `compiler/evaluate/eval.cpp`:
 /// ```cpp
 /// // eval.cpp (simplified)
-/// Tree eval(Tree ldef, int& numInputs, int& numOutputs) {
-///     gGlobal->gCurrentEnv = pushMultiClosureDefs(ldef, gGlobal->nil, gGlobal->nil);
-///     initRecursion();
-///     return eval(closure(boxIdent("process"), …, gGlobal->gCurrentEnv), 0, 0);
+/// Tree evalprocess(Tree eqlist) {
+///     gGlobal->gStackOverflowDetector = stackOverflowDetector(MAX_STACK_SIZE);
+///     Tree b = a2sb(eval(boxIdent(gGlobal->gProcessName.c_str()), gGlobal->nil,
+///                        pushMultiClosureDefs(eqlist, gGlobal->nil, gGlobal->nil)));
+///     if (gGlobal->gSimplifyDiagrams) b = boxSimplification(b);
+///     return b;
 /// }
 /// ```
 ///
 /// Key differences from C++:
-/// - No global mutable state (`gCurrentEnv`, `gGlobal`) — all state is local.
+/// - No global mutable state (`gGlobal`) — all state is local.
 /// - Returns `Result<TreeId, EvalError>` instead of throwing `faustexception`.
 /// - Redefinition errors are caught via `bind_definitions` instead of propagating globally.
 ///
@@ -373,7 +369,7 @@ pub fn eval(
     )
 }
 
-/// Shared implementation behind every `eval_entrypoint_*` entry point.
+/// Implementation of [`eval`].
 ///
 /// Binds the top-level definitions into a fresh root environment, checks that
 /// `entrypoint` (typically `"process"`) is actually defined, evaluates it, then
@@ -391,7 +387,6 @@ fn eval_entrypoint_full(
     let mut env = Environment::empty_with_source_context(source_context);
     let mut stats = EvalStats::default();
     bind_definitions(arena, definitions, &mut env)?;
-    stats.env_layers_pushed += 1; // root scope
     let available_defs = top_level_definition_names(arena, definitions)?;
     // Use get_symbol (no alloc, &self) — if the requested entry-point name was
     // never interned it was never bound.
@@ -403,7 +398,6 @@ fn eval_entrypoint_full(
             definitions,
             available_defs,
         })?;
-    stats.env_lookups += 1;
     let mut loop_detector = match cancel {
         Some(flag) => LoopDetector::with_cancel(flag),
         None => LoopDetector::new(),
@@ -411,7 +405,7 @@ fn eval_entrypoint_full(
     let entry = BoxBuilder::new(arena).ident(entrypoint);
     let result = eval_value(arena, entry, &env, &mut loop_detector)?;
     let result = a2sb_value(arena, result, &mut loop_detector)?;
-    stats.loop_detector_max_depth = loop_detector.call_stack.len();
+    loop_detector.report_apply_memo();
     // Remap def_names keys through a2sb's symbolic_box_cache: pre-a2sb IDs that were
     // rebuilt by a2sb (because their subtree contained residual Abstr nodes) get new IDs.
     // Without this remap, the tagged boxes are unreachable from process_box in the SVG.
@@ -423,6 +417,11 @@ fn eval_entrypoint_full(
             let new_id = cache.get(&old_id).copied().unwrap_or(old_id);
             (new_id, name)
         })
+        .collect();
+    let cache = &loop_detector.symbolic_box_cache;
+    stats.composition_origins = std::mem::take(&mut loop_detector.composition_origins)
+        .into_iter()
+        .map(|(built, source)| (cache.get(&built).copied().unwrap_or(built), source))
         .collect();
     stats.warnings = std::mem::take(&mut loop_detector.warnings);
     stats.def_names = loop_detector.def_names;
@@ -643,7 +642,7 @@ fn lower_abstraction_to_symbolic_value(
 /// box exposes the expected arity.
 fn lower_pattern_matcher_to_symbolic(
     arena: &mut TreeArena,
-    mut pm: PatternMatcherValue,
+    mut pm: Box<PatternMatcherValue>,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
     if pm.automaton.final_state(pm.state) {
@@ -754,7 +753,7 @@ fn eval_value(
         loop_detector.evaluated_boxes.insert(*result_id);
     }
     if should_cache_eval_value(&result) {
-        loop_detector.eval_cache.insert(cache_key, result.clone());
+        loop_detector.eval_cache_insert(cache_key, env, result.clone());
     }
     // When a box containing embedded closures is re-evaluated in a different
     // environment, the new closure keys produce a structurally different TreeId.
@@ -770,9 +769,12 @@ fn eval_value(
 
 /// Decides whether an evaluation result may be memoized in the eval cache.
 ///
-/// Boxes and closures are cacheable; pattern matchers are not, because their
-/// automaton state is mutated in place during application and a cached copy
-/// would be replayed from a stale position.
+/// Boxes and closures are cacheable; pattern matchers are not. Until
+/// 2026-10-16 application wrote pattern-variable bindings into the matcher's
+/// rule environments in place, so a cached copy would have been replayed with
+/// stale bindings. Matchers are persistent now and could be cached (C++ keeps
+/// one per rule list and environment, `getPMProperty`); that is not done, no
+/// measurement having asked for it (`porting/MEMOIZATION.md` §2.4b).
 #[inline]
 fn should_cache_eval_value(value: &EvalValue) -> bool {
     match value {
@@ -789,10 +791,9 @@ fn should_cache_eval_value(value: &EvalValue) -> bool {
 ///
 /// Mapping status: `adapted`.
 /// Rust keeps the memoization layer in [`LoopDetector::eval_cache`] instead of
-/// tree properties. Host-side pattern matchers keep mutable environment state
-/// in `pm.envs`, so only box/closure results are memoized for now; this
-/// function corresponds to the uncached evaluation body that C++ exposes as
-/// `realeval(...)`.
+/// tree properties. Only box/closure results are memoized for now (see
+/// [`should_cache_eval_value`]); this function corresponds to the uncached
+/// evaluation body that C++ exposes as `realeval(...)`.
 fn eval_value_uncached(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -925,11 +926,9 @@ fn eval_value_uncached(
             eval_value(arena, body, env, loop_detector)
         }
         BoxMatch::ForwardAD(exp, seed) => {
-            // Source provenance (C++):
-            // - `/Users/letz/faust/compiler/evaluate/eval.cpp`
-            // - `isBoxForwardAD(exp, seed) -> boxForwardAD(eval(exp, ...), eval(seed, ...))`
-            //
-            // Mapping status: `1:1`.
+            // faust-rs extension: the pinned C++ reference has no `fad` box.
+            // Evaluated like the two-child box constructors of
+            // `compiler/evaluate/eval.cpp`.
             // Both children must be evaluated under the current lexical environment,
             // then rewrapped so the AD primitive remains explicit at the post-eval
             // propagation boundary.
@@ -1221,6 +1220,8 @@ fn eval_ident_value(
             }
             out
         }
+        // a copy of a bound matcher; matchers are persistent, so a copy of
+        // a fresh one is still fresh
         EvalValue::PatternMatcher(pm) => Ok(EvalValue::PatternMatcher(pm)),
     }
 }
@@ -1295,7 +1296,9 @@ fn eval_seq_value(
     }
 
     let mut bld = BoxBuilder::new(arena);
-    Ok(EvalValue::Box(bld.seq(a1, a2)))
+    let built = bld.seq(a1, a2);
+    loop_detector.record_composition_origin(built, seq);
+    Ok(EvalValue::Box(built))
 }
 
 /// Reifies one evaluator value back into box IR.
@@ -1346,8 +1349,12 @@ fn force_value_to_box(
             // Returning the original `case` tree for an unapplied matcher loses
             // the captured lexical environment, which breaks higher-order uses
             // like passing a local `case` function through another function
-            // before eventually applying it.
-            let key = loop_detector.store_pm(pm);
+            // before eventually applying it. Every use of the handle gets a
+            // copy, still fresh if this one is: a `case` passed to itself
+            // through a recursion, `fibk(k, n) = k(k, n-1) + k(k, n-2)`, hits
+            // the apply memo as C++ `gApplyMemo` does on the hash-consed
+            // `boxPatternMatcher`.
+            let key = loop_detector.store_pm(*pm);
             let mut b = BoxBuilder::new(arena);
             let key_node = b.int(key);
             Ok(b.pattern_matcher(key_node))
@@ -1569,28 +1576,30 @@ fn eval_case_value(
     loop_detector: &mut LoopDetector,
 ) -> Result<EvalValue, EvalError> {
     let evaluated_rules = eval_rule_list(arena, rules_rev, env, loop_detector)?;
-    if !loop_detector.automaton_cache.contains_key(&evaluated_rules) {
-        let automaton = pattern_matcher::make_pattern_matcher(arena, evaluated_rules);
+    let automaton = Rc::clone(
         loop_detector
             .automaton_cache
-            .insert(evaluated_rules, automaton);
-    }
-    let automaton = loop_detector
-        .automaton_cache
-        .get(&evaluated_rules)
-        .expect("automaton cache populated")
-        .clone();
-    let envs = (0..automaton.n_rules())
-        .map(|_| Some(env.push_barrier_scope()))
-        .collect();
-    Ok(EvalValue::PatternMatcher(PatternMatcherValue {
+            .entry(evaluated_rules)
+            .or_insert_with(|| {
+                Rc::new(pattern_matcher::make_pattern_matcher(
+                    arena,
+                    evaluated_rules,
+                ))
+            }),
+    );
+    // One barrier for every rule, as C++ `listn(len(rules), pushEnvBarrier(env))`:
+    // pattern variables are bound in layers pushed above it, never in it.
+    let barrier = env.push_barrier_scope();
+    let envs = vec![Some(barrier); automaton.n_rules()];
+    Ok(EvalValue::PatternMatcher(Box::new(PatternMatcherValue {
         automaton,
         state: 0,
         envs,
         original_rules: rules_rev,
         rev_param_list: Vec::new(),
         case_expr,
-    }))
+        fresh_env: Some(env.clone()),
+    })))
 }
 
 /// Extracts the textual file reference from `component(...)` / `library(...)`.

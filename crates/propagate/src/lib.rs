@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Box-to-signal propagation (Phase 4, section 2.4).
+//! Box-to-signal propagation (Phase 4, stage 4.3 of the porting plan).
 //!
 //! # Source provenance (C++)
 //! - `compiler/propagate/propagate.hh`
@@ -53,8 +53,8 @@
 //! ```text
 //! outputs = body_outputs × (1 + seed_outputs)
 //! ```
-//! This matches the C++ `getBoxType` logic (`compiler/boxes/boxtype.cpp:371`)
-//! for the single-seed case.
+//! `fad` is a faust-rs extension: the pinned C++ `getBoxType`
+//! (`compiler/boxes/boxtype.cpp`) has no rule for it.
 //!
 //! Under the explicit-seed model, `[autodiff:false]` metadata is parsed but
 //! does not gate differentiation; the seed list alone decides which signals
@@ -73,9 +73,9 @@
 //!   `signal_prepare`, where it runs once over all process outputs so
 //!   shared sub-terms keep a single symbolic name across primal and tangent
 //!   lanes.
-//! - One internal `ForwardADTransform` instance per seed; a memoization
-//!   cache prevents exponential blow-up on reused DAG subgraphs and breaks
-//!   recursion cycles.
+//! - One internal `ForwardADTransform` for the whole seed set (one tangent
+//!   lane per seed); a memoization cache prevents exponential blow-up on
+//!   reused DAG subgraphs and breaks recursion cycles.
 //! - Seed recognition is `SigId` equality: the transform short-circuits at
 //!   any node whose `SigId` matches the seed and never descends into the
 //!   seed's own recursive body.

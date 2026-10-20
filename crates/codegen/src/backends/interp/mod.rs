@@ -4,17 +4,13 @@
 //! # Source provenance (C++)
 //! - `compiler/generator/interpreter/` — full C++ interpreter subsystem.
 //!
-//! # Intended role
+//! # Role
 //! - Define the Faust Byte Code (FBC) instruction set, instruction/block types,
 //!   and the `FbcReal` trait for generic f32/f64 dispatch.
 //! - Host the FIR → FBC compiler, bytecode optimizer, execution engine,
 //!   DSP factory/instance, and `.fbc` serialization.
-//!
-//! # Current status
-//! **Step 5 complete**: Factory, serialization, DSP interface — the final
-//! integration step. Complete pipeline: FIR → compile → optimize → serialize
-//! → deserialize → instantiate → compute.
-//! Built on Steps 1–4 (types, executor, compiler, optimizer).
+//! - Pipeline: FIR → compile → optimize → serialize → deserialize →
+//!   instantiate → compute.
 //!
 //! # Module layout
 //! - [`opcode`]: `FbcOpcode` enum, `FBC_INSTRUCTION_NAMES`, `INTERP_FILE_VERSION`.
@@ -28,6 +24,8 @@
 //! - [`instance`]: `FbcDspInstance` — runtime DSP state with `compute()` loop.
 //! - [`serial`]: `write_fbc` / `read_fbc` — `.fbc` text format serialization.
 //! - [`fbc_to_cpp`]: `generate_cpp_from_fbc` — AOT FBC → native C++ code generator.
+//! - [`foreign`]: host-function registry for `ffunction` calls.
+//! - [`soundfile`]: `Soundfile` — runtime soundfile data.
 
 pub mod bytecode;
 pub mod compiler;
@@ -89,6 +87,11 @@ pub struct InterpOptions {
     /// `None` falls back to a minimal `-lang interp` line, for callers
     /// (mostly tests) that do not thread the real CLI flags through.
     pub compile_options: Option<String>,
+    /// Emit `compute` in FIR order, without the W3/W2/W7 scheduling of
+    /// `fir::schedule` (forwarding stores, sinking reads, reusing locals).
+    /// `false` by default: this is for differential tests, which compare both
+    /// orders.
+    pub keep_fir_order: bool,
 }
 
 // ─── Error types ────────────────────────────────────────────────────────────
@@ -207,23 +210,16 @@ fn generate_interp_module_step<R: real::FbcReal>(
     // file-scope `static`, interpreter static storage is already per instance —
     // `class_init_instance` runs `static_init_block` on the instance's own
     // executor — so leaving it there gives per-instance tables for free.
-    let flattened = if fir::subcontainer::has_sub_modules(store, module) {
-        let (owned, root) = fir::subcontainer::flatten_sub_modules_owned(
-            store,
-            module,
-            fir::subcontainer::SubModuleStatePolicy::MergedStructFields,
-        )
-        .map_err(|err| {
-            CodegenError::new(
-                CodegenErrorCode::CompilationFailed,
-                format!("flattening generated tables failed: {err}"),
-            )
-        })?;
-        Some((owned, root))
-    } else {
-        None
-    };
-    let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+    // W3/W2/W7: `compute` scheduled for a JIT that keeps loads in program order
+    // (`fir::schedule`; the text backends keep FIR order).
+    let prepared = crate::backends::module_view::prepare_flat_module(
+        store,
+        module,
+        fir::subcontainer::SubModuleStatePolicy::MergedStructFields,
+        !options.keep_fir_order,
+    )
+    .map_err(|message| CodegenError::new(CodegenErrorCode::CompilationFailed, message))?;
+    let (store, module) = prepared.as_ref().map_or((store, module), |(s, m)| (s, *m));
 
     // 1. Decode module root.
     let (
@@ -234,7 +230,6 @@ fn generate_interp_module_step<R: real::FbcReal>(
         globals,
         functions,
         static_decls,
-        sub_modules,
     ) = match match_fir(store, module) {
         fir::FirMatch::Module {
             num_inputs,
@@ -244,7 +239,7 @@ fn generate_interp_module_step<R: real::FbcReal>(
             globals,
             functions,
             static_decls,
-            sub_modules,
+            ..
         } => (
             num_inputs,
             num_outputs,
@@ -253,7 +248,6 @@ fn generate_interp_module_step<R: real::FbcReal>(
             globals,
             functions,
             static_decls,
-            sub_modules,
         ),
         _ => {
             return Err(CodegenError::new(
@@ -262,20 +256,6 @@ fn generate_interp_module_step<R: real::FbcReal>(
             ));
         }
     };
-
-    // Step 0 flattened them away; anything left is a flattening bug, not an
-    // unsupported feature, and must not reach the factory — a table declared
-    // and never filled reads as zeros.
-    let sub_module_names = crate::backends::sub_module_names(store, sub_modules);
-    if !sub_module_names.is_empty() {
-        return Err(CodegenError::new(
-            CodegenErrorCode::CompilationFailed,
-            format!(
-                "sub-modules survived flattening ({}); this is an internal error",
-                sub_module_names.join(", ")
-            ),
-        ));
-    }
 
     let module_name = options.module_name.clone().unwrap_or(module_name_fir);
 
@@ -546,6 +526,8 @@ fn detect_compute_control_dsp_split(
     }
 }
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
 

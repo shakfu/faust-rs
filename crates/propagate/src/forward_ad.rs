@@ -2,7 +2,7 @@
 //!
 //! # Source provenance (C++)
 //! - `compiler/propagate/propagate.cpp`
-//! - `compiler/transform/sigtyperules.hh`
+//! - `compiler/signals/sigtyperules.hh`
 //! - `compiler/signals/signals.cpp`
 //!
 //! # Scope
@@ -101,9 +101,10 @@
 //!   they are selected as explicit seeds; otherwise they are treated as
 //!   independent of the active differentiation variables;
 //! - `button` / `checkbox` are discrete state/control sources, so the current
-//!   FAD pass models them as piecewise-constant and returns zero tangents;
-//! - `vbargraph` / `hbargraph` are metering sinks, not differentiated signal
-//!   paths.
+//!   FAD pass models them as piecewise-constant and returns zero tangents.
+//!
+//! Bargraphs are not controls in this sense: they are identities on their
+//! signal and pass the tangent through (see below).
 //!
 //! ## Arithmetic binary operators (`BinOp`)
 //!
@@ -122,12 +123,12 @@
 //! |----------|--------------------|-----------------|
 //! | `sin(x)` | `cos(x)` | `cos(x) * x'` |
 //! | `cos(x)` | `−sin(x)` | `(0 - sin(x)) * x'` |
-//! | `tan(x)` | `1 / cos²(x)` | `(1 / cos(x)²) * x'` |
+//! | `tan(x)` | `1 + tan²(x)` | `(1 + tan(x)²) * x'` — reuses the primal `tan(x)` node |
 //! | `exp(x)` | `exp(x)` | `exp(x) * x'` |
 //! | `log(x)` | `1 / x` | `(1 / x) * x'` |
 //! | `log10(x)` | `1 / (x · ln 10)` | `(1 / (x * log(10))) * x'` |
 //! | `sqrt(x)` | `1 / (2 · √x)` | `(1 / (2 * sqrt(x))) * x'` |
-//! | `abs(x)` | `x / |x|` (sign) | `(x / abs(x)) * x'` |
+//! | `abs(x)` | `x / abs(x)` (sign) | `(x / abs(x)) * x'` |
 //! | `acos(x)` | `−1 / √(1 − x²)` | `(-1 / sqrt(1 - x²)) * x'` |
 //! | `asin(x)` | `1 / √(1 − x²)` | `(1 / sqrt(1 - x²)) * x'` |
 //! | `atan(x)` | `1 / (1 + x²)` | `(1 / (1 + x²)) * x'` |
@@ -416,6 +417,7 @@
 //! the emitted code.
 
 use ahash::{AHashMap, AHashSet};
+use signals::ad_rules::{DerivativeZeroFolder, is_literal_zero};
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use smallvec::SmallVec;
 use tlib::{
@@ -509,6 +511,10 @@ struct ForwardADTransform<'a> {
     /// augmented, so that the twin does not share the original's inputs and
     /// state.
     env_tokens_memo: AHashMap<SigId, SmallVec<[SigId; 2]>>,
+    /// Folds the literal zeros of each tangent the rules build. Its memo is
+    /// structural, valid at every de Bruijn depth, so it is not scoped with
+    /// the cache by the recursion arm.
+    zero_folder: DerivativeZeroFolder,
 }
 
 impl<'a> ForwardADTransform<'a> {
@@ -523,6 +529,7 @@ impl<'a> ForwardADTransform<'a> {
             env_rename: AHashMap::new(),
             domain_rename: AHashMap::new(),
             env_tokens_memo: AHashMap::new(),
+            zero_folder: DerivativeZeroFolder::new(),
             diff_seed_index: Self::build_seed_index(diff_seeds),
             diff_seeds: diff_seeds.to_vec(),
             aperture_memo: AHashMap::new(),
@@ -716,7 +723,17 @@ impl<'a> ForwardADTransform<'a> {
             return dual;
         }
         let depth_on_entry = self.debruijn_depth;
-        let dual = self.transform_uncached(sig);
+        let mut dual = self.transform_uncached(sig);
+        // The rules build each tangent over the operands' tangents without
+        // looking at them: fold its literal zeros here, so that a zero stays
+        // a literal through the clock-domain wrappers and `augment_block`
+        // does not hold it (porting/fad-zero-tangent-folding-plan-2026-10-18-en.md).
+        // The primal is kept opaque, so only the nodes the rule built are
+        // walked.
+        self.zero_folder.keep(dual.primal);
+        for tangent in &mut dual.tangents {
+            *tangent = self.zero_folder.fold(self.arena, *tangent);
+        }
         debug_assert_eq!(
             self.debruijn_depth, depth_on_entry,
             "debruijn_depth not balanced across transform_uncached"
@@ -905,17 +922,26 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(neg_sin_x, tangent_x)
                 },
             ),
-            SigMatch::Tan(x) => self.unary_chain(
-                x,
-                |b, primal_x| b.tan(primal_x),
-                |b, primal_x, tangent_x| {
-                    let cos_x = b.cos(primal_x);
-                    let cos_sq = b.mul(cos_x, cos_x);
-                    let one = b.real(1.0);
-                    let inv = b.div(one, cos_sq);
-                    b.mul(inv, tangent_x)
-                },
-            ),
+            SigMatch::Tan(x) => {
+                // tan' = 1 + tan², written on the primal output node itself
+                // (not a rebuilt `tan`), so the derivative is one
+                // multiply-add over a value the primal already computes;
+                // `1 / cos²` would add a `cos`, a square and a division.
+                let dual_x = self.transform(x);
+                let mut b = SigBuilder::new(self.arena);
+                let primal = b.tan(dual_x.primal);
+                let tangents = dual_x
+                    .tangents
+                    .into_iter()
+                    .map(|tx| {
+                        let tan_sq = b.mul(primal, primal);
+                        let one = b.real(1.0);
+                        let sec_sq = b.add(one, tan_sq);
+                        b.mul(sec_sq, tx)
+                    })
+                    .collect::<SmallVec<[SigId; 2]>>();
+                Dual { primal, tangents }
+            }
             SigMatch::Exp(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.exp(primal_x),
@@ -1973,13 +1999,6 @@ pub(super) fn generate_fad_signals_multi(
     Ok(result)
 }
 
-/// Whether `sig` is the literal zero a constant's tangent is spelled as
-/// (`real(0.0)` or `int(0)`).
-fn is_literal_zero(arena: &TreeArena, sig: SigId) -> bool {
-    matches!(match_sig(arena, sig), SigMatch::Real(v) if v == 0.0)
-        || matches!(match_sig(arena, sig), SigMatch::Int(0))
-}
-
 #[cfg(test)]
 mod tests {
     //! Randomized structural invariants on the FAD rewriter.
@@ -2174,6 +2193,51 @@ mod tests {
         assert_eq!(result[5], one, "ds1/ds1 must be 1.0");
     }
 
+    /// Returns whether `needle` occurs in the DAG rooted at `root`.
+    fn sig_contains(arena: &TreeArena, root: SigId, needle: &dyn Fn(SigId) -> bool) -> bool {
+        needle(root)
+            || arena.node(root).is_some_and(|node| {
+                node.children
+                    .as_slice()
+                    .iter()
+                    .any(|&child| sig_contains(arena, child, needle))
+            })
+    }
+
+    /// `tan' = 1 + tan²` is written on the primal output node: the tangent
+    /// lane references the very `SigId` of the primal `tan(x)` and contains
+    /// no `cos` (the former `1 / cos²` rule added one `cos` per tan seed).
+    #[test]
+    fn fad_tan_tangent_reuses_primal_node_without_cos() {
+        let mut arena = TreeArena::new();
+        let s = SigBuilder::new(&mut arena).real(0.3);
+        let x = SigBuilder::new(&mut arena).input(0);
+        let sx = SigBuilder::new(&mut arena).mul(s, x);
+        let tan_sx = SigBuilder::new(&mut arena).tan(sx);
+
+        let out =
+            generate_fad_signals_multi(&mut arena, &mut ClockDomainTable::new(), &[tan_sx], &[s])
+                .expect("FAD of tan must succeed");
+        assert_eq!(out.len(), 2, "bundle is [primal, tangent]");
+        let primal = out[0];
+        assert!(matches!(match_sig(&arena, primal), SigMatch::Tan(_)));
+        assert!(
+            sig_contains(&arena, out[1], &|n| n == primal),
+            "the tangent must reuse the primal tan node"
+        );
+        assert!(
+            !sig_contains(&arena, out[1], &|n| matches!(
+                match_sig(&arena, n),
+                SigMatch::Cos(_)
+            )),
+            "the tan tangent must not call cos"
+        );
+        let tan_count_ok = !sig_contains(&arena, out[1], &|n| {
+            n != primal && matches!(match_sig(&arena, n), SigMatch::Tan(_))
+        });
+        assert!(tan_count_ok, "the tangent must not build a second tan node");
+    }
+
     /// FAD Phase B (roadmap P5): the boundary *wrapper* rules commute with
     /// d/ds — `wrapper(s·x)' = wrapper(x)` — and must succeed (no
     /// FRS-PROP-0004). Only the value child is differentiated; the
@@ -2351,20 +2415,16 @@ mod tests {
                 .expect("FAD must succeed on expr = seed + inner_out");
         assert_eq!(result.len(), 2, "one primal + one tangent lane");
 
-        // tangent = 1.0 + proj(1, fad_rec)
-        let SigMatch::BinOp(op, lhs, rhs) = match_sig(&arena, result[1]) else {
-            panic!("tangent of (seed + inner_out) must be a BinOp");
-        };
-        assert_eq!(op, signals::BinOp::Add);
+        // tangent = 1.0 + 0.0, folded to 1.0: tangent(seed) is 1.0 and
+        // tangent(inner_out) the zero constant (the inner recursion does not
+        // depend on the seed and is not rebuilt). A leak of the seed into the
+        // inner body would leave a projection of a rebuilt recursion here.
         let one = SigBuilder::new(&mut arena).real(1.0);
-        assert_eq!(lhs, one, "tangent(seed) must be 1.0");
-        let zero = SigBuilder::new(&mut arena).real(0.0);
         assert_eq!(
-            rhs,
-            zero,
-            "tangent(inner_out) must be the zero constant: the inner recursion does \
-             not depend on the seed and is not rebuilt, got {:?}",
-            tree_to_str(&arena, rhs)
+            result[1],
+            one,
+            "tangent of (seed + inner_out) must fold to 1.0, got {:?}",
+            tree_to_str(&arena, result[1])
         );
         assert_eq!(
             result[0], expr,
@@ -2391,7 +2451,7 @@ mod tests {
 
         // expr = inner_out + seed
         // d(expr)/d(seed) = tangent(inner_out) + tangent(seed)
-        //   tangent(inner_out) = proj(1, expanded_inner_rec) [zero at runtime]
+        //   tangent(inner_out) = 0.0                          [not rebuilt]
         //   tangent(seed)      = 1.0                          [seed check]
         let expr = SigBuilder::new(&mut arena).add(inner_out, seed);
 
@@ -2402,21 +2462,16 @@ mod tests {
 
         let tangent = result[1];
 
-        // tangent must be Add(proj(1, fad_rec), real(1.0)).
-        // Decompose the Add and check the second operand is real(1.0).
-        let SigMatch::BinOp(op, _lhs, rhs) = match_sig(&arena, tangent) else {
-            panic!(
-                "tangent of (inner_out + seed) must be a BinOp; \
-                 got a different node — seed check was poisoned by inner rec body cache"
-            );
-        };
-        assert_eq!(op, signals::BinOp::Add, "tangent must be an Add");
-
+        // tangent(inner_out) is the zero constant (the inner recursion does
+        // not depend on the seed), so the tangent folds to tangent(seed),
+        // which must be real(1.0), not the body-scope tangent
+        // delay1(proj(1, ref(1))) a poisoned seed check would give.
         let one = SigBuilder::new(&mut arena).real(1.0);
         assert_eq!(
-            rhs, one,
-            "rhs of tangent Add must be real(1.0) — tangent(seed) must be 1.0, \
-             not the body-scope tangent delay1(proj(1,ref(1)))"
+            tangent,
+            one,
+            "tangent of (inner_out + seed) must fold to real(1.0), got {:?}",
+            tree_to_str(&arena, tangent)
         );
     }
 }

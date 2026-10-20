@@ -147,6 +147,9 @@ impl<'a> SignalToFirLower<'a> {
     /// Guards:
     /// - Trivial nodes (literals, loads) are never hoisted — they are
     ///   free to duplicate and hoisting them wastes a variable name.
+    ///   Exception: an escaping `Konst` signal lowered to a load of an
+    ///   init-local constant, which does not exist outside
+    ///   `instanceConstants` (see `reads_init_local_constant`).
     /// - Recursive projections must stay in the sample loop; the type
     ///   system ensures they are always Samp, but the guard is kept as
     ///   a defensive check.
@@ -165,7 +168,12 @@ impl<'a> SignalToFirLower<'a> {
             .unwrap_or(0)
             >= 2;
         let at_boundary = self.placement.sig_at_boundary.contains(&sig);
-        if !is_trivial_fir(&self.store, lowered)
+        // A trivial load of an init-local `fConst*` is not free to duplicate
+        // outside `instanceConstants`: an escaping `Konst` signal lowered to
+        // one (`pow(x, 1)` → `x`) still gets its struct field.
+        let hoistable = !is_trivial_fir(&self.store, lowered)
+            || (self.konst_escapes(sig) && self.reads_init_local_constant(lowered));
+        if hoistable
             && !self.is_recursive_projection(sig)
             && !matches!(match_sig(self.arena, sig), SigMatch::WrTbl(..))
             && (sig_shared || at_boundary)
@@ -174,9 +182,10 @@ impl<'a> SignalToFirLower<'a> {
                 Some(Variability::Konst) => {
                     self.materialize_in_bucket(sig, lowered, Bucket::Constants)
                 }
-                Some(Variability::Block) => {
-                    self.materialize_in_bucket(sig, lowered, Bucket::Control)
-                }
+                Some(Variability::Block) => match self.lazy_block_slot(sig) {
+                    Some(slot) => self.materialize_lazy_block(sig, lowered, slot),
+                    None => self.materialize_in_bucket(sig, lowered, Bucket::Control),
+                },
                 Some(Variability::Samp) if self.scalar_schedule.is_some() => {
                     self.materialize_scheduled_sample(lowered)
                 }
@@ -242,7 +251,7 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Proj(index, group) => self.lower_proj(sig, index, group)?,
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(sig, op, lhs, rhs)?,
-            SigMatch::Pow(lhs, rhs) => self.lower_math2(FirMathOp::Pow, lhs, rhs)?,
+            SigMatch::Pow(lhs, rhs) => self.lower_pow(sig, lhs, rhs)?,
             SigMatch::Min(lhs, rhs) => self.lower_minmax(sig, lhs, rhs, true)?,
             SigMatch::Max(lhs, rhs) => self.lower_minmax(sig, lhs, rhs, false)?,
             SigMatch::Sin(value) => self.lower_math1(FirMathOp::Sin, value)?,
@@ -442,13 +451,12 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Lowers supported foreign constants.
     ///
-    /// Active parity slice mirrors the C++ fast-lane special-case for
+    /// Mirrors the C++ `InstructionsCompiler::generateFConst` special case for
     /// `fSamplingFreq`, which loads the persistent `fSampleRate` struct field.
     ///
-    /// `fSamplingFreq` is typed as Int in the signal domain, so its FIR type is
-    /// always `Int32`.  If it appears in a Real context the promoter wraps it in a
-    /// `FloatCast` node, which is lowered separately by `lower_cast`.  No implicit
-    /// cast is needed here.
+    /// The field is an `Int32`. When the prepared type of the `FConst` node is
+    /// `Real` (as in `exp(-2π/ma.SR)`), the load is cast here to that FIR type;
+    /// otherwise it is returned as it is.
     pub(super) fn lower_fconst(
         &mut self,
         sig: SigId,
@@ -717,21 +725,19 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.cast(real_ty, raw))
     }
 
-    /// Lowers general `SIGDELAY` using a fixed-size circular delay line.
+    /// Lowers general `SIGDELAY` through a fixed-size delay line.
     ///
     /// Source provenance (C++):
     /// - `signalFIRCompiler.cpp::compileSigDelay(...)`
     /// - `signalFIRCompiler.hh::writeReadDelay(...)`
     ///
-    /// Active Rust parity slice:
-    /// - constant integer amount only,
-    /// - zero-delay fast path,
-    /// - one typed DSP-struct array per delayed carried signal,
-    /// - masked circular indexing driven by persistent `fIOTA`.
-    ///
-    /// For variable-rate amounts (e.g., UI sliders), the delay line is sized to
-    /// the interval upper bound from `sig_types`; the runtime index expression
-    /// is the lowered amount signal evaluated each sample.
+    /// A zero amount lowers the value directly. Otherwise the line is sized
+    /// by `delay_size_for_amount`: a constant integer amount, or, for
+    /// variable-rate amounts (e.g., UI sliders), the interval upper bound from
+    /// `sig_types`, with the runtime index expression being the lowered amount
+    /// evaluated each sample. The storage strategy is chosen and emitted by
+    /// `signal_fir/delay/` (see [`Self::lower_fixed_delay`]). An amount with
+    /// neither bound is rejected.
     pub(super) fn lower_delay(
         &mut self,
         node: SigId,
@@ -871,12 +877,12 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// **Recursion feedback optimization**: if the carried `value` is
     /// `Proj(i, SYMREC/SYMREF)` pointing into the currently active recursion
-    /// context (detected by `recursion_feedback_info`), the group's existing
-    /// recursion array is reused directly — no separate state variable is
+    /// context (detected by `resolve_recursion_delay_ref`), the group's existing
+    /// recursion carrier is reused directly — no separate state variable is
     /// allocated and no extra write is emitted.  The previous-sample value is
-    /// read as `rec_array[(fIOTA - 1) & 1]`, which is always valid because the
-    /// recursion body writes `rec_array[0]` earlier in the same sample and a
-    /// deferred copy updates `rec_array[1]` after outputs are stored.
+    /// read from the carrier according to its `RecursionStorageStrategy`: the
+    /// scalar field (`SingleScalar`), the slot one past the implicit delay
+    /// (`ExactShift`), or a circular index (`Circular`).
     ///
     /// For all other `value` signals the normal path applies:
     ///
@@ -967,15 +973,6 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
-    /// Replays `Delay1(primal_output)` while lowering a reverse-time RAD loop.
-    ///
-    /// In split RAD bundles, forward primals are emitted before reverse
-    /// gradients. A feedback-coefficient contribution such as
-    /// `adjoint[n] * y[n-1]` must read the primal state at the matching forward
-    /// frame, not advance a recursion carrier while iterating backward. For
-    /// primals present in the public output bundle, the forward output buffer is
-    /// the block-local tape: frame `0` returns the delay initializer `0`, and
-    /// later frames read `output_primal[i0 - 1]`.
     /// Structural fallback of `forward_output_by_sig`: the lane of a forward
     /// output whose shared-structure dump equals `value`'s, for equivalent
     /// but non-identical `SigId`s. The keys are built on the first miss.
@@ -995,6 +992,15 @@ impl<'a> SignalToFirLower<'a> {
             .copied()
     }
 
+    /// Replays `Delay1(primal_output)` while lowering a reverse-time RAD loop.
+    ///
+    /// In split RAD bundles, forward primals are emitted before reverse
+    /// gradients. A feedback-coefficient contribution such as
+    /// `adjoint[n] * y[n-1]` must read the primal state at the matching forward
+    /// frame, not advance a recursion carrier while iterating backward. For
+    /// primals present in the public output bundle, the forward output buffer is
+    /// the block-local tape: frame `0` returns the delay initializer `0`, and
+    /// later frames read `output_primal[i0 - 1]`.
     pub(super) fn lower_forward_output_delay1_for_reverse_loop(
         &mut self,
         node: SigId,

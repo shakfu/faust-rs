@@ -26,22 +26,25 @@
 //!    a `Constant` transition.
 //! 2. Merge that trie into the shared automaton via `merge_state` (deterministic union
 //!    of states/transitions, preserving the variable-first invariant).
-//! 3. After all rules, `build_automaton_metadata` propagates `match_num` flags (whether a
-//!    state has a numeric-constant transition) for potential future optimisations.
+//! 3. After all rules, `build_automaton_metadata` sets the `match_num` flag of every state
+//!    that has a numeric-constant transition; the argument dispatched at such a state is
+//!    folded to a literal first (C++ parity).
 //!
 //! ## Matching — [`apply_pattern_matcher`]
 //!
-//! **Called once per consumed argument** in a loop from the evaluator's `apply_case_rules`.
+//! **Called once per consumed argument** from the evaluator's `apply_pattern_matcher_value`
+//! (`apply.rs`).
 //! Each call:
 //! 1. `apply_pattern_matcher_internal` descends the argument tree, following state-machine
 //!    transitions and recording variable-to-path associations (`Assoc`) in a per-rule
 //!    `substs` table.
 //! 2. After traversal, variable substitutions are resolved: for each active rule the path
-//!    is used to extract the matched subterm, and the result is bound into the rule's
-//!    `Environment` in `env_out`. **Nonlinearity** (same variable matched against two
-//!    different values) nulls out `env_out[r]`.
+//!    is used to extract the matched subterm, and the result is bound in a new layer
+//!    pushed on the rule's `Environment` in `env_out` (C++ `pushValueDef`).
+//!    **Nonlinearity** (same variable matched against two different values) nulls out
+//!    `env_out[r]`.
 //! 3. Returns `(new_state, Some(rhs))` when the automaton reaches a **final state** (all
-//!    patterns consumed), or `(new_state, None)` for an intermediate state, or `(-1, None)`
+//!    patterns consumed), or `(new_state, None)` for an intermediate state, or `(None, None)`
 //!    on failure.
 //!
 //! After the last argument is processed, the caller picks the **first rule** whose
@@ -55,6 +58,8 @@
 //! 3. **`Op`** transitions sorted by ascending `(arity, tag)`.
 //!
 //! This order mirrors the C++ implementation and ensures deterministic matching.
+
+use std::rc::Rc;
 
 use ahash::AHashMap;
 use boxes::{BoxMatch, match_box};
@@ -170,7 +175,8 @@ pub struct State {
     /// State index (equals position in [`Automaton::states`]).
     pub s: usize,
     /// `true` when at least one outgoing constant transition targets a numeric literal.
-    /// Reserved for future numeric-fast-path optimisation; mirrors the C++ `match_num` flag.
+    /// The argument dispatched at such a state is folded to a numeric literal first
+    /// (`simplify_dispatch_argument`); mirrors the C++ `match_num` flag.
     pub match_num: bool,
     /// Rules still active in this state (subset that have not yet failed to match).
     pub rules: Vec<Rule>,
@@ -225,10 +231,12 @@ impl Automaton {
 /// Cache keyed by the `TreeId` of an evaluated `Case` rule-list.
 ///
 /// Raw parser rule-lists are not sufficient keys because pattern evaluation can
-/// depend on the surrounding lexical environment. `apply_case_rules` therefore
+/// depend on the surrounding lexical environment. `eval_case_value` therefore
 /// evaluates/simplifies patterns first and only then memoises the compiled
-/// automaton under the resulting hash-consed rule-list `TreeId`.
-pub(crate) type AutomatonCache = AHashMap<TreeId, Automaton>;
+/// automaton under the resulting hash-consed rule-list `TreeId`. The automaton
+/// is immutable once built and shared by `Rc` with every matcher made from it:
+/// a deep copy per `case` evaluation was a `Vec<State>` clone and its drop.
+pub(crate) type AutomatonCache = AHashMap<TreeId, Rc<Automaton>>;
 
 // ── Internal pattern helpers ──────────────────────────────────────────────────
 
@@ -967,17 +975,21 @@ pub(crate) fn unreachable_numeric_patterns(
 
 /// Applies the automaton to a single argument, advancing the state machine.
 ///
-/// This function is called **once per consumed argument** inside a loop in
-/// `apply_case_rules`. The `env_out` vector accumulates per-rule variable bindings
-/// across calls (each call modifies `env_out` in-place; `env_out[r]` is set to `None`
-/// when rule `r` fails a nonlinearity check).
+/// This function is called **once per consumed argument** by
+/// `apply_pattern_matcher_value` (`apply.rs`). The `env_out` vector accumulates per-rule variable bindings
+/// across calls (each call replaces the slots of the rules it binds variables for,
+/// never the layers they pointed to; `env_out[r]` is set to `None` when rule `r`
+/// fails a nonlinearity check).
 ///
 /// Operationally, one call does three things:
 /// 1. traverse the argument tree with [`apply_pattern_matcher_internal`],
 /// 2. replay recorded paths to extract concrete matched subtrees,
 /// 3. bind those subtrees into each surviving rule environment, rejecting
 ///    nonlinear matches where the same variable name would receive two distinct
-///    values.
+///    values. A binding pushes a child layer and replaces `env_out[r]` with it,
+///    so the layer the slot pointed to is never written: matchers are
+///    persistent values, as in C++, and every copy of one keeps its own
+///    bindings.
 ///
 /// # Arguments
 ///
@@ -1029,6 +1041,14 @@ pub(crate) fn apply_pattern_matcher(
         if env_out[rule_r].is_none() {
             continue;
         }
+        // Bindings go into a layer of this application's own, never into the
+        // layer `env_out[r]` points to: that layer is shared by every copy of
+        // the matcher (a `boxPatternMatcher` handle, a matcher bound to a
+        // parameter), which must not see this application's bindings. C++
+        // pushes one layer per binding (`pushValueDef`); one layer per rule
+        // and argument is equivalent, the nonlinearity lookup reading the new
+        // layer first and stopping at the rule's barrier.
+        let mut pushed = false;
         for assoc in &substs[rule_r] {
             // Resolve the pattern variable's identifier node to a name string,
             // then intern it — collecting into String first to release the
@@ -1054,6 +1074,10 @@ pub(crate) fn apply_pattern_matcher(
                         break;
                     }
                 } else {
+                    if !pushed {
+                        *env = env.push_scope();
+                        pushed = true;
+                    }
                     env.bind(sym_id, z1);
                 }
             }

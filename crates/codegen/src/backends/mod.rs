@@ -2,16 +2,21 @@
 //!
 //! # Organization
 //! - Implemented backends:
-//!   - [`c`], [`codebox`], [`cpp`]
+//!   - [`asc`], [`c`], [`cmajor`], [`codebox`], [`cpp`], `cranelift` (native
+//!     targets only), [`interp`], [`julia`], [`rust`], [`wasm`]
 //! - Shared helpers:
+//!   - [`codegen_error`] (the carrier of the textual backends' typed errors)
+//!   - [`host_function`] (C signatures of host functions called by address)
 //!   - internal `faust_api` module (DSP API signature validation)
+//!   - internal `module_view` module (the decoded FIR module, function and
+//!     variable lookups, and the stable errors for a malformed module, shared
+//!     by every backend)
 //!   - internal `c_family` module (syntax-parameterless emission shared by
 //!     `c`/`cpp`; see `porting/c-family-emitter-core-plan-2026-07-04-en.md`)
 //!   - internal `textual` module (precedence-aware expression layout reusable
 //!     by textual targets)
-//! - Scaffolded backends (planned parity targets):
-//!   - `cranelift`, `cmajor`, `csharp`, `dlang`, `interp`, `jax`, `jsfx`,
-//!     `julia`, `llvm`, `rust`, `sdf3`, `vhdl`, `wasm`.
+//! - Scaffolded backends (planned parity targets, `backend_id()` only):
+//!   - `csharp`, `dlang`, `jax`, `jsfx`, `llvm`, `sdf3`, `vhdl`.
 //!
 //! # Module contract
 //! - Each backend module owns:
@@ -26,6 +31,9 @@
 
 pub(crate) mod c_family;
 pub(crate) mod faust_api;
+pub(crate) mod literals;
+pub(crate) mod module_view;
+pub(crate) mod table_bytes;
 pub(crate) mod textual;
 
 use fir::{FirId, FirMatch, FirStore, match_fir};
@@ -67,8 +75,9 @@ pub(crate) fn sub_module_names(store: &FirStore, sub_modules: FirId) -> Vec<Stri
 ///
 /// That mistake was made independently in the `c`, `rust` and `julia` backends
 /// before this list existed. `is_lifecycle_function` is the single place to
-/// consult; `backends::emits_no_lifecycle_leak` in the compiler test suite is
-/// what catches a backend that forgets to.
+/// consult; the compiler test `lifecycle_leak_guard`
+/// (`no_backend_emits_static_init_as_an_ordinary_function`) is what catches a
+/// backend that forgets to.
 const LIFECYCLE_FUNCTIONS: &[&str] = &[
     "staticInit",
     "metadata",
@@ -107,6 +116,21 @@ pub fn unsupported_sub_modules_message(backend: &str, names: &[String]) -> Strin
     )
 }
 
+/// Scalar precision of a backend's generated real values: Faust's default
+/// `-single`, or `-double`.
+///
+/// One enum instead of three identical ones: the cmajor, julia and rust
+/// options keep their own names (`CmajorRealType`, `JuliaRealType`,
+/// `RustRealType`) as aliases of this type, so callers are unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RealPrecision {
+    /// Single precision, Faust's default code generation.
+    #[default]
+    Float32,
+    /// Double precision, Faust `-double`.
+    Float64,
+}
+
 pub mod codegen_error;
 pub mod host_function;
 
@@ -128,3 +152,20 @@ pub mod rust;
 pub mod sdf3;
 pub mod vhdl;
 pub mod wasm;
+
+#[cfg(test)]
+mod tests {
+    use super::RealPrecision;
+
+    /// The three backend precision names are one type: a value chosen for one
+    /// backend's options is accepted by the others, and the default is
+    /// Faust's single precision everywhere.
+    #[test]
+    fn backend_precision_aliases_are_one_type() {
+        let rust: super::rust::RustRealType = super::julia::JuliaRealType::Float64;
+        let cmajor: super::cmajor::CmajorRealType = rust;
+        assert_eq!(cmajor, RealPrecision::Float64);
+        assert_eq!(cmajor.cmajor_name(), "float64");
+        assert_eq!(super::rust::RustRealType::default(), RealPrecision::Float32);
+    }
+}

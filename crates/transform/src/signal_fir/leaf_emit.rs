@@ -24,7 +24,9 @@
 //! evidence and never call these emitters (producer/checker doctrine in
 //! `vector/mod.rs`).
 
-use fir::{FirBinOp, FirBuilder, FirId, FirMathOp, FirStore, FirType};
+use fir::{
+    FirBinOp, FirBuilder, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
+};
 use signals::BinOp;
 
 /// Where a lowerer records the math intrinsics and integer helper functions
@@ -36,6 +38,136 @@ pub(in crate::signal_fir) trait LeafPrototypes {
     fn note_math_op(&mut self, op: FirMathOp);
     /// Records one used integer helper (`abs`, `min_i`, `max_i`).
     fn note_int_helper(&mut self, name: &'static str);
+    /// Requests the double pow/rint prototypes used by integer powers.
+    fn note_integer_pow(&mut self);
+}
+
+/// Distinguishes the two precisions when integer power introduces double math
+/// into a single-precision module. Other math symbols retain their FIR spelling.
+pub(in crate::signal_fir) fn math_symbol(op: FirMathOp, typ: &FirType) -> &'static str {
+    match (op, typ) {
+        (FirMathOp::Pow, FirType::Float32) => "powf",
+        (FirMathOp::Rint, FirType::Float32) => "rintf",
+        _ => op.symbol(),
+    }
+}
+
+/// Emits integer power as in C++ `powprim.hh::generateCode`, commit
+/// eb21fcccff1ead7fe286f35614a464bea70a5fe2. Runtime exponents use double
+/// pow followed by rint before the int32 cast; rounding at sample precision
+/// would already have lost integers above 2^24. Small constant powers keep
+/// wrapping integer multiplication, as the C++ manual-power path does.
+pub(in crate::signal_fir) fn emit_pow(
+    store: &mut FirStore,
+    protos: &mut impl LeafPrototypes,
+    lhs: FirId,
+    rhs: FirId,
+    result_ty: FirType,
+) -> FirId {
+    if result_ty != FirType::Int32 {
+        if let Some(exponent) = small_integral_exponent(store, rhs) {
+            return emit_real_power_product(store, lhs, exponent, result_ty);
+        }
+        return emit_math_call2(store, protos, FirMathOp::Pow, lhs, rhs, result_ty);
+    }
+    if let FirMatch::Int32 {
+        value: exponent, ..
+    } = match_fir(store, rhs)
+        && (0..=8).contains(&exponent)
+    {
+        let mut b = FirBuilder::new(store);
+        if exponent == 0 {
+            return b.int32(1);
+        }
+        let mut value = lhs;
+        for _ in 1..exponent {
+            value = b.binop(FirBinOp::Mul, value, lhs, FirType::Int32);
+        }
+        return value;
+    }
+    protos.note_integer_pow();
+    let mut b = FirBuilder::new(store);
+    let lhs = b.cast(FirType::Float64, lhs);
+    let rhs = b.cast(FirType::Float64, rhs);
+    let power = b.math_call(FirMathOp::Pow, &[lhs, rhs], FirType::Float64);
+    let rounded = b.math_call(FirMathOp::Rint, &[power], FirType::Float64);
+    b.cast(FirType::Int32, rounded)
+}
+
+/// The exponent of a real power that C++ `powprim.hh::isIntPowArg` expands
+/// by multiplication: a literal with an integral value from 0 to 8 (an integer
+/// literal, or a real one without fractional part). C++ also accepts negative
+/// integer literals, for which its expansion returns the base unchanged;
+/// those keep the `pow` call here.
+fn small_integral_exponent(store: &FirStore, rhs: FirId) -> Option<u32> {
+    let value = match match_fir(store, rhs) {
+        FirMatch::Int32 { value, .. } => f64::from(value),
+        FirMatch::Float32 { value, .. } => f64::from(value),
+        FirMatch::Float64 { value, .. } => value,
+        _ => return None,
+    };
+    (value.fract() == 0.0 && (0.0..=8.0).contains(&value)).then_some(value as u32)
+}
+
+/// `x^n` for a small integral `n` as the left-associated product
+/// `((x·x)·x)…`, the body of the C++ `<Klass>_faustpower<n>_f` helper, on
+/// every backend.
+///
+/// C++ emits that helper only where `gNeedManualPow` holds (C, C++, Rust,
+/// Julia, LLVM, …) and keeps `pow` on the others (Interp, WASM, JSFX,
+/// Codebox, Cmajor, JAX), which cannot all call a local function. The product
+/// is written inline instead, so no backend needs one: `x` is the same FIR
+/// value in every factor, and FIR common-subexpression materialization binds
+/// a non-trivial `x` to one temporary, evaluated once as the helper's
+/// argument would be. An integer base is converted first, as it is for `pow`.
+fn emit_real_power_product(
+    store: &mut FirStore,
+    lhs: FirId,
+    exponent: u32,
+    result_ty: FirType,
+) -> FirId {
+    if exponent == 0 {
+        return emit_real_const(store, &result_ty, 1.0);
+    }
+    let converted = store.value_type(lhs).as_ref() != Some(&result_ty);
+    let mut b = FirBuilder::new(store);
+    let base = if converted {
+        b.cast(result_ty.clone(), lhs)
+    } else {
+        lhs
+    };
+    let mut value = base;
+    for _ in 1..exponent {
+        value = b.binop(FirBinOp::Mul, value, base, result_ty.clone());
+    }
+    value
+}
+
+/// Double prototypes are separate from single powf/rintf declarations, so
+/// mixed integer/real programs have no conflicting function signatures.
+pub(in crate::signal_fir) fn integer_pow_prototypes(store: &mut FirStore) -> Vec<FirId> {
+    [FirMathOp::Pow, FirMathOp::Rint]
+        .into_iter()
+        .map(|op| {
+            let arity = if op == FirMathOp::Pow { 2 } else { 1 };
+            let args = (0..arity)
+                .map(|i| NamedType {
+                    name: format!("arg{i}"),
+                    typ: FirType::Float64,
+                })
+                .collect::<Vec<_>>();
+            FirBuilder::new(store).declare_fun(
+                op.symbol(),
+                FirType::Fun {
+                    args: vec![FirType::Float64; arity],
+                    ret: Box::new(FirType::Float64),
+                },
+                &args,
+                None,
+                false,
+            )
+        })
+        .collect()
 }
 
 /// Maps one signal binary operator to its FIR operator and result type:
@@ -155,7 +287,7 @@ pub(in crate::signal_fir) fn emit_math_call1(
     real_ty: FirType,
 ) -> FirId {
     protos.note_math_op(op);
-    FirBuilder::new(store).math_call(op, &[value], real_ty)
+    FirBuilder::new(store).fun_call(math_symbol(op, &real_ty), &[value], real_ty)
 }
 
 /// Emits one binary math intrinsic call at the internal real precision and
@@ -169,7 +301,7 @@ pub(in crate::signal_fir) fn emit_math_call2(
     real_ty: FirType,
 ) -> FirId {
     protos.note_math_op(op);
-    FirBuilder::new(store).math_call(op, &[lhs, rhs], real_ty)
+    FirBuilder::new(store).fun_call(math_symbol(op, &real_ty), &[lhs, rhs], real_ty)
 }
 
 /// Emits `min`/`max` over already-lowered operands: an explicit `min_i` /
@@ -240,15 +372,18 @@ pub(in crate::signal_fir) fn emit_real_const(
 ///
 /// # Source provenance (C++)
 /// - `InstructionsCompiler::generateSoundfileBuffer`
-///   (`compiler/generator/instructions_compiler.cpp`, `wrapChannel`).
+///   (`compiler/generator/instructions_compiler.cpp`); the channel wrap
+///   (`wrapChannel`) follows the C++ `rework-soundfile` branch (`49c6d9367`),
+///   ahead of the pinned reference, which indexes `fBuffers[chan]` directly
+///   (registry entry DIFF-BEH-016).
 ///
 /// A soundfile can be read with more outputs than its resource has channels
 /// (a stereo file read by `soundfile(label, 4)`): channel `chan` then reads
 /// real channel `chan % fChannels`. The wrap is generated code, not a runtime
 /// duty, so the runtime contract is only `fChannels >= 1` and `fBuffers`
 /// holding `fChannels` pointers. Channel 0 always exists and is left
-/// unwrapped, as in C++. There is no guard against `fChannels == 0`: that is
-/// a runtime obligation, as in C++.
+/// unwrapped, as in that C++ branch. There is no guard against
+/// `fChannels == 0`: that is a runtime obligation, as in C++.
 pub(in crate::signal_fir) fn emit_soundfile_buffer(
     store: &mut FirStore,
     var: String,

@@ -36,10 +36,16 @@
 //!
 //! Unsupported FIR nodes fail with `FRS-CGEN-JULIA-0003`.
 
+use crate::backends::literals::{Digits, NegativeZero, RealSpelling, StringDialect, quoted_string};
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
-use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
+use crate::backends::module_view::{
+    FunctionDecl as DeclareFunView, SkeletonCodes, block_declares_var, block_stores_var,
+    collect_defined_functions, decode_module, section_items, surviving_sub_modules,
+    unsupported_node,
+};
+use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
 
 use crate::backends::faust_api;
 
@@ -100,16 +106,9 @@ impl Default for JuliaOptions {
 }
 
 /// Scalar precision selected for the Julia backend.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum JuliaRealType {
-    /// Single precision, matching Faust default code generation.
-    #[default]
-    Float32,
-    /// Double precision, matching Faust `-double`.
-    Float64,
-}
+pub type JuliaRealType = super::RealPrecision;
 
-impl JuliaRealType {
+impl super::RealPrecision {
     fn julia_name(self) -> &'static str {
         match self {
             Self::Float32 => "Float32",
@@ -147,28 +146,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::UnsupportedNode;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded `FirMatch::Module` header used by the Julia emitter.
-///
-/// This is not a second IR. It is just a borrowed/id-based view that prevents
-/// each emission phase from re-matching the module root. All ids still point
-/// back into the original [`FirStore`] and are decoded at the point where their
-/// section is emitted.
-#[derive(Debug, Clone)]
-struct ModuleView {
-    name: String,
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-    static_decls: FirId,
-}
 
 /// One scalar state initializer extracted from `dsp_struct` or `globals`.
 ///
@@ -208,19 +196,6 @@ enum EmitMode {
     Ui,
 }
 
-/// Body-bearing FIR function declaration normalized for textual emission.
-///
-/// Prototype-only FIR declarations are intentionally filtered out when this view
-/// is collected. Public lifecycle fallbacks should not be displaced by a
-/// declaration that has no body.
-#[derive(Debug, Clone)]
-struct DeclareFunView {
-    name: String,
-    typ: FirType,
-    named_args: Vec<NamedType>,
-    body: Option<FirId>,
-}
-
 #[must_use]
 /// Returns the stable backend identifier.
 pub fn backend_id() -> &'static str {
@@ -229,8 +204,9 @@ pub fn backend_id() -> &'static str {
 
 /// Generates Julia code from a FIR module root.
 ///
-/// The emitter expects a module produced by the transform fast lane. It emits a
-/// single Julia source unit containing:
+/// The emitter expects a module produced by `transform`'s signal→FIR lowering
+/// (`compile_signals_to_fir_fastlane`). It emits a single Julia source unit
+/// containing:
 /// - helper aliases (`REAL`, `pow`, `rint`, `remainder`),
 /// - static tables,
 /// - a mutable DSP state struct,
@@ -290,6 +266,14 @@ fn generate_julia_module_step(
         None
     };
     let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+    // Flattening removes every sub-module; a survivor would be a table this
+    // backend declares and nothing fills, which reads as zeros. wasm,
+    // interp and cranelift already refuse it.
+    if let Some(message) = surviving_sub_modules(store, module) {
+        return Err(
+            CodegenError::new(CodegenErrorCode::InvalidModuleSection, message).at_node(module),
+        );
+    }
 
     let module = decode_module(store, module)?;
     let class_name = options
@@ -297,7 +281,7 @@ fn generate_julia_module_step(
         .as_deref()
         .unwrap_or(module.name.as_str())
         .to_owned();
-    let functions = collect_module_functions(store, module.functions)?;
+    let functions = collect_defined_functions(store, module.functions)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
 
@@ -335,7 +319,7 @@ fn generate_julia_module_step(
 /// runtime vocabulary.
 fn emit_julia_header(out: &mut String, options: &JuliaOptions) {
     let _ = writeln!(out, "#=");
-    let _ = writeln!(out, "Code generated with faust-rs {}", crate::VERSION);
+    let _ = writeln!(out, "Code generated with Faust version {}", crate::VERSION);
     let _ = writeln!(
         out,
         "Compilation options: {}",
@@ -434,11 +418,14 @@ fn emit_struct_fields(
     out: &mut String,
     block_id: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return Err(invalid_section("struct section", block_id, store));
-    };
+    let items = section_items("struct", block_id, store)?;
     for item in items {
         match match_fir(store, item) {
+            // A foreign variable (`fvariable`) is a host symbol, not state.
+            FirMatch::DeclareVar {
+                access: AccessType::Global,
+                ..
+            } => {}
             FirMatch::DeclareVar { name, typ, .. } => {
                 let _ = writeln!(out, "\t{name}::{}", emit_type(&typ));
             }
@@ -471,11 +458,14 @@ fn emit_struct_default_initializers(
     out: &mut String,
     block_id: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return Err(invalid_section("struct section", block_id, store));
-    };
+    let items = section_items("struct", block_id, store)?;
     for item in items {
         match match_fir(store, item) {
+            // A foreign variable (`fvariable`) is a host symbol, not state.
+            FirMatch::DeclareVar {
+                access: AccessType::Global,
+                ..
+            } => {}
             FirMatch::DeclareVar {
                 name, typ, init, ..
             } => {
@@ -1092,12 +1082,16 @@ fn emit_stmt(
             ref cases,
             default,
         } => {
+            // Evaluated once, as C's `switch` evaluates it: the cases are an
+            // `if`/`elseif` chain, which would otherwise re-evaluate it per case.
             let cond = emit_value(store, cond)?;
+            let switch = format!("switch{}", stmt.as_u32());
+            let _ = writeln!(out, "{tab}{switch} = {cond}");
             for (i, (value, block)) in cases.iter().enumerate() {
                 if i == 0 {
-                    let _ = writeln!(out, "{tab}if {cond} == {value}");
+                    let _ = writeln!(out, "{tab}if {switch} == {value}");
                 } else {
-                    let _ = writeln!(out, "{tab}elseif {cond} == {value}");
+                    let _ = writeln!(out, "{tab}elseif {switch} == {value}");
                 }
                 emit_block_with_mode(store, out, *block, indent + 1, mode)?;
             }
@@ -1466,23 +1460,8 @@ fn emit_binop_expr(op: FirBinOp, lhs: &str, rhs: &str) -> String {
 /// use [`emit_binop_expr`] so XOR is rendered as `xor(lhs, rhs)`.
 fn emit_binop(op: FirBinOp) -> &'static str {
     match op {
-        FirBinOp::Add => "+",
-        FirBinOp::Sub => "-",
-        FirBinOp::Mul => "*",
-        FirBinOp::Div => "/",
-        FirBinOp::Rem => "%",
-        FirBinOp::And => "&",
-        FirBinOp::Or => "|",
         FirBinOp::Xor => "xor",
-        FirBinOp::Lsh => "<<",
-        FirBinOp::ARsh => ">>",
-        FirBinOp::LRsh => ">>",
-        FirBinOp::Eq => "==",
-        FirBinOp::Ne => "!=",
-        FirBinOp::Lt => "<",
-        FirBinOp::Le => "<=",
-        FirBinOp::Gt => ">",
-        FirBinOp::Ge => ">=",
+        other => crate::backends::textual::c_like_token(other),
     }
 }
 
@@ -1635,9 +1614,7 @@ fn struct_and_global_items(
 ) -> Result<Vec<FirId>, CodegenError> {
     let mut out = Vec::new();
     for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(invalid_section("struct section", section, store));
-        };
+        let items = section_items("struct", section, store)?;
         out.extend(items);
     }
     Ok(out)
@@ -1701,145 +1678,6 @@ fn collect_table_initializers(
         .collect())
 }
 
-/// Collects body-bearing function declarations from the module function block.
-///
-/// Prototype-only declarations are ignored because they are not executable
-/// bodies and should not suppress lifecycle fallback generation.
-///
-/// The resulting vector preserves FIR declaration order. Public API methods are
-/// selected by name later, and any remaining helper definitions are emitted in
-/// this stable order.
-fn collect_module_functions(
-    store: &FirStore,
-    functions: FirId,
-) -> Result<Vec<DeclareFunView>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return Err(invalid_section("functions section", functions, store));
-    };
-    let mut functions = Vec::new();
-    for item in items {
-        if let FirMatch::DeclareFun {
-            name,
-            typ,
-            args,
-            body: Some(body),
-            ..
-        } = match_fir(store, item)
-        {
-            functions.push(DeclareFunView {
-                name,
-                typ,
-                named_args: args,
-                body: Some(body),
-            });
-        }
-    }
-    Ok(functions)
-}
-
-/// Decodes and validates the FIR module root expected by this backend.
-///
-/// Returning a [`ModuleView`] keeps the public entry point small and gives all
-/// downstream helpers the exact ids for the seven module sections they need.
-/// Non-module roots are rejected with `FRS-CGEN-JULIA-0001`.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    if let FirMatch::Module {
-        num_inputs,
-        num_outputs,
-        name,
-        dsp_struct,
-        globals,
-        functions,
-        static_decls,
-        sub_modules: _,
-    } = match_fir(store, module)
-    {
-        Ok(ModuleView {
-            name,
-            dsp_struct,
-            globals,
-            functions,
-            num_inputs,
-            num_outputs,
-            static_decls,
-        })
-    } else {
-        Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!(
-                "expected FIR module root, got {:?} at node {}",
-                match_fir(store, module),
-                module.as_u32()
-            ),
-        ))
-    }
-}
-
-/// Returns whether a FIR block declares a variable with `name`.
-///
-/// Used to decide whether the backend must synthesize `fSampleRate` in the Julia
-/// struct. Non-block inputs return `false` because the caller will validate
-/// section shape separately when emitting the fields.
-fn block_declares_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::DeclareVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Returns whether a FIR block contains a direct store to `name`.
-///
-/// Used by `instanceConstants!` emission to avoid writing `fSampleRate` twice
-/// when FIR already has an explicit store in the canonical function body.
-fn block_stores_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::StoreVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Builds a stable diagnostic for malformed module sections.
-///
-/// This is the Julia-specific companion of the C/C++ backend section checks.
-/// The diagnostic includes both the logical section name and the concrete FIR
-/// node id to make fixture/debug output actionable.
-fn invalid_section(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::InvalidModuleSection,
-        format!(
-            "{kind} must be a FIR block, got {:?} at node {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
-    )
-}
-
-/// Builds a stable diagnostic for FIR nodes outside the current Julia slice.
-///
-/// Unsupported-node diagnostics are preferred over best-effort partial output:
-/// the generated Julia source should either represent the complete FIR body or
-/// fail before writing misleading code.
-fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::UnsupportedNode,
-        format!(
-            "unsupported FIR {kind} node {:?} at {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
-    )
-}
-
 /// Formats a floating literal in Julia syntax.
 ///
 /// Rust's `Debug` formatting emits the shortest round-trippable decimal for
@@ -1847,19 +1685,17 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
 /// important for small constants such as Faust's noise LCG scale, where fixed
 /// decimal truncation is enough to move impulse samples.
 fn trim_float(value: f64) -> String {
-    if value.is_nan() {
-        return "NaN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-Inf".to_owned()
-        } else {
-            "Inf".to_owned()
-        };
-    }
-    let s = format!("{value:?}");
-    if s == "-0.0" { "0.0".to_owned() } else { s }
+    JULIA_REAL.format(value)
 }
+
+/// Julia spelling of a real literal: `NaN`/`Inf`, `Debug` digits.
+pub(crate) const JULIA_REAL: RealSpelling = RealSpelling {
+    nan: "NaN",
+    pos_inf: "Inf",
+    neg_inf: "-Inf",
+    digits: Digits::Debug,
+    negative_zero: NegativeZero::Normalize,
+};
 
 /// Escapes a Rust string into a Julia double-quoted string literal.
 ///
@@ -1867,23 +1703,7 @@ fn trim_float(value: f64) -> String {
 /// backslashes, and common control characters are normalized while all other
 /// characters are passed through unchanged.
 fn julia_string_literal(input: &str) -> String {
-    let escaped = input
-        .chars()
-        .flat_map(|c| match c {
-            '\\' => "\\\\".chars().collect::<Vec<_>>(),
-            '"' => "\\\"".chars().collect::<Vec<_>>(),
-            // Deliberate deviation from C++ `flattenJSON`, which leaves `$`
-            // alone: Julia interpolates it inside a double-quoted literal, so an
-            // unescaped `$` in a label or in the embedded JSON produces source
-            // that does not compile.
-            '$' => "\\$".chars().collect::<Vec<_>>(),
-            '\n' => "\\n".chars().collect::<Vec<_>>(),
-            '\r' => "\\r".chars().collect::<Vec<_>>(),
-            '\t' => "\\t".chars().collect::<Vec<_>>(),
-            _ => vec![c],
-        })
-        .collect::<String>();
-    format!("\"{escaped}\"")
+    quoted_string(input, StringDialect::Julia)
 }
 
 #[cfg(test)]

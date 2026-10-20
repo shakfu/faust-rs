@@ -1270,7 +1270,7 @@ fn corpus_err_rad_zero_seed_surfaces_rad_seed_arity_diagnostic() {
 // either order. The tests here pin two contracts:
 //
 // 1. The output bundle layouts compose multiplicatively (FAD) or
-//    additively (RAD) as documented in `docs/fad-...md` and
+//    additively (RAD) as documented in `docs/fad-note-en.md` and
 //    `docs/rad-note-en.md`.
 // 2. Second-order derivatives computed two different ways agree
 //    numerically. Specifically:
@@ -2709,6 +2709,213 @@ fn rad_coefficient_wired_through_the_recursion_bra_total_grad_matches_fd() {
         |s| {
             format!(
                 r#"a = hslider("a", {}, -1, 1, 0.001); x = (+(12345) ~ *(1103515245)) * 4.656612873077393e-10; process = x, a : ((+, _) ~ *) : _, !;"#,
+                s[0]
+            )
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `tan` derivative: `1 + tan²` on the primal, in FAD, symbolic RAD and BRA
+// ---------------------------------------------------------------------------
+
+/// FAD of `tan(a)` equals the analytic `1 / cos²(a)` at points spread over
+/// `(-π/2, π/2)`; the rule now computes it as `1 + tan²(a)` from the primal.
+#[test]
+fn fad_tan_tangent_matches_analytic_derivative() {
+    for a in [-1.3_f32, -0.6, 0.0, 0.4, 0.785, 1.2] {
+        let source =
+            format!(r#"a = hslider("a", {a}, -1.5, 1.5, 0.0001); process = fad(tan(a), a);"#);
+        let out = run_interp_temp_source("fad-tan-analytic", &source, 2);
+        assert_eq!(out.len(), 2, "layout is [primal, tangent]");
+        let a64 = f64::from(a);
+        let expected = (1.0 / (a64.cos() * a64.cos())) as f32;
+        for (primal, tangent) in out[0].iter().zip(&out[1]) {
+            assert_close(*primal, a.tan(), 1.0e-6, &format!("tan({a}) primal"));
+            assert_close(*tangent, expected, 1.0e-6, &format!("tan'({a}) tangent"));
+        }
+    }
+}
+
+#[test]
+fn rad_vs_fad_parity_on_tan() {
+    let rad = || {
+        r#"
+a = hslider("a", 0.5, -2.0, 2.0, 0.001);
+b = hslider("b", 0.7, -2.0, 2.0, 0.001);
+process = rad(tan(a*b) + tan(b), (a, b));
+"#
+        .to_string()
+    };
+    let fad = || {
+        r#"
+a = hslider("a", 0.5, -2.0, 2.0, 0.001);
+b = hslider("b", 0.7, -2.0, 2.0, 0.001);
+process = fad(tan(a*b) + tan(b), (a, b));
+"#
+        .to_string()
+    };
+    assert_rad_matches_fad("rad-vs-fad-tan", 1, 2, 4, 1.0e-5, rad, fad);
+}
+
+#[test]
+fn rad_tan_matches_central_difference() {
+    fn rad_source(seeds: &[f32]) -> String {
+        let (a, b) = (seeds[0], seeds[1]);
+        format!(
+            r#"
+a = hslider("a", {a}, -2.0, 2.0, 0.001);
+b = hslider("b", {b}, -2.0, 2.0, 0.001);
+process = rad(tan(a*b), (a, b));
+"#
+        )
+    }
+    fn primal_source(seeds: &[f32]) -> String {
+        let (a, b) = (seeds[0], seeds[1]);
+        format!(
+            r#"
+a = hslider("a", {a}, -2.0, 2.0, 0.001);
+b = hslider("b", {b}, -2.0, 2.0, 0.001);
+process = tan(a*b);
+"#
+        )
+    }
+    assert_rad_matches_central_difference(
+        "tan",
+        1,
+        4,
+        &[0.9, 1.1],
+        &[1.0e-3, 1.0e-3],
+        5.0e-3,
+        rad_source,
+        primal_source,
+    );
+}
+
+/// `tan` in a nonlinear recursion: the BRA sweep tapes the forward `tan`
+/// output and reads `tan' = 1 + tan²` from it. The block total gradient must
+/// still match a finite difference of the block-sum primal.
+#[test]
+fn rad_tan_in_recursive_body_bra_total_grad_matches_fd() {
+    assert_bra_block_total_grad_matches_fd(
+        "rad-tan-nl-one-pole",
+        1,
+        8,
+        &[0.1],
+        &[5e-4],
+        5e-2,
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, -0.9, 0.9, 0.001); process = rad(c : +~(*(0.5) : tan), c);"#,
+                s[0]
+            )
+        },
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, -0.9, 0.9, 0.001); process = c : +~(*(0.5) : tan);"#,
+                s[0]
+            )
+        },
+    );
+}
+
+/// The generated code computes `tan` once and no `cos` at all, in FAD,
+/// symbolic RAD and the BRA reverse sweep. The former `1 / cos²` rule added
+/// one `cos` call per differentiated `tan` (2026-10-13: +18 % on a four-stage
+/// Newton solver differentiated with `fad`).
+#[test]
+fn tan_derivative_emits_no_cos_in_generated_cpp() {
+    use codegen::backends::cpp::CppOptions;
+    let cases = [
+        (
+            "fad",
+            r#"a = hslider("a", 0.3, -1.5, 1.5, 0.001); process = _ : fad(tan(a*_), a);"#,
+        ),
+        (
+            "rad",
+            r#"a = hslider("a", 0.3, -1.5, 1.5, 0.001); process = _ : rad(tan(a*_), a);"#,
+        ),
+        (
+            "bra",
+            r#"c = hslider("c", 0.1, -0.9, 0.9, 0.001); process = rad(c : +~(*(0.5) : tan), c);"#,
+        ),
+    ];
+    for (label, source) in cases {
+        let cpp = Compiler::new()
+            .compile_source_to_cpp(&format!("tan_{label}.dsp"), source, &CppOptions::default())
+            .unwrap_or_else(|e| panic!("{label}: compilation failed: {e}"));
+        assert_eq!(
+            cpp.matches("std::tan(").count(),
+            1,
+            "{label}: one tan call\n{cpp}"
+        );
+        assert!(!cpp.contains("std::cos("), "{label}: no cos call\n{cpp}");
+    }
+}
+
+// ── Bargraphs: the identity on their signal ──────────────────────────────────
+
+/// A bargraph is the identity on its signal, the meter being a side effect, so
+/// the adjoint passes through it, as the tangent does under `fad`
+/// (`fad_tangent_passes_through_a_bargraph`). This body is feed-forward and
+/// takes the symbolic reverse sweep.
+#[test]
+fn rad_adjoint_passes_through_a_bargraph() {
+    fn rad_source(seeds: &[f32]) -> String {
+        format!(
+            r#"
+a = hslider("a", {}, -2.0, 2.0, 0.001);
+b = hslider("b", {}, -2.0, 2.0, 0.001);
+process = rad(a*a : hbargraph("m", -10, 10) : *(b) : vbargraph("n", -10, 10), (a, b));
+"#,
+            seeds[0], seeds[1]
+        )
+    }
+    fn primal_source(seeds: &[f32]) -> String {
+        format!(
+            r#"
+a = hslider("a", {}, -2.0, 2.0, 0.001);
+b = hslider("b", {}, -2.0, 2.0, 0.001);
+process = a*a : hbargraph("m", -10, 10) : *(b) : vbargraph("n", -10, 10);
+"#,
+            seeds[0], seeds[1]
+        )
+    }
+    assert_rad_matches_central_difference(
+        "bargraph-symbolic",
+        1,
+        4,
+        &[1.5, -0.7],
+        &[1.0e-3, 1.0e-3],
+        5.0e-3,
+        rad_source,
+        primal_source,
+    );
+}
+
+/// The same identity inside a recursive body, which reaches the block
+/// reverse-AD lowering (`BlockReverseAD`): the bargraph sits on the feedback
+/// path, and the block-total gradient must match the finite difference.
+#[test]
+fn rad_adjoint_passes_through_a_bargraph_in_a_recursive_body() {
+    assert_bra_block_total_grad_matches_fd(
+        "rad-bargraph-recursive",
+        1,
+        8,
+        &[0.1],
+        &[5e-4],
+        5e-2,
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, -0.9, 0.9, 0.001);
+                   process = rad(c : (+ : hbargraph("m", -10, 10)) ~ sin, c);"#,
+                s[0]
+            )
+        },
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, -0.9, 0.9, 0.001);
+                   process = c : (+ : hbargraph("m", -10, 10)) ~ sin;"#,
                 s[0]
             )
         },

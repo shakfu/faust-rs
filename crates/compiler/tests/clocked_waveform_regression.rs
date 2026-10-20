@@ -1,7 +1,7 @@
 //! Regression: a stateful `waveform` generator inside an `ondemand` block must
 //! advance its read index **in fire time**, not every sample.
 //!
-//! From `examples/ondemand/gamme.dsp`: a pulse clock drives a scale player
+//! From a local example (`gamme.dsp`, not in the repository): a pulse clock drives a scale player
 //! `ondemand(waveform{60,62,64,65,67,69,71,72}:!,_) : ba.midikey2hz`. The
 //! waveform's `iWave*` index counter is fire-gated state (like the per-domain
 //! delay/IOTA counters); emitting its advance at the top rate makes the index
@@ -20,13 +20,20 @@ use std::path::PathBuf;
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{Compiler, SignalFirLane};
 
-const DEFAULT_FAUSTLIBRARIES_ROOT: &str = "/Users/letz/Developpements/faustlibraries";
+/// The faustlibraries checkout used when `FAUST_RS_FAUSTLIBRARIES_ROOT` is
+/// unset: `faustlibraries` next to the directory that holds this repository.
+fn default_faustlibraries_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .map_or_else(std::path::PathBuf::new, |dir| dir.join("faustlibraries"))
+}
 
 fn faustlibraries_root() -> Option<PathBuf> {
     std::env::var_os("FAUST_RS_FAUSTLIBRARIES_ROOT")
         .map(PathBuf::from)
         .or_else(|| {
-            let default = PathBuf::from(DEFAULT_FAUSTLIBRARIES_ROOT);
+            let default = default_faustlibraries_root();
             default.exists().then_some(default)
         })
 }

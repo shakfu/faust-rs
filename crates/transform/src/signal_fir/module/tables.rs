@@ -3,11 +3,14 @@
 //! Handles the three table signal families:
 //! - `SIGWAVEFORM` — constant ROM tables defined inline in the DSP source;
 //! - `SIGRDTBL` — indexed read access into a table;
-//! - `SIGWRTBL` / `SIGGEN` — write-driven tables (e.g. delay lines with an
-//!   external write index).
+//! - `SIGWRTBL` — table definitions with an optional write port (`rwtable`);
+//!   their `SIGGEN` content generator is folded at compile time
+//!   (`siggen::interpret_generator`) or compiled into a filling sub-module
+//!   (`subcontainer.rs`).
 //!
-//! Also owns table sizing helpers (`table_size_for_signal`) and the index
-//! expression normalisation that enforces integer-domain access.
+//! Also owns table sizing (`table_size_from_sig`) and the `-ct` debug
+//! assertion on table indexes (`debug_assert_index_checked`); index clamping
+//! itself happens at signal level in `signal_prepare` (steps 2.10a/2.10b).
 use crate::signal_fir::FirId;
 use crate::signal_fir::FirType;
 use crate::signal_fir::SigId;
@@ -438,8 +441,8 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Expands a table generator signal into concrete initializer values.
     ///
-    /// Only generator shapes that can be fully resolved at compile-time are
-    /// accepted in the current fast-lane slice.
+    /// Only generator shapes that can be fully resolved at compile time are
+    /// accepted here.
     pub(super) fn expand_generator_values(
         &mut self,
         generator_sig: SigId,

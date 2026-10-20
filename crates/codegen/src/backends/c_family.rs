@@ -24,11 +24,13 @@
 //!   did; `cpp` emitted the raw bytes into the literal.
 //!
 //! # Source provenance (C++)
-//! Upstream `/Users/letz/faust/compiler/generator/Text.hh` plays the same
+//! Upstream `compiler/generator/Text.hh` plays the same
 //! role for every one of upstream's textual backends: one shared
 //! literal/operator-formatting module instead of one copy per backend.
 
 use std::fmt::Write as _;
+
+use super::literals::{Digits, NegativeZero, RealSpelling, StringDialect, quoted_string};
 
 use fir::{AccessType, FirBinOp, FirDependencyKind, FirId, FirMatch, FirStore, FirType, match_fir};
 use std::collections::BTreeSet;
@@ -376,25 +378,7 @@ pub(crate) struct CFamilyValueCtx<'a, E> {
 /// [`emit_binop_expr`]).
 #[must_use]
 pub(crate) fn emit_binop(op: FirBinOp) -> &'static str {
-    match op {
-        FirBinOp::Add => "+",
-        FirBinOp::Sub => "-",
-        FirBinOp::Mul => "*",
-        FirBinOp::Div => "/",
-        FirBinOp::Rem => "%",
-        FirBinOp::And => "&",
-        FirBinOp::Or => "|",
-        FirBinOp::Xor => "^",
-        FirBinOp::Lsh => "<<",
-        FirBinOp::ARsh => ">>",
-        FirBinOp::LRsh => ">>",
-        FirBinOp::Eq => "==",
-        FirBinOp::Ne => "!=",
-        FirBinOp::Lt => "<",
-        FirBinOp::Le => "<=",
-        FirBinOp::Gt => ">",
-        FirBinOp::Ge => ">=",
-    }
+    super::textual::c_like_token(op)
 }
 
 /// Renders one FIR binary operator expression as a parenthesized C-family
@@ -506,22 +490,18 @@ pub(crate) fn emit_type(typ: &FirType, syntax: &CFamilySyntax, quad: &str, fixed
 /// `0.0f` for a constant folded to `-0.0`.
 #[must_use]
 pub(crate) fn trim_float(value: f64) -> String {
-    if value.is_nan() {
-        return "NAN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-INFINITY".to_owned()
-        } else {
-            "INFINITY".to_owned()
-        };
-    }
-    let mut s = format!("{value}");
-    if !s.contains(['.', 'e', 'E']) {
-        s.push_str(".0");
-    }
-    if s == "-0.0" { "0.0".to_owned() } else { s }
+    C_FAMILY_REAL.format(value)
 }
+
+/// The C/C++ spelling of a real literal: `<math.h>`'s `NAN`/`INFINITY`,
+/// shortest digits, folded negative zero written `0.0` (upstream parity).
+pub(crate) const C_FAMILY_REAL: RealSpelling = RealSpelling {
+    nan: "NAN",
+    pos_inf: "INFINITY",
+    neg_inf: "-INFINITY",
+    digits: Digits::Shortest,
+    negative_zero: NegativeZero::Normalize,
+};
 
 /// Formats one single-precision value as a C-family `float` literal
 /// (`{value}f`), delegating special values to [`trim_float`] unsuffixed.
@@ -541,18 +521,7 @@ pub(crate) fn format_float32(value: f64) -> String {
 /// reach the emitter.
 #[must_use]
 pub(crate) fn string_literal(input: &str) -> String {
-    let escaped = input
-        .chars()
-        .flat_map(|c| match c {
-            '\\' => "\\\\".chars().collect::<Vec<_>>(),
-            '"' => "\\\"".chars().collect::<Vec<_>>(),
-            '\n' => "\\n".chars().collect::<Vec<_>>(),
-            '\r' => "\\r".chars().collect::<Vec<_>>(),
-            '\t' => "\\t".chars().collect::<Vec<_>>(),
-            _ => vec![c],
-        })
-        .collect::<String>();
-    format!("\"{escaped}\"")
+    quoted_string(input, StringDialect::C)
 }
 
 /// Emits `DeclareTable(AccessType::Static)` nodes as static const arrays with
@@ -616,6 +585,120 @@ pub(crate) fn emit_static_tables<E>(
         }
     }
     Ok(())
+}
+
+/// Emits the static declarations of a `-mem0` module.
+///
+/// Under `-mem0` a generated table is not a static array but a pointer the
+/// host allocator fills (`static float* ftbl0 = NULL;`), and anything other
+/// than a table, a pointer slot or a `NullStatement` is refused: the
+/// allocation plan only knows those. `unsupported` builds the caller's error
+/// for the refused node.
+pub(crate) fn emit_static_tables_mem0<E>(
+    store: &FirStore,
+    out: &mut String,
+    syntax: &CFamilySyntax,
+    block: FirId,
+    render_type: impl Fn(&FirType) -> String,
+    mut render_value: impl FnMut(FirId) -> Result<String, E>,
+    unsupported: impl FnOnce(FirId, String) -> E,
+) -> Result<(), E> {
+    let FirMatch::Block(items) = match_fir(store, block) else {
+        return Ok(());
+    };
+    for item in items {
+        if let FirMatch::DeclareVar {
+            name,
+            typ: FirType::Array(elem, _),
+            access: AccessType::Static,
+            init: None,
+        } = match_fir(store, item)
+        {
+            let _ = writeln!(
+                out,
+                "static {}* {name} = {};",
+                render_type(&elem),
+                syntax.null_value
+            );
+            continue;
+        }
+        match match_fir(store, item) {
+            FirMatch::DeclareTable {
+                name,
+                elem_type,
+                values,
+                ..
+            } => {
+                let rendered = values
+                    .iter()
+                    .map(|value| render_value(*value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let _ = writeln!(
+                    out,
+                    "{} {} {name}[{}] = {{{}}};",
+                    syntax.static_table_keywords,
+                    render_type(&elem_type),
+                    values.len(),
+                    rendered.join(", ")
+                );
+            }
+            FirMatch::NullStatement => {}
+            other => {
+                return Err(unsupported(
+                    item,
+                    format!("unsupported static declaration in mem0: {other:?}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Renders a C/C++ declarator: `<base type> <name><array suffix>`.
+///
+/// C array bounds are part of the declarator, not the type prefix (`float
+/// buf[8];`, not `float[8] buf;`), so an array-typed declaration peels the
+/// bracketed suffixes off before rendering the element type.
+pub(crate) fn emit_named_type(
+    typ: &FirType,
+    name: &str,
+    syntax: &CFamilySyntax,
+    quad: &str,
+    fixed: &str,
+) -> String {
+    let mut suffix = String::new();
+    let mut base = typ;
+    while let FirType::Array(inner, size) = base {
+        let _ = write!(suffix, "[{size}]");
+        base = inner;
+    }
+    format!("{} {name}{suffix}", emit_type(base, syntax, quad, fixed))
+}
+
+/// Returns the `(variable, sub-module)` pairs allocated inside one block.
+///
+/// The FIR carries the allocation but not the release: freeing is bound to how
+/// each language allocates, and upstream itself skips it for Rust, Julia and
+/// AssemblyScript. C pairs `calloc` with `free`, C++ emits `delete<Sub>(sigN)`,
+/// once the fill has run.
+pub(crate) fn allocated_sub_containers(store: &FirStore, block: FirId) -> Vec<(String, String)> {
+    let FirMatch::Block(items) = match_fir(store, block) else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter_map(|item| match match_fir(store, item) {
+            FirMatch::DeclareVar {
+                name,
+                init: Some(init),
+                ..
+            } => match match_fir(store, init) {
+                FirMatch::NewDsp { name: sub, .. } => Some((name, sub)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Emits the FIR value arms shared verbatim (modulo [`CFamilyValueCtx`]

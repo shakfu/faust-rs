@@ -26,6 +26,12 @@
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
+use crate::backends::module_view::{
+    SkeletonCodes, SubModuleView, block_declares_var, block_stores_var, collect_defined_functions,
+    decode_module, find_function_body, invalid_section, is_empty_block,
+    is_receiver_lifecycle_method, is_sub_module_method, section_items, sub_module_views,
+    unsupported_node,
+};
 use fir::{FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir};
 
 use crate::backends::c_family::{self, CFamilySyntax, EmitMode};
@@ -154,27 +160,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::UnsupportedNode;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded FIR module header used by the text emitter.
-///
-/// Like the C backend equivalent, this is a short-lived view whose ids still
-/// point back into the FIR store for actual section emission.
-#[derive(Debug, Clone)]
-struct ModuleView {
-    name: String,
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-    static_decls: FirId,
-    sub_modules: FirId,
-}
 
 /// Borrowed function declaration view used while stitching the C++ class body.
 ///
@@ -224,7 +220,12 @@ fn generate_cpp_module_step(
     let module_name = module.name.clone();
     let effective_options = options.clone();
     let metadata_name = options.metadata_name.as_deref().unwrap_or(&module_name);
-    let declared_functions = collect_module_function_names(store, module.functions)?;
+    // Definitions only: a prototype of a lifecycle function does not displace
+    // the stub synthesized for it (c, rust and julia already did so).
+    let declared_functions: Vec<String> = collect_defined_functions(store, module.functions)?
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
     let has_sample_rate_field = block_declares_var(store, module.dsp_struct, "fSampleRate")
         || block_declares_var(store, module.globals, "fSampleRate");
     let class_name = options
@@ -255,6 +256,7 @@ fn generate_cpp_module_step(
         &mut out,
         class_name,
         metadata_name,
+        &options.metadata_entries,
         options.compile_options.as_deref(),
         &crate::backends::c_family::ForeignDependencies::of(store, module_id),
     );
@@ -320,13 +322,13 @@ fn generate_cpp_module_step(
         store,
         module.dsp_struct,
         module.globals,
-        |section| invalid_struct_section(store, section),
+        |section| invalid_section("struct", section, store),
     )?;
     let table_inits = c_family::collect_table_initializers(
         store,
         module.dsp_struct,
         module.globals,
-        |section| invalid_struct_section(store, section),
+        |section| invalid_section("struct", section, store),
     )?;
     emit_dsp_contract_methods(
         store,
@@ -374,19 +376,6 @@ fn generate_cpp_module_step(
     let _ = writeln!(out);
     let _ = writeln!(out, "#endif");
     Ok(out)
-}
-
-/// Builds this backend's stable error for a malformed state section, used by
-/// the shared initializer collectors.
-fn invalid_struct_section(store: &FirStore, section: FirId) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::InvalidModuleSection,
-        format!(
-            "struct section must be a FIR block, got {:?} at node {}",
-            match_fir(store, section),
-            section.as_u32()
-        ),
-    )
 }
 
 /// Inputs for [`emit_dsp_contract_methods`], grouped like the C backend's
@@ -501,7 +490,7 @@ fn emit_dsp_contract_methods(
                 static_init_body,
                 indent + 2,
             )?;
-            for (var, sub) in allocated_sub_containers(store, static_init_body) {
+            for (var, sub) in c_family::allocated_sub_containers(store, static_init_body) {
                 let _ = writeln!(out, "{tab}        delete{sub}({var});");
             }
         } else {
@@ -533,7 +522,7 @@ fn emit_dsp_contract_methods(
                 static_init_body,
                 indent + 1,
             )?;
-            for (var, sub) in allocated_sub_containers(store, static_init_body) {
+            for (var, sub) in c_family::allocated_sub_containers(store, static_init_body) {
                 let _ = writeln!(out, "{tab}    delete{sub}({var});");
             }
         } else {
@@ -1015,31 +1004,6 @@ fn mem0_class_tables(analysis: &Mem0Analysis) -> Vec<&MemoryZone> {
         .collect()
 }
 
-/// Collects declared function names to decide which DSP API stubs to synthesize.
-fn collect_module_function_names(
-    store: &FirStore,
-    functions: FirId,
-) -> Result<Vec<String>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "section 'functions' must be a FIR block, got {:?} at node {}",
-                match_fir(store, functions),
-                functions.as_u32()
-            ),
-        ));
-    };
-
-    let mut names = Vec::new();
-    for item in items {
-        if let FirMatch::DeclareFun { name, .. } = match_fir(store, item) {
-            names.push(name);
-        }
-    }
-    Ok(names)
-}
-
 /// The headers the C++ prelude always includes.
 const CPP_PRELUDE_HEADERS: &[&str] = &[
     "<algorithm>",
@@ -1056,27 +1020,15 @@ fn emit_cpp_header(
     out: &mut String,
     class_name: &str,
     module_name: &str,
+    metadata_entries: &[(String, String)],
     compile_options: Option<&str>,
     dependencies: &crate::backends::c_family::ForeignDependencies,
 ) {
-    let _ = writeln!(
+    crate::backends::literals::faust_banner(
         out,
-        "/* ------------------------------------------------------------"
-    );
-    let _ = writeln!(out, "name: {}", cpp_string_literal(module_name));
-    let _ = writeln!(
-        out,
-        "Code generated with Faust {} (https://faust.grame.fr)",
-        crate::VERSION
-    );
-    let _ = writeln!(
-        out,
-        "Compilation options: {}",
-        compile_options.unwrap_or("-lang cpp")
-    );
-    let _ = writeln!(
-        out,
-        "------------------------------------------------------------ */"
+        Some(module_name),
+        metadata_entries,
+        compile_options.unwrap_or("-lang cpp"),
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "#ifndef  __{class_name}_H__");
@@ -1141,16 +1093,7 @@ fn emit_section(
     section_id: FirId,
     externalize_mem0_arrays: bool,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, section_id) else {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "section '{section_name}' must be a FIR block, got {:?} at node {}",
-                match_fir(store, section_id),
-                section_id.as_u32()
-            ),
-        ));
-    };
+    let items = section_items(section_name, section_id, store)?;
 
     for item in items {
         // Prototypes, dependencies and foreign variables are not members: the
@@ -1355,22 +1298,15 @@ fn emit_stmt_with_mode(
                         cpp_string_literal(&value)
                     );
                 }
+                // `Meta::declare(key, value)` has no zone: a zone is a UI
+                // notion.
                 EmitMode::Default | EmitMode::Metadata | EmitMode::Compute => {
-                    if var == "0" {
-                        let _ = writeln!(
-                            out,
-                            "{tab}m->declare({}, {});",
-                            cpp_string_literal(&key),
-                            cpp_string_literal(&value)
-                        );
-                    } else {
-                        let _ = writeln!(
-                            out,
-                            "{tab}m->declare(&{var}, {}, {});",
-                            cpp_string_literal(&key),
-                            cpp_string_literal(&value)
-                        );
-                    }
+                    let _ = writeln!(
+                        out,
+                        "{tab}m->declare({}, {});",
+                        cpp_string_literal(&key),
+                        cpp_string_literal(&value)
+                    );
                 }
             }
             Ok(())
@@ -1411,79 +1347,6 @@ fn emit_block_with_mode(
     Ok(())
 }
 
-/// Returns `true` when `block` declares a variable named `name`.
-fn block_declares_var(store: &FirStore, block: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::DeclareVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Returns `true` when `block` stores to a variable named `name`.
-fn block_stores_var(store: &FirStore, block: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::StoreVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Returns `true` for a generated sub-container entry point.
-///
-/// These are emitted as methods of the sub-container class, so their explicit
-/// `dsp` receiver argument is stripped exactly as for the DSP API methods.
-fn is_sub_module_method(name: &str) -> bool {
-    name.starts_with("instanceInit") && name != "instanceInit"
-        || name.starts_with("fill") && name != "fill"
-}
-
-/// Returns the `(variable, sub-module)` pairs allocated inside one block.
-///
-/// The FIR carries the allocation but not the release: freeing is bound to how
-/// each language allocates, and upstream itself skips it for Rust, Julia and
-/// AssemblyScript. C++ emits `delete<Sub>(sigN)` once the fill has run.
-fn allocated_sub_containers(store: &FirStore, block: FirId) -> Vec<(String, String)> {
-    let FirMatch::Block(items) = match_fir(store, block) else {
-        return Vec::new();
-    };
-    items
-        .into_iter()
-        .filter_map(|item| match match_fir(store, item) {
-            FirMatch::DeclareVar {
-                name,
-                init: Some(init),
-                ..
-            } => match match_fir(store, init) {
-                FirMatch::NewDsp { name: sub, .. } => Some((name, sub)),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
-/// Returns the body of the named function declared by a module, if any.
-fn find_function_body(store: &FirStore, functions: FirId, wanted: &str) -> Option<FirId> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return None;
-    };
-    items
-        .into_iter()
-        .find_map(|item| match match_fir(store, item) {
-            FirMatch::DeclareFun { name, body, .. } if name == wanted => body,
-            _ => None,
-        })
-}
-
 /// Emits every generated-table sub-container as a nested class.
 ///
 /// C++ parity: `generateSigGen` / `generateStaticSigGen` produce a
@@ -1502,11 +1365,8 @@ fn emit_sub_modules(
     module_name: &str,
     sub_modules: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, sub_modules) else {
-        return Ok(());
-    };
-    for item in items {
-        let FirMatch::SubModule {
+    for sub in sub_module_views(store, sub_modules)? {
+        let SubModuleView {
             name,
             dsp_struct,
             static_decls,
@@ -1514,13 +1374,7 @@ fn emit_sub_modules(
             functions,
             sub_modules: nested,
             ..
-        } = match_fir(store, item)
-        else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidModuleSection,
-                format!("sub_modules holds a non-SubModule node {}", item.as_u32()),
-            ));
-        };
+        } = sub;
 
         emit_sub_modules(store, out, options, module_name, nested)?;
         emit_static_tables(store, out, options, static_decls)?;
@@ -1634,7 +1488,8 @@ fn emit_declare_fun(
         .map_err(|msg| CodegenError::new(CodegenErrorCode::InvalidModuleSection, msg))?;
     let tab = "    ".repeat(indent);
     let mut params_override: Option<String> = None;
-    let strip_explicit_dsp_arg = (is_dsp_api_method(decl.name) || is_sub_module_method(decl.name))
+    let strip_explicit_dsp_arg = (is_receiver_lifecycle_method(decl.name)
+        || is_sub_module_method(decl.name))
         && matches!(decl.named_args.first(), Some(named) if named.name == "dsp")
         && matches!(
             decl.typ,
@@ -1679,7 +1534,7 @@ fn emit_declare_fun(
     if let Some(override_params) = params_override {
         params = override_params;
     }
-    let is_dsp_api = is_dsp_api_method(decl.name);
+    let is_dsp_api = is_receiver_lifecycle_method(decl.name);
     // The pinned reference emits `void control()` as a plain method but
     // `frame`/`compute` as virtual (cpp_code_container.cpp at 8eebea429).
     let method_prefix = if is_dsp_api && decl.name != "control" {
@@ -1688,8 +1543,12 @@ fn emit_declare_fun(
         ""
     };
     let inline = if decl.is_inline { "inline " } else { "" };
-    // Prototype-only (no body): emit a forward declaration / pure-virtual signature.
+    // Prototype-only (no body): emit a forward declaration, except for a
+    // lifecycle method, whose stub is synthesized and would be declared twice.
     let Some(body) = decl.body else {
+        if is_dsp_api {
+            return Ok(());
+        }
         let _ = writeln!(
             out,
             "{tab}{inline}{method_prefix}{ret} {}({params});",
@@ -1707,7 +1566,7 @@ fn emit_declare_fun(
             let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
         }
         emit_block(store, out, options, module_name, body, indent + 1)?;
-        for (var, sub) in allocated_sub_containers(store, body) {
+        for (var, sub) in c_family::allocated_sub_containers(store, body) {
             let _ = writeln!(out, "{tab}    delete{sub}({var});");
         }
     } else if decl.name == "compute" {
@@ -1784,29 +1643,6 @@ fn emit_compute_body(
     emit_block_with_mode(store, out, options, "", body, indent, &mut mode)
 }
 
-/// Returns `true` when `name` belongs to the canonical Faust DSP API surface.
-fn is_dsp_api_method(name: &str) -> bool {
-    matches!(
-        name,
-        "metadata"
-            | "instanceConstants"
-            | "instanceResetUserInterface"
-            | "instanceClear"
-            | "buildUserInterface"
-            | "compute"
-            | "control"
-            | "frame"
-    )
-}
-
-/// Returns `true` when `body` is an empty FIR block.
-fn is_empty_block(store: &FirStore, body: FirId) -> bool {
-    match match_fir(store, body) {
-        FirMatch::Block(items) => items.is_empty(),
-        _ => false,
-    }
-}
-
 /// Emits one FIR value expression into a C++ expression string.
 /// Renders a variable reference in C++ method context: bare `name`, because
 /// struct state is reachable through the implicit `this`.
@@ -1874,30 +1710,15 @@ fn emit_value(
     }
 }
 
-/// Renders a C++ declarator: `<base type> <name><array suffix>`.
-///
-/// C array bounds are part of the declarator, not the type prefix (`float
-/// buf[8];`, not `float[8] buf;`), so this cannot reuse [`emit_type`]
-/// directly for array-typed declarations; it defers to
-/// [`emit_type_base_and_suffix`] to peel the bracketed suffix off first.
+/// Renders a declarator through the shared [`c_family::emit_named_type`].
 fn emit_named_type(typ: &FirType, name: &str, options: &CppOptions) -> String {
-    let mut suffix = String::new();
-    let base = emit_type_base_and_suffix(typ, options, &mut suffix);
-    format!("{base} {name}{suffix}")
-}
-
-/// Recursively splits an array type into its element base type and the
-/// accumulated `[size]...` declarator suffix, appending to `suffix` for each
-/// nested array dimension. Non-array types are rendered directly via
-/// [`emit_type`] with an untouched (typically empty) `suffix`.
-fn emit_type_base_and_suffix(typ: &FirType, options: &CppOptions, suffix: &mut String) -> String {
-    match typ {
-        FirType::Array(inner, size) => {
-            suffix.push_str(&format!("[{size}]"));
-            emit_type_base_and_suffix(inner, options, suffix)
-        }
-        _ => emit_type(typ, options),
-    }
+    c_family::emit_named_type(
+        typ,
+        name,
+        &SYNTAX,
+        &options.quad_type_name,
+        &options.fixed_type_name,
+    )
 }
 
 /// Maps bare FIR math names to the appropriate C++ symbol spelling.
@@ -1906,6 +1727,10 @@ fn emit_cpp_fun_name(name: &str) -> String {
         return name.to_owned();
     }
     match name {
+        // Explicit C float symbols keep their precision even when a foreign
+        // declaration supplies double operands. The FIR aliases must not
+        // turn these into the overloaded double std::pow/std::rint calls.
+        "powf" | "rintf" => return name.to_owned(),
         "abs" => return "std::abs".to_owned(),
         "min_i" => return "std::min<int>".to_owned(),
         "max_i" => return "std::max<int>".to_owned(),
@@ -1930,19 +1755,6 @@ fn emit_type(typ: &FirType, options: &CppOptions) -> String {
         &options.quad_type_name,
         &options.fixed_type_name,
     )
-}
-
-/// Builds a stable unsupported-node diagnostic for the C++ emitter.
-fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::UnsupportedNode,
-        format!(
-            "unsupported FIR {kind} node {:?} at {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
-    )
-    .at_node(node)
 }
 
 /// Formats a floating-point literal with stable C++ syntax.
@@ -1987,54 +1799,17 @@ fn emit_static_tables(
     block: FirId,
 ) -> Result<(), CodegenError> {
     if options.memory_manager_mode.is_mem0() {
-        let FirMatch::Block(items) = match_fir(store, block) else {
-            return Ok(());
-        };
-        for item in items {
-            if let FirMatch::DeclareVar {
-                name,
-                typ: FirType::Array(elem, _),
-                access: fir::AccessType::Static,
-                init: None,
-            } = match_fir(store, item)
-            {
-                let _ = writeln!(
-                    out,
-                    "static {}* {name} = nullptr;",
-                    emit_type(&elem, options)
-                );
-                continue;
-            }
-            match match_fir(store, item) {
-                FirMatch::DeclareTable {
-                    name,
-                    elem_type,
-                    values,
-                    ..
-                } => {
-                    let rendered = values
-                        .iter()
-                        .map(|value| emit_value(store, options, *value))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let _ = writeln!(
-                        out,
-                        "const static {} {name}[{}] = {{{}}};",
-                        emit_type(&elem_type, options),
-                        values.len(),
-                        rendered.join(", ")
-                    );
-                }
-                FirMatch::NullStatement => {}
-                other => {
-                    return Err(CodegenError::new(
-                        CodegenErrorCode::InvalidModuleSection,
-                        format!("unsupported static declaration in mem0: {other:?}"),
-                    )
-                    .at_node(item));
-                }
-            }
-        }
-        return Ok(());
+        return c_family::emit_static_tables_mem0(
+            store,
+            out,
+            &SYNTAX,
+            block,
+            |typ| emit_type(typ, options),
+            |value| emit_value(store, options, value),
+            |node, message| {
+                CodegenError::new(CodegenErrorCode::InvalidModuleSection, message).at_node(node)
+            },
+        );
     }
     c_family::emit_static_tables(
         store,
@@ -2047,39 +1822,6 @@ fn emit_static_tables(
     )
 }
 
-/// Decodes the FIR module header expected by the C++ emitter.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    match match_fir(store, module) {
-        FirMatch::Module {
-            num_inputs,
-            num_outputs,
-            name,
-            dsp_struct,
-            globals,
-            functions,
-            static_decls,
-            sub_modules,
-        } => Ok(ModuleView {
-            name,
-            dsp_struct,
-            globals,
-            functions,
-            num_inputs,
-            num_outputs,
-            static_decls,
-            sub_modules,
-        }),
-        _ => Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!(
-                "expected FIR module root, got {:?} at node {}",
-                match_fir(store, module),
-                module.as_u32()
-            ),
-        )),
-    }
-}
-
 #[must_use]
 /// Returns the stable backend identifier (`"cpp"`).
 pub fn backend_id() -> &'static str {
@@ -2090,6 +1832,33 @@ pub fn backend_id() -> &'static str {
 mod tests {
     use super::*;
     use fir::{FirBinOp, FirBuilder};
+
+    #[test]
+    fn float_math_symbols_keep_host_precision_with_double_operands() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let base = b.float64(25.0);
+        let exponent = b.float64(6.0);
+        let single = b.fun_call("powf", &[base, exponent], FirType::Float64);
+        let double = b.math_call(FirMathOp::Pow, &[base, exponent], FirType::Float64);
+        let rounded = b.fun_call("rintf", &[base], FirType::Float64);
+        let options = CppOptions::default();
+        assert!(
+            emit_value(&store, &options, single)
+                .unwrap()
+                .starts_with("powf(")
+        );
+        assert!(
+            emit_value(&store, &options, double)
+                .unwrap()
+                .starts_with("std::pow(")
+        );
+        assert!(
+            emit_value(&store, &options, rounded)
+                .unwrap()
+                .starts_with("rintf(")
+        );
+    }
 
     #[test]
     /// DRIFT 3 regression (C-family plan §2.3): a constant folded to `-0.0`

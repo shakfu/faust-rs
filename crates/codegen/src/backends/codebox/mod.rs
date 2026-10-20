@@ -34,10 +34,16 @@
 
 pub mod eval;
 
+use crate::backends::literals::{Digits, NegativeZero, RealSpelling};
+use crate::backends::textual::c_like_token_with_logical_shift as emit_binop;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
+use crate::backends::module_view::{
+    ModuleView, SkeletonCodes, block_items, decode_module, find_function_body, is_dsp_api_method,
+    surviving_sub_modules,
+};
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
 /// Suffix appended to every emitted identifier, because codebox rejects
@@ -76,6 +82,8 @@ pub enum CodegenErrorCode {
     RootNotModule,
     /// A construct codebox cannot express.
     Unsupported,
+    /// A module section has the wrong FIR shape.
+    InvalidModuleSection,
 }
 
 impl CodegenErrorCode {
@@ -85,6 +93,7 @@ impl CodegenErrorCode {
         match self {
             Self::RootNotModule => "FRS-CGEN-CBOX-0001",
             Self::Unsupported => "FRS-CGEN-CBOX-0002",
+            Self::InvalidModuleSection => "FRS-CGEN-CBOX-0003",
         }
     }
 }
@@ -95,22 +104,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::Unsupported;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded FIR module root.
-struct ModuleView {
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-    /// File-scope table declarations; emitted as per-processor `@state`.
-    static_decls: FirId,
-}
 
 /// Where a declaration is being emitted, which decides `@state` versus `let`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,11 +172,23 @@ fn generate_codebox_module_step(
         })
         .transpose()?;
     let (store, module) = flattened.as_ref().map_or((store, module), |(s, m)| (s, *m));
+    // Flattening removes every sub-module; a survivor would be a table this
+    // backend declares and nothing fills, which reads as zeros. wasm,
+    // interp and cranelift already refuse it.
+    if let Some(message) = surviving_sub_modules(store, module) {
+        return Err(
+            CodegenError::new(CodegenErrorCode::InvalidModuleSection, message).at_node(module),
+        );
+    }
 
     let view = decode_module(store, module)?;
     let mut out = String::new();
 
-    let _ = writeln!(out, "// Code generated with faust-rs {}", crate::VERSION);
+    let _ = writeln!(
+        out,
+        "// Code generated with Faust version {}",
+        crate::VERSION
+    );
     let _ = writeln!(
         out,
         "// Compilation options: {}",
@@ -843,8 +859,16 @@ fn emit_stmt(
             Ok(())
         }
 
-        // A dropped value has no effect codebox can express.
-        FirMatch::Drop(_) => Ok(()),
+        // A dropped value is evaluated for its effect: a foreign call must
+        // still run. Only a null value has nothing to evaluate.
+        FirMatch::Drop(value) => {
+            if matches!(match_fir(store, value), FirMatch::NullValue { .. }) {
+                return Ok(());
+            }
+            let value = emit_value(store, options, value)?;
+            let _ = writeln!(out, "{tab}{value};");
+            Ok(())
+        }
 
         FirMatch::AddSoundfile { label, .. } => Err(CodegenError::new(
             CodegenErrorCode::Unsupported,
@@ -916,27 +940,6 @@ fn emit_declare_fun(
     emit_stmt_or_block(store, out, options, body, indent + 1, Phase::Body)?;
     let _ = writeln!(out, "{tab}}}");
     Ok(())
-}
-
-/// Whether `name` is a DSP API method the section emitters re-shape themselves.
-fn is_dsp_api_method(name: &str) -> bool {
-    const METHODS: [&str; 14] = [
-        "metadata",
-        "getNumInputs",
-        "getNumOutputs",
-        "getSampleRate",
-        "classInit",
-        "instanceConstants",
-        "instanceResetUserInterface",
-        "instanceClear",
-        "instanceInit",
-        "init",
-        "buildUserInterface",
-        "control",
-        "frame",
-        "compute",
-    ];
-    METHODS.contains(&name)
 }
 
 /// Emits one value expression.
@@ -1088,8 +1091,10 @@ fn integer_helper(op: FirBinOp) -> Option<&'static str> {
 fn map_math_name(name: &str) -> &str {
     match name {
         "fabsf" | "fabs" | "fabsl" | "abs" => "abs",
-        "max_i" | "max_f" | "max_" | "max_l" => "max",
-        "min_i" | "min_f" | "min_" | "min_l" => "min",
+        // `fmin`/`fmax` are the canonical FIR names of a real `min`/`max`
+        // (`FirMathOp::{Min, Max}`); codebox has only the untyped pair.
+        "fmaxf" | "fmax" | "max_i" | "max_f" | "max_" | "max_l" => "max",
+        "fminf" | "fmin" | "min_i" | "min_f" | "min_" | "min_l" => "min",
         "fmodf" | "fmod" | "fmodl" => "safemod",
         "acosf" | "acos" => "acos",
         "asinf" | "asin" => "asin",
@@ -1122,31 +1127,6 @@ fn map_math_name(name: &str) -> &str {
     }
 }
 
-/// Maps a FIR binary operator to its infix codebox spelling.
-///
-/// Integer `+`, `*` and `%` never reach here: [`integer_helper`] intercepts
-/// them, because codebox's infix operators work on `number` and would not wrap.
-fn emit_binop(op: FirBinOp) -> &'static str {
-    match op {
-        FirBinOp::Add => "+",
-        FirBinOp::Sub => "-",
-        FirBinOp::Mul => "*",
-        FirBinOp::Div => "/",
-        FirBinOp::Rem => "%",
-        FirBinOp::Lsh => "<<",
-        FirBinOp::ARsh | FirBinOp::LRsh => ">>",
-        FirBinOp::Gt => ">",
-        FirBinOp::Lt => "<",
-        FirBinOp::Ge => ">=",
-        FirBinOp::Le => "<=",
-        FirBinOp::Eq => "==",
-        FirBinOp::Ne => "!=",
-        FirBinOp::And => "&",
-        FirBinOp::Or => "|",
-        FirBinOp::Xor => "^",
-    }
-}
-
 /// Maps a FIR type to its codebox annotation.
 ///
 /// Codebox has two: `Int` and `number`. Everything else collapses onto
@@ -1167,85 +1147,23 @@ fn emit_type(typ: &FirType) -> &'static str {
 /// number after the compiler narrows it, but unreadable, and it would drown a
 /// by-eye comparison against the reference in noise.
 fn float_literal(value: f64, options: &CodeboxOptions) -> String {
-    let mut text = if options.double_precision {
-        format_finite(value)
+    if options.double_precision {
+        CODEBOX_REAL.format(value)
     } else {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "single precision emits f32 literals by definition"
-        )]
-        let narrowed = value as f32;
-        // `f32`'s own Display gives the shortest text that round-trips as f32,
-        // which is why the narrowing has to happen before formatting rather
-        // than after.
-        if narrowed.is_finite() && narrowed == narrowed.trunc() {
-            format!("{narrowed:.1}")
-        } else {
-            format!("{narrowed}")
-        }
-    };
-    if !options.double_precision {
-        text.push('f');
-    }
-    text
-}
-
-/// Renders a number with a decimal point, so codebox reads it as a float.
-fn format_finite(value: f64) -> String {
-    if value.is_finite() && value == value.trunc() {
-        format!("{value:.1}")
-    } else {
-        format!("{value}")
+        format!("{}f", CODEBOX_REAL.format_narrowed(value))
     }
 }
 
-/// Returns the items of a FIR block, or an empty list for anything else.
-fn block_items(store: &FirStore, block: FirId) -> Vec<FirId> {
-    match match_fir(store, block) {
-        FirMatch::Block(items) => items,
-        _ => Vec::new(),
-    }
-}
-
-/// Finds the body of a named function declaration.
-fn find_function_body(store: &FirStore, functions: FirId, wanted: &str) -> Option<FirId> {
-    block_items(store, functions)
-        .into_iter()
-        .find_map(|item| match match_fir(store, item) {
-            FirMatch::DeclareFun {
-                name,
-                body: Some(body),
-                ..
-            } if name == wanted => Some(body),
-            _ => None,
-        })
-}
-
-/// Decodes the FIR module root.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    match match_fir(store, module) {
-        FirMatch::Module {
-            num_inputs,
-            num_outputs,
-            dsp_struct,
-            globals,
-            functions,
-            static_decls,
-            ..
-        } => Ok(ModuleView {
-            dsp_struct,
-            globals,
-            functions,
-            static_decls,
-            num_inputs,
-            num_outputs,
-        }),
-        other => Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!("expected FIR module root, got {other:?}"),
-        )),
-    }
-}
+/// Codebox spelling of a real literal: exact integral digits, a folded
+/// negative zero written `0.0`, and no special case for NaN or the infinities
+/// (Rust's own `NaN` and `inf`; codebox has no oracle for them).
+pub(crate) const CODEBOX_REAL: RealSpelling = RealSpelling {
+    nan: "NaN",
+    pos_inf: "inf",
+    neg_inf: "-inf",
+    digits: Digits::ExactIntegral,
+    negative_zero: NegativeZero::Normalize,
+};
 
 /// Stable backend identifier, kept for tooling and report wiring.
 pub const BACKEND_NAME: &str = "codebox";

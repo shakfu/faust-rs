@@ -8,8 +8,9 @@
 //! # Role
 //! - Reconstruct backend-agnostic Faust JSON payloads from canonical FIR
 //!   `metadata` and `buildUserInterface` bodies.
-//! - Keep the JSON description separate from any single backend so it can be
-//!   reused by a future global `-json` CLI path and by backends such as WASM.
+//! - Keep the JSON description separate from any single backend: it is shared
+//!   by the `-json` CLI path, the WASM backend, and the `cranelift-ffi` /
+//!   `interp-ffi` factories.
 
 use std::fmt::Write as _;
 
@@ -301,7 +302,10 @@ pub fn build_json_description_from_fir<F>(
 where
     F: FnMut(&str) -> Option<u32>,
 {
-    let metadata = parse_metadata(store, find_function_body(store, function_items, "metadata"))?;
+    let metadata = parse_metadata(
+        store,
+        crate::backends::module_view::function_body(store, function_items, "metadata"),
+    )?;
     let merged_meta = merge_top_level_and_fir_meta(options.top_level_meta, metadata.entries);
     let declared_name = merged_meta
         .iter()
@@ -332,7 +336,11 @@ where
         ui: {
             let mut ui = parse_ui(
                 store,
-                find_function_body(store, function_items, "buildUserInterface"),
+                crate::backends::module_view::function_body(
+                    store,
+                    function_items,
+                    "buildUserInterface",
+                ),
                 &mut resolve_index,
             )?;
             assign_short_names(&mut ui);
@@ -387,19 +395,7 @@ fn apply_short_names(
 /// This intentionally only covers the characters needed by the Faust JSON
 /// payloads generated here; it is not exposed as a general-purpose serializer.
 pub fn escape_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
+    crate::backends::literals::escape_string(input, crate::backends::literals::StringDialect::Json)
 }
 
 /// Merge compiler-supplied top-level metadata with metadata reconstructed from
@@ -1236,8 +1232,8 @@ where
 
 /// Build one JSON widget payload from a FIR UI leaf.
 ///
-/// The runtime `address` is derived from the current group stack plus the
-/// widget label, matching the public Faust JSON UI convention. `varname` keeps
+/// The runtime `address` is the C++ `PathBuilder` path of the current group
+/// stack plus the widget label, matching the public Faust JSON UI convention. `varname` keeps
 /// the lowered FIR symbol used for backend-specific index resolution.
 #[allow(clippy::too_many_arguments)]
 fn build_widget<F>(
@@ -1254,13 +1250,11 @@ where
     F: FnMut(&str) -> Option<u32>,
 {
     let index = resolve_index(&var);
-    let mut address = String::new();
-    for segment in path_stack {
-        address.push('/');
-        address.push_str(segment);
-    }
-    address.push('/');
-    address.push_str(&label);
+    // C++ `PathBuilder::buildPath`, as `JSONUI` builds it: the label keeps
+    // its spelling, the address has the OSC-awkward characters replaced
+    // (`/my_group/my_gain__dB_`). The facade and faustprobe address controls
+    // by the same function, so the JSON and `set_param_value` agree.
+    let address = crate::shortname::build_path(path_stack, &label);
     Ok(JsonWidget {
         typ,
         // Filled by `assign_short_names` once every address is known.
@@ -1273,25 +1267,6 @@ where
         range,
         soundfile_url,
     })
-}
-
-/// Find the body of one named helper function in the lowered FIR item list.
-///
-/// The JSON builder only depends on the canonical `metadata` and
-/// `buildUserInterface` functions; missing helpers are treated as “no metadata”
-/// or “no UI” rather than as hard errors.
-fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) -> Option<FirId> {
-    function_items
-        .iter()
-        .copied()
-        .find_map(|id| match match_fir(store, id) {
-            FirMatch::DeclareFun {
-                name: ref fun_name,
-                body: Some(body),
-                ..
-            } if fun_name == name => Some(body),
-            _ => None,
-        })
 }
 
 /// Map FIR UI group kinds to the JSON schema names used by Faust runtimes.

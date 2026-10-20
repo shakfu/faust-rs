@@ -2,7 +2,7 @@
 //!
 //! Defines [`NameGen`] (monotonic counters for generated variable names) and
 //! [`PlacementInfo`] (read-only placement analysis results: ref counts,
-//! boundary set, konst escapes).
+//! boundary set, konst escapes, guard-exclusive block values).
 //!
 //! Contains `SignalToFirLower::new` together with the helper methods that are
 //! used across multiple lowering concerns: sample-rate variable creation,
@@ -69,7 +69,8 @@ pub(super) struct NameGen {
     /// (`{i|f}tbl{k}`), shared by integer and real tables.
     ///
     /// C++ parity: `getTypedNames` builds `"i"|"f"` + `getFreshID("tbl")`
-    /// (`instructions_compiler.cpp:1040`), so the type letter is a prefix and
+    /// (`instructions_compiler.cpp`, `generateTable` / `generateStaticTable`),
+    /// so the type letter is a prefix and
     /// not part of the counter key: an int table followed by a real one yields
     /// `itbl0` then `ftbl1`, never two zeros.
     pub(super) tbl_counter: u32,
@@ -79,6 +80,11 @@ pub(super) struct NameGen {
     /// Allocation-ordered counter behind sub-module names (`{module}SIG{k}`,
     /// C++ `getFreshID(getClassName() + "SIG")`).
     pub(super) sub_module_counter: u32,
+    /// Monotonic counter behind the lazy block-rate values of boolean
+    /// `ondemand` guards (`{f|i}SlowOD{n}`) and their per-guard flags
+    /// (`iSlowODDone{n}`); see `clocked.rs`, "Block-rate work in a boolean
+    /// `ondemand` guard".
+    pub(super) slow_od_counter: u32,
 }
 
 /// Read-only placement analysis results, computed once before lowering begins.
@@ -98,6 +104,11 @@ pub(super) struct PlacementInfo {
     /// These hoists need persistent `Struct` storage; init-only `Konst` hoists
     /// can stay stack-local inside `instanceConstants()`.
     pub(super) konst_escapes: HashSet<SigId>,
+    /// `Block` signal nodes that only the payload of one clocked block reaches
+    /// (`placement::guard_exclusive_block_signals`): the candidates for the
+    /// lazy prologue of a boolean `ondemand` guard. Empty for programs without
+    /// clocked blocks and under external control.
+    pub(super) guard_exclusive: HashSet<SigId>,
 }
 
 impl PlacementInfo {
@@ -105,17 +116,19 @@ impl PlacementInfo {
         sig_ref_counts: HashMap<SigId, usize>,
         sig_at_boundary: HashSet<SigId>,
         konst_escapes: HashSet<SigId>,
+        guard_exclusive: HashSet<SigId>,
     ) -> Self {
         Self {
             sig_ref_counts,
             sig_at_boundary,
             konst_escapes,
+            guard_exclusive,
         }
     }
 }
 
 impl<'a> SignalToFirLower<'a> {
-    /// Creates a fresh lowering state for one [`build_module`] call.
+    /// Creates a fresh lowering state for one [`build_module`](super::build_module) call.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         arena: &'a TreeArena,
@@ -263,9 +276,9 @@ impl<'a> SignalToFirLower<'a> {
     /// recursive, or otherwise already materialized in forward storage. This
     /// method therefore performs the tape-aware loads first, then delegates
     /// only the pointwise algebra to `ad_rules`. For formulas that can reuse the
-    /// forward node output (`exp`, `sqrt`, `abs`), `sig` is loaded as `primal`
-    /// so the local transpose uses the recorded forward value rather than a
-    /// second computation.
+    /// forward node output (`exp`, `exp10`, `sqrt`, `tan`), `sig` is loaded as
+    /// `primal` so the local transpose uses the recorded forward value rather
+    /// than a second computation.
     pub(super) fn propagate_bra_unary_math_adj(
         &mut self,
         rule: RadUnaryMathRule,
@@ -279,8 +292,8 @@ impl<'a> SignalToFirLower<'a> {
         // reuse the forward output, pass the tape-loaded current node value so
         // the reverse sweep does not recompute non-trivial temporal operands.
         //
-        // `exp`, `exp10` and `sqrt` read the forward output alone (their
-        // derivative is a multiple of it), and `collect_tape_needed_values`
+        // `exp`, `exp10`, `sqrt` and `tan` read the forward output alone
+        // (their derivative is a function of it: `tan' = 1 + tan²`), and `collect_tape_needed_values`
         // tapes that output, not the operand. The operand must then not be
         // loaded at all: it is not taped, so `load_bra_fwd_value` would lower
         // it again in the reverse sweep, and an operand that holds a recursion
@@ -293,7 +306,10 @@ impl<'a> SignalToFirLower<'a> {
         // is not: `|x|` is rebuilt here from the taped operand rather than
         // loaded, for the same reason.
         let (x_fir, taped_primal) = match rule {
-            RadUnaryMathRule::Exp | RadUnaryMathRule::Exp10 | RadUnaryMathRule::Sqrt => {
+            RadUnaryMathRule::Exp
+            | RadUnaryMathRule::Exp10
+            | RadUnaryMathRule::Sqrt
+            | RadUnaryMathRule::Tan => {
                 let primal = self.load_bra_fwd_value(sig)?;
                 (primal, Some(primal))
             }
@@ -373,6 +389,42 @@ impl<'a> SignalToFirLower<'a> {
     /// beyond `instanceConstants()`.
     pub(super) fn konst_escapes(&self, sig: SigId) -> bool {
         self.placement.konst_escapes.contains(&sig)
+    }
+
+    /// Returns `true` when `node` reads a stack local declared at the top
+    /// level of `instanceConstants()`, i.e. an init-only `fConst*`/`iConst*`
+    /// of [`Self::materialize_in_bucket`].
+    ///
+    /// Such a load is trivial only inside `instanceConstants()`. An escaping
+    /// `Konst` signal lowered to one (an operation lowered to its own operand,
+    /// e.g. `pow(x, 1)` → `x`) must still be stored in a struct field, or the
+    /// local leaks into `compute()`. A stack local of any other function is
+    /// not one: copying it in `instanceConstants()` would read an undeclared
+    /// variable there. `Block` values need no counterpart: they are read in
+    /// the function that computes them, and under external control every
+    /// hoisted one is already a struct field.
+    ///
+    /// Scans the constants section; the placement gate calls it only for an
+    /// escaping `Konst` signal lowered to a stack load, which is rare.
+    pub(super) fn reads_init_local_constant(&self, node: FirId) -> bool {
+        let fir::FirMatch::LoadVar {
+            name,
+            access: AccessType::Stack,
+            ..
+        } = fir::match_fir(&self.store, node)
+        else {
+            return false;
+        };
+        self.sections.constants_statements.iter().any(|&statement| {
+            matches!(
+                fir::match_fir(&self.store, statement),
+                fir::FirMatch::DeclareVar {
+                    name: ref declared,
+                    access: AccessType::Stack,
+                    ..
+                } if *declared == name
+            )
+        })
     }
 
     /// Returns the typed prefix used for one materialized scalar value.
@@ -540,7 +592,7 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Returns the reduced prepared signal type attached to one signal node.
     ///
-    /// The fast-lane relies on the pre-FIR `signal_prepare` boundary to decide
+    /// The lowerer relies on the pre-FIR `signal_prepare` boundary to decide
     /// whether one value/state/table should stay integer or use the internal
     /// real computation type, mirroring the reduced
     /// `deBruijn2Sym -> typeAnnotation -> signalPromote` contract.

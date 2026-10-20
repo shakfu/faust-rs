@@ -18,6 +18,8 @@
 //! `FaustFloat`, `Meta`, `UI`, `ParamIndex`, and `FaustDsp`. The generated
 //! unit is therefore intended for insertion into a Faust Rust architecture,
 //! just like the C++ reference output; it does not package a private runtime.
+//! Validate contract-affecting emitter changes by building the output inside
+//! `faust2jackrust -source` / `faust2portaudiorust -source` projects (AGENTS.md).
 //!
 //! # C-semantics preservation
 //!
@@ -42,11 +44,17 @@
 //!
 //! Unsupported FIR nodes fail with `FRS-CGEN-RUST-0003`.
 
+use crate::backends::literals::{Digits, NegativeZero, RealSpelling, StringDialect, quoted_string};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
-use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
+use crate::backends::module_view::{
+    FunctionDecl as DeclareFunView, SkeletonCodes, SubModuleView, block_declares_var,
+    block_stores_var, collect_defined_functions, decode_module, is_empty_block,
+    is_sub_module_method, section_items, sub_module_views, unsupported_node,
+};
+use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
 
 use crate::backends::faust_api;
 
@@ -69,6 +77,13 @@ pub struct RustOptions {
     /// [`Self::faust_float_type`], for callers (mostly tests) that do not
     /// thread the real CLI flags through.
     pub compile_options: Option<String>,
+    /// Source-level DSP name reported in the generated banner and metadata
+    /// callback. This is independent from [`Self::class_name`].
+    pub metadata_name: Option<String>,
+    /// Source basename reported by the generated metadata callback.
+    pub metadata_filename: Option<String>,
+    /// Non-identity compilation metadata replayed by `metadata()`.
+    pub metadata_entries: Vec<(String, String)>,
 }
 
 impl Default for RustOptions {
@@ -77,19 +92,15 @@ impl Default for RustOptions {
             class_name: Some("mydsp".to_owned()),
             faust_float_type: RustRealType::Float32,
             compile_options: None,
+            metadata_name: None,
+            metadata_filename: None,
+            metadata_entries: Vec::new(),
         }
     }
 }
 
 /// Scalar precision selected for the generated `FaustFloat` alias.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RustRealType {
-    /// Single precision, matching Faust default code generation.
-    #[default]
-    Float32,
-    /// Double precision, matching Faust `-double`.
-    Float64,
-}
+pub type RustRealType = super::RealPrecision;
 
 /// Stable machine-readable error codes for the Rust backend emitter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,28 +131,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::UnsupportedNode;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded `FirMatch::Module` header used by the Rust emitter.
-///
-/// This is not a second IR. It is just a borrowed/id-based view that prevents
-/// each emission phase from re-matching the module root. All ids still point
-/// back into the original [`FirStore`] and are decoded at the point where their
-/// section is emitted.
-#[derive(Debug, Clone)]
-struct ModuleView {
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-    static_decls: FirId,
-    sub_modules: FirId,
-}
 
 /// One scalar state initializer extracted from `dsp_struct` or `globals`.
 ///
@@ -228,19 +228,6 @@ struct StateTypes {
     table_elem_types: HashMap<String, FirType>,
 }
 
-/// Body-bearing FIR function declaration normalized for textual emission.
-///
-/// Prototype-only FIR declarations are intentionally filtered out when this
-/// view is collected. Public lifecycle fallbacks should not be displaced by a
-/// declaration that has no body.
-#[derive(Debug, Clone)]
-struct DeclareFunView {
-    name: String,
-    typ: FirType,
-    named_args: Vec<NamedType>,
-    body: Option<FirId>,
-}
-
 #[must_use]
 /// Returns the stable backend identifier.
 pub fn backend_id() -> &'static str {
@@ -249,8 +236,9 @@ pub fn backend_id() -> &'static str {
 
 /// Generates Rust code from a FIR module root.
 ///
-/// The emitter expects a module produced by the transform fast lane. It emits a
-/// single Rust source unit containing:
+/// The emitter expects a module produced by `transform`'s signal→FIR lowering
+/// (`compile_signals_to_fir_fastlane`). It emits a single Rust source unit
+/// containing:
 /// - static tables,
 /// - a `pub struct` DSP state container with a `new()` constructor,
 /// - Faust lifecycle methods (`init`, `class_init`, `instance_init`, ...),
@@ -280,7 +268,7 @@ fn generate_rust_module_step(
 ) -> Result<String, CodegenError> {
     let module = decode_module(store, module)?;
     let class_name = options.class_name.as_deref().unwrap_or("mydsp").to_owned();
-    let functions = collect_module_functions(store, module.functions)?;
+    let functions = collect_defined_functions(store, module.functions)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
     let state_types = collect_state_types(
@@ -356,29 +344,23 @@ fn generate_rust_module_step(
 /// equivalent, and `rint` must preserve the C library's rounding-mode
 /// semantics rather than using Rust's fixed ties-to-even operation.
 fn emit_rust_header(out: &mut String, options: &RustOptions) {
-    let _ = writeln!(
+    // Upstream's banner, as for c and cpp.
+    let name = options
+        .metadata_name
+        .as_deref()
+        .or(options.class_name.as_deref())
+        .unwrap_or("mydsp");
+    crate::backends::literals::faust_banner(
         out,
-        "/* ------------------------------------------------------------"
-    );
-    let _ = writeln!(
-        out,
-        "Code generated with Faust {} Rust backend (faust-rs)",
-        crate::VERSION
-    );
-    let _ = writeln!(
-        out,
-        "Compilation options: {}",
+        Some(name),
+        &options.metadata_entries,
         options
             .compile_options
             .as_deref()
             .unwrap_or(match options.faust_float_type {
                 RustRealType::Float32 => "-lang rust -single",
                 RustRealType::Float64 => "-lang rust -double",
-            })
-    );
-    let _ = writeln!(
-        out,
-        "------------------------------------------------------------ */"
+            }),
     );
     let _ = writeln!(out);
     let _ = writeln!(out);
@@ -388,6 +370,9 @@ fn emit_rust_header(out: &mut String, options: &RustOptions) {
             let _ = writeln!(out, "#[cfg(not(target_arch = \"wasm32\"))]");
             let _ = writeln!(out, "mod ffi {{");
             let _ = writeln!(out, "    use core::ffi::c_float;");
+            // powprim.hh's integer-power path uses double rint even in a
+            // single-precision DSP. The surrounding F32/F64 API is unchanged.
+            let _ = writeln!(out, "    use core::ffi::c_double;");
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
@@ -399,6 +384,7 @@ fn emit_rust_header(out: &mut String, options: &RustOptions) {
                 "        pub fn remainderf(from: c_float, to: c_float) -> c_float;"
             );
             let _ = writeln!(out, "        pub fn rintf(val: c_float) -> c_float;");
+            let _ = writeln!(out, "        pub fn rint(val: c_double) -> c_double;");
             let _ = writeln!(out, "    }}");
             let _ = writeln!(out, "}}");
             let _ = writeln!(out);
@@ -417,6 +403,15 @@ fn emit_rust_header(out: &mut String, options: &RustOptions) {
             let _ = writeln!(
                 out,
                 "    #[cfg(target_arch = \"wasm32\")]\n    libm::rintf(val)"
+            );
+            let _ = writeln!(out, "}}");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "fn rint_f64(val: f64) -> f64 {{");
+            let _ = writeln!(out, "    #[cfg(not(target_arch = \"wasm32\"))]");
+            let _ = writeln!(out, "    unsafe {{ ffi::rint(val) }}");
+            let _ = writeln!(
+                out,
+                "    #[cfg(target_arch = \"wasm32\")]\n    libm::rint(val)"
             );
             let _ = writeln!(out, "}}");
             let _ = writeln!(out);
@@ -499,11 +494,14 @@ fn emit_struct_fields(
     out: &mut String,
     block_id: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return Err(invalid_section("struct section", block_id, store));
-    };
+    let items = section_items("struct", block_id, store)?;
     for item in items {
         match match_fir(store, item) {
+            // A foreign variable (`fvariable`) is a host symbol, not state.
+            FirMatch::DeclareVar {
+                access: AccessType::Global,
+                ..
+            } => {}
             FirMatch::DeclareVar { name, typ, .. } => {
                 let _ = writeln!(out, "    {name}: {},", emit_type(&typ));
             }
@@ -587,6 +585,7 @@ fn emit_rust_api(
         emit_named_method(store, out, options, locked, state_types, f)?;
     } else {
         let _ = writeln!(out, "    pub fn metadata(&self, m: &mut dyn Meta) {{");
+        emit_compilation_metadata(out, options);
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out);
     }
@@ -788,6 +787,10 @@ fn emit_constructor(
         };
         for item in items {
             match match_fir(store, item) {
+                FirMatch::DeclareVar {
+                    access: AccessType::Global,
+                    ..
+                } => {}
                 FirMatch::DeclareVar {
                     name, typ, init, ..
                 } => {
@@ -996,6 +999,13 @@ fn emit_named_method(
     if decl.name == "instanceConstants" && !block_stores_var(store, body, "fSampleRate") {
         let _ = writeln!(out, "        self.fSampleRate = sample_rate;");
     }
+    if decl.name == "metadata" && is_empty_block(store, body) {
+        // Absent and empty are the same request, as in c, cpp and julia.
+        emit_compilation_metadata(out, options);
+        let _ = writeln!(out, "    }}");
+        let _ = writeln!(out);
+        return Ok(());
+    }
     let mode = match decl.name.as_str() {
         "metadata" => EmitMode::Metadata,
         "buildUserInterface" => EmitMode::Ui,
@@ -1014,6 +1024,32 @@ fn emit_named_method(
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
     Ok(())
+}
+
+/// Writes the compilation metadata (`filename`, `name`, the options'
+/// entries) as `m.declare` lines, in the order c, cpp and julia replay it.
+fn emit_compilation_metadata(out: &mut String, options: &RustOptions) {
+    let class_name = options.class_name.as_deref().unwrap_or("mydsp");
+    let filename = options
+        .metadata_filename
+        .clone()
+        .unwrap_or_else(|| format!("{class_name}.dsp"));
+    let name = options
+        .metadata_name
+        .clone()
+        .unwrap_or_else(|| class_name.to_owned());
+    for (key, value) in crate::backends::c_family::ordered_compilation_metadata(
+        &options.metadata_entries,
+        filename,
+        name,
+    ) {
+        let _ = writeln!(
+            out,
+            "        m.declare({}, {});",
+            rust_string_literal(&key),
+            rust_string_literal(&value)
+        );
+    }
 }
 
 /// Emits a non-canonical helper function declared in the FIR functions block.
@@ -1145,6 +1181,21 @@ fn collect_ui_stats(store: &FirStore, root: FirId) -> UiStats {
 
 fn collect_ui_params(store: &FirStore, root: FirId) -> HashMap<String, usize> {
     collect_ui_stats(store, root).params
+}
+
+/// The parameter index of the UI zone `var`.
+///
+/// Every widget of the body is numbered before it is emitted, so a zone with
+/// no index is an internal inconsistency. It used to fall back to index 0,
+/// which silently bound the widget to the first parameter.
+fn ui_param(ctx: &EmitCtx, var: &str, stmt: FirId) -> Result<usize, CodegenError> {
+    ctx.ui_params.get(var).copied().ok_or_else(|| {
+        CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!("UI zone `{var}` is not a parameter of buildUserInterface"),
+        )
+        .at_node(stmt)
+    })
 }
 
 /// Finds stack/local variables that are assigned after declaration.
@@ -1518,7 +1569,7 @@ fn emit_stmt(
                 fir::ButtonType::Button => "add_button",
                 fir::ButtonType::Checkbox => "add_check_button",
             };
-            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
+            let param = ui_param(ctx, &var, stmt)?;
             let _ = writeln!(
                 out,
                 "{tab}ui_interface.{api}({}, ParamIndex({param}));",
@@ -1540,7 +1591,7 @@ fn emit_stmt(
                 fir::SliderType::Vertical => "add_vertical_slider",
                 fir::SliderType::NumEntry => "add_num_entry",
             };
-            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
+            let param = ui_param(ctx, &var, stmt)?;
             let _ = writeln!(
                 out,
                 "{tab}ui_interface.{api}({}, ParamIndex({param}), {} as FaustFloat, {} as FaustFloat, {} as FaustFloat, {} as FaustFloat);",
@@ -1563,7 +1614,7 @@ fn emit_stmt(
                 fir::BargraphType::Horizontal => "add_horizontal_bargraph",
                 fir::BargraphType::Vertical => "add_vertical_bargraph",
             };
-            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
+            let param = ui_param(ctx, &var, stmt)?;
             let _ = writeln!(
                 out,
                 "{tab}ui_interface.{api}({}, ParamIndex({param}), {} as FaustFloat, {} as FaustFloat);",
@@ -1579,7 +1630,7 @@ fn emit_stmt(
                     let zone = if var == "0" {
                         "None".to_owned()
                     } else {
-                        let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
+                        let param = ui_param(ctx, &var, stmt)?;
                         format!("Some(ParamIndex({param}))")
                     };
                     let _ = writeln!(
@@ -1601,7 +1652,7 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddSoundfile { label, url, var } => {
-            let param = ctx.ui_params.get(&var).copied().unwrap_or_default();
+            let param = ui_param(ctx, &var, stmt)?;
             let _ = writeln!(
                 out,
                 "{tab}ui_interface.add_soundfile({}, {}, ParamIndex({param}));",
@@ -1700,10 +1751,10 @@ fn emit_value(
     match match_fir(store, value) {
         FirMatch::Int32 { value, .. } => Ok(format!("{value}i32")),
         FirMatch::Int64 { value, .. } => Ok(format!("{value}i64")),
-        FirMatch::Float32 { value, .. } => Ok(format!("{}f32", trim_float(f64::from(value)))),
+        FirMatch::Float32 { value, .. } => Ok(real_literal(f64::from(value), "f32")),
         FirMatch::Float64 { value, .. }
         | FirMatch::Quad { value, .. }
-        | FirMatch::FixedPoint { value, .. } => Ok(format!("{}f64", trim_float(value))),
+        | FirMatch::FixedPoint { value, .. } => Ok(real_literal(value, "f64")),
         FirMatch::Bool { value, .. } => Ok(if value { "true" } else { "false" }.to_owned()),
         FirMatch::NewDsp { name, .. } => Ok(format!("new{name}()")),
         FirMatch::LoadVar { name, access, .. } => {
@@ -1751,7 +1802,13 @@ fn emit_value(
         FirMatch::Neg { value: inner, typ } => {
             let rendered = emit_value(store, options, locked, inner)?;
             let rendered = coerce_rendered(store, &typ, inner, &rendered);
-            Ok(format!("(-{rendered})"))
+            // An integer negation wraps like the other integer operations:
+            // `-i32::MIN` panics in a debug build.
+            if matches!(typ, FirType::Int32 | FirType::Int64) {
+                Ok(format!("({rendered}).wrapping_neg()"))
+            } else {
+                Ok(format!("(-{rendered})"))
+            }
         }
         FirMatch::Cast { typ, value: inner } => {
             let rendered = emit_value(store, options, locked, inner)?;
@@ -1824,7 +1881,7 @@ fn emit_cond(
     cond: FirId,
 ) -> Result<String, CodegenError> {
     if let FirMatch::BinOp { op, lhs, rhs, .. } = match_fir(store, cond)
-        && is_comparison(op)
+        && op.is_comparison()
     {
         return emit_comparison(store, options, locked, op, lhs, rhs);
     }
@@ -1836,14 +1893,6 @@ fn emit_cond(
         }
         _ => Ok(format!("(({rendered}) != 0)")),
     }
-}
-
-/// Returns whether one FIR binary operator is a comparison.
-fn is_comparison(op: FirBinOp) -> bool {
-    matches!(
-        op,
-        FirBinOp::Eq | FirBinOp::Ne | FirBinOp::Lt | FirBinOp::Le | FirBinOp::Gt | FirBinOp::Ge
-    )
 }
 
 /// Emits one FIR comparison as a native Rust boolean expression.
@@ -1896,7 +1945,7 @@ fn emit_binop_expr(
     let lhs_rendered = emit_value(store, options, locked, lhs)?;
     let rhs_rendered = emit_value(store, options, locked, rhs)?;
 
-    if is_comparison(op) {
+    if op.is_comparison() {
         // FIR comparisons carry their C result type (`Int32` from the fast
         // lane, `Bool` in hand-written fixtures). The rendered Rust expression
         // must match that type so arithmetic/coercion callers stay sound.
@@ -2040,6 +2089,7 @@ fn emit_fun_call(
         "acosh",
         "atanh",
         "exp",
+        "exp2",
         "log",
         "log2",
         "log10",
@@ -2108,6 +2158,7 @@ fn emit_fun_call(
         "acosh" => Some("acosh"),
         "atanh" => Some("atanh"),
         "exp" => Some("exp"),
+        "exp2" => Some("exp2"),
         "log" => Some("ln"),
         "log2" => Some("log2"),
         "log10" => Some("log10"),
@@ -2329,17 +2380,6 @@ fn resolve_float(typ: &FirType, options: &RustOptions) -> RustRealType {
     }
 }
 
-/// Renders a variable reference according to FIR storage class.
-///
-/// Struct state is addressed through `self.name`; stack, loop, global, static,
-/// and function-argument values keep their local textual name in this backend
-/// slice.
-/// Returns `true` for a generated sub-container entry point.
-fn is_sub_module_method(name: &str) -> bool {
-    name.starts_with("instanceInit") && name != "instanceInit"
-        || name.starts_with("fill") && name != "fill"
-}
-
 /// Emits every generated-table sub-container as a struct with its two methods.
 ///
 /// C++ parity: the `CodeContainer` a `SIGGEN` produces. Rust has no destructor
@@ -2353,24 +2393,15 @@ fn emit_sub_modules(
     locked: &BTreeSet<String>,
     sub_modules: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, sub_modules) else {
-        return Ok(());
-    };
-    for item in items {
-        let FirMatch::SubModule {
+    for sub in sub_module_views(store, sub_modules)? {
+        let SubModuleView {
             name,
             dsp_struct,
             static_decls,
             functions,
             sub_modules: nested,
             ..
-        } = match_fir(store, item)
-        else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidModuleSection,
-                format!("sub_modules holds a non-SubModule node {}", item.as_u32()),
-            ));
-        };
+        } = sub;
 
         emit_sub_modules(store, out, options, locked, nested)?;
         emit_static_tables(store, out, options, static_decls)?;
@@ -2690,9 +2721,7 @@ fn collect_struct_initializers(
 ) -> Result<Vec<StructInit>, CodegenError> {
     let mut out = Vec::new();
     for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(invalid_section("struct section", section, store));
-        };
+        let items = section_items("struct", section, store)?;
         for item in items {
             if let FirMatch::DeclareVar {
                 name,
@@ -2716,9 +2745,7 @@ fn collect_table_initializers(
 ) -> Result<Vec<TableInit>, CodegenError> {
     let mut out = Vec::new();
     for section in [dsp_struct, globals] {
-        let FirMatch::Block(items) = match_fir(store, section) else {
-            return Err(invalid_section("struct section", section, store));
-        };
+        let items = section_items("struct", section, store)?;
         for item in items {
             if let FirMatch::DeclareTable {
                 name,
@@ -2762,131 +2789,24 @@ fn collect_state_types(store: &FirStore, sections: &[FirId]) -> StateTypes {
     out
 }
 
-/// Collects body-bearing function declarations from the module function block.
+/// Formats a typed floating literal: `0.5f32`, or `f32::INFINITY` for a
+/// special value.
 ///
-/// Prototype-only declarations are ignored because they are not executable
-/// bodies and should not suppress lifecycle fallback generation.
-fn collect_module_functions(
-    store: &FirStore,
-    functions: FirId,
-) -> Result<Vec<DeclareFunView>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return Err(invalid_section("functions section", functions, store));
-    };
-    let mut out = Vec::new();
-    for item in items {
-        if let FirMatch::DeclareFun {
-            name,
-            typ,
-            args,
-            body: Some(body),
-            ..
-        } = match_fir(store, item)
-        {
-            out.push(DeclareFunView {
-                name,
-                typ,
-                named_args: args,
-                body: Some(body),
-            });
+/// The suffix of a special value is its type path, not a trailing suffix:
+/// appending `f32` to [`trim_float`]'s `f64::INFINITY` gave
+/// `f64::INFINITYf32`, which is not Rust.
+fn real_literal(value: f64, ty: &str) -> String {
+    if value.is_nan() {
+        format!("{ty}::NAN")
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            format!("{ty}::NEG_INFINITY")
+        } else {
+            format!("{ty}::INFINITY")
         }
-    }
-    Ok(out)
-}
-
-/// Decodes and validates the FIR module root expected by this backend.
-///
-/// Returning a [`ModuleView`] keeps the public entry point small and gives all
-/// downstream helpers the exact ids for the seven module sections they need.
-/// Non-module roots are rejected with `FRS-CGEN-RUST-0001`.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    if let FirMatch::Module {
-        num_inputs,
-        num_outputs,
-        name: _,
-        dsp_struct,
-        globals,
-        functions,
-        static_decls,
-        sub_modules,
-    } = match_fir(store, module)
-    {
-        Ok(ModuleView {
-            dsp_struct,
-            globals,
-            functions,
-            num_inputs,
-            num_outputs,
-            static_decls,
-            sub_modules,
-        })
     } else {
-        Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!(
-                "expected FIR module root, got {:?} at node {}",
-                match_fir(store, module),
-                module.as_u32()
-            ),
-        ))
+        format!("{}{ty}", trim_float(value))
     }
-}
-
-/// Returns whether a FIR block declares a variable with `name`.
-fn block_declares_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::DeclareVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Returns whether a FIR block contains a direct store to `name`.
-///
-/// Used by `instance_constants` emission to avoid writing `fSampleRate` twice
-/// when FIR already has an explicit store in the canonical function body.
-fn block_stores_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::StoreVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Builds a stable diagnostic for malformed module sections.
-fn invalid_section(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::InvalidModuleSection,
-        format!(
-            "{kind} must be a FIR block, got {:?} at node {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
-    )
-}
-
-/// Builds a stable diagnostic for FIR nodes outside the current Rust slice.
-///
-/// Unsupported-node diagnostics are preferred over best-effort partial output:
-/// the generated Rust source should either represent the complete FIR body or
-/// fail before writing misleading code.
-fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::UnsupportedNode,
-        format!(
-            "unsupported FIR {kind} node {:?} at {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
-    )
 }
 
 /// Formats a floating literal without a Rust type suffix.
@@ -2896,19 +2816,17 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
 /// important for small constants such as Faust's noise LCG scale, where fixed
 /// decimal truncation is enough to move impulse samples.
 fn trim_float(value: f64) -> String {
-    if value.is_nan() {
-        return "f64::NAN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "f64::NEG_INFINITY".to_owned()
-        } else {
-            "f64::INFINITY".to_owned()
-        };
-    }
-    let s = format!("{value:?}");
-    if s == "-0.0" { "0.0".to_owned() } else { s }
+    RUST_REAL.format(value)
 }
+
+/// Rust spelling of an unsuffixed real literal: `Debug` digits.
+pub(crate) const RUST_REAL: RealSpelling = RealSpelling {
+    nan: "f64::NAN",
+    pos_inf: "f64::INFINITY",
+    neg_inf: "f64::NEG_INFINITY",
+    digits: Digits::Debug,
+    negative_zero: NegativeZero::Normalize,
+};
 
 /// Escapes a string into a Rust double-quoted string literal.
 ///
@@ -2916,25 +2834,14 @@ fn trim_float(value: f64) -> String {
 /// backslashes, and common control characters are normalized while all other
 /// characters are passed through unchanged.
 fn rust_string_literal(input: &str) -> String {
-    let escaped = input
-        .chars()
-        .flat_map(|c| match c {
-            '\\' => "\\\\".chars().collect::<Vec<_>>(),
-            '"' => "\\\"".chars().collect::<Vec<_>>(),
-            '\n' => "\\n".chars().collect::<Vec<_>>(),
-            '\r' => "\\r".chars().collect::<Vec<_>>(),
-            '\t' => "\\t".chars().collect::<Vec<_>>(),
-            _ => vec![c],
-        })
-        .collect::<String>();
-    format!("\"{escaped}\"")
+    quoted_string(input, StringDialect::C)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CodegenErrorCode, EmitCtx, EmitMode, RustOptions, RustRealType, StateTypes,
-        collect_mutable_local_vars, emit_block, emit_fun_call, emit_rust_header,
+        collect_mutable_local_vars, emit_block, emit_fun_call, emit_rust_header, emit_value,
         generate_rust_module,
     };
     use crate::fixtures::{
@@ -2942,6 +2849,94 @@ mod tests {
         build_sine_phasor_test_module, build_table_state_delay_test_module,
     };
     use fir::{AccessType, FirBuilder, FirStore, FirType};
+
+    /// A UI zone with no parameter index is an error: it used to fall back to
+    /// `ParamIndex(0)`, binding the widget to the first parameter. The
+    /// numbering pass does not look inside loops, so a widget in one is the
+    /// way to reach it.
+    #[test]
+    fn an_unknown_ui_zone_is_refused_not_bound_to_parameter_zero() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let button = b.add_button(fir::ButtonType::Button, "go", "fGhost");
+        let loop_body = b.block(&[button]);
+        let one = b.int32(1);
+        let looped = b.simple_for_loop("i0", one, loop_body, false);
+        let ui_body = b.block(&[looped]);
+        let build_ui = b.declare_fun(
+            "buildUserInterface",
+            crate::fixtures::build_ui_fun_type(),
+            &crate::fixtures::build_ui_fun_args(),
+            Some(ui_body),
+            false,
+        );
+        let compute_body = b.block(&[]);
+        let compute = b.declare_fun(
+            "compute",
+            crate::fixtures::compute_fun_type(),
+            &crate::fixtures::compute_fun_args(),
+            Some(compute_body),
+            false,
+        );
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let functions = b.block(&[build_ui, compute]);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            1,
+            "ghost",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+            &[],
+        );
+
+        let err = generate_rust_module(&store, module, &RustOptions::default())
+            .expect_err("a zone with no parameter must be refused");
+        assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
+        assert!(err.message().contains("fGhost"));
+    }
+
+    /// Integer negation wraps like the other integer operations; a plain
+    /// `-x` panics on `i32::MIN` in a debug build.
+    #[test]
+    fn integer_negation_wraps_and_real_negation_does_not() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let i = b.load_var("iState", AccessType::Struct, FirType::Int32);
+        let neg_int = b.neg(i, FirType::Int32);
+        let f = b.load_var("fState", AccessType::Struct, FirType::Float32);
+        let neg_real = b.neg(f, FirType::Float32);
+        let options = RustOptions::default();
+        let locked = std::collections::BTreeSet::new();
+        let int_text = emit_value(&store, &options, &locked, neg_int).expect("int neg");
+        let real_text = emit_value(&store, &options, &locked, neg_real).expect("real neg");
+        assert!(int_text.ends_with(".wrapping_neg()"), "{int_text}");
+        assert!(real_text.starts_with("(-"), "{real_text}");
+    }
+
+    #[test]
+    fn special_real_literals_are_typed_paths_not_suffixed() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let cases = [
+            (b.float32(f32::INFINITY), "f32::INFINITY"),
+            (b.float32(f32::NEG_INFINITY), "f32::NEG_INFINITY"),
+            (b.float32(f32::NAN), "f32::NAN"),
+            (b.float64(f64::INFINITY), "f64::INFINITY"),
+            (b.float64(f64::NAN), "f64::NAN"),
+            (b.float32(0.5), "0.5f32"),
+            (b.float64(-0.0), "0.0f64"),
+        ];
+        let options = RustOptions::default();
+        let locked = std::collections::BTreeSet::new();
+        for (value, expected) in cases {
+            let rendered = emit_value(&store, &options, &locked, value).expect("literal");
+            assert_eq!(rendered, expected);
+        }
+    }
 
     #[test]
     fn mutable_local_analysis_marks_stack_arrays_written_by_store_table() {
@@ -2975,7 +2970,8 @@ mod tests {
         assert!(out.contains("fn rint_f32(val: f32) -> f32 {"));
         assert!(out.contains("unsafe { ffi::rintf(val) }"));
         assert!(out.contains("libm::rintf(val)"));
-        assert!(!out.contains("c_double"));
+        assert!(out.contains("fn rint_f64(val: f64) -> f64 {"));
+        assert!(out.contains("pub fn rint(val: c_double) -> c_double;"));
     }
 
     #[test]

@@ -43,7 +43,8 @@ pub const EVAL_ITERATION_INVALID: DiagnosticCode = DiagnosticCode("FRS-EVAL-0004
 pub const EVAL_REDEFINED_SYMBOL: DiagnosticCode = DiagnosticCode("FRS-EVAL-0005");
 /// Slider/numentry init value is outside the [min, max] range.
 ///
-/// C++ equivalent: the `checkRange` check in `eval.cpp` that emits
+/// C++ equivalent: `SignalChecker::isRange` in
+/// `compiler/transform/sigPromotion.cpp`, a signal-level check that emits
 /// `"init = ... outside of [min max] range in '...'"`.
 pub const EVAL_SLIDER_INIT_OUT_OF_RANGE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0006");
 /// A constant expression divides by a constant zero.
@@ -91,7 +92,7 @@ pub const EVAL_CASE_ARGUMENT_NOT_CONSTANT: DiagnosticCode = DiagnosticCode("FRS-
 /// definitions of the cycle.
 ///
 /// C++ equivalent: `loopDetector::detect` in
-/// `compiler/evaluate/loopDetector.cpp`, "endless evaluation cycle of <k>
+/// `compiler/evaluate/loopDetector.cpp`, "endless evaluation cycle of `<k>`
 /// steps".
 pub const EVAL_EVALUATION_CYCLE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0013");
 /// Generic eval failure fallback code.

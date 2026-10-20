@@ -47,6 +47,8 @@ use crate::signal_fir::recursion::resolve_active_recursion_carrier;
 /// declarations.
 #[derive(Default)]
 pub(super) struct UsedPrototypes {
+    /// Double pow/rint calls emitted for integer powers.
+    pub(super) integer_pow: bool,
     /// Set of math operations used; drives prototype emission order.
     pub(super) math_ops: HashSet<FirMathOp>,
     /// Set of integer helper function names used (`abs`, `min_i`, `max_i`).
@@ -72,6 +74,9 @@ impl UsedPrototypes {
 }
 
 impl leaf_emit::LeafPrototypes for UsedPrototypes {
+    fn note_integer_pow(&mut self) {
+        self.integer_pow = true;
+    }
     fn note_math_op(&mut self, op: FirMathOp) {
         self.math_ops.insert(op);
     }
@@ -162,6 +167,25 @@ impl<'a> SignalToFirLower<'a> {
             lhs,
             rhs,
             real_ty,
+        ))
+    }
+
+    /// Preserves the certified result nature for C++ integer-power parity.
+    pub(super) fn lower_pow(
+        &mut self,
+        node: SigId,
+        lhs: SigId,
+        rhs: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let result_ty = self.signal_fir_type(node)?;
+        let lhs = self.lower_signal(lhs)?;
+        let rhs = self.lower_signal(rhs)?;
+        Ok(leaf_emit::emit_pow(
+            &mut self.store,
+            &mut self.used_protos,
+            lhs,
+            rhs,
+            result_ty,
         ))
     }
 
@@ -264,7 +288,7 @@ impl<'a> SignalToFirLower<'a> {
     /// `de_bruijn_to_sym` preparation step.
     ///
     /// Expects symbolic recursion payloads (`SYMREC` / `SYMREF`) — the normal
-    /// fast-lane input form produced by `signal_prepare`.
+    /// input form produced by `signal_prepare`.
     ///
     /// **Scheduled body evaluation**: a delayed `Proj(SYMREF)` may allocate the
     /// group's carriers before the owning `Proj(SYMREC)` is reached. Body

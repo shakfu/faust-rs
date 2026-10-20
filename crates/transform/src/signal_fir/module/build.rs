@@ -6,12 +6,15 @@
 //! Owns the single crate-visible function [`build_module`] that accepts
 //! pre-validated planning data and a prepared signal forest and assembles a
 //! self-contained [`SignalFirOutput`] with all Faust lifecycle sections in
-//! deterministic order: `metadata`, `instanceConstants`,
-//! `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
-//! and `compute`.
+//! deterministic order: `metadata`, optional `staticInit`,
+//! `instanceConstants`, `instanceResetUserInterface`, `instanceClear`,
+//! `buildUserInterface`, and `compute`, plus `frame` (one-sample mode) and
+//! `control` (external control) when requested.
 //!
-//! All other submodules in `module/` provide `impl SignalToFirLower` methods
-//! that are invoked from the orchestration logic here.
+//! Most other submodules in `module/` provide `impl SignalToFirLower` methods
+//! that are invoked from the orchestration logic here; `region.rs`,
+//! `rad_formula_builder.rs`, and `subcontainer_compile.rs` define supporting
+//! types and the generator sub-module compiler instead.
 
 use super::region;
 use super::setup;
@@ -39,7 +42,7 @@ use crate::signal_fir::module::classify_reverse_time_outputs;
 use crate::signal_fir::module::clocked;
 use crate::signal_fir::module::fixed_ad_internal_signals;
 use crate::signal_fir::module::match_sig;
-use crate::signal_fir::placement::analyze_signal_sharing;
+use crate::signal_fir::placement::{analyze_signal_sharing, guard_exclusive_block_signals};
 use crate::signal_fir::planner::SignalFirPlan;
 use crate::signal_fir::{ControlRateMode, ProcessingApi};
 use crate::signal_prepare::SimpleSigType;
@@ -644,15 +647,13 @@ fn collect_prototype_declarations(lower: &mut SignalToFirLower<'_>) -> Vec<FirId
         if !lower.used_protos.math_ops.contains(op) {
             continue;
         }
-        let arity = match op {
-            FirMathOp::Pow
-            | FirMathOp::Min
-            | FirMathOp::Max
-            | FirMathOp::Atan2
-            | FirMathOp::Fmod
-            | FirMathOp::Remainder => 2,
-            _ => 1,
-        };
+        if lower.used_protos.integer_pow
+            && math_real_ty == FirType::Float64
+            && matches!(op, FirMathOp::Pow | FirMathOp::Rint)
+        {
+            continue;
+        }
+        let arity = op.arity();
         let proto_args: Vec<NamedType> = (0..arity)
             .map(|i| NamedType {
                 name: format!("arg{i}"),
@@ -662,7 +663,7 @@ fn collect_prototype_declarations(lower: &mut SignalToFirLower<'_>) -> Vec<FirId
         let proto = {
             let mut b = FirBuilder::new(&mut lower.store);
             b.declare_fun(
-                op.symbol(),
+                crate::signal_fir::leaf_emit::math_symbol(*op, &math_real_ty),
                 FirType::Fun {
                     args: vec![math_real_ty.clone(); arity],
                     ret: Box::new(math_real_ty.clone()),
@@ -673,6 +674,11 @@ fn collect_prototype_declarations(lower: &mut SignalToFirLower<'_>) -> Vec<FirId
             )
         };
         math_prototypes.push(proto);
+    }
+    if lower.used_protos.integer_pow {
+        math_prototypes.extend(crate::signal_fir::leaf_emit::integer_pow_prototypes(
+            &mut lower.store,
+        ));
     }
     for name in INT_FUN_PROTO_ORDER {
         if !lower.used_protos.int_fun_names.contains(name) {
@@ -1048,17 +1054,17 @@ fn assemble_module_output(
 
 /// Lowers a prepared signal forest into a complete FIR module.
 ///
-/// Entry point for the fast-lane lowering boundary: accepts pre-validated
+/// Entry point of the scalar signal->FIR lowering: accepts pre-validated
 /// planning data and a prepared signal forest, returns a [`SignalFirOutput`]
-/// with all Faust lifecycle sections (`metadata`, `instanceConstants`,
-/// `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
-/// `compute`) assembled in deterministic order.
+/// with all Faust lifecycle sections (listed in the module header) assembled
+/// in deterministic order.
 ///
 /// # Promotion invariant
 ///
-/// The `signals` forest **must** have been processed by
-/// `signal_prepare::promote_signals_for_fir` (and optionally
-/// `normalize::simplify`) before being passed here.  That pass guarantees:
+/// The `signals` forest **must** come from the `signal_prepare` staging
+/// (`prepare_signals_for_fir*`), whose promotion pass
+/// (`normalize::promote_signals_fastlane`) runs before it reaches here.  That
+/// pass guarantees:
 ///
 /// - Every `BinOp(op, lhs, rhs)` node has operands whose signal domain
 ///   types are already consistent with `op`: mixed Int/Real operands are
@@ -1070,7 +1076,7 @@ fn assemble_module_output(
 /// - `Delay1(x)` and `Prefix(init, x)` have `type(init) == type(x)`.
 ///
 /// **Consequence for the lowerer**: no implicit coercion is needed inside
-/// `lower_binop`, `lower_delay_state`, or `normalized_table_index`.  All
+/// `lower_binop` or `lower_delay_state`.  All
 /// necessary casts appear as explicit signal-tree nodes and are handled by
 /// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
 /// FloatCast`.
@@ -1165,7 +1171,19 @@ pub(crate) fn build_module<'a>(
     };
     let (sig_ref_counts, sig_at_boundary, konst_escapes) =
         analyze_signal_sharing(arena, signals, sig_types);
-    let placement = setup::PlacementInfo::new(sig_ref_counts, sig_at_boundary, konst_escapes);
+    // Lazy block-rate values exist in clocked programs under internal control
+    // only (`clocked.rs`, "Block-rate work in a boolean `ondemand` guard").
+    let guard_exclusive = if clocked.is_some() && !control_rate_mode.is_external() {
+        guard_exclusive_block_signals(arena, signals, sig_types)
+    } else {
+        std::collections::HashSet::new()
+    };
+    let placement = setup::PlacementInfo::new(
+        sig_ref_counts,
+        sig_at_boundary,
+        konst_escapes,
+        guard_exclusive,
+    );
     let mut lower = SignalToFirLower::new(
         arena,
         module_name,

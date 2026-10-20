@@ -9,9 +9,11 @@
 //! Faust-specific realisation of reverse-mode automatic differentiation in a
 //! block-processing DSP context.
 //!
-//! Note: as of 2026-05-10 the primary RAD dispatcher uses the forward-mode
-//! algebraic RAD path; the BRA lowering here is preserved for the LTI
-//! adjoint fast-path revival.
+//! Note: since 2026-05-10 the symbolic RAD sweep in `propagate::reverse_ad`
+//! handles feed-forward bodies only; temporal and recursive `rad(...)` bodies
+//! reach this module as `SigBlockReverseAD` carriers, so this BRA lowering is
+//! the production path for them. The `ReverseTimeRec` LTI fast path is the
+//! dormant one.
 use crate::signal_fir::FirId;
 use crate::signal_fir::FirStore;
 use crate::signal_fir::FirType;
@@ -357,7 +359,7 @@ impl<'a> SignalToFirLower<'a> {
     /// and no carry is declared (`bra_sweep_is_causal`).
     ///
     /// The sweep is emitted **at most once** per group per loop slice; the
-    /// `bra_state_scheduled` guard prevents re-emission when multiple gradient
+    /// `bra.scheduled` guard prevents re-emission when multiple gradient
     /// projection slots for the same carrier are lowered.
     ///
     /// # Algorithm
@@ -376,7 +378,7 @@ impl<'a> SignalToFirLower<'a> {
     ///    3b. Seed the adjoint map: `adj[body_sigs[k]] += cotangent_firs[k]`.
     /// 4. Walk the postorder in reverse, calling `propagate_bra_adj` for each
     ///    node to distribute its accumulated adjoint to its children.
-    /// 5. Store per-seed gradient `FirId`s into `bra_grad_cache`.
+    /// 5. Store per-seed gradient `FirId`s into `bra.grad_cache`.
     pub(super) fn ensure_bra_backward_sweep(
         &mut self,
         group: SigId,
@@ -1145,6 +1147,15 @@ impl<'a> SignalToFirLower<'a> {
                 Self::add_to_adjoint(&mut self.store, adj, value, y_bar, real_ty);
             }
 
+            // ── V/HBargraph(control, value): the identity on `value` ────────
+            //
+            // The forward lowering writes the meter zone and returns `value`;
+            // as for `Attach`, the adjoint goes to `value` and the meter write
+            // is not replayed.
+            SigMatch::VBargraph(_, value) | SigMatch::HBargraph(_, value) => {
+                Self::add_to_adjoint(&mut self.store, adj, value, y_bar, real_ty);
+            }
+
             // ── Delay(c, x): anti-causal carry with circular buffer ──────────
             SigMatch::Delay(sig_inner, amount) => {
                 self.propagate_bra_delay_adj(sig, sig_inner, amount, y_bar, adj)?;
@@ -1368,7 +1379,7 @@ impl<'a> SignalToFirLower<'a> {
     /// (with a different recursion variable on the stack) must **not** be
     /// lowered here.
     ///
-    /// Idempotency is maintained per-signal via `bra_tape_store_var`: if a
+    /// Idempotency is maintained per-signal via `bra.tape_store_var`: if a
     /// signal has already been taped (e.g. because it is shared across bodies),
     /// a second call for a different body silently skips it.
     ///
@@ -1377,16 +1388,16 @@ impl<'a> SignalToFirLower<'a> {
     /// 1. Build the postorder for the supplied `body_sigs` roots.
     /// 2. Call [`collect_tape_needed_values`] to determine which forward values
     ///    require a tape.
-    /// 3. For each tape-needed signal `v` not yet in `bra_tape_store_var`:
+    /// 3. For each tape-needed signal `v` not yet in `bra.tape_store_var`:
     ///    a. Allocate a fresh struct-field name `fBraTapeN`.
     ///    b. Declare the field as `Array(real_ty, bra_tape_block_size)`.
     ///    c. Lower `v` via `lower_signal` (runs in the forward loop context).
-    ///    d. Emit `store_table(fBraTapeN, Struct, i0, v_fir)` to
-    ///    `sample_phases.immediate` so it captures the forward value
+    ///    d. Emit `store_table(fBraTapeN, Struct, i0, v_fir)` to the current
+    ///    region's `immediate` phase so it captures the forward value
     ///    **before** `post_output` updates delay/state variables (placing
     ///    it in `sample_end` would read post-update state and produce the
     ///    wrong tape entry for signals like `Delay1`).
-    ///    e. Record the mapping `v → fBraTapeN` in `bra_tape_store_var`.
+    ///    e. Record the mapping `v → fBraTapeN` in `bra.tape_store_var`.
     ///
     /// In the split public-output schedule these stores appear in the forward
     /// loop and the matching loads appear in a later reverse loop.  In the
@@ -1516,7 +1527,7 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// The loop variable `i0` used for the tape load is the same reverse-loop
     /// counter driven by the outer `build_module` reverse iteration; loading
-    /// tape[i0] during the backward sweep at step `n` retrieves the forward
+    /// `tape[i0]` during the backward sweep at step `n` retrieves the forward
     /// value stored at forward step `n`.
     ///
     /// A value that is neither taped nor trivially re-evaluable is refused:

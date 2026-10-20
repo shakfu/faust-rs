@@ -6,8 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tlib::TreeId;
 
+use crate::Environment;
 use crate::SymId;
-use crate::environment::{ClosureValue, EnvFrameKey, EvalCacheKey, EvalValue, PatternMatcherValue};
+use crate::environment::{
+    ApplyMemoKey, ClosureValue, EnvFrameKey, EvalCacheKey, EvalValue, PatternMatcherValue,
+};
 use crate::error::{DepthContext, DepthGuard, DepthLimit, DepthLimitSource, EvalError};
 
 /// Infinite loop detector for recursive symbol expansion.
@@ -18,36 +21,39 @@ use crate::error::{DepthContext, DepthGuard, DepthLimit, DepthLimitSource, EvalE
 /// 2. **Depth exceeded**: the call stack grows beyond `max_depth`, indicating runaway recursion
 ///    in deeply nested but non-cyclic programs.
 ///
-/// # C++ correspondence — `loopDetector.hh`
+/// # C++ correspondence — `loopDetector.hh` / `loopDetector.cpp` (adapted)
 ///
-/// The C++ `LoopDetector` uses a `set<Tree>` to track in-flight nodes plus a recursion depth
-/// counter. The Rust version uses a `Vec<TreeId>` for the call stack:
+/// The C++ `loopDetector` is a sliding window: `detect(cons(exp, env))` (`eval.cpp`) writes
+/// each evaluated `(expression, environment)` pair into a 1024-entry ring buffer and, every 400
+/// steps, reports a cycle if the current pair already occurs in the window
+/// (`gLoopDetector(1024, 400)` in `global.cpp`). Runaway depth is caught separately by
+/// `stackOverflowDetector`, which measures the native stack.
 ///
-/// | Aspect | C++ (`LoopDetector`) | Rust (`LoopDetector`) |
+/// The Rust version keeps an exact stack of in-flight frames instead:
+///
+/// | Aspect | C++ | Rust (`LoopDetector`) |
 /// |---|---|---|
-/// | In-flight tracking | `set<Tree>` — O(log n) per check | `Vec<TreeId>` linear scan — O(n) per check |
-/// | Depth counter | Separate `int` field | `call_stack.len()` |
-/// | Check cost | O(log depth) tree-pointer comparison | O(depth) u32 comparison — cache-friendly |
-///
-/// For evaluation stacks typical of Faust programs (depth < 100), the Rust O(n) scan over a
-/// compact vector is expected to be competitive with, and often faster than, the C++ O(log n)
-/// set probe because the stack stays shallow and contiguous. The tree/set approach becomes more
-/// attractive only when recursion depth grows far beyond the intended Faust range.
+/// | Cycle tracking | ring buffer of recent `cons(exp, env)` trees, checked periodically | `Vec<LoopFrame>` of in-flight `(node or symbol, environment)` frames, linear scan on every entry |
+/// | Depth limit | `stackOverflowDetector` (native stack size) | `call_stack.len()` against `max_depth`, plus structural and nesting budgets |
 ///
 /// # Performance
-/// - `enter`: O(depth) scan — the entire call stack fits in L1 cache for depth < 256.
+/// - `enter`: O(depth) scan of the call stack.
 /// - `leave`: O(1) — `Vec::pop`.
-/// - Memory: 8 bytes per frame (one `u32` TreeId, padded).
+/// - Memory: one `LoopFrame` (a node or symbol id plus an environment frame key) and one
+///   `SymId` per frame.
 ///
 /// # Evaluation-phase caches
 ///
 /// `LoopDetector` is threaded through every recursive evaluator call, making it the
-/// natural carrier for caches that must survive across the whole evaluation phase.
-/// Currently it holds:
-/// - `automaton_cache`: memoises the compiled `pattern_matcher::Automaton` for each
-///   **evaluated** `Case` rule-list, keyed by the resulting rule-list `TreeId`.
-///   This is important for parity: the same raw `case` syntax can yield different
-///   effective patterns under different lexical environments.
+/// natural carrier for caches that must survive across the whole evaluation phase:
+/// `automaton_cache`, `eval_cache`, `apply_memo`, `symbolic_box_cache`,
+/// `closure_intern`, `normal_form_cache`, `evaluated_boxes`, `box_arity_cache`,
+/// `control_widgets_cache` and the constant-folding `fold` caches (see
+/// `porting/MEMOIZATION.md` §2.2-§2.5b). For example, `automaton_cache` memoises
+/// the compiled `pattern_matcher::Automaton` for each **evaluated** `Case`
+/// rule-list, keyed by the resulting rule-list `TreeId`: the same raw `case`
+/// syntax can yield different effective patterns under different lexical
+/// environments.
 #[derive(Clone, Debug)]
 pub struct LoopDetector {
     pub(crate) call_stack: Vec<LoopFrame>,
@@ -93,6 +99,10 @@ pub struct LoopDetector {
     ///
     /// C++ equivalent: `setDefNameProperty(result, id)` in `eval.cpp`.
     pub(crate) def_names: std::collections::HashMap<tlib::TreeId, String>,
+    /// The source composition each composition box built by evaluation comes
+    /// from (`None` once two sources built the same box), handed to
+    /// [`EvalStats::composition_origins`](crate::EvalStats::composition_origins).
+    pub(crate) composition_origins: std::collections::HashMap<tlib::TreeId, Option<tlib::TreeId>>,
     /// Non-fatal findings, handed to [`EvalStats::warnings`](crate::EvalStats::warnings) at the end of the run.
     pub(crate) warnings: Vec<crate::EvalWarning>,
     pub(crate) automaton_cache: crate::pattern_matcher::AutomatonCache,
@@ -154,6 +164,38 @@ pub struct LoopDetector {
     /// keeps it inside the per-pass [`LoopDetector`] so one evaluation session
     /// preserves sharing without requiring mutable properties on tree nodes.
     pub(crate) eval_cache: ahash::HashMap<EvalCacheKey, EvalValue>,
+    /// Memoized function applications: the beta-reduction of an abstraction
+    /// closure by one argument, and the rule selected by a fresh pattern
+    /// matcher for its full argument list (`apply.rs`).
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/eval.cpp`
+    /// - `applyList` / `gApplyMemo` (upstream `6789c5da8`, #1290)
+    ///
+    /// Mapping status: `adapted`. The key is [`ApplyMemoKey`]: C++ keys on the
+    /// hash-consed closure or `boxPatternMatcher` tree and the evaluated
+    /// argument list, Rust on the expression, the identity of the environment
+    /// it closes over and the arguments. [`eval_cache`](Self::eval_cache)
+    /// cannot see these repeats: its key holds the environment of the call
+    /// site, and every application evaluates its body in a layer of its own.
+    /// Only successful `Box`/`Closure` results are stored, and an application
+    /// in progress has no entry, so loop and depth detection are unchanged.
+    pub(crate) apply_memo: ahash::HashMap<ApplyMemoKey, EvalValue>,
+    /// Probes and hits of [`apply_memo`](Self::apply_memo) per
+    /// [`ApplyMemoKind`], printed at the end of the pass when
+    /// `FAUST_EVAL_APPLY_PROFILE` is set.
+    pub(crate) apply_memo_probes: [u64; 2],
+    pub(crate) apply_memo_hits: [u64; 2],
+    /// One handle per environment store named by an [`ApplyMemoKey`] or an
+    /// [`EvalCacheKey`]: an [`EnvFrameKey`] holds raw store and
+    /// source-context pointers, and a store freed during the pass (the empty
+    /// roots of `a2sb`) could hand its address to a new one whose layers
+    /// would then hit stale entries.
+    pub(crate) pinned_environments: ahash::HashMap<(usize, usize), Environment>,
+    /// The store last pinned by [`pin_environment`](Self::pin_environment):
+    /// nearly every key names the program's own store, so the insertion path
+    /// compares two pointers instead of probing `pinned_environments`.
+    pub(crate) last_pinned: Option<(usize, usize)>,
     /// Memoized verdicts of `normal_form::is_normal_form`, per tree: a tree in
     /// normal form evaluates to itself in every environment and skips the
     /// walk and the per-layer cache.
@@ -195,6 +237,19 @@ pub struct LoopDetector {
     /// The caches of constant folding, kept for the pass: a fold costs what
     /// is new in the expression, as in C++ (`crate::simplify::FoldCache`).
     pub(crate) fold: crate::simplify::FoldCache,
+}
+
+/// The two applications [`LoopDetector::apply_memo`] holds, for its counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApplyMemoKind {
+    /// The beta-reduction of an abstraction closure by one argument.
+    Abstraction = 0,
+    /// A fresh pattern matcher applied to its full argument list.
+    Case = 1,
+}
+
+impl ApplyMemoKind {
+    const ALL: [Self; 2] = [Self::Abstraction, Self::Case];
 }
 
 /// One dispatch of a `case` argument on numeric patterns: see
@@ -355,6 +410,25 @@ pub(crate) const DEBUG_STRUCTURAL_HARD_MAX_DEPTH: usize = 4_096;
 pub(crate) const RELEASE_STRUCTURAL_HARD_MAX_DEPTH: usize = 32_768;
 
 impl LoopDetector {
+    /// Records that evaluating the source composition `source` built the
+    /// composition box `built`. Positions are the parser's, on source nodes:
+    /// a box built by evaluation has none, and its first located descendant
+    /// is usually inside a called function's body, not the faulty
+    /// composition. A box built from two sources has no single origin.
+    pub(crate) fn record_composition_origin(&mut self, built: tlib::TreeId, source: tlib::TreeId) {
+        if built == source {
+            return;
+        }
+        self.composition_origins
+            .entry(built)
+            .and_modify(|origin| {
+                if *origin != Some(source) {
+                    *origin = None;
+                }
+            })
+            .or_insert(Some(source));
+    }
+
     /// Creates a detector with the default maximum recursion depth.
     ///
     /// The default is deliberately lower than the structural hard cap: recursive
@@ -431,6 +505,7 @@ impl LoopDetector {
             structural_max_depth: structural.value,
             cancel,
             def_names: std::collections::HashMap::new(),
+            composition_origins: std::collections::HashMap::new(),
             warnings: Vec::new(),
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
@@ -443,6 +518,11 @@ impl LoopDetector {
             control_widgets_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             evaluated_boxes: ahash::HashSet::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            apply_memo: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            apply_memo_probes: [0; 2],
+            apply_memo_hits: [0; 2],
+            pinned_environments: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            last_pinned: None,
             structural_depth: 0,
             numeric_dispatches: Vec::new(),
             fold: crate::simplify::FoldCache::default(),
@@ -562,11 +642,12 @@ impl LoopDetector {
         key
     }
 
-    /// Retrieves a stored `PatternMatcherValue` by cloning it out.
+    /// Retrieves a stored `PatternMatcherValue` by cloning it out, boxed as
+    /// [`EvalValue::PatternMatcher`] holds it.
     ///
     /// Returns `None` if the key is out of range.
-    pub(crate) fn get_pm(&self, key: i32) -> Option<PatternMatcherValue> {
-        self.pm_store.get(key as usize).cloned()
+    pub(crate) fn get_pm(&self, key: i32) -> Option<Box<PatternMatcherValue>> {
+        self.pm_store.get(key as usize).cloned().map(Box::new)
     }
 
     /// Stores a `ClosureValue` and returns its dense key for `boxClosure` nodes.
@@ -590,6 +671,96 @@ impl LoopDetector {
         self.closure_store.push(cv);
         self.closure_intern.insert(intern_key, key);
         key
+    }
+
+    /// Looks `key` up in the apply memo, counting the probe under `kind`.
+    pub(crate) fn apply_memo_get(
+        &mut self,
+        key: &ApplyMemoKey,
+        kind: ApplyMemoKind,
+    ) -> Option<EvalValue> {
+        self.apply_memo_probes[kind as usize] += 1;
+        let hit = self.apply_memo.get(key).cloned();
+        if hit.is_some() {
+            self.apply_memo_hits[kind as usize] += 1;
+        }
+        hit
+    }
+
+    /// Records the result of the application `key`, `env` being the
+    /// environment its `env_key` names.
+    ///
+    /// Pattern matchers are not stored, as in the eval cache
+    /// (`should_cache_eval_value`). `env` is pinned for the rest of the pass,
+    /// so the pointers in `key` cannot be reused by another store while the
+    /// entry exists.
+    pub(crate) fn apply_memo_insert(
+        &mut self,
+        key: ApplyMemoKey,
+        env: &Environment,
+        value: &EvalValue,
+    ) {
+        if matches!(value, EvalValue::PatternMatcher(_)) {
+            return;
+        }
+        self.pin_environment(key.env_key, env);
+        self.apply_memo.insert(key, value.clone());
+    }
+
+    /// Records `eval(key.expr, env)` in the eval cache, `env` being the
+    /// environment `key.env_key` names, and pins it like
+    /// [`apply_memo_insert`](Self::apply_memo_insert) does.
+    pub(crate) fn eval_cache_insert(
+        &mut self,
+        key: EvalCacheKey,
+        env: &Environment,
+        value: EvalValue,
+    ) {
+        self.pin_environment(key.env_key, env);
+        self.eval_cache.insert(key, value);
+    }
+
+    /// Keeps the store and source context `env_key` points to alive for the
+    /// rest of the pass, `env` being an environment of that store.
+    fn pin_environment(&mut self, env_key: EnvFrameKey, env: &Environment) {
+        let store = (env_key.store_ptr, env_key.source_context_ptr);
+        // Sound: the last pinned store is held by `pinned_environments`, so
+        // no other store can have its address.
+        if self.last_pinned == Some(store) {
+            return;
+        }
+        self.pinned_environments
+            .entry(store)
+            .or_insert_with(|| env.clone());
+        self.last_pinned = Some(store);
+    }
+
+    /// Prints the apply memo counters when `FAUST_EVAL_APPLY_PROFILE` is set.
+    pub(crate) fn report_apply_memo(&self) {
+        if std::env::var_os("FAUST_EVAL_APPLY_PROFILE").is_none() {
+            return;
+        }
+        let [abstr, case] = ApplyMemoKind::ALL.map(|kind| {
+            (
+                self.apply_memo_probes[kind as usize],
+                self.apply_memo_hits[kind as usize],
+            )
+        });
+        eprintln!(
+            "eval apply memo: abstractions {} probes {} hits, cases {} probes {} hits, \
+             {} entries; {} eval-cache entries, {} environment layers in {} stores",
+            abstr.0,
+            abstr.1,
+            case.0,
+            case.1,
+            self.apply_memo.len(),
+            self.eval_cache.len(),
+            self.pinned_environments
+                .values()
+                .map(|env| env.with_store(|store| store.layers.len()))
+                .sum::<usize>(),
+            self.pinned_environments.len(),
+        );
     }
 
     /// Retrieves a stored `ClosureValue` by cloning it out.
@@ -675,7 +846,7 @@ impl LoopDetector {
 
     /// Enters a structural lowering frame (`a2sb` / `a2sb_value`).
     ///
-    /// Unlike [`enter`], this path does not record an identity key because
+    /// Unlike [`enter`](Self::enter), this path does not record an identity key because
     /// every iteration creates a fresh `boxSlot`, making cycle detection
     /// impossible. The counter only enforces the `max_depth` budget so a
     /// diverging user program fails with `RecursionDepthExceeded` instead of
@@ -780,6 +951,47 @@ mod tests {
             "every dispatch is popped"
         );
         Ok(())
+    }
+
+    /// The store every eval-cache and apply-memo key names stays alive for
+    /// the pass: a key holds raw pointers, and a store freed meanwhile could
+    /// hand its address to a new one whose layers would hit the old entries.
+    /// The roots `a2sb` makes with `Environment::empty()` are such stores;
+    /// here two roots are evaluated in turn with one detector, the first
+    /// dropped before the second is made.
+    #[test]
+    fn a_store_named_by_a_memo_key_outlives_its_environment() {
+        let parsed = parser::parse_program("g = 3;\nprocess = g + g : *(2);\n", "pinned.dsp");
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let mut arena = parsed.state.arena;
+        let root = parsed.root.expect("a parsed program");
+        let mut detector = super::LoopDetector::new();
+        let mut stores = Vec::new();
+        for _ in 0..2 {
+            let mut env = crate::Environment::empty();
+            crate::definitions::bind_definitions(&mut arena, root, &mut env)
+                .expect("definitions bind");
+            let entry = BoxBuilder::new(&mut arena).ident("process");
+            crate::eval_value(&mut arena, entry, &env, &mut detector).expect("process evaluates");
+            stores.push(std::rc::Rc::downgrade(&env.store));
+        }
+        assert!(
+            stores.iter().all(|store| store.upgrade().is_some()),
+            "a dropped root whose layers key cache entries is kept alive"
+        );
+        let named: std::collections::HashSet<_> = detector
+            .eval_cache
+            .keys()
+            .map(|key| key.env_key)
+            .chain(detector.apply_memo.keys().map(|key| key.env_key))
+            .map(|key| (key.store_ptr, key.source_context_ptr))
+            .collect();
+        assert_eq!(named.len(), 2, "each root keys entries of its own");
+        assert!(
+            named
+                .iter()
+                .all(|store| detector.pinned_environments.contains_key(store))
+        );
     }
 
     const CHAIN: &str = "chain(0) = _;\nchain(n) = chain(n-1) : *(0.5);\n";

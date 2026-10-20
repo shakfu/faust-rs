@@ -13,7 +13,7 @@
 //! |------|-----------------|-------------|-------------|
 //! | Init-time constant | [`Variability::Konst`] | `constants_statements` | `instanceConstants` |
 //! | Block-rate control | [`Variability::Block`] | `control_statements` | `compute` preamble |
-//! | Per-sample | [`Variability::Samp`] | `sample_statements` | `compute` inner loop |
+//! | Per-sample | [`Variability::Samp`] | per-slice sample-loop statements (`sample_loops`) | `compute` inner loop |
 //!
 //! Phase 1 ensures that every FIR statement is emitted **exactly once, in the
 //! correct section**, rather than being re-evaluated on every sample tick.
@@ -22,8 +22,9 @@
 //!
 //! [`analyze_signal_sharing`] performs a single DFS pre-pass over the signal
 //! DAG before any lowering takes place.  It produces three maps that the lowering
-//! engine ([`super::module::SignalToFirLower`]) stores and consults during
-//! [`lower_sig`](super::module) dispatch:
+//! engine (`module::SignalToFirLower`) stores and consults in
+//! `place_by_variability` (`module/core_lowering.rs`), called from
+//! `lower_signal`:
 //!
 //! - **`ref_counts`**: how many parent nodes reference each [`SigId`].  A node
 //!   with `ref_count >= 2` is *shared* and benefits from being materialized into
@@ -69,30 +70,41 @@
 //! [`Bucket`] is the runtime tag that identifies which section a hoisted
 //! variable belongs to.
 //!
-//! [`is_trivial_fir`] is a predicate consulted by the placement gate inside
-//! `lower_sig`: literals, variable loads, and null values are free to duplicate,
-//! so they are never materialized into temporary variables.
+//! [`is_trivial_fir`] is a predicate consulted by the placement gate
+//! (`place_by_variability`): literals, variable loads, and null values are free to duplicate,
+//! so they are never materialized into temporary variables. The one exception
+//! is an escaping `Konst` signal lowered to a load of an init-local constant
+//! (`reads_init_local_constant`): that local does not exist outside
+//! `instanceConstants`, so the value is re-stored in a struct field.
 //!
-//! # Placement gate (inside `lower_sig`)
+//! # Placement gate (`place_by_variability`)
 //!
-//! The actual hoisting decision lives in `module/` as part of the main
-//! `lower_sig` dispatch loop (it needs mutable access to the lowering engine's
-//! internal statement lists and counters).  The gate combines the three
-//! pieces provided here:
+//! The actual hoisting decision lives in `module/core_lowering.rs`
+//! (`place_by_variability`, applied by `lower_signal` to every lowered value;
+//! it needs mutable access to the lowering engine's internal statement lists
+//! and counters).  The gate combines the three pieces provided here:
 //!
 //! ```text
-//! if !is_trivial_fir(lowered)
+//! if (!is_trivial_fir(lowered)
+//!     || (konst_escapes.contains(sig) && reads_init_local_constant(lowered)))
 //!    && !is_recursive_projection(sig)       // impl on SignalToFirLower
 //!    && !matches!(sig, WrTbl(..))
 //!    && (sig_shared || at_boundary)          // ref_counts / has_higher_parent
 //! {
 //!     match variability_of(sig) {            // impl on SignalToFirLower
-//!         Konst => materialize_in_bucket(Constants, konst_escapes.contains(sig))
-//!         Block => materialize_in_bucket(Control)
-//!         Samp  => materialize in the selected scalar schedule
+//!         Konst => materialize_in_bucket(sig, lowered, Constants)
+//!         Block => match lazy_block_slot(sig) {   // guard_exclusive, open bool guard
+//!                      Some(slot) => materialize_lazy_block(sig, lowered, slot)
+//!                      None => materialize_in_bucket(sig, lowered, Control)
+//!                  }
+//!         Samp  => materialize_scheduled_sample(lowered)  // selected schedule
 //!     }
 //! }
 //! ```
+//!
+//! [`guard_exclusive_block_signals`] is a separate pre-pass, run for clocked
+//! programs only: the `Block` signals that the payload of a single clocked
+//! block reaches, and nothing else does.
 //!
 //! See also: `porting/fir-cse-runtime-optimizations-plan-2026-04-03-en.md`,
 //! section "Phase 1 — variability-driven statement placement".
@@ -194,6 +206,63 @@ pub(super) fn analyze_signal_sharing(
         analysis.has_higher_parent,
         analysis.konst_escapes,
     )
+}
+
+/// `Block` signals that only the payload of one clocked block reaches.
+///
+/// A boolean `ondemand` block computes such a value at its first fire in each
+/// audio block instead of before the sample loop (`module/clocked.rs`,
+/// "Block-rate work in a boolean `ondemand` guard"). A value that is also
+/// reached from outside that payload — the top level, or another block's
+/// payload — stays hoisted before the loop: computing it in the guard as well
+/// would compute it twice.
+///
+/// The owner of a signal is the `Clocked(clock, y)` annotation whose payload
+/// `y` reaches it, identified by `clock`, the same for every held value of one
+/// block. A signal reached from two owners, or from outside every payload (the
+/// roots, a block's clock), has none. Worklist: a signal's owner changes at
+/// most twice (unset, one owner, none), so each edge is walked at most twice.
+pub(super) fn guard_exclusive_block_signals(
+    arena: &TreeArena,
+    roots: &[SigId],
+    sig_types: &HashMap<SigId, SigType>,
+) -> HashSet<SigId> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Owner {
+        Payload(SigId),
+        Shared,
+    }
+    let mut owners: HashMap<SigId, Owner> = HashMap::new();
+    let mut pending: Vec<(SigId, Owner)> = roots.iter().map(|&r| (r, Owner::Shared)).collect();
+    while let Some((sig, reached)) = pending.pop() {
+        let owner = match owners.get(&sig) {
+            None => reached,
+            Some(&known) if known == reached || known == Owner::Shared => continue,
+            Some(_) => Owner::Shared,
+        };
+        owners.insert(sig, owner);
+        let payload = match match_sig(arena, sig) {
+            SigMatch::Clocked(clock, y) => Some((clock, y)),
+            _ => None,
+        };
+        if let Some(node) = arena.node(sig) {
+            for &child in node.children.as_slice() {
+                let child_owner = match payload {
+                    Some((clock, y)) if child == y => Owner::Payload(clock),
+                    _ => owner,
+                };
+                pending.push((child, child_owner));
+            }
+        }
+    }
+    owners
+        .into_iter()
+        .filter(|&(sig, owner)| {
+            matches!(owner, Owner::Payload(_))
+                && sig_types.get(&sig).map(SigType::variability) == Some(Variability::Block)
+        })
+        .map(|(sig, _)| sig)
+        .collect()
 }
 
 /// Recursive DFS helper for [`analyze_signal_sharing`].

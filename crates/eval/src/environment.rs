@@ -13,11 +13,16 @@ use crate::{EnvId, SymId};
 ///
 /// Rust keeps closures and pattern matchers as explicit evaluator values rather
 /// than as tree-encoded host nodes, then lowers residual values back to boxes.
+///
+/// The pattern matcher is boxed: its state is 96 bytes, and stored inline it
+/// made every value that size, including the ten million boxes and closures
+/// of the eval cache on a large program (`porting/MEMOIZATION.md` §2.4b).
+/// Matchers are few, and none is stored in that cache.
 #[derive(Clone, Debug)]
 pub(crate) enum EvalValue {
     Box(TreeId),
     Closure(ClosureValue),
-    PatternMatcher(PatternMatcherValue),
+    PatternMatcher(Box<PatternMatcherValue>),
 }
 
 impl EvalValue {
@@ -65,12 +70,26 @@ impl Eq for ClosureValue {}
 #[derive(Clone, Debug)]
 /// Captured pattern-matcher automaton value used by residual `case` handling.
 pub(crate) struct PatternMatcherValue {
-    pub(crate) automaton: crate::pattern_matcher::Automaton,
+    /// Shared with the automaton cache: immutable once built, so every
+    /// matcher of one rule list points to one automaton instead of copying it.
+    pub(crate) automaton: Rc<crate::pattern_matcher::Automaton>,
     pub(crate) state: usize,
     pub(crate) envs: Vec<Option<Environment>>,
     pub(crate) original_rules: TreeId,
     pub(crate) rev_param_list: Vec<TreeId>,
     pub(crate) case_expr: TreeId,
+    /// The environment `case_expr` was evaluated in, while this matcher is
+    /// fresh: built by `eval_case_value` and not applied yet, in its initial
+    /// state with every rule on one barrier over that environment.
+    /// `(case_expr, fresh_env)` then names the matcher, and the apply memo
+    /// keys on it (`apply.rs`).
+    ///
+    /// Taken by the first application, partial or not. Copies keep it: a
+    /// binding pushes a layer of the application's own and never writes into
+    /// `envs`, so a stored handle or a matcher bound to a parameter is the
+    /// same function as the fresh one (until 2026-10-16 bindings were written
+    /// in place and copies were not fresh, `DIFF-GAP-018`).
+    pub(crate) fresh_env: Option<Environment>,
 }
 
 impl PartialEq for PatternMatcherValue {
@@ -110,6 +129,23 @@ pub(crate) struct EvalCacheKey {
     pub(crate) env_key: EnvFrameKey,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Memoization key for one function application, parity with C++ `gApplyMemo`
+/// (upstream `6789c5da8`, absent from the pinned reference `8eebea429`).
+///
+/// `fun` is the applied expression and `env_key` the environment it closes
+/// over: the `abstr` of a closure and its captured environment, or the `case`
+/// of a fresh pattern matcher and the environment it was evaluated in.
+/// `args` is what the application consumes, already evaluated: the one
+/// argument of a beta-reduction for an `abstr`, the list of the matcher's
+/// arguments for a `case`. The two kinds cannot collide, `fun` being an
+/// `abstr` node in one and a `case` node in the other.
+pub(crate) struct ApplyMemoKey {
+    pub(crate) fun: TreeId,
+    pub(crate) env_key: EnvFrameKey,
+    pub(crate) args: TreeId,
+}
+
 #[derive(Clone, Debug)]
 /// One lexical environment layer.
 pub(crate) struct EnvLayer {
@@ -136,11 +172,12 @@ pub(crate) struct EnvStore {
     pub(crate) layers: Vec<EnvLayer>,
 }
 
-/// Lexical evaluation environment mapping symbol names to box-IR tree nodes.
+/// Lexical evaluation environment mapping symbol names to evaluator values.
 ///
 /// # Architecture
 ///
-/// Implemented as a **linked list of scopes**, where each scope is a `Vec<(SymId, TreeId)>`:
+/// Implemented as a **linked list of scopes** in a shared arena, where each scope is a
+/// `Vec<(SymId, EvalValue)>` plus a `binding_index` from symbol to latest binding:
 ///
 /// ```text
 /// Environment { bindings: [("f", 42)], parent: Some(→) }
@@ -160,14 +197,14 @@ pub(crate) struct EnvStore {
 ///
 /// | Aspect | C++ (`environment.cpp`) | Rust (`Environment`) |
 /// |---|---|---|
-/// | Storage | Hash-consed tree nodes with property tables | `Vec<(u32, TreeId)>` — interned `SymId` |
-/// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | `EvalValue::{Box, Closure}` in the current adapted model |
+/// | Storage | Hash-consed tree nodes with property tables | arena layers of `Vec<(SymId, EvalValue)>` + `binding_index` — interned `SymId` |
+/// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | `EvalValue::{Box, Closure, PatternMatcher}` |
 /// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: per-layer symbol index lookup, then recurse to `parent` |
 /// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — allocate one arena layer and return its `EnvId` handle |
 /// | Redefinition | `addLayerDef` throws `faustexception` on conflicting rebind | `bind_definitions` returns `EvalError::RedefinedSymbol` |
 /// | Barrier | `pushEnvBarrier` / `isEnvBarrier` — stops pattern-matcher lookup | `push_barrier_scope()` / `lookup_until_barrier()` |
-/// | Env copy/rewire | `copyEnvReplaceDefs` + `updateClosures` — for captured-env rewrites | Deferred in the current Rust model |
-/// | Profiling | `gGlobal->gStats.fEnvLayersPushed/fEnvLookups/fEnvLookupTotalDepth` | [`EvalStats`](crate::EvalStats) returned by [`eval`](crate::eval) |
+/// | Env copy/rewire | `copyEnvReplaceDefs` + `updateClosures` — for captured-env rewrites | `copy_env_replace_defs` + `rewrite_captured_env` (`definitions.rs`) |
+/// | Profiling | `gGlobal->gStats.fEnvLayersPushed/fEnvLookups/fEnvLookupTotalDepth` | none (no consumer; removed 2026-10-18) |
 ///
 /// # Performance
 ///
@@ -175,13 +212,12 @@ pub(crate) struct EnvStore {
 /// - **Lookup**: O(d) hash probes where d = scope depth. Bindings remain stored
 ///   in insertion order for diagnostics/snapshots, while `binding_index` tracks
 ///   the latest binding for each symbol in one layer.
-/// - **Bind**: `Vec::push` — amortized O(1), no hashing, no pointer chasing.
+/// - **Bind**: `Vec::push` plus one `binding_index` insert — amortized O(1), no pointer chasing.
 /// - **Push scope**: O(1) one-layer allocation in the shared environment arena.
 /// - **Memory per binding**: one inline `(SymId, EvalValue)` pair in the current layer vector.
 ///   The frequently-hit plain-box case stores only one symbol id plus one small tagged payload and
-///   avoids per-binding heap allocation; closure and pattern-matcher bindings carry larger inline
-///   state. The earlier `8 bytes` rule of thumb applies only to the narrow `SymId + TreeId` box
-///   payload shape and should not be read as the size of every binding variant.
+///   avoids per-binding heap allocation; every binding is sized for the closure variant (an
+///   expression and an `Environment` handle), a pattern matcher's state being boxed.
 #[derive(Clone, Debug)]
 pub struct Environment {
     pub(crate) store: Rc<RefCell<EnvStore>>,
@@ -599,5 +635,29 @@ impl Environment {
 impl Default for Environment {
     fn default() -> Self {
         Self::empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    /// The value domain is as large as its largest variant, and every entry
+    /// of the eval cache pays for it (`porting/MEMOIZATION.md` §2.4b): a
+    /// closure and a tag word, not a pattern matcher stored inline.
+    #[test]
+    fn an_eval_value_is_a_closure_and_a_tag() {
+        assert!(size_of::<PatternMatcherValue>() > size_of::<ClosureValue>());
+        assert!(
+            size_of::<EvalValue>() <= size_of::<ClosureValue>() + size_of::<usize>(),
+            "EvalValue is {} bytes, ClosureValue {}",
+            size_of::<EvalValue>(),
+            size_of::<ClosureValue>(),
+        );
+        assert!(
+            size_of::<(EvalCacheKey, EvalValue)>()
+                <= size_of::<EvalCacheKey>() + size_of::<ClosureValue>() + size_of::<usize>()
+        );
     }
 }

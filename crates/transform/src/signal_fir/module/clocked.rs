@@ -1,15 +1,18 @@
 //! Guarded-block lowering for clocked wrappers (`ondemand`/US/DS).
 //!
 //! # Source provenance (C++)
-//! - `compiler/generator/compile_scal.cpp` (`generateOD`, `generateTempVar`,
-//!   `generatePermVar`, `sigSeq`/`sigClocked` cases, 2181-2284; branch
-//!   `master-dev-ocpp-od-fir-2-FIR19`, commit `8eebea429`)
+//! - `compiler/generator/compile_scal.cpp` (`sigTempVar`/`sigPermVar`/
+//!   `sigSeq`/`sigOD`/`sigClocked` dispatch cases, 838-853; `generateTempVar`,
+//!   `generatePermVar`, `generateOD`, `generateUS`, `generateDS`, 2182-2284;
+//!   branch `master-dev-ocpp-od-fir-2-FIR19`, commit `8eebea429`)
 //! - `compiler/parallelize/loop.cpp` (`CodeIFblock`)
 //!
 //! # Scope
-//! Guard shapes (plan provenance: ondemand port §3.8): boolean `ondemand` → `if (clock != 0) { … }`
-//! (C++ `CodeIFblock`); integer `ondemand` / `upsampling` → counted
-//! `SimpleForLoop`; `downsampling` → `if (fDSCounter == 0)` + modulo post-code.
+//! Guard shapes (plan provenance: ondemand port §3.8, i.e.
+//! `porting/ondemand-clock-domains-analysis-port-plan-2026-06-10-en.md`):
+//! boolean `ondemand` → `if (clock != 0) { … }` (C++ `CodeIFblock`); integer
+//! `ondemand` / `upsampling` → counted `SimpleForLoop`; `downsampling` →
+//! `if (fDSCounter == 0)` + modulo post-code.
 //! All reuse the generic FIR `If` / `SimpleForLoop` / `Block` statements per
 //! the region-tree FIR-vocabulary decision (`region.rs`).
 //!
@@ -49,6 +52,36 @@
 //! - `PermVar(Clocked(env, v))` → persistent struct field `fPerm<i>` cleared
 //!   to 0, assigned inside the block, read as a plain field load;
 //! - `OnDemand([Clocked(env, h), holds…])` → guarded `If` region.
+//!
+//! # Block-rate work in a boolean `ondemand` guard (adaptation)
+//! A `Block` value (control rate: sliders, constants, and what is computed
+//! from them) that only a boolean `ondemand` guard needs is not hoisted before
+//! the sample loop, where C++ `generateOD` puts it like any `fSlow`: it would
+//! run at every block whether or not the clock fires. It is computed at the
+//! first fire of each block instead. A value also needed outside the guard's
+//! payload keeps the hoisting (`PlacementInfo::guard_exclusive`), since the
+//! guard would otherwise compute it a second time. One flag per guard
+//! (`iSlowODDone<n>`) is declared, zeroed, before the sample loop, and the
+//! guard body starts with one prologue:
+//! `if (iSlowODDone<n> == 0) { v1 = …; v2 = …; fPerm<i> = v2; iSlowODDone<n> = 1; }`.
+//! A hold store whose value is lazy (`fPerm<i> = v2`) moves into the prologue
+//! when nothing else in the guard reads or writes its field: the field already
+//! holds the value at the later fires of the block. A value the rest of the
+//! guard still reads (`{f|i}SlowOD<n>`) is declared, zeroed, before the loop,
+//! since a later fire of the block reads what the first one stored; any other
+//! value is a local of the prologue, so it does not stay live across the loop.
+//! On faust-coopiano's light body, its 5,010 values read only by their hold
+//! store, live across the loop, put it at 26–28 % of a core in wasm (node,
+//! pedal up) against 21–22 % with the stores in the prologue; the voice's
+//! 33,414 intermediates, declared before the loop, made its wasm `compute`
+//! 38,616 locals instead of 5,210 and its compilation 40 % slower.
+//! A `Block` value is constant within a block, so the bits are those of the
+//! hoisted form; the prologue's operands are `Konst`/`Block` values hoisted
+//! before the loop or earlier entries of the same prologue, so its order (the
+//! materialization order) is valid. Integer `ondemand` and `upsampling`
+//! (counted loops) and `downsampling` keep the hoisting, as does external
+//! control (`-ec`). Plan: `porting/ondemand-block-rate-in-domain-analysis-and-plan-2026-10-17-en.md`;
+//! registry: DIFF-BEH-024.
 use crate::signal_fir::FirId;
 use crate::signal_fir::FirType;
 use crate::signal_fir::SigId;
@@ -92,6 +125,27 @@ pub(super) struct ClockedState<'a> {
     pub(super) domain_ifwrap: HashMap<propagate::ClockDomainId, Vec<(String, usize)>>,
     /// Monotonic counter for `fPerm<i>` hold-field names.
     pub(super) next_perm_id: usize,
+    /// Lazy block-rate prologue of each open block (parallel to
+    /// `open_domains`); only boolean `ondemand` blocks ever fill theirs.
+    pub(super) lazy_prologues: Vec<LazyPrologue>,
+}
+
+/// Block-rate values computed at the first fire of a boolean `ondemand` block
+/// in the current block (see the module documentation).
+#[derive(Default)]
+pub(super) struct LazyPrologue {
+    /// The block's `iSlowODDone<n>` flag, declared with its first value.
+    flag: Option<String>,
+    /// The values, in materialization order (a valid evaluation order).
+    values: Vec<LazyValue>,
+}
+
+/// One lazily computed block-rate value of a [`LazyPrologue`].
+struct LazyValue {
+    name: String,
+    typ: FirType,
+    zero: FirId,
+    value: FirId,
 }
 
 /// Analysis products handed to `build_module` for clocked programs.
@@ -106,6 +160,7 @@ impl<'a> ClockedState<'a> {
             domains: plan.domains,
             envs: plan.envs,
             open_domains: Vec::new(),
+            lazy_prologues: Vec::new(),
             open_loops: Vec::new(),
             perm_fields: HashMap::new(),
             emitted_blocks: HashSet::new(),
@@ -307,6 +362,24 @@ impl<'a> SignalToFirLower<'a> {
             None
         } else {
             Some(clocked.open_domains[effective_depth - 1])
+        }
+    }
+
+    /// Depth of the open region that holds `domain`'s guarded block: the
+    /// open block of its parent domain, `0` (the sample loop) for a top-level
+    /// domain. Falls back to the innermost open block when the parent is not
+    /// open (the block is then reached from within its parent's payload).
+    fn parent_block_depth(&self, domain: propagate::ClockDomainId) -> usize {
+        let Some(clocked) = self.clocked.as_ref() else {
+            return self.regions.child_depth();
+        };
+        match clocked.domains.get(domain).and_then(|d| d.parent) {
+            None => 0,
+            Some(parent) => clocked
+                .open_domains
+                .iter()
+                .rposition(|&open| open == parent)
+                .map_or_else(|| self.regions.child_depth(), |index| index + 1),
         }
     }
 
@@ -690,16 +763,21 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         wrapper: SigId,
         domain: propagate::ClockDomainId,
+        parent_depth: usize,
         loop_ctx: Option<LoopCtx>,
         hold_stores: &[(SigId, String)],
     ) -> Result<super::region::RegionPhases, SignalFirError> {
         // ── Body: lower the held values inside the child region ──────────
+        // Its cache scope hangs under the region of its parent domain, which
+        // is not the innermost open block when this block is reached from an
+        // unrelated domain's payload (see `RegionCache`).
         self.regions.open_child();
-        self.cache.open_child();
+        self.cache.open_child_under(parent_depth);
         {
             let clocked_state = self.clocked.as_mut().expect("clocked state present");
             clocked_state.open_domains.push(domain);
             clocked_state.open_loops.push(loop_ctx.clone());
+            clocked_state.lazy_prologues.push(LazyPrologue::default());
         }
         let prev_redirect = self.regions.set_redirect(None);
 
@@ -737,7 +815,17 @@ impl<'a> SignalToFirLower<'a> {
             clocked_state.open_domains.pop();
             clocked_state.open_loops.pop();
         }
+        let lazy = self
+            .clocked
+            .as_mut()
+            .expect("clocked state present")
+            .lazy_prologues
+            .pop()
+            .expect("lazy prologue pushed with its block");
         let mut body_phases = self.regions.close_child();
+        if let Some(prologue) = self.emit_lazy_prologue(lazy, &mut body_phases) {
+            body_phases.immediate.insert(0, prologue);
+        }
         self.cache.close_child();
         self.regions.set_redirect(prev_redirect);
         body_result?;
@@ -775,6 +863,199 @@ impl<'a> SignalToFirLower<'a> {
         Ok(body_phases)
     }
 
+    /// Index (into `open_domains`) of the block whose lazy prologue receives
+    /// the `Block` value `sig` lowered now: the effective block, when it is a
+    /// boolean `ondemand` guard, control is internal, and only that block's
+    /// payload reaches `sig` (`PlacementInfo::guard_exclusive`). `None` keeps
+    /// the hoisting.
+    pub(super) fn lazy_block_slot(&self, sig: SigId) -> Option<usize> {
+        if self.control_rate_mode.is_external() || !self.placement.guard_exclusive.contains(&sig) {
+            return None;
+        }
+        let clocked = self.clocked.as_ref()?;
+        let depth = self
+            .regions
+            .redirect_depth()
+            .unwrap_or_else(|| self.regions.child_depth());
+        let slot = depth.checked_sub(1)?;
+        let domain = *clocked.open_domains.get(slot)?;
+        let bool_guard = clocked.open_loops.get(slot)?.is_none()
+            && clocked
+                .domains
+                .get(domain)
+                .is_some_and(|d| matches!(d.kind, propagate::ClockDomainKind::OnDemand));
+        bool_guard.then_some(slot)
+    }
+
+    /// Queues `sig`'s value in the lazy prologue of block `slot` and returns
+    /// its read; [`Self::emit_lazy_prologue`] decides where it is declared.
+    pub(super) fn materialize_lazy_block(
+        &mut self,
+        sig: SigId,
+        value: FirId,
+        slot: usize,
+    ) -> FirId {
+        let typ = self
+            .store
+            .value_type(value)
+            .unwrap_or_else(|| self.real_ty());
+        let zero = self
+            .zero_value_for_signal(sig)
+            .unwrap_or_else(|_| self.float_const(0.0));
+        let n = self.name_gen.slow_od_counter;
+        self.name_gen.slow_od_counter += 1;
+        let is_int = matches!(typ, FirType::Int32 | FirType::Int64 | FirType::Bool);
+        let name = format!("{}SlowOD{n}", if is_int { "i" } else { "f" });
+        let needs_flag = self
+            .clocked
+            .as_ref()
+            .is_some_and(|c| c.lazy_prologues[slot].flag.is_none());
+        let mut b = FirBuilder::new(&mut self.store);
+        let read = b.load_var(&name, AccessType::Stack, typ.clone());
+        let flag_decl = needs_flag.then(|| {
+            let flag = format!("iSlowODDone{n}");
+            let zero = b.int32(0);
+            (
+                b.declare_var(&flag, FirType::Int32, AccessType::Stack, Some(zero)),
+                flag,
+            )
+        });
+        let prologue = &mut self
+            .clocked
+            .as_mut()
+            .expect("lazy_block_slot found a clocked block")
+            .lazy_prologues[slot];
+        if let Some((flag_decl, flag)) = flag_decl {
+            prologue.flag = Some(flag);
+            self.sections.push_externalizable_control(flag_decl);
+        }
+        prologue.values.push(LazyValue {
+            name,
+            typ,
+            zero,
+            value,
+        });
+        read
+    }
+
+    /// `if (flag == 0) { values…; holds…; flag = 1; }`, or `None` for an
+    /// empty prologue.
+    ///
+    /// A hold store of the guard (`fPerm<i> = {f|i}SlowOD<k>;`, at the top of
+    /// its `immediate` phase) moves into the prologue when nothing else in the
+    /// guard reads or writes the field: the value is constant within the block,
+    /// so the field already holds it at the later fires of that block. A value
+    /// the rest of the guard (`body`) still reads is then declared, zeroed,
+    /// before the loop and stored here; any other value is a local of the
+    /// prologue, which keeps it from being live across the sample loop.
+    fn emit_lazy_prologue(
+        &mut self,
+        lazy: LazyPrologue,
+        body: &mut super::region::RegionPhases,
+    ) -> Option<FirId> {
+        let flag = lazy.flag?;
+        let lazy_names: HashSet<&str> = lazy.values.iter().map(|v| v.name.as_str()).collect();
+        // Hold stores of a lazy value: (position in `immediate`, field, value).
+        let holds: Vec<(usize, String, String)> = body
+            .immediate
+            .iter()
+            .enumerate()
+            .filter_map(|(at, &id)| {
+                let fir::FirMatch::StoreVar {
+                    name: field,
+                    access: AccessType::Struct,
+                    value,
+                } = fir::match_fir(&self.store, id)
+                else {
+                    return None;
+                };
+                match fir::match_fir(&self.store, value) {
+                    fir::FirMatch::LoadVar {
+                        name,
+                        access: AccessType::Stack,
+                        ..
+                    } if lazy_names.contains(name.as_str()) => Some((at, field, name)),
+                    _ => None,
+                }
+            })
+            .collect();
+        // Names read and written by the rest of the guard. The FIR store
+        // shares nodes: walk each one once.
+        let hold_at: HashSet<usize> = holds.iter().map(|(at, ..)| *at).collect();
+        let mut read = HashSet::new();
+        let mut written = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut pending: Vec<FirId> = body
+            .immediate
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !hold_at.contains(at))
+            .map(|(_, &id)| id)
+            .chain(body.post_output.iter().copied())
+            .chain(body.sample_end.iter().copied())
+            .collect();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match fir::match_fir(&self.store, id) {
+                fir::FirMatch::LoadVar { name, .. }
+                | fir::FirMatch::LoadVarAddress { name, .. } => {
+                    read.insert(name);
+                }
+                fir::FirMatch::StoreVar { name, .. } => {
+                    written.insert(name);
+                }
+                _ => {}
+            }
+            pending.extend(fir::fir_match_children(&self.store, id));
+        }
+        let mut held_fields: HashMap<&str, usize> = HashMap::new();
+        for (_, field, _) in &holds {
+            *held_fields.entry(field.as_str()).or_default() += 1;
+        }
+        let (moved, kept): (Vec<_>, Vec<_>) = holds.iter().partition(|(_, field, _)| {
+            !read.contains(field) && !written.contains(field) && held_fields[field.as_str()] == 1
+        });
+        // A hold store that stays reads its value after the prologue.
+        let mut read_after: HashSet<String> = read;
+        read_after.extend(kept.iter().map(|(_, _, value)| value.clone()));
+        let moved_at: HashSet<usize> = moved.iter().map(|(at, ..)| *at).collect();
+        let moved_stores: Vec<FirId> = moved.iter().map(|(at, ..)| body.immediate[*at]).collect();
+        let mut at = 0;
+        body.immediate.retain(|_| {
+            at += 1;
+            !moved_at.contains(&(at - 1))
+        });
+
+        let mut stmts = Vec::with_capacity(lazy.values.len() + moved_stores.len() + 1);
+        for LazyValue {
+            name,
+            typ,
+            zero,
+            value,
+        } in lazy.values
+        {
+            let mut b = FirBuilder::new(&mut self.store);
+            if read_after.contains(&name) {
+                let decl = b.declare_var(&name, typ, AccessType::Stack, Some(zero));
+                stmts.push(b.store_var(&name, AccessType::Stack, value));
+                self.sections.push_externalizable_control(decl);
+            } else {
+                stmts.push(b.declare_var(&name, typ, AccessType::Stack, Some(value)));
+            }
+        }
+        stmts.extend(moved_stores);
+        let mut b = FirBuilder::new(&mut self.store);
+        let now = b.load_var(&flag, AccessType::Stack, FirType::Int32);
+        let zero = b.int32(0);
+        let cond = b.binop(FirBinOp::Eq, now, zero, FirType::Int32);
+        let one = b.int32(1);
+        stmts.push(b.store_var(&flag, AccessType::Stack, one));
+        let then_block = b.block(&stmts);
+        Some(b.if_(cond, then_block, None))
+    }
+
     pub(super) fn ensure_guarded_block(&mut self, wrapper: SigId) -> Result<FirId, SignalFirError> {
         let dummy = self.lower_int32_const(0);
         if self
@@ -786,13 +1067,47 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         let (holds, clock, domain, kind) = self.decode_clocked_wrapper(wrapper)?;
+        // The block belongs to its parent domain's region, which is not the
+        // innermost open block when the block is reached from an unrelated
+        // domain's payload: its clock is computed there, its body sees only
+        // that region's values, and its guard is emitted there.
+        let parent_depth = self.parent_block_depth(domain);
+        let previous_redirect = self.regions.set_redirect(Some(parent_depth));
+        let built = self.build_guarded_block(wrapper, holds, clock, domain, kind, parent_depth);
+        self.regions.set_redirect(previous_redirect);
+        built?;
+
+        self.clocked
+            .as_mut()
+            .expect("clocked state present")
+            .emitted_blocks
+            .insert(wrapper);
+        Ok(dummy)
+    }
+
+    /// Precondition, hold fields, body and guard of one wrapper's block, with
+    /// the append surface set to its parent region by `ensure_guarded_block`.
+    fn build_guarded_block(
+        &mut self,
+        wrapper: SigId,
+        holds: Vec<SigId>,
+        clock: SigId,
+        domain: propagate::ClockDomainId,
+        kind: propagate::ClockDomainKind,
+        parent_depth: usize,
+    ) -> Result<(), SignalFirError> {
         let clock_is_int = matches!(self.types.get(&clock), Some(SimpleSigType::Int));
         let shape = self.select_guard_shape(kind, clock, clock_is_int)?;
         let (clock_fir, guard_cond, loop_ctx) =
             self.emit_guard_precondition(&shape, clock, clock_is_int, domain)?;
         let hold_stores = self.declare_hold_fields(&holds)?;
-        let body_phases =
-            self.lower_guarded_body(wrapper, domain, loop_ctx.clone(), &hold_stores)?;
+        let body_phases = self.lower_guarded_body(
+            wrapper,
+            domain,
+            parent_depth,
+            loop_ctx.clone(),
+            &hold_stores,
+        )?;
 
         // ── Wrap the body in the guard and append to the outer region ────
         let body_stmts = body_phases.flattened();
@@ -821,12 +1136,6 @@ impl<'a> SignalToFirLower<'a> {
                 DomainCounters::emit_wrapping_increment(&mut self.store, &counter, clock_fir);
             self.regions.current_phases_mut().immediate.push(bump);
         }
-
-        self.clocked
-            .as_mut()
-            .expect("clocked state present")
-            .emitted_blocks
-            .insert(wrapper);
-        Ok(dummy)
+        Ok(())
     }
 }

@@ -1,7 +1,8 @@
 //! AssemblyScript (`asc`) backend generation from FIR `Module` roots.
 //!
 //! # Source provenance
-//! Mirrors the C++ Faust AssemblyScript backend:
+//! Mirrors the C++ Faust AssemblyScript backend (present on upstream
+//! `master-dev`, absent from the pinned reference `8eebea429`):
 //! - `compiler/generator/assemblyscript/assemblyscript_instructions.hh`
 //! - `compiler/generator/assemblyscript/assemblyscript_code_container.cpp`
 //!
@@ -15,19 +16,25 @@
 //! - Numeric literals are wrapped (`<i32>(n)`, `<f32>(n)`, `<f64>(n)`).
 //! - Arrays are `StaticArray<T>`.
 //! - Standard math maps to `Math.*` / `Mathf.*`.
-//! - UI / soundfile nodes are emitted as comments (parity with the C++ asc
-//!   backend, which lowers them to `// ui ...`).
+//! - UI nodes and soundfile declarations are emitted as comments (parity with
+//!   the C++ asc backend, which lowers them to `// ui ...`); soundfile reads
+//!   call the `env._soundfile*` host imports.
 //!
 //! # Limitations
 //! Scalar code path only. Unsupported FIR nodes fail fast with
 //! `FRS-CGEN-ASC-0003`.
 
+use crate::backends::literals::{Digits, NegativeZero, RealSpelling, StringDialect, escape_string};
+use crate::backends::textual::c_like_token_with_logical_shift as emit_binop;
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
-use fir::{
-    AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
+use crate::backends::module_view::{
+    ModuleView, SkeletonCodes, SubModuleView, block_declares_var, block_stores_var,
+    collect_defined_functions, decode_module, find_function_body, invalid_section,
+    is_receiver_lifecycle_method, section_items, sub_module_views, unsupported_node,
 };
+use fir::{AccessType, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir};
 
 use crate::backends::faust_api;
 
@@ -99,24 +106,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::UnsupportedNode;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded FIR module header used by the text emitter.
-#[derive(Debug, Clone)]
-struct ModuleView {
-    name: String,
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-    static_decls: FirId,
-    sub_modules: FirId,
-}
 
 /// Borrowed function declaration view used while stitching the class body.
 struct DeclareFunView<'a> {
@@ -159,12 +159,17 @@ fn generate_asc_module_step(
         .as_deref()
         .unwrap_or(module.name.as_str())
         .to_owned();
-    let declared_functions = collect_module_function_names(store, module.functions)?;
+    // Definitions only: a prototype of a lifecycle function does not displace
+    // the stub synthesized for it (c, rust and julia already did so).
+    let declared_functions: Vec<String> = collect_defined_functions(store, module.functions)?
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "// Code generated with faust-rs {} (https://faust.grame.fr)",
+        "// Code generated with Faust {} (https://faust.grame.fr)",
         crate::VERSION
     );
     let _ = writeln!(
@@ -403,7 +408,7 @@ fn emit_methods_canonical_order(
     }
 
     let _ = writeln!(out, "    static classInit(sample_rate: i32): void {{");
-    if let Some(body) = declared_function_body(store, module.functions, "staticInit") {
+    if let Some(body) = find_function_body(store, module.functions, "staticInit") {
         emit_block(store, out, options, class_name, body, 2)?;
     }
     let _ = writeln!(out, "    }}");
@@ -506,15 +511,13 @@ fn emit_declared_method(
     functions: FirId,
     method: &str,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return Err(invalid_section("functions", functions, store));
-    };
+    let items = section_items("functions", functions, store)?;
     for item in items {
         if let FirMatch::DeclareFun {
             name,
             typ,
             args,
-            body,
+            body: body @ Some(_),
             ..
         } = match_fir(store, item)
             && name == method
@@ -538,23 +541,6 @@ fn emit_declared_method(
     Ok(())
 }
 
-/// Collects declared function names to decide which DSP API stubs to synthesize.
-fn collect_module_function_names(
-    store: &FirStore,
-    functions: FirId,
-) -> Result<Vec<String>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return Err(invalid_section("functions", functions, store));
-    };
-    let mut names = Vec::new();
-    for item in items {
-        if let FirMatch::DeclareFun { name, .. } = match_fir(store, item) {
-            names.push(name);
-        }
-    }
-    Ok(names)
-}
-
 /// Emits a module section as class fields (`DeclareVar` only).
 fn emit_section_fields(
     store: &FirStore,
@@ -564,11 +550,14 @@ fn emit_section_fields(
     section_id: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, section_id) else {
-        return Err(invalid_section("fields", section_id, store));
-    };
+    let items = section_items("fields", section_id, store)?;
     for item in items {
         match match_fir(store, item) {
+            // A foreign variable (`fvariable`) is a host symbol, not a field.
+            FirMatch::DeclareVar {
+                access: AccessType::Global,
+                ..
+            } => {}
             FirMatch::DeclareVar { .. } | FirMatch::DeclareTable { .. } => {
                 emit_stmt(store, out, options, class_name, item, indent, Phase::Fields)?;
             }
@@ -793,15 +782,6 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
-        FirMatch::IteratorForLoop {
-            iterators, body, ..
-        } => {
-            // The scalar asc path doesn't lower vectorized iterator loops; emit
-            // the body inline (parity with the C++ backend's comment + body).
-            let _ = writeln!(out, "{tab}// iterator-for over [{}]", iterators.join(", "));
-            emit_block(store, out, options, class_name, body, indent)?;
-            Ok(())
-        }
         FirMatch::WhileLoop { cond, body } => {
             let cond = emit_value(store, options, class_name, cond)?;
             let _ = writeln!(out, "{tab}while ({cond}) {{");
@@ -862,23 +842,11 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}// metadata {}", one_line(&key));
             Ok(())
         }
-        FirMatch::Label(_)
-        | FirMatch::ShiftArrayVar { .. }
-        | FirMatch::DeclareStructType { .. } => Ok(()),
-        FirMatch::DeclareBufferIterators {
-            name1,
-            name2,
-            channels,
-            ..
-        } => {
-            // Buffer-iterator hints are a vectorization aid; the scalar asc path
-            // does not use them. Emit a comment for parity with the C++ backend.
-            let _ = writeln!(
-                out,
-                "{tab}// buffer iterators: {name1}, {name2}, channels={channels}"
-            );
-            Ok(())
-        }
+        FirMatch::Label(_) => Ok(()),
+        // `IteratorForLoop`, `ShiftArrayVar`, `DeclareStructType` and
+        // `DeclareBufferIterators` are refused, as cpp does: they were accepted
+        // here and emitted nothing (a delay line that never shifts) or the
+        // loop body once — code that compiles and computes the wrong thing.
         _ => Err(unsupported_node("statement", stmt, store)),
     }
 }
@@ -916,7 +884,7 @@ fn emit_declare_fun(
     let tab = "    ".repeat(indent);
 
     // For DSP API methods, the FIR carries an explicit leading `dsp` arg; strip it.
-    let strip_dsp_arg = is_dsp_api_method(decl.name)
+    let strip_dsp_arg = is_receiver_lifecycle_method(decl.name)
         && matches!(decl.named_args.first(), Some(n) if n.name == "dsp");
 
     let (ret, params) = match decl.typ {
@@ -1278,29 +1246,6 @@ fn math_namespace(options: &AscOptions) -> &'static str {
     }
 }
 
-/// Maps one FIR binary operator to its AssemblyScript token spelling.
-fn emit_binop(op: FirBinOp) -> &'static str {
-    match op {
-        FirBinOp::Add => "+",
-        FirBinOp::Sub => "-",
-        FirBinOp::Mul => "*",
-        FirBinOp::Div => "/",
-        FirBinOp::Rem => "%",
-        FirBinOp::And => "&",
-        FirBinOp::Or => "|",
-        FirBinOp::Xor => "^",
-        FirBinOp::Lsh => "<<",
-        FirBinOp::ARsh => ">>",
-        FirBinOp::LRsh => ">>>",
-        FirBinOp::Eq => "==",
-        FirBinOp::Ne => "!=",
-        FirBinOp::Lt => "<",
-        FirBinOp::Le => "<=",
-        FirBinOp::Gt => ">",
-        FirBinOp::Ge => ">=",
-    }
-}
-
 /// Renders a FIR type into AssemblyScript spelling.
 fn emit_type(typ: &FirType, options: &AscOptions) -> String {
     match typ {
@@ -1344,11 +1289,8 @@ fn emit_sub_modules(
     class_name: &str,
     sub_modules: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, sub_modules) else {
-        return Ok(());
-    };
-    for item in items {
-        let FirMatch::SubModule {
+    for sub in sub_module_views(store, sub_modules)? {
+        let SubModuleView {
             name,
             elem_type,
             dsp_struct,
@@ -1356,13 +1298,7 @@ fn emit_sub_modules(
             globals,
             functions,
             sub_modules: nested,
-        } = match_fir(store, item)
-        else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidModuleSection,
-                format!("sub_modules holds a non-SubModule node {}", item.as_u32()),
-            ));
-        };
+        } = sub;
 
         emit_sub_modules(store, out, options, class_name, nested)?;
 
@@ -1476,19 +1412,6 @@ fn emit_sub_modules(
     Ok(())
 }
 
-/// Returns the body of the named function declared by a module, if any.
-fn declared_function_body(store: &FirStore, functions: FirId, wanted: &str) -> Option<FirId> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return None;
-    };
-    items
-        .into_iter()
-        .find_map(|item| match match_fir(store, item) {
-            FirMatch::DeclareFun { name, body, .. } if name == wanted => body,
-            _ => None,
-        })
-}
-
 fn emit_static_tables(
     store: &FirStore,
     out: &mut String,
@@ -1550,96 +1473,10 @@ fn emit_static_tables(
     Ok(())
 }
 
-/// Decodes the FIR root into the [`ModuleView`] used by the rest of the emitter.
-///
-/// Returns `RootNotModule` when `module` does not decode to `FirMatch::Module`.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    match match_fir(store, module) {
-        FirMatch::Module {
-            num_inputs,
-            num_outputs,
-            name,
-            dsp_struct,
-            globals,
-            functions,
-            static_decls,
-            sub_modules,
-        } => Ok(ModuleView {
-            name,
-            dsp_struct,
-            globals,
-            functions,
-            num_inputs,
-            num_outputs,
-            static_decls,
-            sub_modules,
-        }),
-        _ => Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!(
-                "expected FIR module root, got {:?} at node {}",
-                match_fir(store, module),
-                module.as_u32()
-            ),
-        )),
-    }
-}
-
-/// Returns `true` for canonical Faust lifecycle/DSP-API function names.
-///
-/// Used by [`emit_declare_fun`] to decide whether to strip the leading `dsp`
-/// FIR argument: these methods become AssemblyScript instance methods with
-/// an implicit `this`, so their explicit FIR `dsp` parameter has no rendered
-/// counterpart.
-fn is_dsp_api_method(name: &str) -> bool {
-    // `control`/`frame` are the execution-options entry points (plan §5.7:
-    // the AssemblyScript one-sample target).
-    matches!(
-        name,
-        "metadata"
-            | "instanceConstants"
-            | "instanceResetUserInterface"
-            | "instanceClear"
-            | "buildUserInterface"
-            | "compute"
-            | "control"
-            | "frame"
-    )
-}
-
-fn block_declares_var(store: &FirStore, block: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block) else {
-        return false;
-    };
-    items.iter().any(
-        |id| matches!(match_fir(store, *id), FirMatch::DeclareVar { name: v, .. } if v == name),
-    )
-}
-
-fn block_stores_var(store: &FirStore, block: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block) else {
-        return false;
-    };
-    items
-        .iter()
-        .any(|id| matches!(match_fir(store, *id), FirMatch::StoreVar { name: v, .. } if v == name))
-}
-
 /// Escapes arbitrary text for embedding inside an AssemblyScript double-quoted
 /// string literal (used by the `getJSON()` snapshot).
 fn escape_as_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 16);
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out
+    escape_string(value, StringDialect::C)
 }
 
 /// Formats one `f64` as an AssemblyScript floating literal.
@@ -1654,55 +1491,21 @@ fn escape_as_string(value: &str) -> String {
 /// special-value spellings genuinely differ (C `NAN`/`INFINITY` macros vs
 /// AssemblyScript globals).
 fn trim_float(value: f64) -> String {
-    if value.is_nan() {
-        return "NaN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-Infinity".to_owned()
-        } else {
-            "Infinity".to_owned()
-        };
-    }
-    let mut text = format!("{value}");
-    if !text.contains(['.', 'e', 'E']) {
-        text.push_str(".0");
-    }
-    if text == "-0.0" {
-        "0.0".to_owned()
-    } else {
-        text
-    }
+    ASC_REAL.format(value)
 }
+
+/// AssemblyScript spelling of a real literal: the `NaN`/`Infinity` globals.
+pub(crate) const ASC_REAL: RealSpelling = RealSpelling {
+    nan: "NaN",
+    pos_inf: "Infinity",
+    neg_inf: "-Infinity",
+    digits: Digits::Shortest,
+    negative_zero: NegativeZero::Normalize,
+};
 
 /// Renders a comma-joined `[...]` AssemblyScript array literal.
 fn format_array(values: impl Iterator<Item = String>) -> String {
     format!("[{}]", values.collect::<Vec<_>>().join(", "))
-}
-
-/// Builds an `InvalidModuleSection` error for a module section that did not
-/// decode as a FIR block.
-fn invalid_section(section: &str, id: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::InvalidModuleSection,
-        format!(
-            "section '{section}' must be a FIR block, got {:?} at node {}",
-            match_fir(store, id),
-            id.as_u32()
-        ),
-    )
-}
-
-/// Builds an `UnsupportedNode` error for one FIR node the asc emitter cannot render.
-fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::UnsupportedNode,
-        format!(
-            "unsupported FIR {kind} node {:?} at {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
-    )
 }
 
 /// Returns the stable AssemblyScript backend identifier (`"asc"`).

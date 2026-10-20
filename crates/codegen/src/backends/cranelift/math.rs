@@ -2,8 +2,9 @@
 //! backend implements.
 //!
 //! The subset pre-check and the lowering both decide through
-//! [`resolve_math_call`], over the one inventory [`HOST_MATH`], so a call the
-//! pre-check accepts is one the lowering can emit.
+//! [`resolve_math_call`], over the one inventory
+//! [`HOST_MATH`](super::host::HOST_MATH), so a call the pre-check accepts is
+//! one the lowering can emit.
 //!
 //! A call reaches here under two kinds of names:
 //! - FIR's own math names (`sin`, `pow`, `fabs`, ...: [`fir::FirMathOp`]),
@@ -25,7 +26,7 @@ use super::host::host_math;
 use super::{ExternFunction, HostFunctionSignature, HostScalarType};
 use crate::backends::host_function::{faust_declaration, signature_mismatch};
 use fir::{FirMathOp, FirType};
-use foreign_call::{NamedFunction, ScalarType, libm_function};
+use foreign_call::{NamedFunction, libm_function};
 use std::collections::HashMap;
 
 /// Maps a FIR unary math op to its `f32` host symbol.
@@ -116,30 +117,9 @@ pub(crate) struct HostCall<'a> {
     pub(crate) params: Vec<HostScalarType>,
 }
 
-/// The host function type of a typed function's parameter or result, which
-/// is `int`, `float` or `double`.
-fn host_type(ty: ScalarType) -> HostScalarType {
-    match ty {
-        ScalarType::Int32 => HostScalarType::Int,
-        ScalarType::Float32 => HostScalarType::Float,
-        ScalarType::Float64 => HostScalarType::Double,
-        ScalarType::Bool | ScalarType::Void => {
-            unreachable!("a typed function takes and returns int, float or double")
-        }
-    }
-}
-
 /// The signature of a typed function.
 fn signature_of(function: &NamedFunction) -> HostFunctionSignature {
-    HostFunctionSignature {
-        ret: host_type(function.function.ret()),
-        params: function
-            .function
-            .params()
-            .iter()
-            .map(|ty| host_type(*ty))
-            .collect(),
-    }
+    HostFunctionSignature::of_typed(function.function)
 }
 
 fn typed_call(function: &'static NamedFunction) -> HostCall<'static> {
@@ -276,6 +256,10 @@ pub(crate) fn resolve_math_call(
     double: bool,
 ) -> Option<Result<&'static NamedFunction, String>> {
     let math = match FirMathOp::from_symbol(name) {
+        // The new FIR aliases also name fixed-precision C symbols. Preserve
+        // their host signature even when a foreign declaration widens its
+        // result; only canonical unsuffixed FIR names pick by result type.
+        Some(_) if matches!(name, "powf" | "rintf") => host_math(name)?,
         Some(op) => {
             let wide = match ret {
                 FirType::Float64 => true,
@@ -306,6 +290,7 @@ pub(crate) fn resolve_math_call(
 mod tests {
     use super::*;
     use crate::backends::cranelift::host::HOST_MATH;
+    use foreign_call::ScalarType;
 
     const ALL_MATH_OPS: &[FirMathOp] = &[
         FirMathOp::Pow,
@@ -481,6 +466,8 @@ mod tests {
         assert_eq!(ok("std::pow", FirType::Float64, 2, false), "pow");
         // C symbols name one variant; the precision converts.
         assert_eq!(ok("tanhf", FirType::Float64, 1, true), "tanhf");
+        assert_eq!(ok("powf", FirType::Float64, 2, true), "powf");
+        assert_eq!(ok("rintf", FirType::Float64, 1, true), "rintf");
         assert_eq!(ok("sinf", FirType::FaustFloat, 1, false), "sinf");
         assert_eq!(ok("isnan", FirType::Int32, 1, false), "isnan");
         assert_eq!(ok("abs", FirType::Int32, 1, false), "abs");

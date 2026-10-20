@@ -1,7 +1,9 @@
 # libfaust-ffi
 
-Backend-agnostic libfaust C API: `generateSHA1`, `expandDSP*`,
-`generateAuxFiles*`, and one addition of this port, `getCCompleteDSPError`.
+Backend-agnostic libfaust C API: `generateCSHA1`, `expandCDSPFrom{File,String}`,
+`generateCAuxFilesFrom{File,String}[2]` (C++ wrappers `generateSHA1`,
+`expandDSP*`, `generateAuxFiles*` in `libfaust.h`), and two additions of this
+port, `getCCompleteDSPError` and `getCDSPErrorDiagnostics`.
 
 These entry points belong to no backend — expansion and auxiliary-file
 generation run the shared front end, and the SHA key is computed from text — so
@@ -21,7 +23,9 @@ wrappers over the C ABI, the same shape `libfaust-box.h` uses for the Box API,
 each wrapper releasing its returned `const char*` through `freeCMemory`.
 
 `freeCMemory` itself is exported once for the whole distribution by
-`interp-ffi`; defining it here would collide at link time.
+`interp-ffi`; defining it here would collide at link time. Every adapter's
+`freeCMemory` is `ffi_common::free_c_memory`, which releases the strings and
+the pointer arrays (`Signal*`, `char**`) of every API.
 
 ## Compile errors
 

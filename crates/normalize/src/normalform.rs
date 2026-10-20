@@ -1,12 +1,14 @@
-//! Normal-form pipeline coordinator — Phase 1.
+//! Normal-form preparation and the promotion/simplification entry points.
 //!
-//! Ported (Phase 1 scope) from C++ `compiler/normalize/normalform.cpp`.
+//! Partial port of C++ `compiler/normalize/normalform.cpp`.
 //!
-//! # Phase 1 scope
+//! # Entry points
 //!
-//! This module implements the three preparation steps that
-//! `crates/transform/signal_prepare` currently performs before FIR lowering,
-//! now exposed as a general-purpose, backend-agnostic API:
+//! - [`promote_signals_fastlane`] and [`simplify_signals_fastlane`] are the
+//!   passes `transform::signal_prepare` runs, between its re-typings, on the
+//!   production compile path.
+//! - [`prepare_signals`] / [`prepare_signals_multi`] chain the steps below
+//!   into one backend-agnostic call (used by the signal C API):
 //!
 //! 0. **De Bruijn coherence check** (`check_de_bruijn_coherence`): reject
 //!    locally escaping recursive references before any symbolic conversion.
@@ -23,14 +25,12 @@
 //! through explicit integer-context helpers instead of relying on backend-side
 //! repairs.
 //!
-//! # Phase 2 (deferred)
-//!
-//! The full C++ `simplifyToNormalForm` pipeline (UI promotion, FTZ wrapping,
-//! auto-differentiation, double-promotion, causality check) is deferred to a
-//! future Phase 2 implementation.
+//! [`prepare_signals`] does not run the other steps of C++
+//! `simplifyToNormalForm` (UI promotion, FTZ wrapping, auto-differentiation,
+//! double-promotion, causality check).
 //!
 //! # API mapping status
-//! - `simplifyToNormalForm(sig)` → [`prepare_signals`] (Phase 1 only)
+//! - `simplifyToNormalForm(sig)` → [`prepare_signals`] (subset, see above)
 //! - `simplifyToNormalForm2(sigs)` → [`prepare_signals_multi`]
 
 use std::collections::HashMap;
@@ -50,7 +50,8 @@ use crate::simplify::{SimplifyCache, simplify_with_cache};
 
 /// Configuration for the normal-form preparation pipeline.
 ///
-/// Corresponds to the subset of `gGlobal` options consumed by Phase 1.
+/// Corresponds to the subset of `gGlobal` options consumed by
+/// [`prepare_signals`].
 #[derive(Debug, Clone, Default)]
 pub struct NormalFormOpts {
     /// Skip the signal-promotion pass (useful for testing individual steps).
@@ -113,7 +114,7 @@ impl From<sigtype::InferenceError> for NormalFormError {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/// Phase 1 normal-form preparation for a single signal.
+/// Normal-form preparation for a single signal.
 ///
 /// Runs the normal-form preparation pipeline:
 /// 0. `check_de_bruijn_coherence(arena, sig)`
@@ -123,7 +124,7 @@ impl From<sigtype::InferenceError> for NormalFormError {
 ///
 /// Returns the promoted signal root and the type map produced by step 2.
 ///
-/// C++: Phase 1 subset of `Tree simplifyToNormalForm(Tree sig)`.
+/// C++: subset of `Tree simplifyToNormalForm(Tree sig)`.
 pub fn prepare_signals(
     arena: &mut TreeArena,
     ui: &UiProgram,
@@ -135,7 +136,7 @@ pub fn prepare_signals(
     Ok((sigs[0], types))
 }
 
-/// Phase 1 normal-form preparation for a slice of output signals.
+/// Normal-form preparation for a slice of output signals.
 ///
 /// Applies the preparation pipeline to the entire signal forest rooted at
 /// `sigs`, treating them as co-dependent outputs (type annotation sees all
@@ -143,7 +144,7 @@ pub fn prepare_signals(
 ///
 /// Returns the promoted signal roots (same order as input) and the type map.
 ///
-/// C++: Phase 1 subset of `void simplifyToNormalForm2(tvec& sigs)`.
+/// C++: subset of `tvec simplifyToNormalForm2(tvec siglist)`.
 pub fn prepare_signals_multi(
     arena: &mut TreeArena,
     ui: &UiProgram,
@@ -188,15 +189,13 @@ pub fn prepare_signals_multi(
 
 /// Insert numeric promotion casts into a signal forest.
 ///
-/// Walks each signal tree and inserts `FloatCast` nodes where an integer signal
-/// feeds into a context that requires a real value, and vice versa.  This is a
-/// simplified version of the C++ `SignalPromotion` pass sufficient for Phase 1.
+/// Infallible wrapper over [`promote_signals_fastlane`]: inserts the numeric
+/// casts where an integer signal feeds a context that requires a real value,
+/// and vice versa. Panics if promotion fails, which canonical type annotation
+/// is expected to rule out.
 ///
-/// Current scope: wrap integer-valued output signals with `FloatCast` when
-/// the Faust process output is expected to be real (variability = Konst with
-/// Int nature).  This matches the minimal promotion the fast-lane needed.
-///
-/// C++: `signalPromotion(sig)` in `normalform.cpp`.
+/// C++: `signalPromote(sig)` (`SignalPromotion`,
+/// `compiler/transform/sigPromotion.cpp`), called from `normalform.cpp`.
 pub fn promote_signals(
     arena: &mut TreeArena,
     types: &HashMap<SigId, SigType>,
@@ -236,13 +235,11 @@ fn ffun_arg_kinds(arena: &TreeArena, ff: SigId) -> Option<Vec<Option<ReducedSigK
     )
 }
 
-/// Fast-lane promotion pass shared by `normalize` and FIR preparation.
+/// Promotion pass shared by `normalize` and `transform::signal_prepare`.
 ///
-/// This is the current Rust home of the detailed promotion subset previously
-/// implemented in `transform::signal_prepare`. It consumes the canonical
-/// `SigType` map produced by `TypeAnnotator`, so recursive widening and mixed
-/// numeric expressions are decided from the same source of truth as the rest
-/// of the normalization pipeline.
+/// It consumes the canonical `SigType` map produced by `TypeAnnotator`, so
+/// recursive widening and mixed numeric expressions are decided from the same
+/// source of truth as the rest of the normalization pipeline.
 pub fn promote_signals_fastlane(
     arena: &mut TreeArena,
     types: &HashMap<SigId, SigType>,
@@ -319,15 +316,15 @@ enum ReducedSigKind {
 ///   rule does.
 ///
 /// Current rule inventory:
-/// - `1:1 enough for Phase 1`: arithmetic/binops, `select2`, delay/table
+/// - `1:1`: arithmetic/binops, `select2`, delay/table
 ///   indices, `enable`, bargraphs, waveform numeric homogenization, clocked
 ///   family integer clocks.
 /// - `adapted but context-invariant`: list reconstruction, symbolic recursion,
 ///   `output`, `attach`, `control`, `seq`, `temp_var`, `perm_var`,
 ///   `assert_bounds`, `lowest`, `highest`, foreign-function argument lists.
-/// - `deferred to Phase 2`: passes outside the current normalization subset
-///   (`simplify`, FTZ wrapping, auto-diff, UI promotion beyond numeric casts,
-///   and the rest of full `simplifyToNormalForm`).
+/// - outside this pass: simplification ([`simplify_signals_fastlane`]), FTZ
+///   wrapping, auto-diff, UI promotion beyond numeric casts, and the rest of
+///   full `simplifyToNormalForm`.
 struct SignalPromoter<'a> {
     arena: &'a mut TreeArena,
     types: &'a HashMap<SigId, SigType>,
@@ -481,7 +478,9 @@ impl<'a> SignalPromoter<'a> {
             }
             SigMatch::BinOp(op, left, right) => self.promote_binop(sig, op, left, right)?,
             SigMatch::Pow(left, right) => {
-                self.promote_real_binary(|b, l, r| b.pow(l, r), left, right)?
+                // C++ sigPromotion.cpp: promote to the primitive's result
+                // nature, preserving integer pow operands until FIR emission.
+                self.promote_minmax(|b, l, r| b.pow(l, r), left, right)?
             }
             SigMatch::Min(left, right) => {
                 self.promote_minmax(|b, l, r| b.min(l, r), left, right)?
@@ -1090,6 +1089,32 @@ mod tests {
     }
 
     // ── promote_signals ───────────────────────────────────────────────────
+
+    #[test]
+    fn pow_promotion_keeps_integer_operands_and_promotes_mixed_pairs() {
+        let mut a = arena();
+        let u = ui();
+        let mut b = SigBuilder::new(&mut a);
+        let base = b.int(25);
+        let input = b.input(0);
+        let exponent = b.int_cast(input);
+        let integer = b.pow(base, exponent);
+        let mixed = b.pow(base, input);
+        let types = sigtype::TypeAnnotator::new(&a, &u)
+            .annotate(&[integer, mixed])
+            .unwrap();
+        let promoted = promote_signals(&mut a, &types, &[integer])[0];
+        assert_eq!(match_sig(&a, promoted), SigMatch::Pow(base, exponent));
+        let promoted = promote_signals(&mut a, &types, &[mixed])[0];
+        let SigMatch::Pow(lhs, rhs) = match_sig(&a, promoted) else {
+            panic!("pow expected")
+        };
+        assert!(matches!(
+            match_sig(&a, lhs),
+            SigMatch::FloatCast(_) | SigMatch::Real(_)
+        ));
+        assert_eq!(rhs, input);
+    }
 
     #[test]
     fn promote_signals_no_change_for_same_type_binop() {

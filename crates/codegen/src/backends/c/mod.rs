@@ -26,7 +26,12 @@
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
-use fir::{AccessType, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
+use crate::backends::module_view::{
+    FunctionDecl as DeclareFunView, SkeletonCodes, SubModuleView, block_declares_var,
+    block_stores_var, collect_defined_functions, decode_module, invalid_section, is_empty_block,
+    section_items, sub_module_views, unsupported_node,
+};
+use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
 
 use crate::backends::c_family::{self, CFamilySyntax, EmitMode, StructInit, TableInit};
 use crate::backends::faust_api;
@@ -154,41 +159,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::UnsupportedNode;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded FIR module header used to keep emission helpers independent from the
-/// exact `FirMatch::Module` shape.
-///
-/// This is an internal normalization step, not a long-lived IR: helpers treat
-/// these ids as section roots that must still be re-decoded before emission.
-#[derive(Debug, Clone)]
-struct ModuleView {
-    name: String,
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-    static_decls: FirId,
-    sub_modules: FirId,
-}
-
-/// Normalized function declaration extracted from FIR before textual emission.
-///
-/// Keeping an owned view here avoids repeatedly borrowing through the FIR store
-/// while the emitter walks several lifecycle/API synthesis passes.
-#[derive(Debug, Clone)]
-struct DeclareFunView {
-    name: String,
-    typ: FirType,
-    named_args: Vec<NamedType>,
-    /// `None` when this is a prototype-only declaration (no body).
-    body: Option<FirId>,
-}
 
 #[must_use]
 /// Returns the stable backend identifier (`"c"`).
@@ -253,7 +234,7 @@ fn generate_c_module_step(
         None
     };
 
-    let declared_functions = collect_module_functions(store, module.functions)?;
+    let declared_functions = collect_defined_functions(store, module.functions)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
     let mut out = String::new();
@@ -264,6 +245,7 @@ fn generate_c_module_step(
             .metadata_name
             .as_deref()
             .unwrap_or(&module.name),
+        &effective_options.metadata_entries,
         effective_options.compile_options.as_deref(),
         mem0.is_some(),
         &crate::backends::c_family::ForeignDependencies::of(store, module_id),
@@ -308,28 +290,16 @@ fn emit_c_header(
     out: &mut String,
     class_name: &str,
     module_name: &str,
+    metadata_entries: &[(String, String)],
     compile_options: Option<&str>,
     mem0: bool,
     dependencies: &crate::backends::c_family::ForeignDependencies,
 ) {
-    let _ = writeln!(
+    crate::backends::literals::faust_banner(
         out,
-        "/* ------------------------------------------------------------"
-    );
-    let _ = writeln!(out, "name: \"{module_name}\"");
-    let _ = writeln!(
-        out,
-        "Code generated with Faust {} (https://faust.grame.fr)",
-        crate::VERSION
-    );
-    let _ = writeln!(
-        out,
-        "Compilation options: {}",
-        compile_options.unwrap_or("-lang c")
-    );
-    let _ = writeln!(
-        out,
-        "------------------------------------------------------------ */"
+        Some(module_name),
+        metadata_entries,
+        compile_options.unwrap_or("-lang c"),
     );
     let _ = writeln!(out);
     let guard = format!("__{}_H__", class_name);
@@ -480,11 +450,8 @@ fn emit_sub_modules(
     options: &COptions,
     sub_modules: FirId,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, sub_modules) else {
-        return Ok(());
-    };
-    for item in items {
-        let FirMatch::SubModule {
+    for sub in sub_module_views(store, sub_modules)? {
+        let SubModuleView {
             name,
             dsp_struct,
             static_decls,
@@ -492,13 +459,7 @@ fn emit_sub_modules(
             functions,
             sub_modules: nested,
             ..
-        } = match_fir(store, item)
-        else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidModuleSection,
-                format!("sub_modules holds a non-SubModule node {}", item.as_u32()),
-            ));
-        };
+        } = sub;
 
         emit_sub_modules(store, out, options, nested)?;
         emit_static_tables(store, out, options, static_decls)?;
@@ -601,30 +562,6 @@ fn emit_sub_modules(
     Ok(())
 }
 
-/// Returns the `(variable, sub-module)` pairs allocated inside one block.
-///
-/// The FIR carries the allocation but not the release, which is bound to how
-/// each language allocates; C pairs `calloc` with `free` once the fill has run.
-fn allocated_sub_containers(store: &FirStore, block: FirId) -> Vec<(String, String)> {
-    let FirMatch::Block(items) = match_fir(store, block) else {
-        return Vec::new();
-    };
-    items
-        .into_iter()
-        .filter_map(|item| match match_fir(store, item) {
-            FirMatch::DeclareVar {
-                name,
-                init: Some(init),
-                ..
-            } => match match_fir(store, init) {
-                FirMatch::NewDsp { name: sub, .. } => Some((name, sub)),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
 /// Emits one FIR block worth of struct fields.
 ///
 /// Only `DeclareVar` and `DeclareTable` entries contribute concrete state
@@ -638,16 +575,7 @@ fn emit_struct_fields(
     block_id: FirId,
     externalize_mem0_arrays: bool,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "struct section must be a FIR block, got {:?} at node {}",
-                match_fir(store, block_id),
-                block_id.as_u32()
-            ),
-        ));
-    };
+    let items = section_items("struct", block_id, store)?;
 
     for item in items {
         match match_fir(store, item) {
@@ -690,32 +618,6 @@ fn emit_struct_fields(
     Ok(())
 }
 
-/// Returns `true` when `block_id` declares a variable named `name`.
-fn block_declares_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::DeclareVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
-/// Returns `true` when `block_id` stores to a variable named `name`.
-fn block_stores_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
-    let FirMatch::Block(items) = match_fir(store, block_id) else {
-        return false;
-    };
-    items.iter().any(|id| {
-        matches!(
-            match_fir(store, *id),
-            FirMatch::StoreVar { name: var_name, .. } if var_name == name
-        )
-    })
-}
-
 /// Aggregated inputs required to synthesize the public Faust C API surface.
 struct CApiEmitInput<'a> {
     options: &'a COptions,
@@ -749,7 +651,6 @@ fn emit_c_api(
         table_inits,
         mem0,
     } = spec;
-    let names: Vec<&str> = declared_functions.iter().map(|f| f.name.as_str()).collect();
 
     if let Some(analysis) = mem0 {
         emit_mem0_instance_api(out, class_name, analysis);
@@ -808,7 +709,7 @@ fn emit_c_api(
         && let Some(body) = static_init.body
     {
         emit_block(store, out, options, body, 1)?;
-        for (var, sub) in allocated_sub_containers(store, body) {
+        for (var, sub) in c_family::allocated_sub_containers(store, body) {
             let _ = writeln!(out, "    delete{sub}({var});");
         }
     } else {
@@ -954,9 +855,7 @@ fn emit_c_api(
         if crate::backends::is_lifecycle_function(&f.name) {
             continue;
         }
-        if names.contains(&f.name.as_str()) {
-            emit_helper_function(store, out, options, f)?;
-        }
+        emit_helper_function(store, out, options, f)?;
     }
 
     Ok(())
@@ -964,11 +863,12 @@ fn emit_c_api(
 
 /// Emits manager-backed object and instance-buffer allocation for C `-mem0`.
 ///
-/// Source provenance: Faust C++ `CodeContainer::generateMemoryMethods`. The C
-/// adaptation is transactional, preserves explicit alignment, captures the
-/// creator table, and releases completed allocations in reverse order via the
-/// shared `releaseInstance{class_name}` helper — safe to call from a failure
-/// midway through `create{class_name}` because `memset` zero-initializes every
+/// Source provenance: Faust C++ `CCodeContainer::produceClass` and its
+/// `generateAllocateFun`/`generateDestroyFun` helpers (`c/c_code_container.*`)
+/// under `-mem`. The C adaptation is transactional, preserves explicit
+/// alignment, captures the creator table, and releases completed allocations
+/// in reverse order via the shared `releaseInstance{class_name}` helper — safe
+/// to call from a failure midway through `create{class_name}` because `memset` zero-initializes every
 /// not-yet-allocated field to `NULL`, so the helper's null guard only ever
 /// destroys what actually got allocated.
 fn emit_mem0_instance_api(out: &mut String, class_name: &str, analysis: &Mem0Analysis) {
@@ -1248,14 +1148,37 @@ fn emit_metadata(
     if let Some(f) = declared_functions.iter().find(|f| f.name == "metadata") {
         emit_named_fun(store, out, options, class_name, f)
     } else {
+        // Absent and empty are the same request, as in cpp and julia: replay
+        // the compilation metadata. This used to declare a bring-up
+        // placeholder, `"faust-rs": "module-first c backend prototype"`.
         let _ = writeln!(out, "void metadata{class_name}(MetaGlue* m) {{");
-        let _ = writeln!(
-            out,
-            "    m->declare(m->metaInterface, \"faust-rs\", \"module-first c backend prototype\");"
-        );
+        emit_compilation_metadata(out, options, class_name);
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
         Ok(())
+    }
+}
+
+/// Writes the compilation metadata (`filename`, `name`, the options'
+/// entries) as `m->declare` lines.
+fn emit_compilation_metadata(out: &mut String, options: &COptions, class_name: &str) {
+    let filename = options
+        .metadata_filename
+        .clone()
+        .unwrap_or_else(|| format!("{class_name}.dsp"));
+    let name = options
+        .metadata_name
+        .clone()
+        .unwrap_or_else(|| class_name.to_owned());
+    for (key, value) in
+        c_family::ordered_compilation_metadata(&options.metadata_entries, filename, name)
+    {
+        let _ = writeln!(
+            out,
+            "    m->declare(m->metaInterface, {}, {});",
+            c_string_literal(&key),
+            c_string_literal(&value)
+        );
     }
 }
 
@@ -1308,24 +1231,7 @@ fn emit_named_fun(
     if decl.name == "compute" {
         emit_compute_body(store, out, options, body, 1)?;
     } else if decl.name == "metadata" && is_empty_block(store, body) {
-        let filename = options
-            .metadata_filename
-            .clone()
-            .unwrap_or_else(|| format!("{class_name}.dsp"));
-        let name = options
-            .metadata_name
-            .clone()
-            .unwrap_or_else(|| class_name.to_owned());
-        for (key, value) in
-            c_family::ordered_compilation_metadata(&options.metadata_entries, filename, name)
-        {
-            let _ = writeln!(
-                out,
-                "    m->declare(m->metaInterface, {}, {});",
-                c_string_literal(&key),
-                c_string_literal(&value)
-            );
-        }
+        emit_compilation_metadata(out, options, class_name);
     } else {
         let mut mode = match decl.name.as_str() {
             "metadata" => EmitMode::Metadata,
@@ -1334,7 +1240,7 @@ fn emit_named_fun(
         };
         emit_block_with_mode(store, out, options, body, 1, &mut mode)?;
         if decl.name == "instanceConstants" {
-            for (var, sub) in allocated_sub_containers(store, body) {
+            for (var, sub) in c_family::allocated_sub_containers(store, body) {
                 let _ = writeln!(out, "    delete{sub}({var});");
             }
         }
@@ -1342,10 +1248,6 @@ fn emit_named_fun(
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     Ok(())
-}
-
-fn is_empty_block(store: &FirStore, body: FirId) -> bool {
-    matches!(match_fir(store, body), FirMatch::Block(items) if items.is_empty())
 }
 
 /// Emits one non-DSP helper function as a `static` C function.
@@ -1404,19 +1306,6 @@ fn emit_compute_body(
     emit_block_with_mode(store, out, options, body, indent, &mut mode)
 }
 
-/// Builds this backend's stable error for a malformed state section, used by
-/// the shared initializer collectors.
-fn invalid_struct_section(store: &FirStore, section: FirId) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::InvalidModuleSection,
-        format!(
-            "struct section must be a FIR block, got {:?} at node {}",
-            match_fir(store, section),
-            section.as_u32()
-        ),
-    )
-}
-
 /// Collects scalar struct/global initializers used by reset lifecycle methods.
 ///
 /// Shared with the `cpp` backend via
@@ -1427,7 +1316,7 @@ fn collect_struct_initializers(
     globals: FirId,
 ) -> Result<Vec<StructInit>, CodegenError> {
     c_family::collect_struct_initializers(store, dsp_struct, globals, |section| {
-        invalid_struct_section(store, section)
+        invalid_section("struct", section, store)
     })
 }
 
@@ -1441,48 +1330,8 @@ fn collect_table_initializers(
     globals: FirId,
 ) -> Result<Vec<TableInit>, CodegenError> {
     c_family::collect_table_initializers(store, dsp_struct, globals, |section| {
-        invalid_struct_section(store, section)
+        invalid_section("struct", section, store)
     })
-}
-
-/// Extracts all body-bearing helper/function definitions from the module.
-fn collect_module_functions(
-    store: &FirStore,
-    functions: FirId,
-) -> Result<Vec<DeclareFunView>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, functions) else {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "section 'functions' must be a FIR block, got {:?} at node {}",
-                match_fir(store, functions),
-                functions.as_u32()
-            ),
-        ));
-    };
-
-    let mut names = Vec::new();
-    for item in items {
-        if let FirMatch::DeclareFun {
-            name,
-            typ,
-            args,
-            body: Some(body),
-            ..
-        } = match_fir(store, item)
-        {
-            // Only collect function *definitions* (with body). Prototype-only
-            // DeclareFun nodes (body: None) are forward declarations and do not
-            // displace the canonical stub generation in emit_c_api.
-            names.push(DeclareFunView {
-                name,
-                typ,
-                named_args: args,
-                body: Some(body),
-            });
-        }
-    }
-    Ok(names)
 }
 
 /// Emits a FIR block in default rendering mode.
@@ -1591,10 +1440,12 @@ fn emit_stmt(
                         c_string_literal(&value)
                     );
                 }
+                // `MetaGlue::declare(metaInterface, key, value)` has no zone:
+                // a zone is a UI notion.
                 EmitMode::Default | EmitMode::Metadata | EmitMode::Compute => {
                     let _ = writeln!(
                         out,
-                        "{tab}m->declare(m->metaInterface, {zone}, {}, {});",
+                        "{tab}m->declare(m->metaInterface, {}, {});",
                         c_string_literal(&key),
                         c_string_literal(&value)
                     );
@@ -1678,30 +1529,15 @@ fn emit_type(typ: &FirType, options: &COptions) -> String {
     )
 }
 
-/// Renders a C declarator: `<base type> <name><array suffix>`.
-///
-/// C array bounds are part of the declarator, not the type prefix (`float
-/// buf[8];`, not `float[8] buf;`), so this cannot reuse [`emit_type`]
-/// directly for array-typed declarations; it defers to
-/// [`emit_type_base_and_suffix`] to peel the bracketed suffix off first.
+/// Renders a declarator through the shared [`c_family::emit_named_type`].
 fn emit_named_type(typ: &FirType, name: &str, options: &COptions) -> String {
-    let mut suffix = String::new();
-    let base = emit_type_base_and_suffix(typ, options, &mut suffix);
-    format!("{base} {name}{suffix}")
-}
-
-/// Recursively splits an array type into its element base type and the
-/// accumulated `[size]...` declarator suffix, appending to `suffix` for each
-/// nested array dimension. Non-array types are rendered directly via
-/// [`emit_type`] with an untouched (typically empty) `suffix`.
-fn emit_type_base_and_suffix(typ: &FirType, options: &COptions, suffix: &mut String) -> String {
-    match typ {
-        FirType::Array(inner, size) => {
-            suffix.push_str(&format!("[{size}]"));
-            emit_type_base_and_suffix(inner, options, suffix)
-        }
-        _ => emit_type(typ, options),
-    }
+    c_family::emit_named_type(
+        typ,
+        name,
+        &SYNTAX,
+        &options.quad_type_name,
+        &options.fixed_type_name,
+    )
 }
 
 /// Emits `DeclareTable(AccessType::Static)` nodes as `static const` arrays
@@ -1717,49 +1553,17 @@ fn emit_static_tables(
     block: FirId,
 ) -> Result<(), CodegenError> {
     if options.memory_manager_mode.is_mem0() {
-        let FirMatch::Block(items) = match_fir(store, block) else {
-            return Ok(());
-        };
-        for item in items {
-            if let FirMatch::DeclareVar {
-                name,
-                typ: FirType::Array(elem, _),
-                access: AccessType::Static,
-                init: None,
-            } = match_fir(store, item)
-            {
-                let _ = writeln!(out, "static {}* {name} = NULL;", emit_type(&elem, options));
-                continue;
-            }
-            match match_fir(store, item) {
-                FirMatch::DeclareTable {
-                    name,
-                    elem_type,
-                    values,
-                    ..
-                } => {
-                    let rendered = values
-                        .iter()
-                        .map(|value| emit_value(store, options, *value))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let _ = writeln!(
-                        out,
-                        "static const {} {name}[{}] = {{{}}};",
-                        emit_type(&elem_type, options),
-                        values.len(),
-                        rendered.join(", ")
-                    );
-                }
-                FirMatch::NullStatement => {}
-                other => {
-                    return Err(CodegenError::new(
-                        CodegenErrorCode::InvalidModuleSection,
-                        format!("unsupported static declaration in mem0: {other:?}"),
-                    ));
-                }
-            }
-        }
-        return Ok(());
+        return c_family::emit_static_tables_mem0(
+            store,
+            out,
+            &SYNTAX,
+            block,
+            |typ| emit_type(typ, options),
+            |value| emit_value(store, options, value),
+            |node, message| {
+                CodegenError::new(CodegenErrorCode::InvalidModuleSection, message).at_node(node)
+            },
+        );
     }
     c_family::emit_static_tables(
         store,
@@ -1769,53 +1573,6 @@ fn emit_static_tables(
         &options.fixed_type_name,
         block,
         |value| emit_value(store, options, value),
-    )
-}
-
-/// Decodes the FIR module header expected by the C emitter.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    if let FirMatch::Module {
-        num_inputs,
-        num_outputs,
-        name,
-        dsp_struct,
-        globals,
-        functions,
-        static_decls,
-        sub_modules,
-    } = match_fir(store, module)
-    {
-        Ok(ModuleView {
-            name,
-            dsp_struct,
-            globals,
-            functions,
-            num_inputs,
-            num_outputs,
-            static_decls,
-            sub_modules,
-        })
-    } else {
-        Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!(
-                "expected FIR module root, got {:?} at node {}",
-                match_fir(store, module),
-                module.as_u32()
-            ),
-        ))
-    }
-}
-
-/// Builds a stable unsupported-node diagnostic for the C emitter.
-fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
-    CodegenError::new(
-        CodegenErrorCode::UnsupportedNode,
-        format!(
-            "unsupported FIR {kind} node {:?} at {}",
-            match_fir(store, node),
-            node.as_u32()
-        ),
     )
 }
 
@@ -2252,7 +2009,8 @@ int main(void) {
             "ui_interface->addHorizontalSlider(ui_interface->uiInterface, \"gain\", &dsp->fGain, (FAUSTFLOAT)0.5, (FAUSTFLOAT)0.0, (FAUSTFLOAT)1.0, (FAUSTFLOAT)0.01);"
         ));
         assert!(out.contains("void metadatamydsp(MetaGlue* m)"));
-        assert!(out.contains("m->declare(m->metaInterface, 0, \"author\", \"faust-rs\");"));
+        // `MetaGlue::declare` takes no zone.
+        assert!(out.contains("m->declare(m->metaInterface, \"author\", \"faust-rs\");"));
     }
 
     #[test]

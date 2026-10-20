@@ -29,15 +29,14 @@
 //! 2. **Adjoint accumulation.** Initialize `adjoints[primal] = 1.0` for every
 //!    primal, then walk the postorder in reverse and emit local transpose
 //!    contributions `child_bar += y_bar * d y / d child` for each visited
-//!    `y`. Existing entries are summed via [`add_adjoint`].
+//!    `y`. Existing entries are summed via [`ReverseADTransform::add_adjoint`].
 //! 3. **Seed extraction.** Re-emit `primals` followed by, for each seed
 //!    lane, the accumulated `adjoints[seed]` (or `0.0` when the seed is not
 //!    reached from any primal output, e.g. `rad(sin(x), y)`).
 //!
-//! # Phase B scope
+//! # Symbolic sweep scope
 //!
-//! Phase B targets the feed-forward subset that overlaps the existing
-//! forward-AD differentiable set:
+//! The symbolic sweep handles a feed-forward subset:
 //!
 //! - constants, audio inputs, UI controls (zero contribution unless seed),
 //! - arithmetic `BinOp` (Add/Sub/Mul/Div/Rem and discrete bitwise/comparison),
@@ -46,9 +45,11 @@
 //! - `Min`/`Max` via primal comparison,
 //! - `Select2` routes adjoint to the chosen branch,
 //! - `IntCast` (zero) and `FloatCast` (forward),
-//! - bargraphs (zero contribution).
+//! - bargraphs: the identity on their signal, the meter being a side effect,
+//!   so the adjoint passes through, as the tangent does under FAD (and in the
+//!   block reverse-AD lowering of temporal bodies).
 //!
-//! Phase C extension (this revision):
+//! It also handles:
 //!
 //! - read-only `RdTbl(T, idx)` propagates adjoint through the read index
 //!   only, using the same symmetric finite-difference slope as the FAD pass
@@ -61,8 +62,7 @@
 //!   forward adjoint through the signal-carrying operand only, matching
 //!   FAD's transparency contract.
 //!
-//! The 2026-05-10 dispatcher change keeps this symbolic pass feed-forward
-//! only. Temporal, recursive, and `SigIIR` nodes raise
+//! This symbolic pass is feed-forward only. Temporal, recursive, and `SigIIR` nodes raise
 //! [`PropagateError::RadUnsupportedNode`] and are routed by
 //! [`generate_rad_signals`] to the `SigBlockReverseAD` fallback. The legacy
 //! `ReverseTimeRec` LTI/IIR path remains as dormant helper infrastructure but
@@ -76,8 +76,6 @@
 //! - non-unary or unrecognized foreign functions,
 //! - soundfile accessors,
 //! - representation casts and other opaque families.
-//!
-//! Phase D refines the strict diagnostics around temporal nodes.
 //!
 //! # Why temporal nodes refuse adjoint
 //!
@@ -119,7 +117,7 @@
 //! - `reverse_ad.rs` still works in Signal IR, where nodes are typed by the
 //!   signal type system and can be rewritten by later normalization/preparation
 //!   passes.  Backend-local objects such as `fBraTapeN` arrays are not signal
-//!   nodes and cannot participate in `normalform.rs` / `signalPromotion`.
+//!   nodes and cannot participate in `normalform.rs` / `signalPromote`.
 //! - The correct execution schedule depends on the surrounding FIR context.
 //!   A top-level `process = rad(body, seeds)` usually exposes both primal and
 //!   gradient projections as public outputs, so FIR lowering emits a forward
@@ -241,10 +239,10 @@ impl<'a> ReverseADTransform<'a> {
                 out.push(y);
             }
             SigMatch::VBargraph(_, inner) | SigMatch::HBargraph(_, inner) => {
-                // Metering sinks: no adjoint contribution but still walked
-                // so a seed reachable only through a bargraph is correctly
-                // recorded as unreachable (gradient zero).
-                let _ = inner;
+                // The identity on its signal, the meter being a side effect:
+                // the adjoint flows to the metered signal, as the tangent does
+                // under FAD.
+                out.push(inner);
             }
             SigMatch::RdTbl(table, ridx) => {
                 // Phase C: read-only tables are differentiable through the
@@ -477,8 +475,9 @@ impl<'a> ReverseADTransform<'a> {
                 self.add_adjoint(x, x_contrib);
                 self.add_adjoint(z, z_contrib);
             }
-            SigMatch::VBargraph(_, _) | SigMatch::HBargraph(_, _) => {
-                // Sinks: no adjoint passes through.
+            SigMatch::VBargraph(_, inner) | SigMatch::HBargraph(_, inner) => {
+                // y = bargraph(x) = x: the full adjoint passes through.
+                self.add_adjoint(inner, y_bar);
             }
             SigMatch::RdTbl(table, ridx) => {
                 // Phase C: read-only table read.
@@ -601,6 +600,7 @@ impl<'a> ReverseADTransform<'a> {
         let primal = match rule {
             RadUnaryMathRule::Exp => b.exp(x),
             RadUnaryMathRule::Sqrt => b.sqrt(x),
+            RadUnaryMathRule::Tan => b.tan(x),
             RadUnaryMathRule::Abs => b.abs(x),
             _ => x,
         };
@@ -989,7 +989,7 @@ fn build_block_reverse_ad(arena: &mut TreeArena, primals: &[SigId], seeds: &[Sig
 /// targeted diagnostic.
 ///
 /// The fallback boundary is intentionally semantic.  Tape layout, enforcement
-/// that actual tape stores are already `real_ty` after `signalPromotion`,
+/// that actual tape stores are already `real_ty` after `signalPromote`,
 /// persistent `fConst*` storage for constants reused by generated sweeps, and
 /// split-vs-inline loop scheduling are all FIR-lowering responsibilities.
 pub(super) fn generate_rad_signals(
@@ -1233,6 +1233,46 @@ mod tests {
         let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
         assert!(dump_contains_real(&arena, branches[0], 11.0));
         assert!(dump_contains_real(&arena, branches[1], 13.0));
+    }
+
+    fn contains_node(arena: &TreeArena, root: SigId, needle: &dyn Fn(SigId) -> bool) -> bool {
+        needle(root)
+            || arena.node(root).is_some_and(|node| {
+                node.children
+                    .as_slice()
+                    .iter()
+                    .any(|&child| contains_node(arena, child, needle))
+            })
+    }
+
+    /// The symbolic `tan` adjoint is `y_bar * (1 + tan(x)²)` on the primal
+    /// `tan(x)` node (hash-consed, so the gradient lane shares it with the
+    /// primal lane) and calls no `cos`.
+    #[test]
+    fn rad_tan_gradient_reuses_primal_node_without_cos() {
+        let mut arena = TreeArena::new();
+        let (seed, primal) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let seed = b.real(0.3);
+            let x = b.input(0);
+            let arg = b.mul(seed, x);
+            (seed, b.tan(arg))
+        };
+        let out = generate_rad_signals(&mut arena, &[primal], &[seed])
+            .expect("feed-forward tan should differentiate symbolically");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], primal);
+        assert!(
+            contains_node(&arena, out[1], &|n| n == primal),
+            "the gradient must reuse the primal tan node"
+        );
+        assert!(
+            !contains_node(&arena, out[1], &|n| matches!(
+                match_sig(&arena, n),
+                SigMatch::Cos(_)
+            )),
+            "the tan gradient must not call cos"
+        );
     }
 
     #[test]

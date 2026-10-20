@@ -1,9 +1,10 @@
 //! Backend-specific lower-error to `CompilerError` converters.
 //!
-//! Each `lower_*_error_to_compiler` function maps the three-variant
-//! `LowerError<E>` type (Transform / Verify / Codegen) for a specific backend
-//! (C++, C, Julia, interpreter, FIR) into the unified `CompilerError` enum
-//! consumed by all public `Compiler` methods.
+//! Each `lower_*_error_to_compiler` function maps the staged lowering error
+//! of one backend (ExecutionOptions / Transform / Verify / Codegen; C++, C,
+//! Julia, Rust, AssemblyScript, Codebox, Cmajor, Cranelift, interpreter, FIR)
+//! into the unified `CompilerError` enum consumed by all public `Compiler`
+//! methods.
 //!
 //! Also contains `enrich_diagnostic_with_node` — attaches source-span context
 //! to a diagnostic when the error carries an offending box or signal node —
@@ -501,6 +502,7 @@ fn add_box_origin_labels(
             )
             .as_deref(),
             &output.entrypoint_name,
+            None,
         );
     }
     diagnostic
@@ -775,6 +777,7 @@ pub(crate) fn add_signal_source_labels(
             reachable_owner_definition_name_for_node(arena, defs_root, box_node, entrypoint_name)
                 .as_deref(),
             entrypoint_name,
+            None,
         );
     }
     diagnostic
@@ -788,6 +791,7 @@ pub(crate) fn add_signal_source_labels(
 /// (flat-box boundary, arity inference, signal propagation) which share the
 /// same enrichment policy.  Set `add_paired` for composition errors
 /// (seq/split/merge/rec) that benefit from paired A/B arity context.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_propagate_compiler_error(
     source: &str,
     error: propagate::PropagateError,
@@ -796,6 +800,7 @@ pub(crate) fn make_propagate_compiler_error(
     root: BoxId,
     entrypoint_name: &str,
     add_paired: bool,
+    composition_origins: &std::collections::HashMap<BoxId, Option<BoxId>>,
 ) -> CompilerError {
     let node = propagate_error_node(&error);
     let owner = node
@@ -821,6 +826,7 @@ pub(crate) fn make_propagate_compiler_error(
             n,
             owner.as_deref(),
             entrypoint_name,
+            Some(composition_origins),
         );
     }
     CompilerError::Propagate {

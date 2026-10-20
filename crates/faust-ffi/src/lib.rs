@@ -1,8 +1,8 @@
 //! Unified C/C++ FFI distribution crate.
 //!
 //! This crate owns the canonical `libfaust-rs` artifacts (`staticlib` + `cdylib`).
-//! Backend-specific FFI crates (`interp-ffi`, `cranelift-ffi`, `box-ffi`,
-//! `signal-ffi`) are linked as Rust libraries and their exported `extern "C"`
+//! The FFI crates (`interp-ffi`, `cranelift-ffi`, `box-ffi`, `signal-ffi`,
+//! `libfaust-ffi`) are linked as Rust libraries and their exported `extern "C"`
 //! symbols are distributed through this single top-level library.
 
 // Same allocator as the `faust-rs` binary, for the same measured reason: the
@@ -12,8 +12,9 @@
 // Permitted here where it would not be in an rlib: this crate is a
 // cdylib/staticlib, so it is the final artifact for its own Rust code. It is
 // sound because the FFI memory contract never crosses allocators — every
-// pointer returned to a host comes from `CString::into_raw` and goes back
-// through the exported `freeCMemory`, and no path frees host-allocated memory.
+// pointer returned to a host is a `CString` or a boxed pointer array that goes
+// back through the exported `freeCMemory` (`ffi_common::free_c_memory`), and
+// no path frees host-allocated memory.
 //
 // The one shape to keep in mind is `staticlib` linked into a *Rust* host that
 // also selects an allocator: the allocator shim symbols are not per-crate, so

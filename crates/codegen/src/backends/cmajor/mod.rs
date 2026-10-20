@@ -40,19 +40,26 @@
 //!
 //! # Table representation adaptation
 //!
-//! The C++ backend runs `CmajorTableTypeVisitor` and
-//! `CmajorTableVisitor` because its generic instruction functions may still
-//! carry placeholder table types. Canonical Rust FIR already co-locates the
+//! The C++ backend runs `TableSizeVisitor` and `TableSizeCloneVisitor`
+//! (`cmajor_code_container.hh`), which record and rename each `fill*` call by
+//! table size, because its generic instruction functions may still carry
+//! placeholder table types. Canonical Rust FIR already co-locates the
 //! concrete element type and length in [`FirType::Array`] and
 //! [`FirMatch::DeclareTable`]. The emitter therefore renders those owned types
 //! directly: no name-indexed specialization side table is needed. Integration
 //! tests cover read-only, writable, waveform, and generated tables at multiple
 //! sizes, plus repeated generation to guard request-local determinism.
 
+use crate::backends::literals::{Digits, NegativeZero, RealSpelling, StringDialect, quoted_string};
+use crate::backends::textual::c_like_token_with_logical_shift as emit_binop;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::backends::codegen_error::{BackendError, CodegenErrorCode as BackendErrorCode};
+use crate::backends::module_view::{
+    ModuleView, SkeletonCodes, SubModuleView, block_items, decode_module, find_function_body,
+    is_dsp_api_method, sub_module_views,
+};
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
 use super::textual::{OperandSide, c_like_fir_operator, infix_operand_needs_parentheses};
@@ -60,17 +67,11 @@ use super::textual::{OperandSide, c_like_fir_operator, infix_operand_needs_paren
 /// Stable backend identifier used by CLI, diagnostics, and capability tables.
 pub const BACKEND_NAME: &str = "cmajor";
 
-/// Cmajor scalar precision.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CmajorRealType {
-    /// Cmajor `float32`, matching Faust `-single`.
-    #[default]
-    Float32,
-    /// Cmajor `float64`, matching Faust `-double`.
-    Float64,
-}
+/// Cmajor scalar precision: `float32` for Faust `-single`, `float64` for
+/// `-double`.
+pub type CmajorRealType = super::RealPrecision;
 
-impl CmajorRealType {
+impl super::RealPrecision {
     /// Returns the Cmajor scalar type spelling.
     #[must_use]
     pub const fn cmajor_name(self) -> &'static str {
@@ -94,6 +95,14 @@ pub struct CmajorOptions {
     /// [`Self::real_type`], for callers (mostly tests) that do not thread the
     /// real CLI flags through.
     pub compile_options: Option<String>,
+    /// Source-level DSP name reported in the generated banner. This is
+    /// independent from [`Self::class_name`].
+    pub metadata_name: Option<String>,
+    /// Source basename. Cmajor has no metadata callback; kept for the same
+    /// shape as the other backends' options.
+    pub metadata_filename: Option<String>,
+    /// Non-identity compilation metadata (the `declare` entries).
+    pub metadata_entries: Vec<(String, String)>,
 }
 
 impl Default for CmajorOptions {
@@ -102,6 +111,9 @@ impl Default for CmajorOptions {
             class_name: "mydsp".to_owned(),
             real_type: CmajorRealType::Float32,
             compile_options: None,
+            metadata_name: None,
+            metadata_filename: None,
+            metadata_entries: Vec::new(),
         }
     }
 }
@@ -119,6 +131,8 @@ pub enum CodegenErrorCode {
     InvalidStructure,
     /// A concrete table signature cannot be derived safely.
     TableSpecialization,
+    /// A module section, or a `sub_modules` entry, has the wrong FIR shape.
+    InvalidModuleSection,
 }
 
 impl CodegenErrorCode {
@@ -131,6 +145,7 @@ impl CodegenErrorCode {
             Self::InvalidIdentifier => "FRS-CGEN-CMAJ-0003",
             Self::InvalidStructure => "FRS-CGEN-CMAJ-0004",
             Self::TableSpecialization => "FRS-CGEN-CMAJ-0005",
+            Self::InvalidModuleSection => "FRS-CGEN-CMAJ-0006",
         }
     }
 }
@@ -141,22 +156,17 @@ impl BackendErrorCode for CodegenErrorCode {
     }
 }
 
+impl SkeletonCodes for CodegenErrorCode {
+    const ROOT_NOT_MODULE: Self = Self::RootNotModule;
+    const INVALID_MODULE_SECTION: Self = Self::InvalidModuleSection;
+    const UNSUPPORTED_NODE: Self = Self::Unsupported;
+}
+
 /// One emission failure of this backend.
 ///
 /// Alias of the shared [`crate::backends::codegen_error::BackendError`]
 /// carrier; only the code enum above is specific to this backend.
 pub type CodegenError = BackendError<CodegenErrorCode>;
-
-/// Decoded FIR module sections needed by the Cmajor container.
-struct ModuleView {
-    dsp_struct: FirId,
-    globals: FirId,
-    functions: FirId,
-    static_decls: FirId,
-    sub_modules: FirId,
-    num_inputs: usize,
-    num_outputs: usize,
-}
 
 /// Borrowed helper-function declaration passed through the emitter as one
 /// semantic unit.
@@ -291,17 +301,23 @@ fn generate_cmajor_module_step(
     let ui = collect_ui(store, view.functions)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "/* Code generated with faust-rs {}", crate::VERSION);
-    let _ = writeln!(
-        out,
-        "   Compilation options: {} */",
+    // Upstream's banner, as for c and cpp.
+    crate::backends::literals::faust_banner(
+        &mut out,
+        Some(
+            options
+                .metadata_name
+                .as_deref()
+                .unwrap_or(&options.class_name),
+        ),
+        &options.metadata_entries,
         options
             .compile_options
             .as_deref()
             .unwrap_or(match options.real_type {
                 CmajorRealType::Float32 => "-lang cmajor -single",
                 CmajorRealType::Float64 => "-lang cmajor -double",
-            })
+            }),
     );
     let _ = writeln!(out, "namespace faust");
     let _ = writeln!(out, "{{");
@@ -353,11 +369,8 @@ fn emit_sub_modules(
     sub_modules: FirId,
     table_sizes: &BTreeMap<String, usize>,
 ) -> Result<(), CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, sub_modules) else {
-        return Ok(());
-    };
-    for item in items {
-        let FirMatch::SubModule {
+    for sub in sub_module_views(store, sub_modules)? {
+        let SubModuleView {
             name,
             elem_type,
             dsp_struct,
@@ -365,13 +378,7 @@ fn emit_sub_modules(
             globals,
             functions,
             sub_modules: nested,
-        } = match_fir(store, item)
-        else {
-            return Err(CodegenError::new(
-                CodegenErrorCode::InvalidStructure,
-                format!("sub_modules holds a non-SubModule node {}", item.as_u32()),
-            ));
-        };
+        } = sub;
 
         emit_sub_modules(store, out, options, nested, table_sizes)?;
 
@@ -755,20 +762,7 @@ fn build_label(label: &str) -> String {
 
 /// Quotes a Faust label or metadata value as a Cmajor string literal.
 fn cmajor_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            other => escaped.push(other),
-        }
-    }
-    escaped.push('"');
-    escaped
+    quoted_string(value, StringDialect::C)
 }
 
 /// Emits persistent declarations from one FIR module section.
@@ -1226,10 +1220,14 @@ fn emit_stmt(
             cases,
             default,
         } => {
+            // Evaluated once, as C's `switch` evaluates it: the cases are an
+            // `if`/`else if` chain, which would otherwise re-evaluate it per case.
             let cond = emit_value(store, options, cond)?;
+            let switch = format!("switch{}", stmt.as_u32());
+            let _ = writeln!(out, "{tab}let {switch} = {cond};");
             for (position, (value, block)) in cases.into_iter().enumerate() {
                 let keyword = if position == 0 { "if" } else { "else if" };
-                let _ = writeln!(out, "{tab}{keyword} (bool({cond} == {value})) {{");
+                let _ = writeln!(out, "{tab}{keyword} (bool({switch} == {value})) {{");
                 emit_block_items(store, out, options, block, indent + 1, context)?;
                 let _ = writeln!(out, "{tab}}}");
             }
@@ -1447,7 +1445,7 @@ fn emit_value(
             // result type, whereas Cmajor comparisons produce `bool`. Preserve
             // the FIR contract explicitly; Cmajor rejects an implicit bool to
             // int32 store even though C/C++ accept it.
-            if is_comparison(op) && typ == FirType::Int32 {
+            if op.is_comparison() && typ == FirType::Int32 {
                 Ok(format!("int32({expression})"))
             } else {
                 Ok(expression)
@@ -1527,7 +1525,7 @@ fn emit_infix_operand(
     else {
         return Ok(rendered);
     };
-    if is_comparison(child_op) && typ == FirType::Int32 {
+    if child_op.is_comparison() && typ == FirType::Int32 {
         return Ok(rendered);
     }
     let needs_parentheses = infix_operand_needs_parentheses(
@@ -1638,36 +1636,6 @@ fn emit_struct_type(
     Ok(())
 }
 
-/// Maps FIR operators to Cmajor infix spelling.
-const fn emit_binop(op: FirBinOp) -> &'static str {
-    match op {
-        FirBinOp::Add => "+",
-        FirBinOp::Sub => "-",
-        FirBinOp::Mul => "*",
-        FirBinOp::Div => "/",
-        FirBinOp::Rem => "%",
-        FirBinOp::And => "&",
-        FirBinOp::Or => "|",
-        FirBinOp::Xor => "^",
-        FirBinOp::Lsh => "<<",
-        FirBinOp::ARsh | FirBinOp::LRsh => ">>",
-        FirBinOp::Eq => "==",
-        FirBinOp::Ne => "!=",
-        FirBinOp::Lt => "<",
-        FirBinOp::Le => "<=",
-        FirBinOp::Gt => ">",
-        FirBinOp::Ge => ">=",
-    }
-}
-
-/// Whether a FIR binary operator produces Cmajor's native `bool` type.
-const fn is_comparison(op: FirBinOp) -> bool {
-    matches!(
-        op,
-        FirBinOp::Eq | FirBinOp::Ne | FirBinOp::Lt | FirBinOp::Le | FirBinOp::Gt | FirBinOp::Ge
-    )
-}
-
 /// Maps C/C++ precision-specific math names to Cmajor built-ins.
 fn map_math_name(name: &str) -> &str {
     let name = name.strip_prefix("std::").unwrap_or(name);
@@ -1711,38 +1679,23 @@ fn map_math_name(name: &str) -> &str {
 
 /// Formats a real literal in the selected Cmajor precision.
 fn float_literal(value: f64, real_type: CmajorRealType) -> String {
-    if value.is_nan() {
-        return "nan".to_owned();
-    }
-    if value == f64::INFINITY {
-        return "inf".to_owned();
-    }
-    if value == f64::NEG_INFINITY {
-        return "-inf".to_owned();
-    }
     match real_type {
-        CmajorRealType::Float32 => {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "single-precision Cmajor literals intentionally narrow to f32"
-            )]
-            let value = value as f32;
-            let text = if value == value.trunc() {
-                format!("{value:.1}")
-            } else {
-                value.to_string()
-            };
-            format!("{text}f")
+        CmajorRealType::Float32 if value.is_finite() => {
+            format!("{}f", CMAJOR_REAL.format_narrowed(value))
         }
-        CmajorRealType::Float64 => {
-            if value == value.trunc() {
-                format!("{value:.1}")
-            } else {
-                value.to_string()
-            }
-        }
+        CmajorRealType::Float32 | CmajorRealType::Float64 => CMAJOR_REAL.format(value),
     }
 }
+
+/// Cmajor spelling of a real literal: `nan`/`inf`, exact integral digits,
+/// a folded negative zero written `0.0` as every C-like backend writes it.
+pub(crate) const CMAJOR_REAL: RealSpelling = RealSpelling {
+    nan: "nan",
+    pos_inf: "inf",
+    neg_inf: "-inf",
+    digits: Digits::ExactIntegral,
+    negative_zero: NegativeZero::Normalize,
+};
 
 /// Checks the conservative identifier grammar shared by generated names.
 fn validate_identifier(name: &str, kind: &str) -> Result<(), CodegenError> {
@@ -1785,77 +1738,6 @@ fn io_channel(name: &str, prefix: &str) -> Option<usize> {
 /// Recognizes the canonical FIR zones assigned to bargraph widgets.
 fn is_bargraph_zone(name: &str) -> bool {
     name.starts_with("fHbargraph") || name.starts_with("fVbargraph")
-}
-
-/// Returns all items held by a FIR block.
-fn block_items(store: &FirStore, block: FirId) -> Vec<FirId> {
-    match match_fir(store, block) {
-        FirMatch::Block(items) => items,
-        _ => Vec::new(),
-    }
-}
-
-/// Finds the body of a canonical DSP method.
-fn find_function_body(store: &FirStore, functions: FirId, wanted: &str) -> Option<FirId> {
-    block_items(store, functions)
-        .into_iter()
-        .find_map(|item| match match_fir(store, item) {
-            FirMatch::DeclareFun {
-                name,
-                body: Some(body),
-                ..
-            } if name == wanted => Some(body),
-            _ => None,
-        })
-}
-
-/// Whether a function is reshaped into the Cmajor processor contract.
-fn is_dsp_api_method(name: &str) -> bool {
-    const METHODS: [&str; 14] = [
-        "metadata",
-        "getNumInputs",
-        "getNumOutputs",
-        "getSampleRate",
-        "classInit",
-        "instanceConstants",
-        "instanceResetUserInterface",
-        "instanceClear",
-        "instanceInit",
-        "init",
-        "buildUserInterface",
-        "control",
-        "frame",
-        "compute",
-    ];
-    METHODS.contains(&name)
-}
-
-/// Decodes the root module without reaching into raw tree tags.
-fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
-    match match_fir(store, module) {
-        FirMatch::Module {
-            num_inputs,
-            num_outputs,
-            dsp_struct,
-            globals,
-            functions,
-            static_decls,
-            sub_modules,
-            ..
-        } => Ok(ModuleView {
-            dsp_struct,
-            globals,
-            functions,
-            static_decls,
-            sub_modules,
-            num_inputs,
-            num_outputs,
-        }),
-        other => Err(CodegenError::new(
-            CodegenErrorCode::RootNotModule,
-            format!("expected FIR module root, found {other:?}"),
-        )),
-    }
 }
 
 #[cfg(test)]

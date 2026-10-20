@@ -1,16 +1,20 @@
 //! Compile-time interpreter for computed table generators (`SIGGEN`).
 //!
-//! Mirrors the C++ `signal2Container()`-style behavior used for deterministic
-//! 0-input table generators: evaluate the generator at compile time instead of
-//! emitting runtime init code.
+//! Rust-only path behind `TableInitMode::Const`: it folds a deterministic
+//! 0-input table generator to literal values at compile time. C++
+//! `signal2Container()`, like the default `TableInitMode::Runtime`
+//! (`module::subcontainer_compile`), instead compiles the generator into a
+//! sub-module run at initialization.
 //!
 //! # Scope
 //!
 //! This interpreter is used only for table generators that are known to be
-//! compile-time evaluable in the fast-lane:
+//! compile-time evaluable:
 //!
 //! - no audio inputs,
-//! - no UI/runtime context dependency,
+//! - no UI, soundfile, or foreign constant/variable/function dependency;
+//!   the sampling rate (`ma.SR`) only with an explicit
+//!   `table_init_sample_rate`,
 //! - deterministic signal graph,
 //! - bounded expansion requested by the caller (`size` samples).
 //!
@@ -89,8 +93,9 @@ pub(super) fn interpret_generator(
     Ok(results)
 }
 
-/// Test-only forwarding hook so `tests.rs` can validate generator semantics
-/// without exposing the interpreter outside the `signal_fir` module boundary.
+/// Test-only forwarding hook so the `tests/` suite can validate generator
+/// semantics without exposing the interpreter outside the `signal_fir` module
+/// boundary.
 #[cfg(test)]
 pub(super) fn interpret_generator_for_test(
     arena: &TreeArena,
@@ -202,7 +207,24 @@ impl<'a> GeneratorInterpreter<'a> {
                 let rhs = self.eval(y)?;
                 Ok(self.eval_binop(sig, op, lhs, rhs))
             }
-            SigMatch::Pow(x, y) => Ok(self.eval(x)?.powf(self.eval(y)?)),
+            SigMatch::Pow(x, y) => {
+                let lhs = self.eval(x)?;
+                let rhs = self.eval(y)?;
+                // Same prepared integer-power contract as powprim.hh and
+                // leaf_emit::emit_pow, including table-init=const generators.
+                let value = if self.simple_type(sig) == Some(SimpleSigType::Int) {
+                    (if let SigMatch::Int(exponent) = match_sig(self.arena, y)
+                        && (0..=8).contains(&exponent)
+                    {
+                        (lhs as i32).wrapping_pow(exponent as u32)
+                    } else {
+                        lhs.powf(rhs).round_ties_even() as i32
+                    }) as f64
+                } else {
+                    lhs.powf(rhs)
+                };
+                Ok(value)
+            }
             SigMatch::Min(x, y) => Ok(self.eval(x)?.min(self.eval(y)?)),
             SigMatch::Max(x, y) => Ok(self.eval(x)?.max(self.eval(y)?)),
             SigMatch::FloatCast(x) => self.eval(x),

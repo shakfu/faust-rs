@@ -1,5 +1,6 @@
-//! Backend-agnostic libfaust C API — `generateSHA1`, `expandDSP*`,
-//! `generateAuxFiles*`.
+//! Backend-agnostic libfaust C API — `generateCSHA1`, `expandCDSP*`,
+//! `generateCAuxFiles*` (C++ wrappers `generateSHA1`, `expandDSP*`,
+//! `generateAuxFiles*` in `include/libfaust.h`).
 //!
 //! # Source provenance (C++)
 //! - `compiler/generator/libfaust.h` (the C++ surface)
@@ -15,7 +16,7 @@
 //! actually documents.
 //!
 //! An rlib rather than code inside `faust-ffi` because `faust-ffi` is a
-//! cdylib/staticlib aggregator with no Rust of its own, and a separate library
+//! cdylib/staticlib aggregator with no API of its own, and a separate library
 //! keeps this surface testable in isolation.
 //!
 //! # Memory contract

@@ -15,8 +15,8 @@
 //! - [`vec_to_list`] / [`list_to_vec`] provide the shared `cons`/`nil` list
 //!   adapters reused by later compiler stages.
 //!
-//! # Recursive trees (Phase 5)
-//! The crate now exposes explicit recursive-tree helpers for de Bruijn and symbolic forms:
+//! # Recursive trees
+//! The crate exposes explicit recursive-tree helpers for de Bruijn and symbolic forms:
 //! - De Bruijn builders/matchers: [`de_bruijn_rec`], [`de_bruijn_ref`],
 //!   [`match_de_bruijn_rec`], [`match_de_bruijn_ref`]
 //! - Symbolic builders/matchers: [`sym_rec`], [`sym_ref`], [`match_sym_rec`], [`match_sym_ref`]
@@ -31,10 +31,11 @@
 //!   [`RecursionError`] returns instead of process-global assertions.
 //!
 //! Pipeline contract note:
-//! - the fast-lane now clones the whole signal forest into a private staging arena
-//!   and applies [`de_bruijn_to_sym`] before FIR lowering.
-//! - normalization-level symbolic conversion remains opt-in at other call-site
-//!   boundaries that expose signal trees directly.
+//! - `transform::signal_prepare` clones the propagated signal forest into a
+//!   private staging arena and applies [`de_bruijn_to_sym`] before typing and
+//!   FIR lowering.
+//! - `normalize::normalform::prepare_signals` applies the same conversion for
+//!   callers that hand signal trees to it directly.
 
 mod arena;
 mod property;

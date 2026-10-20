@@ -47,7 +47,7 @@ pub(super) enum RecursionStorageStrategy {
     ///
     /// The current sample value is materialized separately as a stack-local
     /// binding during the sample iteration, then committed back to the struct
-    /// field in `PostOutput`.
+    /// field in the `post_output` sample phase.
     SingleScalar,
     /// Exact-size shift carrier:
     /// - current sample in slot `0`
@@ -71,8 +71,9 @@ pub(super) enum RecursionStorageStrategy {
 /// - [`RecursionStorageStrategy::Circular`] when accumulated delay analysis
 ///   upsizes the carrier beyond the copy-delay threshold
 ///
-/// Source provenance (C++): `signalFIRCompiler.cpp` (`generateRecProj`,
-/// `generateRec`), emitted as `fRecN[2]` / `iRecN[2]`.
+/// Source provenance (C++): `compiler/generator/instructions_compiler.cpp`
+/// (`InstructionsCompiler::generateRecProj`, `generateRec`), emitted as
+/// `fRecN[2]` / `iRecN[2]`.
 #[derive(Clone, Debug)]
 pub(super) struct RecArrayInfo {
     /// Generated DSP-struct array variable name (e.g. `fRec7`).

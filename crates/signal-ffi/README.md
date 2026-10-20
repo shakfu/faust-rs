@@ -14,7 +14,9 @@ source generation, backed by Rust `signals::SigBuilder` and `signals::match_sig`
 - Exposes normalization and source helpers
   (`CsimplifyToNormalForm`, `CsimplifyToNormalForm2`,
   `CcreateSourceFromSignals`).
-- Exposes a thin C++ convenience wrapper (`libfaust-signal.h`).
+- Exposes a thin C++ convenience wrapper (`libfaust-signal.h`) over a subset
+  of the C API: the `sig*` constructors and part of the `isSig*` matchers; the
+  rest is used through the C names.
 - Uses `tree-ffi` for shared tree handles, context-owned C strings,
   null-terminated handle arrays, and common Signal enum definitions
   (`SType`, `SOperator`).
@@ -22,8 +24,9 @@ source generation, backed by Rust `signals::SigBuilder` and `signals::match_sig`
 ## Context model
 
 Signal handles share the same process-global context
-(`createLibContext` / `destroyLibContext`) as `box-ffi`, exported from
-`tree-ffi`. This lets `Box` and `Signal` handles be printed and freed through
+(`createLibContext` / `destroyLibContext`) as `box-ffi`: its state lives in
+`tree-ffi`, and these entry points are exported by `box-ffi`, a dependency of
+this crate. This lets `Box` and `Signal` handles be printed and freed through
 the common libfaust helpers (`CprintSignal`, `freeCMemory`) without a separate
 context lifecycle.
 
@@ -63,4 +66,4 @@ The exported symbol names and signatures mirror the C++ reference header
 - `tree-ffi` — shared handle model, global context, and enum definitions.
 - `box-ffi` — sibling C ABI crate sharing the same context.
 - `faust-ffi` — re-exports these symbols (`signal_api`) in the unified
-  `libfaust` distribution artifact.
+  `libfaust-rs` distribution artifact.

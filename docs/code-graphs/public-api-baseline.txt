@@ -178,7 +178,6 @@ enum AccessMetric
 enum AllocationPhase
 enum BackendFailureKind
 enum BlockStoreData
-enum CmajorRealType
 enum CodegenErrorCode
 enum CompileError
 enum ComputeCostError
@@ -194,7 +193,6 @@ enum HeapType
 enum HostScalarType
 enum JsonBuildError
 enum JsonUiItem
-enum JuliaRealType
 enum LayoutValueSource
 enum MemoryLayoutError
 enum MemoryLayoutFlavor
@@ -202,7 +200,7 @@ enum MemoryManagerMode
 enum MemoryRole
 enum MemoryScope
 enum MemoryType
-enum RustRealType
+enum RealPrecision
 enum SampleType
 enum StructFieldKind
 enum WasmBackendErrorCode
@@ -335,9 +333,6 @@ fn StructLayoutPlan::field
 fn StructLayoutPlan::fields
 fn StructLayoutPlan::size_bytes
 fn TargetAbi::native
-fn WasmBackendError::code
-fn WasmBackendError::message
-fn WasmBackendError::new
 fn WasmBackendErrorCode::as_str
 fn WasmMemoryLayout::from_module
 fn WasmMemoryLayout::scaffold
@@ -487,7 +482,6 @@ struct StructFieldLayout
 struct StructLayoutPlan
 struct TargetAbi
 struct TypeLayout
-struct WasmBackendError
 struct WasmJsonContext
 struct WasmMemoryLayout
 struct WasmModule
@@ -495,9 +489,13 @@ struct WasmOptions
 trait BackendCodegenError
 trait CodegenErrorCode
 trait FbcReal
+type CmajorRealType
 type CodegenError
 type CompilerParts
 type FirFixtureBuilder
+type JuliaRealType
+type RustRealType
+type WasmBackendError
 use api
 use bytecode
 use compiler
@@ -890,6 +888,7 @@ fn PolyProbe::set_all
 fn PolyProbe::voice_controls
 fn PolyProbe::voice_count
 fn PolyProbe::voice_states
+fn PolyProbe::warnings
 fn PolyState::active_count
 fn PolyState::apply_legato
 fn PolyState::key_off
@@ -1440,6 +1439,8 @@ fn FactoryHandle::from_raw
 fn FaustMemoryManager::is_compatible_v1
 fn alloc_c_string
 fn alloc_opaque
+fn alloc_ptr_array
+fn free_if_owned_ptr_array
 fn null_c_string_array
 fn parse_ffi_compile_args
 fn sha1
@@ -1593,6 +1594,7 @@ fn prepare_callee_body_for_inlining
 fn promote_static_tables_to_struct
 fn qualify_struct_access
 fn qualify_sub_module_bodies
+fn schedule_compute
 fn struct_field_names
 fn sweep_scaffolding_drop_roots
 fn sweep_scaffolding_drop_roots_with_mapping
@@ -1603,6 +1605,7 @@ fn verify_module_structure
 mod checker
 mod helpers
 mod inliner
+mod schedule
 mod subcontainer
 struct DiagContext
 struct FirBuilder
@@ -1957,6 +1960,7 @@ fn ParseState::signed_float_from_token
 fn ParseState::signed_int_from_token
 fn ParseState::split_from_token
 fn ParseState::symbol_from_token
+fn ParseState::unary_minus_from_token
 fn ParseState::uqstring_from_token
 fn ParseState::waveform_box_from_ctx
 fn ParserCtx::accept_definition
@@ -2193,6 +2197,9 @@ fn BinOp::name
 fn BinOp::symbol
 fn BlockRevPolicy::from_raw
 fn BlockRevPolicy::to_raw
+fn DerivativeZeroFolder::fold
+fn DerivativeZeroFolder::keep
+fn DerivativeZeroFolder::new
 fn SigBuilder::abs
 fn SigBuilder::acos
 fn SigBuilder::add
@@ -2305,6 +2312,7 @@ fn embedded_iir
 fn extract_fir_filter
 fn extract_iir_filter
 fn iir_filter_to_state_space
+fn is_literal_zero
 fn make_sig_fir
 fn match_sig
 fn mul_sig_iir
@@ -2320,6 +2328,7 @@ fn simplify_fir
 fn sub_sig_fir
 fn sub_sig_iir
 mod ad_rules
+struct DerivativeZeroFolder
 struct FirFilter
 struct IirFilter
 struct LinearTerm
@@ -2456,6 +2465,7 @@ fn TreeArena::clone_forest_from
 fn TreeArena::clone_forest_from_with_mapping
 fn TreeArena::clone_subtree_from
 fn TreeArena::cons
+fn TreeArena::contains_recursion
 fn TreeArena::float
 fn TreeArena::get_symbol
 fn TreeArena::hd

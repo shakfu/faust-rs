@@ -23,7 +23,7 @@
 //!    producer files so a renamed or newly added entry point cannot
 //!    silently rot the list;
 //! 4. no `check.rs` importing *anything* from a sibling producer file
-//!    (`build`/`produce`/`materialize`/`session`): since the clock_ad
+//!    (`build`/`produce`/`materialize`/`session`/`signal`): since the clock_ad
 //!    checker-independence follow-up (2026-07-20), every vector checker
 //!    re-derives with its own code, and the allowlist
 //!    [`CHECKER_PRODUCER_IMPORT_ALLOWLIST`] is empty by design — a new
@@ -91,7 +91,7 @@ const MAX_PRODUCTION_LINES: usize = 2_000;
 /// exception — leaving it here would let the list silently accumulate dead
 /// entries, so a shrunk file is flagged as a stale exception to remove
 /// rather than passing silently.
-const KNOWN_OVERSIZED_FILES: [(&str, &str); 11] = [
+const KNOWN_OVERSIZED_FILES: [(&str, &str); 8] = [
     (
         "crates/transform/src/signal_fir/vector/lower/signal.rs",
         "numerically sensitive lowering path, kept structurally intact by          design (readability plan §7); this is the file that drove the old          threshold up twice before P6 named it as an exception instead",
@@ -118,18 +118,6 @@ const KNOWN_OVERSIZED_FILES: [(&str, &str); 11] = [
     ),
     (
         "crates/codegen/src/backends/c/mod.rs",
-        "textual backend emitter, see the `rust/mod.rs` entry above",
-    ),
-    (
-        "crates/codegen/src/backends/julia/mod.rs",
-        "textual backend emitter, see the `rust/mod.rs` entry above",
-    ),
-    (
-        "crates/codegen/src/backends/asc/mod.rs",
-        "textual backend emitter, see the `rust/mod.rs` entry above",
-    ),
-    (
-        "crates/codegen/src/backends/cmajor/mod.rs",
         "textual backend emitter, see the `rust/mod.rs` entry above",
     ),
     (

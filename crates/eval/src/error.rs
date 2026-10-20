@@ -9,37 +9,6 @@ use tlib::TreeId;
 
 use crate::suggestions::{SymbolSuggestion, rank_similar_names};
 
-/// Performance statistics collected during evaluation.
-///
-/// Returned by [`eval`](crate::eval) alongside the evaluated box tree.
-/// Provides the same information as the C++ `gGlobal->gStats` fields used for profiling
-/// the evaluator, but without global mutable state — stats are accumulated locally and
-/// returned by value.
-///
-/// # C++ correspondence
-///
-/// | Rust field | C++ equivalent | C++ location |
-/// |---|---|---|
-/// | `env_layers_pushed` | `gStats.fEnvLayersPushed` | `environment.cpp` — `pushNewLayer` |
-/// | `env_lookups` | `gStats.fEnvLookups` | `environment.cpp` — `searchIdDef` |
-/// | `env_lookup_total_depth` | `gStats.fEnvLookupTotalDepth` | `environment.cpp` — `searchIdDef` loop |
-/// | `loop_detector_max_depth` | (no direct equivalent — C++ uses `gGlobal->gRecursionLimit`) | |
-/// | `nodes_evaluated` | (not tracked in C++) | |
-///
-/// # Interpretation
-///
-/// These ratios describe the intended interpretation once all counters are wired:
-///
-/// - **`env_lookups / nodes_evaluated`**: average lookups per evaluated node. High values (> 3)
-///   indicate deeply bound symbols that might benefit from flattening or interning.
-/// - **`env_lookup_total_depth / env_lookups`**: average scope depth traversed per lookup.
-///   Values > 3 indicate deep scope chains where caching may help.
-/// - **`env_layers_pushed / nodes_evaluated`**: scope-push frequency. High values for iterative
-///   forms (`ipar`/`iseq`) are expected.
-///
-/// As of the current port, instrumentation is still incremental: the field meanings are stable,
-/// but not every evaluator path updates every counter yet. Consumers should therefore treat these
-/// values as progressively improving telemetry, not as a fully complete profiling contract.
 /// A non-fatal finding of the evaluator.
 ///
 /// The compiler reports these under its semantic-warnings option, the class
@@ -60,25 +29,18 @@ pub enum EvalWarning {
     },
 }
 
+/// Side results of an evaluation, returned by [`eval`](crate::eval) alongside
+/// the evaluated box tree.
+///
+/// Unlike C++, which keeps them in `gGlobal`, they are collected locally and
+/// returned by value. The C++ evaluator profiling counters (`gStats.fEnv*`,
+/// printed only by the `-lang fir` output of a `FIR_BUILD` compiler) have no
+/// counterpart: nothing in `faust-rs` read them, and fields that were never
+/// populated were removed on 2026-10-18.
 #[derive(Clone, Debug, Default)]
-/// Lightweight evaluator statistics returned by opt-in entry points.
 pub struct EvalStats {
     /// Non-fatal findings collected during the evaluation, in order.
     pub warnings: Vec<EvalWarning>,
-    /// Number of child scopes created via `push_scope()`.
-    /// C++ equivalent: `gStats.fEnvLayersPushed`.
-    pub env_layers_pushed: u64,
-    /// Number of symbol lookups performed across all scopes.
-    /// C++ equivalent: `gStats.fEnvLookups`.
-    pub env_lookups: u64,
-    /// Total scope depth traversed across all lookups (sum of per-lookup depths).
-    /// Dividing by `env_lookups` gives the average lookup depth.
-    /// C++ equivalent: `gStats.fEnvLookupTotalDepth`.
-    pub env_lookup_total_depth: u64,
-    /// Maximum loop-detector stack depth reached during evaluation.
-    pub loop_detector_max_depth: usize,
-    /// Total number of box nodes visited by `eval_box`.
-    pub nodes_evaluated: u64,
     /// Definition-name map: evaluated `BoxId` → source definition name.
     ///
     /// Populated during eval whenever a named closure is forced to a concrete box.
@@ -87,6 +49,12 @@ pub struct EvalStats {
     /// C++ equivalent: the property set by `setDefNameProperty(result, id)` in
     /// `compiler/evaluate/eval.cpp`.
     pub def_names: std::collections::HashMap<tlib::TreeId, String>,
+    /// For each composition box (`:`, `,`, `<:`, `:>`, `~`) the evaluation
+    /// built, the source composition it was evaluated from, or `None` when
+    /// two sources built the same box. Lets a later arity error point at the
+    /// composition written in the program rather than inside a function the
+    /// composition called.
+    pub composition_origins: std::collections::HashMap<tlib::TreeId, Option<tlib::TreeId>>,
 }
 
 /// Evaluator error.
@@ -495,7 +463,8 @@ pub enum EvalError {
     },
     /// Slider or numentry init value is outside the declared [min, max] range.
     ///
-    /// C++ equivalent: the `checkRange` diagnostic in `eval.cpp`:
+    /// C++ equivalent (upstream Faust; absent from the pinned reference
+    /// `8eebea429`): the `checkRange` diagnostic in `eval.cpp`:
     /// `"init = ... outside of [min max] range in '...'"`.
     ///
     /// Values are stored as `u64` bit-patterns (via `f64::to_bits`) to keep the

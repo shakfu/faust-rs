@@ -18,7 +18,13 @@ signals/source, backed by Rust `boxes::BoxBuilder` and `boxes::match_box`.
   - `CDSPToBoxes` — compile DSP source text to a box graph,
   - `CboxesToSignals` / `CboxesToSignals2` — propagate a box graph to signals,
   - `CcreateSourceFromBoxes` — generate backend source from a box graph.
-- Exposes a thin C++ convenience wrapper (`libfaust-box.h`).
+- Exposes a thin C++ convenience wrapper (`libfaust-box.h`) over a subset of
+  the C API: the constructor family, each applied constructor under the
+  reference spelling (`boxAdd(Box, Box)`) and, as an alias, the C spelling
+  (`boxAddAux(Box, Box)`), and 13 of the matchers. The other matchers and the
+  pipeline-conversion helpers are used through their C names (DIFF-API-009).
+- Adds two Rust-port constructors, `CboxFad` and `CboxRad`, absent from the
+  reference header.
 - Uses `tree-ffi` for shared tree handles, context-owned C strings,
   null-terminated handle arrays, and common Box/Signal enum definitions
   (`SType`, `SOperator`).
@@ -34,8 +40,9 @@ common helpers.
 ## Notes
 
 - `Box` handles are opaque and stable within one active context.
-- `Ctree2str` and `CprintBox` return heap C strings allocated by Rust;
-  release them with `freeCMemory`.
+- `Ctree2str` and `CprintBox` return heap C strings allocated by Rust, and
+  `CboxesToSignals*` null-terminated `Signal*` arrays; release both with
+  `freeCMemory`, also after `destroyLibContext`.
 - Matcher out-parameters and error buffers are written only on success;
   invalid pointers produce `null` / `false` / `0` results.
 - This is an incremental parity layer; rows marked as exact candidates in the
@@ -64,8 +71,9 @@ even right after a `CDSPToBoxes` failure that had some.
 
 ## Source provenance
 
-The exported symbol names and signatures mirror the C++ reference headers
-`architecture/faust/dsp/libfaust-box-c.h` and `libfaust-box.h`.
+The exported C symbol names and signatures mirror the C++ reference header
+`architecture/faust/dsp/libfaust-box-c.h`, plus the additions listed above;
+`libfaust-box.h` covers only the subset described in Scope.
 
 ## Relationship to other crates
 
@@ -75,5 +83,5 @@ The exported symbol names and signatures mirror the C++ reference headers
 - `signal-ffi` — sibling C ABI crate sharing the same context.
 - `compiler`, `propagate`, `codegen`, `transform` — drive the conversion
   helpers (`CDSPToBoxes`, `CboxesToSignals*`, `CcreateSourceFromBoxes`).
-- `faust-ffi` — re-exports these symbols (`box_api`) in the unified `libfaust`
-  distribution artifact.
+- `faust-ffi` — re-exports these symbols (`box_api`) in the unified
+  `libfaust-rs` distribution artifact.

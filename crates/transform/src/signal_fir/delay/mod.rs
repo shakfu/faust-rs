@@ -33,16 +33,18 @@
 //! one concern per file:
 //!
 //! - `manager.rs` — [`DelayManager`] state, sizing decisions, allocation.
-//! - `plan.rs` — [`DelayPlan`] + the `plan_delays` / `DelayPlanner` single-pass walk.
+//! - `plan.rs` — [`plan::DelayPlan`] + the `plan_delays` / `DelayPlanner` single-pass walk.
 //! - `context.rs` — [`DelayFirCtx`] / [`DelayLoweringCtx`] borrow bundles.
 //! - `shift.rs` / `circular_pow2.rs` / `if_wrapping.rs` — the three strategies.
 //! - `sizing.rs` — pure delay-amount → size resolution.
 //! - `options.rs` — [`DelayOptions`] + the strategy selector.
 //! - `arith.rs` — the shared `DelayArith` FIR-expression helper.
+//! - `domain_counters.rs` — per-clock-domain `IOTA` / `DSCounter` fields
+//!   (`DomainCounters`).
 //!
 //! # Strategy descriptions
 //!
-//! ## Shift/copy (`DelayKind::Shift`, delays ≤ `-mcd`, default 16)
+//! ## Shift/copy (`DelayKind::Shift`, delays < `-mcd`, default 16)
 //!
 //! Each sample, all buffer elements are shifted one slot toward the high end,
 //! and the new value is placed at index 0.  Read is a direct load at index
@@ -67,7 +69,7 @@
 //! end-of-sample: fIOTA = fIOTA + 1;
 //! ```
 //!
-//! ## If-based wrapping (`DelayKind::IfWrapping`, delays > `-dlt`)
+//! ## If-based wrapping (`DelayKind::IfWrapping`, delays ≥ `-dlt`)
 //!
 //! Uses an exact-size buffer (size = `max_delay + 1`) with a dedicated
 //! per-line integer counter.  The counter wraps to zero via an `if` comparison
@@ -89,9 +91,10 @@
 //!
 //! The planning split is:
 //!
-//! - [`plan_delays`] produces a [`DelayPlan`] with both per-carrier max delays
-//!   and recursion-output sizing metadata in one DAG walk.
-//! - `prepare_delay_lines` allocates each line through [`DelayManager::ensure_delay_line`].
+//! - [`plan_delays`] produces a [`plan::DelayPlan`] with both per-carrier max
+//!   delays and recursion-output sizing metadata in one DAG walk.
+//! - `prepare_delay_lines` allocates each line through
+//!   `DelayManager::ensure_delay_line_in_context`.
 //! - `ensure_recursion_array_for_group` in `module/` consumes the recursion-output
 //!   analysis to size recursion carriers.
 //!
@@ -104,9 +107,9 @@
 //! | Item | Kind | Purpose |
 //! |------|------|---------|
 //! | [`pow2limit_for_delay`] | free fn | `next_power_of_two(N + 1)` with overflow checks |
-//! | [`constant_delay_amount`] | free fn | Extract a literal `SIGINT` delay amount |
-//! | [`variable_delay_max_bound`] | free fn | Derive a bound from interval analysis |
-//! | [`min_const_upper_bound`] | free fn | Structural fallback: `SIGMIN(SigInt(n), _)` |
+//! | [`sizing::constant_delay_amount`] | free fn | Extract a literal `SIGINT` delay amount |
+//! | [`sizing::variable_delay_max_bound`] | free fn | Derive a bound from interval analysis |
+//! | [`sizing::min_const_upper_bound`] | free fn | Structural fallback: `SIGMIN(SigInt(n), _)` |
 //! | [`delay_size_for_amount`] | free fn | Unified resolver (tries all three above) |
 //! | [`DelayOptions`] | struct | `-mcd` / `-dlt` threshold options |
 //! | [`DelayKind`] | enum | Strategy + all per-strategy FIR emission behaviour |
@@ -115,7 +118,7 @@
 //! | [`DelayFirCtx`] | struct | Borrow bundle for FIR-emitting methods |
 //! | [`GlobalCircularCursor`] | struct | Shared `fIOTA` cursor service for circular storage |
 //! | [`plan_delays`] | free fn | Unified single-pass delay planner |
-//! | [`DelayPlan`] | struct | Pure-data delay decision; input to allocation |
+//! | [`plan::DelayPlan`] | struct | Pure-data delay decision; input to allocation |
 //!
 //! The complementary **stateful orchestration** layer (`lower_fixed_delay`,
 //! `lower_delay_state`, recursion-carrier resolution, and `lower_signal`
@@ -123,8 +126,8 @@
 //!
 //! Source provenance (C++):
 //! - `compiler/transform/signalFIRCompiler.hh` — `DelayLine`, `allocateDelayLineAux`
-//! - `compiler/transform/signalFIRCompiler.cpp` — `compileSigDelay`, `writeReadDelay`,
-//!   `checkDelayInterval`
+//! - `compiler/transform/signalFIRCompiler.cpp` — `compileSigDelay`, `writeReadDelay`
+//! - `compiler/signals/sigtype.cpp` — `checkDelayInterval`
 
 use fir::{FirId, FirType};
 

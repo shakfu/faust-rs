@@ -1,7 +1,7 @@
 //! Multiplicative term: `k · x₁^n₁ · x₂^n₂ · ... / (y₁^m₁ · y₂^m₂ · ...)`
 //!
 //! Ported from C++ `compiler/normalize/mterm.cpp`.
-// Internal module — functions will be wired into the simplify/normalform pipeline in Phase 2.
+// Internal module, used by `aterm`, `normalize` and `simplify`.
 #![allow(dead_code)]
 //!
 //! # Invariant
@@ -128,6 +128,25 @@ pub(crate) fn sig_order(types: &HashMap<SigId, SigType>, sig: SigId) -> u8 {
         Some(Variability::Konst) => 0,
         Some(Variability::Block) => 1,
         _ => 2,
+    }
+}
+
+/// Order of a term in the normalized sums: 3 when some state reaches it
+/// (a recursion node occurs in it, [`TreeArena::contains_recursion`]),
+/// [`sig_order`] otherwise.
+///
+/// C++ (upstream Faust 2.90): `sigs::sigOrder`, whose level 4,
+/// "audio-recursive", reads tlib's `kContainsRec` bit (commit `d4d51e5ed`,
+/// 2026-08-09, posterior to the pinned reference). Sums join these terms
+/// last ([`crate::aterm::Aterm::normalized_tree`]) and
+/// [`Mterm::complexity`] weighs such a factor one more than an audio-rate
+/// one; the grouping of products keeps [`sig_order`], upstream's cap at the
+/// audio level. Registry: DIFF-BEH-023.
+pub(crate) fn state_order(arena: &TreeArena, types: &HashMap<SigId, SigType>, sig: SigId) -> u8 {
+    if arena.contains_recursion(sig) {
+        3
+    } else {
+        sig_order(types, sig)
     }
 }
 
@@ -626,7 +645,7 @@ impl Mterm {
         let c_factors: i32 = self
             .factors
             .iter()
-            .map(|(&base, &exp)| (1 + sig_order(types, base) as i32) * exp.abs())
+            .map(|(&base, &exp)| (1 + state_order(arena, types, base) as i32) * exp.abs())
             .sum();
         c_coef + c_factors
     }
@@ -687,7 +706,10 @@ impl Mterm {
             return self.coef;
         }
 
-        // Group factors by signal order (0=Konst, 1=Block, 2=Samp)
+        // Group factors by signal order (0=Konst, 1=Block, 2=Samp). A factor
+        // that depends on state stays at 2: upstream caps its order-4 class
+        // at the audio level here, where regrouping is recurrence-neutral
+        // (`d4d51e5ed`, see [`state_order`]).
         // A[o] = numerator tree for order o, B[o] = denominator tree
         let mut a: [Option<SigId>; 3] = [None; 3];
         let mut b: [Option<SigId>; 3] = [None; 3];

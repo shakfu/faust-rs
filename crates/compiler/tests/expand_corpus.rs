@@ -9,9 +9,9 @@
 //!
 //! Host-dependent lines (compiler version, option spelling, library paths)
 //! and the libraries' own editorial metadata (versions, license strings) are
-//! normalized exactly as `xtask expand-oracle` normalizes them when recording,
-//! so a difference here is a difference in what the two compilers actually
-//! emit — not in which faustlibraries release happens to be on the machine.
+//! normalized exactly as `xtask expand-oracle` normalizes them when recording.
+//! Imports use a small corpus-local library: masking metadata cannot hide
+//! algorithm changes between installed faustlibraries releases.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +32,8 @@ fn expand_dir(kind: &str) -> PathBuf {
         .join("tests")
         .join("expand")
         .join(kind)
+        .canonicalize()
+        .expect("the expansion corpus directory must exist")
 }
 
 /// Returns the corpus fixtures in deterministic name order.
@@ -145,6 +147,34 @@ fn expansions_match_the_cpp_reference() {
     );
 }
 
+#[test]
+fn library_import_uses_only_corpus_local_sources() {
+    let expansion = expand(&expand_dir("dsp").join("020_library_import.dsp"));
+    let imports: Vec<PathBuf> = expansion
+        .lines()
+        .filter(|line| line.starts_with("declare library_path"))
+        .map(|line| {
+            let (_, value) = line.split_once(' ').expect("declaration keyword");
+            let (_, value) = value.split_once(' ').expect("declaration key");
+            PathBuf::from(
+                value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix("\";"))
+                    .expect("quoted import path"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        imports,
+        [expand_dir("dsp")
+            .join("expand_test_library.lib")
+            .canonicalize()
+            .expect("corpus-local library")],
+        "the import fixture must not resolve installed Faust libraries"
+    );
+    assert!(expansion.contains("declare expand_test_library_lib_name \"Expansion Test Library\";"));
+}
+
 /// Re-expands an already-expanded document.
 fn re_expand(expansion: &str) -> String {
     let expansion = expansion.to_owned();
@@ -256,14 +286,23 @@ fn compile_fixture_to_cpp(path: &Path) -> String {
 ///
 /// `m->declare(...)` carries `filename`, `compile_options`, the per-library
 /// keys, `library_path*` and `version` — all of which the expansion
-/// legitimately changes. Everything else is the algorithm, compared verbatim:
-/// generated variable names describe the program, so an expansion and its
-/// original must produce the same ones.
+/// legitimately changes — and the banner copies `author`, `copyright`,
+/// `license`, `name` and `version` from the same metadata. Everything else is
+/// the algorithm, compared verbatim: generated variable names describe the
+/// program, so an expansion and its original must produce the same ones.
 fn algorithm_only(generated: &str) -> Vec<&str> {
+    const BANNER_KEYS: [&str; 5] = [
+        "author: ",
+        "copyright: ",
+        "license: ",
+        "name: ",
+        "version: ",
+    ];
     generated
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.trim_start().starts_with("m->declare("))
+        .filter(|line| !BANNER_KEYS.iter().any(|key| line.starts_with(key)))
         .filter(|line| !line.trim_start().starts_with("//"))
         .filter(|line| !line.is_empty())
         .collect()

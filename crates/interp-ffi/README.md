@@ -63,6 +63,8 @@ Notes:
     used by the `faust` crate
 - `src/ui.rs`
   - UI/meta callback dispatch helpers
+- `src/json.rs`
+  - factory JSON, in the format of the C++ `interpreter_dsp_factory::getJSON`
 
 ## Shared FFI helpers (factorized)
 
@@ -70,11 +72,12 @@ This crate relies on `crates/ffi-common` for backend-agnostic FFI mechanics:
 
 - `UIGlue` / `MetaGlue`
 - C string allocation/free helpers
-- `freeCMemory` string helper
+- `freeCMemory` (`free_c_memory`: strings and registered pointer arrays)
 - `argv` decoding
 - error buffer writing (`4096` bytes)
-- shared FFI option parsing (`-I`, `-cn`, `-double`, `-vec`, `-vs`, `-lv`,
-  and `-ss`)
+- FFI host-option parsing (`-I`, `-cn`, the four `mem0` aliases, `--warn`);
+  program options (`-double`, `-vec`, `-vs`, `-lv`, `-ss`, ...) are read by
+  `compiler::CompileOptionArgs::from_argv`
 
 Backend-specific semantics remain local to this crate (factory/runtime behavior,
 `.fbc` serialization semantics, interpreter execution).
