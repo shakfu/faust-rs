@@ -65,10 +65,18 @@ Options:
           Output format for rendered frames [default: csv] [possible values: csv, ir, json]
       --sweep <PATH=V1,V2,...>
           Sweep a control over several values, as `PATH=V1,V2,...` (repeatable)
+      --points <FILE>
+          Sweep the points of a CSV file rather than a cartesian product
       --reduce <R>
           Reduce each render to one number per channel: rms, peak, energy, dc, f0, `sfdr` or `thd`
       --f0 <HZ>
           Fundamental in Hz for `--reduce sfdr` / `--reduce thd`
+      --describe <LIST>
+          Describe each render: `loudness`, `attack`, `decay[:DB]`, `sustain:A..B`, `centroid[:A..B]`, `width[:A..B]`, separated by commas
+      --describe-hop <SECONDS>
+          Envelope frame of `--describe`, seconds [default: 0.01]
+      --describe-fft <N>
+          Transform length of `--describe centroid`, a power of two [default: 2048]
       --at <FRAME> <PATH=VALUE>
           Set a control at an exact frame: `--at FRAME PATH=VALUE` (repeatable)
       --note <PITCH[:VEL]@ON[..OFF]>
@@ -98,7 +106,7 @@ Options:
       --reset-per-block
           Start every `--train` block from a cleared state and from frame 0 of the excitation: one pass over the same response per block, an offline calibration with one epoch per block (with `--in file:` the response is the file). Without it the blocks are the successive stretches of one stream and the state carries over
       --fd-check[=<WHERE>]
-          Check the gradient lanes of the `--train` controls against central finite differences of the loss lane, on one block from a fresh instance per evaluation. Fails when a relative error exceeds `--fd-tolerance` [possible values: start, end, both]
+          Check the gradient lanes of the `--train` controls against central finite differences of the loss lane, on one block from a fresh instance per evaluation. Fails when a relative error exceeds `--fd-tolerance`. A control is never set outside its range: within `--fd-step` of a bound the differences are one-sided, away from it, and the line says so [possible values: start, end, both]
       --fd-step <FD_STEP>
           Step of the finite differences [default: 0.001]
       --fd-tolerance <FD_TOLERANCE>
@@ -117,6 +125,16 @@ Options:
           How a compile failure is reported: `human`, the compiler's rendered diagnostics on stderr (the default), or `json`, the compiler's diagnostics-v2 report on stdout (code, ranges, facts, machine-applicable fixes) and the one-line summary on stderr [default: human] [possible values: human, json]
   -h, --help
           Print help (see more with '--help')
+
+Block diagrams:
+      --svg <DIR>            Draw the block diagrams of the program into DIR, created if needed, and exit: nothing is compiled to code or rendered, so the flags of a render are refused. Prints the index of what was written, a `file,name` CSV row per diagram (a JSON document with `--format json`)
+      --fold <N>             Fold out into a file of its own every named sub-diagram of a diagram whose complexity exceeds N; 0 draws everything in one file (default 25, as `-f N`)
+      --fold-complexity <N>  Smallest complexity of a sub-diagram worth a file of its own (default 2, as `-fc N`)
+      --max-name-size <N>    Longest label, longer ones keeping their first and last thirds around `...` (default 40, as `-mns N`)
+      --simplify-diagrams    Draw every constant sub-diagram as its value (`-sd`): the diagram only, the program is not changed
+      --scaled-svg           SVG sized by its viewBox alone, to scale with its container (`-sc`)
+      --shadow-blur          A drop shadow under the boxes (`-blur`)
+      --draw-route-frame     A frame around route boxes (`-drf`)
 
 Compiler options (as faust-rs):
       --process-name <NAME>          Specify the top-level DSP entry-point name instead of `process` (`-pn <name>`, `--process-name <name>`) [default: process]

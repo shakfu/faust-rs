@@ -65,6 +65,12 @@ verified Rust extension must not be presented as a proof of C++ parity.
 - Additional adapted behavior: differentiating a read-only table index uses a
   symmetric finite-difference slope. This is a documented derivative model,
   not C++ semantic parity.
+- Implemented correction (2026-10-24, shared with `rad`): the derivative of
+  `abs(x)` is `sign(x)` with `sign(0) = 0`, the value of a central difference.
+  It was `x / abs(x)`, `0 / 0` at a value that is 0 at run time, which made
+  every tangent `NaN` whatever the seed (the faust-elements string models, a
+  silent delay line). Pinned by `abs_at_zero_has_a_zero_derivative_in_fad_and_rad`
+  in `crates/compiler/tests/rad_runtime.rs`.
 - Implemented correction at `f18a50c8`: bargraphs forward the wrapped signal's
   tangents while retaining the meter on the rebuilt primal; see the
   [2026-09-19 review](fad-clock-domains-explanation-and-review-2026-09-19-en.md).
@@ -106,6 +112,9 @@ verified Rust extension must not be presented as a proof of C++ parity.
   finite difference, `BlockReverseAD`) in `crates/compiler/tests/rad_runtime.rs`.
   The gap was first recorded in the
   [2026-09-19 review, §10](fad-clock-domains-explanation-and-review-2026-09-19-en.md#10-what-these-results-do-not-establish).
+- Implemented correction (2026-10-24): the `abs` rule is the sign, 0 at 0, as
+  under `fad` (DIFF-SRC-001), in the symbolic sweep and in `BlockReverseAD`
+  (one shared formula, `signals::ad_rules`).
 - Compatibility impact: the source form and `BlockReverseAD` semantics have no
   pinned C++ source/backend oracle. Validation uses symbolic identities,
   FAD/RAD agreement, finite differences, and optimized/unoptimized runtime
@@ -237,7 +246,17 @@ must run unchanged with Faust C++ should not pass them.
   of the `compute` calls against real time (`--time`), a compile failure as
   the compiler's diagnostics-v2 JSON report (`--error-format json`), and the
   frequency response of a program checked to be linear and time-invariant
-  (`--freqresp`). The `faust-rs` options that choose the program or shape its
+  (`--freqresp`), sweeps given point by point from a CSV file (`--points`)
+  and sweeps of a polyphonic instrument, each point from a reset instrument
+  (`PolyProbe::reset`), what a render sounds like as a few descriptors
+  defined in the user guide (`--describe`: loudness, attack, decay, sustain,
+  spectral centroid, stereo width; `crates/cranelift-ffi/tests/describe_probe.rs`),
+  and the block diagrams of the probed program (`--svg DIR`,
+  draw-only: written into `DIR` alone, named by definition with a `-2`, `-3`
+  suffix for a repeated name instead of the C++ address suffix, an index on
+  stdout; the C++ drawing options under `faust-rs`'s spellings, `-sd`
+  simplifying the drawing only, not the compiled program;
+  `crates/cranelift-ffi/tests/svg_probe.rs`). The `faust-rs` options that choose the program or shape its
   code are `faust-rs`'s own declaration, `compiler::CompileOptionArgs`,
   shared with the two impulse runners, and forwarded under their `faust-rs`
   spellings; `-ec`, `-os` and `-mem0` are refused
@@ -247,6 +266,14 @@ must run unchanged with Faust C++ should not pass them.
   impulse-test`. Evidence:
   [`docs/faustprobe-user-guide-en.md`](../docs/faustprobe-user-guide-en.md),
   [`faustprobe-generic-test-tool-design-2026-08-14-en.md`](faustprobe-generic-test-tool-design-2026-08-14-en.md).
+  `--fd-check` never sets a control outside its range: within `--fd-step` of
+  a bound its differences are one-sided (second order, extrapolated), named
+  in the line and as `scheme` in the JSON, and a range narrower than two
+  steps is refused (2026-10-24; before, they stepped across the bound, and a
+  table read at `int(x * N)` with `x` below its minimum crashed the probe on
+  faust-elements). Regression coverage: `fd_check_at_a_bound_stays_inside_the_range`
+  and `fd_check_refuses_a_range_narrower_than_its_step` in
+  `crates/cranelift-ffi/src/probe/train.rs`.
   Comparisons at zero absolute and relative tolerance require bit identity,
   including signed zeros. `--check determinism` runs its second compilation
   and render in a separate process so equal FIR keys cannot reuse the first
@@ -967,6 +994,74 @@ must run unchanged with Faust C++ should not pass them.
   - `crates/compiler/tests/ondemand_lazy_block.rs`;
   - the `cpp`, `c`, `wasm`, `interp`, `cranelift`, `cpp-vec0` and `cpp-vec1`
     impulse lanes on the `ondemand_*` corpus.
+
+### DIFF-BEH-025 — `-svg` folds shared sub-diagrams
+
+- Status: `reference-fix` (drawings only; generated code unchanged).
+- The pinned C++ (`8eebea429`, 2.84.3) folds only named sub-diagrams into
+  files of their own and expands a shared unnamed one at every use, so a
+  recursion with shared subproblems draws its expanded tree:
+  `cheb(n,x) = 2*x*cheb(n-1,x) - cheb(n-2,x)` at `n = 23` writes 431 MB in
+  7.1 s, and the drawing grows like Fibonacci. faust-rs did the same (373 MB
+  in 1.3 s), and also expanded a second use of a folded *named* diagram, which
+  C++ always links.
+- faust-rs now follows upstream `master-dev` #1290 (`6789c5da8`) and its label
+  fix `068fb9a80`: a sub-diagram with more than one parent in the box DAG is
+  folded like a named one, every use of a folded diagram is a link to its one
+  file, its label is its own expression printed within a 1024-node budget
+  (`boxes::box_pp_bounded`, C++ `mBoxName`), and its file is
+  `diagram-<hex>.svg` (`diagram.svg`, `diagram-2.svg`, ... under `faustprobe
+  --svg`). `box_complexity` is memoized per drawing and saturates at 10^9.
+- Compatibility impact:
+  - `cheb(23)`: 192 KB, 23 files; `cheb(100)`: 808 KB in 0.01 s. Over the
+    133 impulse-test programs, 1.28 GB in 14 058 files becomes 191 MB in
+    17 536 files; every program still draws.
+  - Drawings of programs with shared sub-diagrams have more, smaller files
+    than before and than the pinned C++; folded names and labels differ from
+    C++'s, whose own printer formats numbers differently.
+- Evidence:
+  - [`svg-shared-node-folding-port-plan-2026-10-22-en.md`](svg-shared-node-folding-port-plan-2026-10-22-en.md);
+  - `crates/draw` tests (`a_shared_node_without_a_name_is_folded_once_and_linked_at_each_use`,
+    `a_named_diagram_used_twice_is_drawn_once`,
+    `a_fibonacci_shaped_dag_draws_in_linear_size`),
+    `crates/boxes/tests/shared_dags.rs`,
+    `crates/cranelift-ffi/tests/svg_probe.rs`
+    (`a_recursion_with_shared_subproblems_draws_in_linear_size`).
+
+### DIFF-BEH-026 — a variable delay amount with a negative lower bound
+
+- Status: `adapted`.
+- C++ `checkDelayInterval` (`sigtype.cpp`) and the delay rule of
+  `sigtyperules.cpp` require a delay amount's interval to lie within
+  `[0, INT_MAX)` ("possible negative values ... used in delay expression").
+  `sigtype::check_delay_interval` accepts a negative lower bound when the
+  upper bound is non-negative; variable-delay lowering clamps the index at run
+  time. A program C++ refuses can therefore compile in Rust, for instance an
+  audio input used as an amount (`_, _ : @`, interval `[-1, 1]`).
+- Two intervals are refused nevertheless, being no bound: an upper bound of
+  `INT_MAX` or more (as C++ refuses it), and an interval spanning the whole
+  integer range, `hi - lo >= 2^32 - 1`, the range the analysis gives `int(x)`
+  for an `x` it cannot bound, possibly shifted (`int(x) - 1` is
+  `[INT_MIN - 1, INT_MAX - 1]`). Before this, such an amount was accepted and
+  sized its delay line to 2^31 samples: an 8 GiB DSP structure, which crashes
+  a C++ host that allocates it on the stack while `faustprobe` renders it.
+- Related: C++ checks delay amounts on normalized signals, where a delay of a
+  delay is folded (`x @ 100 @ (s - 100)` is `x @ (s - 100 + 100)`); faust-rs
+  does not apply the delay normal form at the top-level rate and compiles
+  `rep_67` through the tolerance above, with the numerical difference of
+  `DIFF-GAP-016`.
+- Compatibility impact: Rust accepts amounts with a negative lower bound that
+  C++ refuses; it refuses, as C++, the amounts the interval analysis could not
+  bound, with the diagnostic `delay-interval`.
+- Evidence: `sigtype` tests `check_delay_interval_rejects_an_upper_bound_of_int_max_like_cpp`,
+  `check_delay_interval_rejects_the_whole_int_range_even_shifted`,
+  `check_delay_interval_accepts_negative_lower_bound_with_nonnegative_hi`;
+  `crates/compiler/tests/diagnostic_errors.rs`
+  (`a_delay_bounded_only_by_the_int_range_is_rejected_like_cpp`,
+  `the_same_delay_clamped_to_its_real_range_compiles_with_a_small_line`),
+  `crates/transform/src/signal_prepare/tests/typing.rs`
+  (`prepare_signals_for_fir_keeps_sampling_frequency_in_delay_amounts_after_simplify`,
+  whose sample rate is bounded as `ma.SR` bounds it).
 
 ## 6. Additional backends and delivery forms
 

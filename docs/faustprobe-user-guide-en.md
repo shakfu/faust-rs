@@ -553,6 +553,94 @@ With `--format csv` a sweep prints one row per point, as above. With
 `--format json` it prints the full structure, including the window each point
 used. `--format ir` cannot hold a sweep and is rejected.
 
+### A list of points: `--points FILE`
+
+A cartesian product is the wrong shape for presets or random patches.
+`--points FILE` reads the points from a CSV file: the first line that is
+neither empty nor a `#` comment names the controls (paths or fragments, as
+`--set` takes them), and each following line is one point. Everything else is
+a sweep's: one compilation, every point from a cleared instance, one row per
+point headed by the controls in the file's order, every value checked against
+its range before the first render (`--clamp` to accept and report). It cannot
+be combined with `--sweep`, `--train` or `--freqresp`.
+
+```
+$ cat points.csv
+# two cutoffs, two resonances
+cutoff,q
+500,1
+2000,4
+$ faustprobe --double --in sine:1000 -n 4096 --points points.csv --reduce rms filt.dsp
+cutoff,q,rms_out0,rms_out1
+500,1,0.19702361563033663,0.6323246724172475
+2000,4,0.9274345242605067,0.3146324951847318
+```
+
+### Describing a render: `--describe`
+
+When two implementations of one sound cannot be compared sample by sample (a
+port against its original, a model against a recording), or when a sweep
+should say what a control does to the *sound*, `--describe LIST` measures each
+render with a few descriptors, separated by commas:
+
+| Descriptor | Value |
+|---|---|
+| `loudness` | the loudest envelope frame, `10 log10(e_peak)` dBFS (`-inf` when silent) |
+| `attack` | start of the first frame reaching `0.81 e_peak` (90 % in amplitude), s |
+| `decay[:DB]` | from the loudest frame to the first later one at or below `e_peak - DB` dB, s; `decay` is `decay:30`; `NaN` when the window ends first |
+| `sustain:A..B` | mean energy of the frames lying wholly within `[A, B)` s, against the loudest, dB |
+| `centroid[:A..B]` | spectral centroid over `[A, B)` s (default: the window), Hz |
+| `width[:A..B]` | `10 log10(Σ(x0-x1)²) - 10 log10(Σ(x0+x1)²)` over `[A, B)` s, dB; two outputs only |
+
+The definitions, which every number depends on:
+
+- Everything reads the **window** (the frames after `--skip`), and every time
+  is in seconds from its first frame: start the note there.
+- The signal is the **mid**, the mean of the outputs, except for `width`.
+- The **envelope** is the mean of `mid²` over frames of `--describe-hop`
+  seconds (default 0.01, rounded to whole samples) from the window's start; a
+  last partial frame is left out. Times are whole frames: resolution one hop,
+  and `attack=0` means "within the first frame".
+- `centroid` sums the power spectra of `--describe-fft` samples (default 2048,
+  a power of two), periodic Hann window, hop of half a transform, over bins 2
+  to `N/2 - 1` (DC, the bin beside it and Nyquist out).
+- A value that does not exist is not replaced by a number: a decay not
+  reached is `NaN` (not the length of the window), a silent window has a
+  loudness of `-inf`, two identical outputs a width of `-inf`. CSV prints
+  `NaN`/`-inf`, JSON `null`; a `# note:` says why.
+
+A single render prints a `# describe` line after the channels; a sweep's rows
+get one column per descriptor, named in its canonical spelling (`decay:30`,
+`sustain:0.8..1`), after the reduction when `--reduce` is given and instead of
+the three statistics otherwise; JSON runs get a `describe` object.
+
+```
+$ faustprobe --double --in sine:1000 -n 8192 --sweep cutoff=500,2000 --describe loudness,centroid,decay:10 filt.dsp
+cutoff,loudness,centroid,decay:10
+500,-13.16734661477514,999.999989494145,NaN
+2000,-7.869588693465957,1000.0000001514137,NaN
+# note: decay:10 is NaN at 2 of 2 point(s): not reached before the window ends (or the window is silent)
+```
+
+What cannot be measured is refused before any render: `width` on a program
+that does not have two outputs, a stretch beyond the window or holding no
+whole frame, a `centroid` stretch shorter than one transform. `--describe` is
+not taken by `--freqresp`, `--train` or the impulse-test protocol.
+
+These are the descriptors of the `faust-elements` sound atlas
+(`scripts/gen_atlas.mjs`, `describe()`), with its hop, window and bands. Its
+first 124 points, rendered with `--points` in single precision as the page's
+wasm renders them (voice and body as one program, `process = e.process :
+e.effect`, at the atlas's gain of 0.7, `--at 32000 gate=0`), reproduce the 671
+values the atlas stores to their four digits; a decay not reached is the one
+deliberate difference (the script reports the end of the render). Through
+`--nvoices` the velocity is a MIDI one, 89/127 for 0.7, and the levels move by
+a few hundredths of a dB. Spectral
+flatness and harmonicity, which that script also computes, are not here: the
+first depends on a floor and a band more than on the sound, the second needs
+a fundamental and a tolerance that are the study's choices. Compute them from
+`--out` renders.
+
 ## 8. Measuring aliasing and distortion
 
 `sfdr` and `thd` answer opposite questions about the same spectrum.
@@ -599,6 +687,10 @@ steady stretch.
 A `--reduce` returns one scalar per channel. That covers every property that can
 gate a build: level, offset, dominant frequency, aliasing, distortion, and any
 of them across a parameter sweep.
+
+`--describe` (§7) adds a few numbers per render that are not per channel:
+level, envelope times, brightness, width, the measures of what a sound is
+rather than of what a channel holds.
 
 What it does not cover is anything needing a *vector*. Comparing a hundred
 partials against a predicted curve, or tracking each of their decay slopes over
@@ -699,6 +791,23 @@ was fixed every voice was given silence, and `--in` was accepted under
 `--nvoices` and meant nothing. For an instrument without inputs, the usual
 case, nothing changes; a silent render of one that has some under `--in zero`
 says so.
+
+**Sweeps.** `--sweep`, `--points`, `--reduce` and `--describe` work as for a
+scalar program (§7). Every point renders from a reset instrument: every voice
+and the effect at their declared defaults with their state cleared, every
+voice free, then `--set`, the point's values, and the notes of the schedule
+played again. A point therefore renders what the same command with `--set`
+renders alone, whatever the points before it, and one compilation serves them
+all: a JIT of `faust-elements` costs about 1.2 s, its 124 atlas points render
+in 4 s in all.
+
+```
+$ faustprobe --nvoices 1 --sr 32000 -n 64000 --note 57:89@0..32000 --points presets.csv \
+    --describe loudness,attack,decay,sustain:0.8..1,centroid:0.05..1,width:0..1 -I dsp dsp/elements_poly.dsp
+```
+
+`--out` and `--every` are refused with a sweep, and so is an `--at` that
+writes a swept control, as on the scalar path.
 
 **Statistics and failures are those of a scalar render.** The header line adds
 the voices (`# frames=300 sr=44100 nvoices=1 active_voices=1 window=0..300 (300
@@ -942,10 +1051,25 @@ notation, the gradient being small by then:
 ```
 
 The check at the end fails the command after the rows and the trained values
-were printed. On a bound, the differences step across it: the program
-computes there as anywhere, the range being the host's business.
+were printed.
 
-*The reference.* `fd` is the central difference at `--fd-step` (default
+*On a bound.* The differences never set a control outside its range: a value
+the program never sees otherwise can take it anywhere, and a table read at
+`int(x * N)` with `x` just below its minimum reads before the table (the
+faust-elements `signature` at 0 crashed the probe that way). Within
+`--fd-step` of a bound they are one-sided, away from it, with the formula of
+the same order, `(-3 f(x) + 4 f(x + h) - f(x + 2h)) / 2h` at the lower bound
+and its mirror at the upper one, and the same extrapolation; the line names
+it:
+
+```text
+# fd-check /probe_signature/unit/signature: rad 0.000000 fd 0.000000 relative error 0.00e0 (forward, at a bound)
+```
+
+A range narrower than two steps on both sides of the value is refused with
+the range and the remedy, a smaller `--fd-step`.
+
+*The reference.* `fd` is the central difference (one-sided on a bound) at `--fd-step` (default
 1e-3) and at half of it, extrapolated to a zero step, `(4 D(h/2) - D(h)) / 3`.
 A plain central difference is off by the loss's third derivative times `h^2 /
 6`, an error that does not shrink with the gradient: on the resonator above it
@@ -1000,7 +1124,8 @@ took.
 one document: `schema_version`, `dsp`, `sr`, and `train` with `options` (the
 optimiser, `lr`, `block`, `blocks`, `reset_per_block`), `clamped`, `grid`
 (`points[]` with `set` and `loss`, `best`), `fd_check` (`start` and `end`:
-`checks[]` with `path`, `rad`, `fd`, `fd_plain`, `relative_error`; `worst_relative_error`,
+`checks[]` with `path`, `rad`, `fd`, `fd_plain`, `relative_error`, `scheme`:
+`"central"`, `"forward"` or `"backward"`; `worst_relative_error`,
 `tolerance`, `passes`), `rows[]` (`block`, `loss`, `values`, and `grads`
 always, thinned by `--every`), `trained[]` (`path`, `value`, `min`, `max`,
 `blocks_on_lower`, `blocks_on_upper`, `ends_on`: `"lower"`, `"upper"` or
@@ -1322,3 +1447,95 @@ the document. A magnitude of `-inf` is `null`. (For the few hours between the
 introduction of `--freqresp` and that of its sweep, `linearity` and `outputs`
 sat directly under `freqresp`.)
 
+
+## 17. Block diagrams: `--svg`
+
+`--svg DIR` draws the block diagrams of the program into `DIR`, created if
+needed, and exits. The drawing is faust-rs's own (the `draw` crate, the port
+of the C++ `-svg`), on the program the other modes probe: `-I`, `-pn NAME` and
+`--eval` choose it exactly as they do for a render, so a figure and a
+measurement are of the same thing.
+
+```text
+$ faustprobe -I .. --svg figs/fdn fdn.dsp
+file,name
+process.svg,process
+encoder.svg,encoder
+inDomain.svg,inDomain
+decoder.svg,decoder
+encoder-2.svg,encoder
+...
+feedbackNetwork.svg,feedbackNetwork
+```
+
+- **Draw-only.** Nothing is compiled to code and nothing is rendered, so the
+  flags of a render (`--set`, `-n`, `--in`, `--sweep`, `--freqresp`,
+  `--train`, `--compare`, ...) are refused rather than ignored. A figure is a
+  question about structure, and the index and a render's rows would compete
+  for stdout.
+- **Only in `DIR`.** Nothing is written next to the source, unlike
+  `faust-rs -svg`, which makes `<name>-svg/` in the working directory. Files
+  already in `DIR` are overwritten, never removed: give each figure a
+  directory of its own, or a diagram left by an earlier run stays beside the
+  new ones.
+- **Stable names.** A folded sub-diagram is named by its definition,
+  `feedbackNetwork.svg`, then `feedbackNetwork-2.svg` for a second distinct
+  diagram of the same name (the same function applied to other arguments), in
+  drawing order. Names are compared without case, so two files never differ by
+  case alone. The same input gives the same files and the same bytes on every
+  run, and an edit that does not change what is drawn does not rename them;
+  `faust-rs -svg` and the C++ compiler suffix each name with a tree index or
+  an address instead (`decoder-000034e8.svg`, `layer-98768.svg`), which moves
+  with anything evaluated before.
+- **Shared sub-diagrams.** A sub-diagram used in several places (a
+  recursion with shared subproblems, a constant computed once and used twice)
+  is folded even without a name, as in upstream Faust (#1290): its file is
+  `diagram.svg`, `diagram-2.svg`, ..., and its label, in the index too, is its
+  own expression (`_,0.35355338f : *`). Every use is a link to that one file,
+  so the drawing grows with the program, not with its expansion:
+  `cheb(n,x) = 2*x*cheb(n-1,x) - cheb(n-2,x)` at `n = 100` draws 808 KB.
+- **The index** is on stdout: a `file,name` CSV row per diagram, root first,
+  the name quoted when it holds a comma. With `--format json`, one document:
+  `schema_version`, `dsp`, `eval` (under `--eval`), `svg_dir`, and
+  `diagrams[]` with `file` and `name`.
+
+The root is `process.svg`, or `NAME.svg` under `-pn NAME`. Under `--eval` the
+root is the expressions, drawn as one diagram titled with their text, in
+`process.svg`; a `.lib` works as for a render, its definitions unprefixed:
+
+```text
+$ faustprobe -I .. --svg figs/parallel --eval 'sc.parallel(7, 4, mk)' texture.dsp
+file,name
+process.svg,"sc.parallel(7, 4, mk)"
+harmonics.svg,harmonics
+harmonics-2.svg,harmonics
+...
+```
+
+An expression that does not compile fails as with any `--eval`, located in
+`<eval k>`, and nothing is written.
+
+### Drawing options
+
+The C++ compiler's, under `faust-rs`'s spellings (the single-dash forms are
+accepted too):
+
+| flag | C++ | default | effect |
+|---|---|---|---|
+| `--fold N` | `-f N` | 25 | fold out every named sub-diagram of a diagram whose complexity exceeds N into a file of its own; `0` draws everything in one file |
+| `--fold-complexity N` | `-fc N` | 2 | smallest complexity worth a file of its own |
+| `--max-name-size N` | `-mns N` | 40 | longest label; a longer one keeps its first and last thirds around `...` |
+| `--simplify-diagrams` | `-sd` | off | draw every constant sub-diagram as its value (`_, (1 <: _, _ : +) : *` draws `_, 2 : *`) |
+| `--scaled-svg` | `-sc` | off | size the SVG by its viewBox alone, to scale with its container |
+| `--shadow-blur` | `-blur` | off | a drop shadow under the boxes |
+| `--draw-route-frame` | `-drf` | off | a frame around route boxes |
+
+`-sd` changes the drawing only: unlike the C++ option, the program compiled by
+the other modes is not simplified (it would compute the same values). A
+sub-diagram the simplification rewrites keeps its definition name, as in C++.
+Each option without `--svg` is refused.
+
+A sub-diagram built by a factory, a function applied to arguments, is labelled
+with the function's name (`feedbackNetwork`, `matrix`): the C++ compiler
+labels the same boxes with a truncated print of the applied closure
+(`feedbackNetwo...ER5[nil]]]}`) or `diagram_13`.

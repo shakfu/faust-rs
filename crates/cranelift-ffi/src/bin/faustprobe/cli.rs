@@ -236,6 +236,16 @@ pub(crate) struct Args {
     #[arg(long = "sweep", value_name = "PATH=V1,V2,...")]
     pub(crate) sweeps: Vec<String>,
 
+    /// Sweep the points of a CSV file rather than a cartesian product.
+    ///
+    /// The first line that is neither empty nor a `#` comment names the
+    /// controls (paths or fragments, as `--set` takes them), each following
+    /// line is one point: presets, random patches. One compilation for every
+    /// point; each renders from a cleared instance, as with `--sweep`, and
+    /// gives a row headed by the controls, in the file's order.
+    #[arg(long = "points", value_name = "FILE", conflicts_with = "sweeps")]
+    pub(crate) points: Option<String>,
+
     /// Reduce each render to one number per channel: rms, peak, energy, dc, f0,
     /// `sfdr` or `thd`.
     ///
@@ -253,6 +263,40 @@ pub(crate) struct Args {
     /// fundamental — a bright pluck, a filtered saw — is misread without it.
     #[arg(long = "f0", value_name = "HZ")]
     pub(crate) f0: Option<f64>,
+
+    /// Describe each render: `loudness`, `attack`, `decay[:DB]`,
+    /// `sustain:A..B`, `centroid[:A..B]`, `width[:A..B]`, separated by commas.
+    ///
+    /// Computed on the window (after `--skip`), times in seconds from its
+    /// first frame, on the mid (the mean of the outputs), in envelope frames
+    /// of `--describe-hop`: `loudness` is the loudest frame (dBFS), `attack`
+    /// the start of the first frame at 90 % of its amplitude, `decay:DB` (default 30) the time from it down DB dB
+    /// (`NaN` when not reached), `sustain:A..B` the level of the frames within
+    /// `[A, B)` s against it (dB), `centroid` the spectral centroid (Hz, Hann
+    /// window, hop of half a transform), `width` side against mid energy of two
+    /// outputs (dB). A sweep's rows get one column per descriptor, named as
+    /// written here (`decay` is `decay:30`); a single render a `# describe`
+    /// line; JSON a `describe` object.
+    #[arg(long = "describe", value_name = "LIST")]
+    pub(crate) describe: Option<String>,
+
+    /// Envelope frame of `--describe`, seconds.
+    #[arg(
+        long = "describe-hop",
+        value_name = "SECONDS",
+        default_value_t = 0.01,
+        requires = "describe"
+    )]
+    pub(crate) describe_hop: f64,
+
+    /// Transform length of `--describe centroid`, a power of two.
+    #[arg(
+        long = "describe-fft",
+        value_name = "N",
+        default_value_t = 2048,
+        requires = "describe"
+    )]
+    pub(crate) describe_fft: usize,
 
     /// Set a control at an exact frame: `--at FRAME PATH=VALUE` (repeatable).
     ///
@@ -362,7 +406,9 @@ pub(crate) struct Args {
     /// Check the gradient lanes of the `--train` controls against central
     /// finite differences of the loss lane, on one block from a fresh
     /// instance per evaluation. Fails when a relative error exceeds
-    /// `--fd-tolerance`.
+    /// `--fd-tolerance`. A control is never set outside its range: within
+    /// `--fd-step` of a bound the differences are one-sided, away from it,
+    /// and the line says so.
     ///
     /// `--fd-check` alone, or `--fd-check=start`, checks at the descent's
     /// starting point, before it (or instead of it, with `--blocks 0`);
@@ -450,6 +496,97 @@ pub(crate) struct Args {
     #[arg(long = "error-format", value_enum, default_value_t = ErrorFormat::Human)]
     pub(crate) error_format: ErrorFormat,
 
+    /// Draw the block diagrams of the program into DIR, created if needed,
+    /// and exit: nothing is compiled to code or rendered, so the flags of a
+    /// render are refused. Prints the index of what was written, a `file,name`
+    /// CSV row per diagram (a JSON document with `--format json`).
+    ///
+    /// The program is the one the other modes probe: FILE's `process`, or its
+    /// `-pn` definition, or under `--eval` the expressions, drawn as one
+    /// diagram titled with their text in `process.svg`. A folded sub-diagram
+    /// is named by its definition, `feedbackNetwork.svg`, then
+    /// `feedbackNetwork-2.svg` for a second distinct diagram of the same name,
+    /// in drawing order: the same input gives the same files and contents on
+    /// every run. Files already in DIR are overwritten, never removed: give
+    /// each figure a directory of its own.
+    #[arg(
+        long = "svg",
+        value_name = "DIR",
+        help_heading = "Block diagrams",
+        conflicts_with_all = [
+            "render", "sr", "block", "opt_level", "sets", "set_a", "set_b", "clamp",
+            "input", "skip", "every", "list_params", "bargraphs", "quiet", "precision",
+            "out", "compare", "reference", "tolerance", "rel_tolerance",
+            "compare_outputs", "checks", "fail_above", "sweeps", "points", "reduce", "f0",
+            "describe", "describe_hop", "describe_fft", "ats",
+            "notes", "chords", "nvoices", "effect", "voice_stop_level", "train",
+            "loss_lane", "grad_lane", "optimizer", "lr", "blocks", "reset_per_block",
+            "fd_check", "fd_step", "fd_tolerance", "train_verbose", "time", "freqresp",
+            "settle", "linearity_tolerance",
+        ]
+    )]
+    pub(crate) svg: Option<String>,
+
+    /// Fold out into a file of its own every named sub-diagram of a diagram
+    /// whose complexity exceeds N; 0 draws everything in one file (default
+    /// 25, as `-f N`).
+    #[arg(
+        long = "fold",
+        value_name = "N",
+        requires = "svg",
+        help_heading = "Block diagrams"
+    )]
+    pub(crate) fold: Option<usize>,
+
+    /// Smallest complexity of a sub-diagram worth a file of its own (default
+    /// 2, as `-fc N`).
+    #[arg(
+        long = "fold-complexity",
+        value_name = "N",
+        requires = "svg",
+        help_heading = "Block diagrams"
+    )]
+    pub(crate) fold_complexity: Option<usize>,
+
+    /// Longest label, longer ones keeping their first and last thirds around
+    /// `...` (default 40, as `-mns N`).
+    #[arg(
+        long = "max-name-size",
+        value_name = "N",
+        requires = "svg",
+        help_heading = "Block diagrams"
+    )]
+    pub(crate) max_name_size: Option<usize>,
+
+    /// Draw every constant sub-diagram as its value (`-sd`): the diagram
+    /// only, the program is not changed.
+    #[arg(
+        long = "simplify-diagrams",
+        requires = "svg",
+        help_heading = "Block diagrams"
+    )]
+    pub(crate) simplify_diagrams: bool,
+
+    /// SVG sized by its viewBox alone, to scale with its container (`-sc`).
+    #[arg(long = "scaled-svg", requires = "svg", help_heading = "Block diagrams")]
+    pub(crate) scaled_svg: bool,
+
+    /// A drop shadow under the boxes (`-blur`).
+    #[arg(
+        long = "shadow-blur",
+        requires = "svg",
+        help_heading = "Block diagrams"
+    )]
+    pub(crate) shadow_blur: bool,
+
+    /// A frame around route boxes (`-drf`).
+    #[arg(
+        long = "draw-route-frame",
+        requires = "svg",
+        help_heading = "Block diagrams"
+    )]
+    pub(crate) draw_route_frame: bool,
+
     /// The options of `faust-rs` that choose the program or shape its code,
     /// `faust-rs`'s own declaration (`-double`, `-pn`, `-vec`, `-ss`, ...):
     /// the command line goes through `faust-rs`'s
@@ -519,7 +656,9 @@ pub(crate) fn reject_protocol_conflicts(args: &Args) -> Result<(), String> {
         ("--set", !args.sets.is_empty()),
         ("--format", args.format != Format::Ir),
         ("--sweep", !args.sweeps.is_empty()),
+        ("--points", args.points.is_some()),
         ("--reduce", args.reduce.is_some()),
+        ("--describe", args.describe.is_some()),
         ("--at", !args.ats.is_empty()),
         (
             "--note/--chord",
@@ -534,6 +673,7 @@ pub(crate) fn reject_protocol_conflicts(args: &Args) -> Result<(), String> {
         ("--eval", !args.evals.is_empty()),
         ("--compare/--ref/--check", verification_requested(args)),
         ("--freqresp", args.freqresp.is_some()),
+        ("--svg", args.svg.is_some()),
     ]
     .into_iter()
     .filter_map(|(flag, given)| given.then_some(flag))
