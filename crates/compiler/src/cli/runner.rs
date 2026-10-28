@@ -281,6 +281,9 @@ pub fn compile_options_full_string(cli: &CliArgs, backend_lang: Option<&str>) ->
     if cli.compile.memory_manager {
         parts.push("-mem0".to_owned());
     }
+    if cli.user_interface_macros {
+        parts.push("-uim".to_owned());
+    }
     if let Some(name) = cli.class_name.as_deref()
         && name != codegen::DEFAULT_CLASS_NAME
     {
@@ -371,7 +374,12 @@ pub fn wrap_backend_with_architecture(generated: &str, cli: &CliArgs) -> String 
     };
 
     let mut options = EnrobageOptions::new(architecture_file.clone());
-    options.architecture_dirs = cli.architecture_dir.clone();
+    // C++ global::initDirectories seeds the search list before processCmdline
+    // appends -A paths. Inline headers use the same list as the main template.
+    options.architecture_dirs = FaustInstallPaths::from_environment().architecture_dirs;
+    options
+        .architecture_dirs
+        .extend(cli.architecture_dir.iter().cloned());
     options.inline_arch_files = cli.inline_architecture_files;
     if let Some(class_name) = selected_class_name(cli) {
         options.class_name = class_name;

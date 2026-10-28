@@ -35,6 +35,7 @@ use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
 
 use crate::backends::c_family::{self, CFamilySyntax, EmitMode, StructInit, TableInit};
 use crate::backends::faust_api;
+use crate::backends::ui_macros::{UiMacroBlock, UiMacroWidget, emit_ui_macros};
 use crate::memory_layout::{
     AllocationPhase, Mem0Analysis, Mem0AnalysisOptions, MemoryLayoutFlavor, MemoryManagerMode,
     MemoryRole, MemoryScope, MemoryZone, analyze_effective_mem0,
@@ -105,6 +106,14 @@ pub struct COptions {
     pub metadata_filename: Option<String>,
     /// Non-identity compilation metadata replayed by `metadata()`.
     pub metadata_entries: Vec<(String, String)>,
+    /// Emit the `-uim` user-interface macros (the `#ifdef FAUST_UIMACROS`
+    /// block) after the DSP code. Source provenance: C++
+    /// `global::gUIMacroSwitch`.
+    pub ui_macros: bool,
+    /// The widgets those macros list, in interface order. The compiler
+    /// pipeline fills them from the interface the module shows; ignored
+    /// unless [`Self::ui_macros`].
+    pub ui_macro_widgets: Vec<UiMacroWidget>,
 }
 
 impl Default for COptions {
@@ -123,6 +132,8 @@ impl Default for COptions {
             metadata_name: None,
             metadata_filename: None,
             metadata_entries: Vec::new(),
+            ui_macros: false,
+            ui_macro_widgets: Vec::new(),
         }
     }
 }
@@ -281,6 +292,20 @@ fn generate_c_module_step(
             mem0: mem0.as_ref(),
         },
     )?;
+    if options.ui_macros {
+        emit_ui_macros(
+            &mut out,
+            &UiMacroBlock {
+                file_name: options.metadata_filename.as_deref(),
+                class_name: &class_name,
+                compile_options: options.compile_options.as_deref().unwrap_or("-lang c"),
+                num_inputs: module.num_inputs,
+                num_outputs: module.num_outputs,
+                double_precision: options.double_precision,
+                widgets: &options.ui_macro_widgets,
+            },
+        );
+    }
     emit_c_footer(&mut out);
     Ok(out)
 }
@@ -368,30 +393,37 @@ fn emit_c_header(
     let _ = writeln!(out, "#define exp10 __exp10");
     let _ = writeln!(out, "#endif");
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "static inline FAUST_UNUSED int faustmini(int a, int b) {{ return (a < b) ? a : b; }}"
-    );
+    // Guarded by `FAUSTMAXI`, in C++ `CCodeContainer::produceClass`'s order
+    // (`c_code_container.cpp`, since Faust 2.85.5 and in the pinned
+    // `8eebea429`), so several DSPs can share one translation unit.
+    let _ = writeln!(out, "#ifndef FAUSTMAXI");
+    let _ = writeln!(out, "#define FAUSTMAXI");
     let _ = writeln!(
         out,
         "static inline FAUST_UNUSED int faustmaxi(int a, int b) {{ return (a > b) ? a : b; }}"
     );
+    let _ = writeln!(
+        out,
+        "static inline FAUST_UNUSED int faustmini(int a, int b) {{ return (a < b) ? a : b; }}"
+    );
+    let _ = writeln!(out, "#endif");
     // Two's-complement wrapping integer arithmetic: signed overflow is UB in
     // C, so add/sub/mul run on `uint32_t` (defined modulo 2^32) and convert
     // back — the semantics Faust-generated code (the noise LCG in
-    // particular) has always assumed.
-    let _ = writeln!(
-        out,
-        "static inline FAUST_UNUSED int faust_wrap_add(int a, int b) {{ return (int)(((uint32_t)a) + ((uint32_t)b)); }}"
-    );
-    let _ = writeln!(
-        out,
-        "static inline FAUST_UNUSED int faust_wrap_sub(int a, int b) {{ return (int)(((uint32_t)a) - ((uint32_t)b)); }}"
-    );
-    let _ = writeln!(
-        out,
-        "static inline FAUST_UNUSED int faust_wrap_mul(int a, int b) {{ return (int)(((uint32_t)a) * ((uint32_t)b)); }}"
-    );
+    // particular) has always assumed. The `FAUST_INT_WRAP` guard is C++
+    // `CCodeContainer::produceClass`'s (`c_code_container.cpp`, Faust
+    // master-dev `88b5c93ae`): several DSPs, from either compiler, can share
+    // one translation unit. `static` gives each unit its own copy, so the
+    // body may differ from C++'s.
+    let _ = writeln!(out, "#ifndef FAUST_INT_WRAP");
+    let _ = writeln!(out, "#define FAUST_INT_WRAP");
+    for (name, op) in [("add", '+'), ("sub", '-'), ("mul", '*')] {
+        let _ = writeln!(
+            out,
+            "static inline FAUST_UNUSED int faust_wrap_{name}(int a, int b) {{ return (int)(((uint32_t)a) {op} ((uint32_t)b)); }}"
+        );
+    }
+    let _ = writeln!(out, "#endif");
     let _ = writeln!(out);
 }
 
