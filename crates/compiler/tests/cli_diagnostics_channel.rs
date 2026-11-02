@@ -416,7 +416,12 @@ fn check_json_compiler_type_family_failure_is_clean() {
 
 #[test]
 fn check_json_sfir_family_failure_is_clean() {
-    let result = run_and_assert_clean_json(&corpus_path("err_fad_rad_temporal.dsp"), &[]);
+    // The reverse sweep of `BlockReverseAD` has no rule for a read of a
+    // writable table (DIFF-GAP-006). A fixture must be a program the lowering
+    // refuses by design: this test used to run on `fad(rad(x', x), x)`, whose
+    // failure was a missing rule, and implementing the rule removed its
+    // premise.
+    let result = run_and_assert_clean_json(&corpus_path("err_rad_writable_table_block.dsp"), &[]);
     assert!(
         !result.success,
         "expected exit 1 on a signal->FIR lowering failure"
@@ -429,7 +434,7 @@ fn check_json_sfir_family_failure_is_clean() {
 
     // The diagnostic already carries the code, so the message must not repeat
     // it. Using the error's Display here used to render
-    // "error [FRS-SFIR-0004] [FRS-SFIR-0004] signal preparation failed: ...".
+    // "error [FRS-SFIR-0004] [FRS-SFIR-0004] ...".
     let message = first_message(&result);
     assert!(
         !message.contains(first_code(&result)),
@@ -440,6 +445,19 @@ fn check_json_sfir_family_failure_is_clean() {
             .as_array()
             .is_some_and(|labels| !labels.is_empty()),
         "unsupported lowering must point to the originating Faust construct"
+    );
+}
+
+#[test]
+fn check_json_fad_of_a_block_rad_with_a_dependent_seed_is_located() {
+    let result = run_and_assert_clean_json(&corpus_path("err_fad_rad_dependent_seed.dsp"), &[]);
+    assert!(!result.success, "expected exit 1 on the refusal");
+    assert_eq!(first_code(&result), "FRS-PROP-0005");
+    assert!(
+        result.stdout["diagnostics"][0]["labels"]
+            .as_array()
+            .is_some_and(|labels| !labels.is_empty()),
+        "the refusal must point at the program"
     );
 }
 
@@ -816,10 +834,10 @@ fn check_json_src_family_unresolved_import_is_structured() {
 
 #[test]
 fn error_format_human_still_writes_diagnostics_to_stderr_not_stdout() {
-    // D1 explicitly requires --error-format human behavior to be preserved
-    // byte for byte. This is a coarse regression guard, not a full snapshot:
-    // stdout must be empty and stderr must carry the pipeline-failed prefix
-    // plus the FRS code, on a plain (not --check) failing compile.
+    // This is a coarse regression guard, not a full snapshot: stdout must be
+    // empty and stderr must carry the FRS code, on a plain (not --check)
+    // failing compile. The diagnostic comes first, with its location at the
+    // start of the line: a `pipeline failed:` prefix would only repeat it.
     let output = Command::new(bin_path())
         .arg(corpus_path("err_09_eval_undefined_symbol.dsp"))
         .arg("--error-format")
@@ -834,13 +852,106 @@ fn error_format_human_still_writes_diagnostics_to_stderr_not_stdout() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("pipeline failed:"),
-        "expected the human-mode prefix line on stderr, got: {stderr}"
+        !stderr.contains("pipeline failed:"),
+        "expected the diagnostic alone on stderr, got: {stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("err_09_eval_undefined_symbol.dsp:1:7: error")),
+        "expected the location first, got: {stderr}"
     );
     assert!(
         stderr.contains("FRS-EVAL-"),
         "expected an FRS-EVAL-* code in the human rendering, got: {stderr}"
     );
+}
+
+// ─── Human color: the terminal channel only, and only when wanted ────────
+
+/// A failing compile whose outcome the test environment cannot influence: the
+/// three variables `--color auto` reads start out unset.
+fn failing_compile(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(bin_path());
+    command
+        .arg(corpus_path("err_09_eval_undefined_symbol.dsp"))
+        .args(args)
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .envs(env.iter().copied());
+    command.output().expect("failed to spawn faust-rs")
+}
+
+fn has_escape(bytes: &[u8]) -> bool {
+    bytes.contains(&0x1b)
+}
+
+#[test]
+fn color_auto_stays_plain_on_a_pipe_and_follows_the_environment() {
+    assert!(!has_escape(&failing_compile(&[], &[]).stderr));
+    assert!(!has_escape(
+        &failing_compile(&["--color", "auto"], &[("NO_COLOR", "1")]).stderr
+    ));
+    assert!(has_escape(
+        &failing_compile(&[], &[("CLICOLOR_FORCE", "1")]).stderr
+    ));
+    // NO_COLOR outranks a forced color.
+    assert!(!has_escape(
+        &failing_compile(&[], &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")]).stderr
+    ));
+}
+
+#[test]
+fn an_explicit_color_choice_outranks_the_environment() {
+    assert!(has_escape(
+        &failing_compile(&["--color", "always"], &[("NO_COLOR", "1")]).stderr
+    ));
+    assert!(!has_escape(
+        &failing_compile(&["--color", "never"], &[("CLICOLOR_FORCE", "1")]).stderr
+    ));
+}
+
+#[test]
+fn color_always_changes_nothing_but_the_escapes() {
+    let plain = failing_compile(&["--color", "never"], &[]);
+    let colored = failing_compile(&["--color", "always"], &[]);
+    assert_eq!(plain.status.code(), colored.status.code());
+    assert!(colored.stdout.is_empty());
+    assert_eq!(
+        anstream::adapter::strip_bytes(&colored.stderr).into_vec(),
+        plain.stderr
+    );
+}
+
+#[test]
+fn color_always_reaches_semantic_warnings() {
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("color_warning.dsp");
+    std::fs::write(&path, "process = log(hslider(\"x\", 0, -1, 1, 0.1));\n").unwrap();
+    let run = |color: &str| {
+        Command::new(bin_path())
+            .arg(&path)
+            .args(["--warn", "--color", color, "--dump-sig"])
+            .output()
+            .expect("failed to spawn faust-rs")
+    };
+    let stderr = run("always").stderr;
+    assert!(has_escape(&stderr));
+    assert!(String::from_utf8_lossy(&stderr).contains("warning [FRS-"));
+    assert!(!has_escape(&run("never").stderr));
+}
+
+#[test]
+fn color_always_never_reaches_the_json_channel() {
+    let output = failing_compile(
+        &["--check", "--error-format", "json", "--color", "always"],
+        &[],
+    );
+    assert!(!has_escape(&output.stdout));
+    assert!(!has_escape(&output.stderr));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("stdout must stay one JSON document");
 }
 
 // ─── Dump modes (not --check): success keeps generated output, no JSON mixed in ──

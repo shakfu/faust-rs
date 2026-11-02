@@ -471,14 +471,23 @@ fn collect_table_sizes(store: &FirStore, roots: &[FirId]) -> BTreeMap<String, us
     out
 }
 
-/// Emits Cmajor streams in the ordering of the pinned C++ `sortIO` reference.
+/// Emits Cmajor streams in channel order: `input0..` then `output0..`.
+///
+/// A Cmajor host numbers a processor's channels in the order its endpoints
+/// are declared, so this order is the channel order of the patch. The pinned
+/// C++ reference (`8eebea429`) declared them in reverse (`output2, output1,
+/// output0, input2, ...`) through a `sortIO` call that C++ Faust `master-dev`
+/// has since removed: rendered by `cmaj render`, the channels came out
+/// reversed. This follows the current C++ order (`CmajorInstVisitor` in
+/// `compiler/generator/cmajor/cmajor_instructions.hh`, mapping status `1:1`
+/// with `master-dev`, `adapted` from the pinned reference).
 fn emit_streams(out: &mut String, view: &ModuleView, options: &CmajorOptions) {
     let real = options.real_type.cmajor_name();
-    for channel in (0..view.num_outputs).rev() {
-        let _ = writeln!(out, "\t\toutput stream {real} output{channel};");
-    }
-    for channel in (0..view.num_inputs).rev() {
+    for channel in 0..view.num_inputs {
         let _ = writeln!(out, "\t\tinput stream {real} input{channel};");
+    }
+    for channel in 0..view.num_outputs {
+        let _ = writeln!(out, "\t\toutput stream {real} output{channel};");
     }
 }
 
@@ -668,12 +677,14 @@ fn emit_ui_declarations(
             UiWidgetKind::Slider { init, lo, hi, step } => {
                 let _ = write!(
                     out,
-                    ", min: {}, max: {}, init: {}, step: {}",
+                    ", min: {}, max: {}, init: {}",
                     float_literal(lo, options.real_type),
                     float_literal(hi, options.real_type),
-                    float_literal(init, options.real_type),
-                    float_literal(step, options.real_type)
+                    float_literal(init, options.real_type)
                 );
+                if init_on_step_grid(init, step) {
+                    let _ = write!(out, ", step: {}", float_literal(step, options.real_type));
+                }
             }
             UiWidgetKind::Bargraph { lo, hi } => {
                 let _ = write!(
@@ -1677,6 +1688,25 @@ fn map_math_name(name: &str) -> &str {
     }
 }
 
+/// Whether a slider's `step` annotation can be written: a Cmajor host starts
+/// an input at its `init` snapped to `step`, overriding the exact default the
+/// generated `instanceResetUserInterface` sets. The host
+/// (`PatchParameterProperties::snapAndConstrainValue`) reads both annotations
+/// as float and computes `round(init / step) * step` in float, the grid
+/// anchored on 0: `init = 9.3e-10` with `step = 0.001` would start at 0, and
+/// `init = 0.2` with `step = 0.0001` at `2000 * 0.0001f = 0.19999999`. The
+/// step is only written when that computation gives `init` back exactly.
+///
+/// C++ source: `cmajorStep` in `compiler/generator/cmajor/cmajor_instructions.hh`
+/// (mapping status `1:1`).
+fn init_on_step_grid(init: f64, step: f64) -> bool {
+    if step <= 0.0 {
+        return false;
+    }
+    let (init, step) = (init as f32, step as f32);
+    (init / step).round() * step == init
+}
+
 /// Formats a real literal in the selected Cmajor precision.
 fn float_literal(value: f64, real_type: CmajorRealType) -> String {
     match real_type {
@@ -1774,6 +1804,36 @@ mod tests {
             &[],
         );
         (store, module)
+    }
+
+    #[test]
+    fn step_is_written_only_for_a_default_on_its_grid() {
+        // round(init / step) * step in float gives init back exactly
+        for (init, step) in [
+            (0.25, 0.05),
+            (0.0, 0.01),
+            (0.3, 0.1),
+            (0.707, 0.001),
+            (440.0, 1.0),
+            (0.5, 0.001),
+            (1000.0, 0.1),
+        ] {
+            assert!(init_on_step_grid(init, step), "{init} / {step}");
+            let (i, s) = (f64::from(init as f32), f64::from(step as f32));
+            assert!(init_on_step_grid(i, s), "{i} / {s} (float)");
+        }
+        // a Cmajor host would start these inputs elsewhere: off the grid, or
+        // on it but one float away (2000 * 0.0001f is 0.19999999, not 0.2f)
+        for (init, step) in [
+            (9.313225746154785e-10, 0.001),
+            (0.707, 0.01),
+            (0.9999995, 0.001),
+            (-0.9999990463256836, 0.001),
+            (0.2, 0.0001),
+        ] {
+            assert!(!init_on_step_grid(init, step), "{init} / {step}");
+        }
+        assert!(!init_on_step_grid(0.5, 0.0));
     }
 
     #[test]

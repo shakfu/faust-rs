@@ -7,7 +7,7 @@ exit=1
     "commit_date": "<COMMIT_DATE>",
     "name": "faust-rs",
     "target": "<TARGET>",
-    "version": "0.9.3"
+    "version": "0.9.5"
   },
   "diagnostics": [
     {
@@ -17,6 +17,10 @@ exit=1
         "box_expr": {
           "type": "string",
           "value": "BOXIDENT(sym(\"fooo\"))"
+        },
+        "expr": {
+          "type": "string",
+          "value": "fooo"
         },
         "node_id": {
           "type": "unsigned",
@@ -60,9 +64,9 @@ exit=1
       },
       "fixes": [],
       "help": [
-        "define the symbol in scope or fix the identifier name",
+        "general: define the symbol in scope or fix the identifier name",
         "template: fooo = ...; // define before use",
-        "for top-level aliases: define target before first use"
+        "general: for top-level aliases, define the target before its first use"
       ],
       "labels": [
         {
@@ -120,16 +124,11 @@ exit=1
       "message": "undefined symbol `fooo`",
       "notes": [
         "cause: unresolved identifier in current lexical scope",
+        "cause: `fooo` is not present in current visible scope",
         "rule: referenced identifier must be present in visible lexical scope",
-        "computed: `fooo` is not present in current visible scope",
-        "scope.local=process",
         "scope.visible=process",
-        "scope.top_level=process",
         "node_id=5",
-        "box_expr=BOXIDENT(sym(\"fooo\"))",
-        "expr=fooo",
-        "error originates from definition 'process'",
-        "binding_trace=process"
+        "box_expr=BOXIDENT(sym(\"fooo\"))"
       ],
       "related": [],
       "severity": "error",

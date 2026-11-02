@@ -28,10 +28,9 @@ Typical human output includes:
 - header: `error [FRS-...-....] message`,
 - source label with line/caret when available,
 - notes:
-  - `cause:` why the compiler failed,
-  - `rule:` semantic rule being checked,
   - `computed:` concrete values computed by the compiler,
-  - context notes (`expr=...`, owner definition, alias trace),
+  - `suggested target:` the value that would fit,
+  - context notes (owner definition and alias trace, past the entry point),
 - `help:` concrete fix suggestions.
 
 Example interpretation:
@@ -39,6 +38,13 @@ Example interpretation:
 - `FRS-PROP-0002` means a Phase 4 connection/arity mismatch.
 - If notes say `split(A, B) requires inputs(B) % outputs(A) == 0`, the fix is to make
   `inputs(B)` a multiple of `outputs(A)`.
+
+In a terminal the parts are color-coded: the severity, code and primary carets
+in red for an error, yellow for a warning and cyan for a remark; the location
+and message in bold; line gutters and secondary labels in blue; `note` in cyan;
+`help` and `fix` in green; `trace` in magenta. Use `--color always|never` to
+override the detection, or set `NO_COLOR` (see the
+[CLI guide](user-cli-guide-en.md)). Redirected output stays plain.
 
 ## 3. Error families (quick map)
 
@@ -58,8 +64,8 @@ below it, so raising the level never hides something you just saw.
 | Level | Shows |
 |---|---|
 | `concise` | header, the blamed location, and the first help line |
-| `standard` (default) | every relevant label, `cause`/`rule`/`computed` notes, traces, and fixes |
-| `debug` | plus internal ids and previews (`node_id`, `box_expr`) and the typed debug object |
+| `standard` (default) | every label that adds a place, `computed` notes, traces, and fixes |
+| `debug` | plus `cause:` and `rule:` notes, general help, internal ids and previews (`node_id`, `box_expr`) and the typed debug object |
 | `full` | plus untruncated traces and related diagnostics |
 
 Use `standard` day to day, `concise` when you only want to be routed to the

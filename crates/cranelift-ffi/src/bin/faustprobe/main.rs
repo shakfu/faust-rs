@@ -28,6 +28,8 @@ use std::thread;
 
 use clap::Parser;
 
+use compiler::diagnostics_human::StderrColor;
+use cranelift_ffi::factory::set_complete_error_color;
 use cranelift_ffi::probe::engine::last_compile_failure;
 use cranelift_ffi::probe::protocol;
 
@@ -130,10 +132,15 @@ fn main() -> ExitCode {
     // Cranelift JIT plus the faust-rs front end recurse deeply; run on a large
     // stack, as `impulse-cranelift` and the differential tests do.
     let error_format = args.error_format;
+    let stderr = StderrColor::resolve(args.color);
+    // A summary line is all that a human reads under the JSON format.
+    let color = stderr.enabled() && error_format == ErrorFormat::Human;
     let result = thread::Builder::new()
         .name("faustprobe".to_owned())
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
+            // Per thread, and this is the thread that compiles.
+            set_complete_error_color(color);
             let result = if args.determinism_worker {
                 determinism::worker(&args)
             } else {
@@ -148,10 +155,24 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("faustprobe: {error}");
+            let text = match without_summary(&error) {
+                Some(diagnostics) => format!("{diagnostics}\n"),
+                None => format!("faustprobe: {error}\n"),
+            };
+            stderr.write(&text);
             ExitCode::FAILURE
         }
     }
+}
+
+/// The diagnostics of a compile failure, which begin by what its summary line
+/// says. A host of the C API needs that line, the buffer it has is the size of
+/// one; a reader of this output does not. A line that starts with an option says
+/// which program of the command line it was, and stays.
+fn without_summary(error: &str) -> Option<&str> {
+    let (summary, diagnostics) = error.split_once('\n')?;
+    let header = diagnostics.lines().next()?;
+    (header.contains("[FRS-") && !summary.starts_with("--")).then_some(diagnostics)
 }
 
 /// Under `--error-format json`, a run that ends on a compile failure prints

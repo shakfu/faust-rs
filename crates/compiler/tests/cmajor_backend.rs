@@ -283,6 +283,30 @@ fn float64_precision_reaches_streams_controls_and_literals() {
 }
 
 #[test]
+fn step_is_left_out_when_the_default_is_off_its_grid() {
+    // A Cmajor host starts an input at round(init / step) * step, in float:
+    // 9.3e-10 with a step of 0.001 would start at 0, 0.707 with 0.01 at 0.71,
+    // and 0.2 with 0.0001 at 2000 * 0.0001f = 0.19999999.
+    let text = cmajor(
+        "step_grid.dsp",
+        "process = hslider(\"off\", 9.313225746154785e-10, -1, 1, 0.001), \
+         nentry(\"q\", 0.707, 0.1, 10, 0.01), hslider(\"on\", 0.3, 0, 1, 0.1), \
+         hslider(\"ulp\", 0.2, 0.001, 1.45, 0.0001);",
+    );
+    let line = |name: &str| {
+        text.lines()
+            .find(|l| l.contains(&format!("name: \"{name}\"")))
+            .unwrap_or_else(|| panic!("no {name} endpoint in {text}"))
+            .to_string()
+    };
+    assert!(!line("off").contains("step:"), "{text}");
+    assert!(!line("q").contains("step:"), "{text}");
+    assert!(line("on").contains("init: 0.3f, step: 0.1f"), "{text}");
+    assert!(!line("ulp").contains("step:"), "{text}");
+    assert_cmajor_frontend("step_grid", &text);
+}
+
+#[test]
 fn readonly_table_emits_concrete_cmajor_storage() {
     let text = cmajor("rdtable.dsp", "process = rdtable(8, 0.25, int(_));");
     assert!(text.contains("[8]"), "{text}");
@@ -342,6 +366,31 @@ fn one_sample_io_uses_cmajor_streams() {
     assert!(!text.contains("inputs["), "{text}");
     assert!(!text.contains("outputs["), "{text}");
     assert_cmajor_frontend("io", &text);
+}
+
+#[test]
+fn streams_are_declared_in_channel_order() {
+    // A Cmajor host numbers the channels in declaration order: declared in
+    // reverse, the three outputs of this patch came out as 3, 2, 1.
+    let text = cmajor("order.dsp", "process = par(i, 3, *(i + 1));");
+    let streams: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains(" stream "))
+        .collect();
+    assert_eq!(
+        streams,
+        [
+            "input stream float32 input0;",
+            "input stream float32 input1;",
+            "input stream float32 input2;",
+            "output stream float32 output0;",
+            "output stream float32 output1;",
+            "output stream float32 output2;",
+        ],
+        "{text}"
+    );
+    assert_cmajor_frontend("order", &text);
 }
 
 #[test]

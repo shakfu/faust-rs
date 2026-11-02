@@ -45,6 +45,496 @@ fn identical_unresolved_nodes_blame_the_reachable_occurrence() {
     );
 }
 
+/// `a` is both local to `process` and top-level: its local site does not end
+/// the definition of `process`, as a top-level site would.
+#[test]
+fn a_local_definition_sharing_a_top_level_name_keeps_the_failing_use() {
+    let source = "process = b\nwith {\n  a = 2;\n  b = missing + a;\n};\na = 1;\n";
+    let err = Compiler::new()
+        .compile_source_to_signals("shadowing.dsp", source)
+        .expect_err("the undefined symbol should fail");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    assert_eq!(diagnostic.labels[0].role, compiler::LabelRole::UseSite);
+    assert_eq!(diagnostic.labels[0].span.line, 4);
+    assert_eq!(diagnostic.labels[0].span.col, 7);
+}
+
+/// A library's names stay in the facts, and the text keeps the close ones.
+/// The expression of a diagnostic, which the label already points at: a debug
+/// fact, for `--error-verbosity debug`.
+fn readable_expr(diagnostic: &compiler::Diagnostic) -> String {
+    let debug = diagnostic.debug.as_ref().expect("a debug context");
+    let (_, value) = debug
+        .fields
+        .iter()
+        .find(|(key, _)| key.as_str() == "expr")
+        .expect("a readable expression");
+    match value {
+        DiagnosticValue::String(text) => text.to_string(),
+        other => panic!("not a string: {other:?}"),
+    }
+}
+
+/// A message is for a reader, and a node number means nothing to one.
+#[test]
+fn a_message_names_no_node_of_the_box_tree() {
+    let err = Compiler::new()
+        .compile_source_to_signals("seq.dsp", "process = (_, _) : (_, _, _);\n")
+        .expect_err("the composition should fail");
+    let message = &err.diagnostic_bundle().as_slice()[0].message;
+    assert_eq!(
+        message.as_ref(),
+        "sequential composition mismatch: left outputs (2) != right inputs (3)"
+    );
+    assert!(!err.to_string().contains(" node "), "{err}");
+}
+
+/// A function in an expression reads as Faust, as `boxpp` writes it, and not as
+/// the tags of the box tree.
+#[test]
+fn a_composition_prints_a_function_as_faust() {
+    let source = "f(x) = x * 0.5;\nprocess = (_, _) : (_, _, _) : f;\n";
+    let err = Compiler::new()
+        .compile_source_to_signals("lambda.dsp", source)
+        .expect_err("the composition should fail");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    let expr = readable_expr(diagnostic);
+    assert!(expr.contains("\\(x1).("), "{expr}");
+    assert!(!expr.contains("BOX"), "{expr}");
+
+    // what the printer of the previews has no form of its own for
+    for (source, text) in [
+        (
+            "process = fconstant(int fSamplingFreq, <math.h>) : (_, _);\n",
+            "fconstant(int fSamplingFreq, <math.h>)",
+        ),
+        ("process = waveform{1, 2} : (_, _, _);\n", "waveform{1,2}"),
+    ] {
+        let err = Compiler::new()
+            .compile_source_to_signals("leaf.dsp", source)
+            .expect_err("the composition should fail");
+        let expr = readable_expr(&err.diagnostic_bundle().as_slice()[0]);
+        assert!(expr.contains(text), "{expr}");
+    }
+}
+
+/// A mismatch is where two widths meet: the one that is wrong is written in the
+/// definition of an operand.
+#[test]
+fn a_composition_labels_the_definitions_of_its_operands() {
+    let labels = |source: &str| {
+        let err = Compiler::new()
+            .compile_source_to_signals("operands.dsp", source)
+            .expect_err("the composition should fail");
+        let labels: Vec<(String, u32)> = err.diagnostic_bundle().as_slice()[0]
+            .labels
+            .iter()
+            .map(|label| (label.message.to_string(), label.span.line))
+            .collect();
+        labels
+    };
+    let found = labels("stereo = _, _;\n\nf(g) = g;\nmono = f(_);\nprocess = stereo : mono;\n");
+    assert_eq!(found[0], ("failing composition".to_owned(), 5));
+    assert!(
+        found.contains(&("`stereo` is defined here".to_owned(), 1)),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&("`mono` is defined here".to_owned(), 4)),
+        "{found:?}"
+    );
+    // a group holds an operand and adds no width
+    let found = labels("stereo = _, _;\nprocess = _ : vgroup(\"x\", stereo);\n");
+    assert!(
+        found.contains(&("`stereo` is defined here".to_owned(), 1)),
+        "{found:?}"
+    );
+    // the name of a parameter is not the definition of that name
+    let found = labels("x = 1;\nf(x) = x : (_, _);\nprocess = f(_);\n");
+    assert!(
+        !found.iter().any(|(text, _)| text.contains("`x`")),
+        "{found:?}"
+    );
+}
+
+/// The application is what has one place: the function may be written in
+/// many, and a primitive is one node for all of them.
+#[test]
+fn too_many_arguments_names_the_call() {
+    let failure = |source: &str| {
+        let err = Compiler::new()
+            .compile_source_to_signals("calls.dsp", source)
+            .expect_err("the call should fail");
+        let diagnostic = err.diagnostic_bundle().as_slice()[0].clone();
+        (
+            diagnostic.message.to_string(),
+            diagnostic.labels[0].span.line,
+        )
+    };
+    assert_eq!(
+        failure("b(x) = attach(0, x);\na(x) = attach(x, 1, 2);\nprocess = a, b;\n"),
+        (
+            "too many arguments for `attach`: expected at most 2, got 3".to_owned(),
+            2
+        )
+    );
+    // the parameters count, whatever the result of the function accepts
+    assert_eq!(
+        failure("g(x, y) = x + y;\nprocess = g(1, 2, 3, 4);\n"),
+        (
+            "too many arguments for `g`: expected at most 2, got 4".to_owned(),
+            2
+        )
+    );
+}
+
+/// The call is what is wrong or what shows it: the rules are a second place.
+/// The message cites the arguments the rules saw, simplified, as C++ does.
+#[test]
+fn a_case_failure_names_the_call_and_its_arguments() {
+    let failure = |source: &str| {
+        let err = Compiler::new()
+            .compile_source_to_signals("case.dsp", source)
+            .expect_err("no rule should match");
+        err.diagnostic_bundle().as_slice()[0].clone()
+    };
+    let diagnostic = failure("f(1) = 2;\ng = f(1 + 2);\nprocess = g;\n");
+    assert_eq!(diagnostic.message.as_ref(), "no case rule matches `f(3)`");
+    assert_eq!(diagnostic.labels[0].span.line, 2);
+    assert_eq!(diagnostic.labels[0].span.col, 5);
+    assert!(
+        diagnostic.labels.iter().any(|label| label.message.as_ref()
+            == "the rules that do not match"
+            && label.span.line == 1),
+        "{:?}",
+        diagnostic.labels
+    );
+    // the rules stop at the argument no rule takes
+    let diagnostic = failure("f(0, x) = x;\nf(1, x) = x;\nprocess = f(2, _);\n");
+    assert_eq!(
+        diagnostic.message.as_ref(),
+        "no case rule matches `f(2, ...)`"
+    );
+    // and the call that fails among others is the one cited
+    let source = "f(1) = 2;\nprocess = f(1), f(2);\n";
+    assert_eq!(
+        failure(source).message.as_ref(),
+        "no case rule matches `f(2)`"
+    );
+}
+
+/// One compilation for the undefined symbols of a program, not one each.
+#[test]
+fn every_undefined_symbol_reached_is_reported() {
+    let source = "a = 1;\nb = 2;\nprocess = ax + bx + c;\n";
+    let err = Compiler::new()
+        .compile_source_to_signals("names.dsp", source)
+        .expect_err("the symbols are undefined");
+    let diagnostics = err.diagnostic_bundle().as_slice();
+    let found: Vec<(&str, u32)> = diagnostics
+        .iter()
+        .map(|d| (d.message.as_ref(), d.labels[0].span.col))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("undefined symbol `ax`", 11),
+            ("undefined symbol `bx`", 16),
+            ("undefined symbol `c`", 21)
+        ]
+    );
+    // the failure is the first, and the others say how they were found
+    assert!(err.to_string().ends_with("undefined symbol `ax`"), "{err}");
+    let note = |d: &compiler::Diagnostic| d.notes.iter().any(|n| n.contains("evaluating on"));
+    assert!(!note(&diagnostics[0]));
+    assert!(note(&diagnostics[1]) && note(&diagnostics[2]));
+
+    // the same name twice is one error
+    let err = Compiler::new()
+        .compile_source_to_signals("names.dsp", "process = ax + ax;\n")
+        .expect_err("the symbol is undefined");
+    assert_eq!(err.diagnostic_bundle().as_slice().len(), 1);
+
+    // past a limit, the rest waits for the next compilation
+    let names: Vec<String> = (0..12).map(|i| format!("missing_{i}")).collect();
+    let source = format!("process = {};\n", names.join(" + "));
+    let err = Compiler::new()
+        .compile_source_to_signals("names.dsp", &source)
+        .expect_err("the symbols are undefined");
+    assert_eq!(err.diagnostic_bundle().as_slice().len(), 8);
+}
+
+/// Evaluation is lazy, and the search for further symbols comes after a failure:
+/// what compiles still does, and another failure gets no search.
+#[test]
+fn a_symbol_nothing_reaches_stays_out_of_it() {
+    let compiler = Compiler::new();
+    for source in [
+        "unused = nope;\nprocess = _;\n",
+        "f(x) = x with { dead = nope; };\nprocess = f(_);\n",
+    ] {
+        assert!(
+            compiler
+                .compile_source_to_signals("lazy.dsp", source)
+                .is_ok(),
+            "{source}"
+        );
+    }
+    let err = compiler
+        .compile_source_to_signals("lazy.dsp", "f(1) = 2;\nprocess = f(3), nope;\n")
+        .expect_err("no rule matches");
+    let diagnostics = err.diagnostic_bundle().as_slice();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].message.as_ref(),
+        "no case rule matches `f(3)`"
+    );
+}
+
+/// A width that `<:` or `:>` would connect is often one of them written `:`.
+#[test]
+fn a_mismatch_names_the_operator_that_would_fit() {
+    let help = |source: &str| {
+        let err = Compiler::new()
+            .compile_source_to_signals("operator.dsp", source)
+            .expect_err("the composition should fail");
+        let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+        diagnostic
+            .help
+            .iter()
+            .find(|help| help.contains("would"))
+            .map(ToString::to_string)
+    };
+    assert_eq!(
+        help("process = _ : (_, _);\n").as_deref(),
+        Some("`A <: B` would split the 1 output(s) of A over the 2 inputs of B")
+    );
+    assert_eq!(
+        help("process = (_, _, _, _) : (_, _);\n").as_deref(),
+        Some("`A :> B` would merge the 4 outputs of A into the 2 input(s) of B")
+    );
+    // neither fits, so nothing is said
+    assert_eq!(help("process = (_, _) : (_, _, _);\n"), None);
+}
+
+/// `-(x)` in an argument reads as a negation, and no operator would connect it.
+#[test]
+fn a_section_of_minus_is_named_instead_of_an_operator() {
+    let err = Compiler::new()
+        .compile_source_to_signals("minus.dsp", "x = 0.5;\nprocess = _ : *(-(x));\n")
+        .expect_err("the composition should fail");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    assert!(diagnostic.help.iter().any(|help| help.contains("`0 - x`")));
+    assert!(!diagnostic.help.iter().any(|help| help.contains("would")));
+    assert!(
+        diagnostic
+            .notes
+            .iter()
+            .any(|note| note.contains("the section `_ - x`"))
+    );
+}
+
+/// The same reading holds for every primitive, in any place of its arguments.
+#[test]
+fn a_section_of_minus_is_named_beside_any_primitive() {
+    for program in [
+        "max(-(x))",
+        "min(-(x))",
+        "pow(-(x))",
+        "fmod(-(x))",
+        "atan2(-(x))",
+        "remainder(-(x))",
+        "%(-(x))",
+        "&(-(x))",
+        "<(-(x))",
+        "@(-(x))",
+        "attach(-(x))",
+        "prefix(-(x))",
+        "min(-(x), _)",
+        "pow(_, -(x))",
+        "select2(0, -(x))",
+        "select3(0, 1, -(x))",
+    ] {
+        let source = format!("x = 0.5;\nprocess = _ : {program};\n");
+        let err = Compiler::new()
+            .compile_source_to_signals("minus.dsp", &source)
+            .expect_err("the composition should fail");
+        let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+        assert!(
+            diagnostic.help.iter().any(|help| help.contains("`0 - x`")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+        assert!(
+            !diagnostic.help.iter().any(|help| help.contains("would")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+    }
+}
+
+/// The negation is proposed where it connects the widths, for each operator.
+#[test]
+fn a_section_of_minus_is_named_when_the_negation_connects() {
+    for program in [
+        "_, _ : (max(-(x)), _)",
+        "_, _, _ :> max(-(x))",
+        "_, _ <: select2(-(x))",
+        "_, _ : select2(-(x))",
+        "_ : max(-(x), -(x))",
+    ] {
+        let source = format!("x = 0.5;\nprocess = {program};\n");
+        let err = Compiler::new()
+            .compile_source_to_signals("minus.dsp", &source)
+            .expect_err("the composition should fail");
+        let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+        assert!(
+            diagnostic.help.iter().any(|help| help.contains("`0 - x`")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+    }
+}
+
+/// A section that does not explain the widths leaves the operator alone: one
+/// in the left operand, as a library's `(_ - _') < 0`, or beside an input too many.
+#[test]
+fn a_section_of_minus_that_does_not_connect_is_not_named() {
+    for program in [
+        "(_, _ - 1 : max) : _, _",
+        "(_ <: _, _ - 1 : max) : _, _",
+        "_ : (max(-(0.5)), _)",
+        "_ : select2(-(0.5))",
+    ] {
+        let source = format!("process = {program};\n");
+        let err = Compiler::new()
+            .compile_source_to_signals("minus.dsp", &source)
+            .expect_err("the composition should fail");
+        let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+        assert!(
+            diagnostic.help.iter().any(|help| help.contains("`A <: B`")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+        assert!(
+            !diagnostic.help.iter().any(|help| help.contains("`0 - x`")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+    }
+}
+
+/// A section that no primitive takes as an argument says nothing of a negation,
+/// and neither does an argument that is another section.
+#[test]
+fn other_sections_keep_the_operator() {
+    for program in ["(_ - 1, _)", "max(*(0.5))", "max(/(2))", "max(+(1))"] {
+        let source = format!("process = _ : {program};\n");
+        let err = Compiler::new()
+            .compile_source_to_signals("minus.dsp", &source)
+            .expect_err("the composition should fail");
+        let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+        assert!(
+            diagnostic.help.iter().any(|help| help.contains("`A <: B`")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+        assert!(
+            !diagnostic.help.iter().any(|help| help.contains("`0 - x`")),
+            "{program}: {:?}",
+            diagnostic.help
+        );
+    }
+}
+
+/// A subtraction of two sections is no section in an argument.
+#[test]
+fn a_plain_minus_still_gets_the_operator() {
+    let err = Compiler::new()
+        .compile_source_to_signals("minus.dsp", "process = _ : (_ - 1, _);\n")
+        .expect_err("the composition should fail");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    assert!(diagnostic.help.iter().any(|help| help.contains("`A <: B`")));
+}
+
+/// A waveform carries its size, and "too many arguments" does not say so.
+#[test]
+fn a_size_beside_a_waveform_is_explained() {
+    let err = Compiler::new()
+        .compile_source_to_signals(
+            "table.dsp",
+            "process = rdtable(4, waveform{1, 2, 3, 4}, 0);\n",
+        )
+        .expect_err("the table should be refused");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    assert!(
+        diagnostic
+            .help
+            .iter()
+            .any(|help| help.contains("`rdtable(waveform{...}, ...)`"))
+    );
+    assert!(
+        diagnostic
+            .notes
+            .iter()
+            .any(|note| note.contains("two signals"))
+    );
+}
+
+/// A name of an imported file is no duplicate to remove.
+#[test]
+fn a_name_of_an_imported_file_is_said_to_be_one() {
+    let dir = std::env::temp_dir().join(format!("faust-rs-clash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("directory");
+    std::fs::write(dir.join("mine.lib"), "pm = 1;\n").expect("write");
+    let file = dir.join("clash.dsp");
+    std::fs::write(&file, "import(\"mine.lib\");\npm = 2;\nprocess = pm;\n").expect("write");
+    let err = Compiler::new()
+        .compile_file_to_cpp(&file, std::slice::from_ref(&dir), &Default::default())
+        .expect_err("the name is taken");
+    std::fs::remove_dir_all(&dir).expect("remove");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    assert!(
+        diagnostic
+            .help
+            .iter()
+            .any(|help| help.contains("imported `mine.lib`")),
+        "help: {:?}",
+        diagnostic.help
+    );
+    assert!(
+        !diagnostic
+            .help
+            .iter()
+            .any(|help| help.contains("remove the duplicate"))
+    );
+    assert_eq!(diagnostic.labels.len(), 2, "both definitions are shown");
+}
+
+#[test]
+fn a_long_scope_is_summed_up_in_the_text_and_whole_in_the_facts() {
+    let names: Vec<String> = (0..40).map(|i| format!("name_{i} = {i};")).collect();
+    let source = format!("{}\nprocess = name_3x;\n", names.join("\n"));
+    let err = Compiler::new()
+        .compile_source_to_signals("scope.dsp", &source)
+        .expect_err("the undefined symbol should fail");
+    let diagnostic = &err.diagnostic_bundle().as_slice()[0];
+    let note = diagnostic
+        .notes
+        .iter()
+        .find(|note| note.starts_with("scope.visible="))
+        .expect("a scope note");
+    assert!(note.contains("names, the closest:"), "{note}");
+    assert!(note.contains("name_3"), "{note}");
+    assert!(!note.contains("name_17"), "{note}");
+    assert!(
+        diagnostic
+            .facts
+            .iter()
+            .any(|(key, _)| key.as_str() == "scope_top_level")
+    );
+}
+
 #[test]
 fn parse_error_fixture_exposes_frs_parse_code() {
     let compiler = Compiler::new();
@@ -97,22 +587,19 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
         (
             "err_09_eval_undefined_symbol.dsp",
             1u32,
-            "error originates from definition 'foo'",
+            Some("error originates from definition 'foo'"),
         ),
         (
             "err_10_eval_too_many_arguments.dsp",
             2u32,
-            "error originates from definition 'process'",
+            // the snippet shows it, and a note would only repeat it
+            None,
         ),
-        (
-            "err_12_eval_case_no_match.dsp",
-            1u32,
-            "error originates from definition 'foo'",
-        ),
+        ("err_12_eval_case_no_match.dsp", 2u32, None),
         (
             "err_13_eval_undefined_symbol_alias_chain_nested.dsp",
             1u32,
-            "error originates from definition 'foo'",
+            Some("error originates from definition 'foo'"),
         ),
     ];
 
@@ -143,11 +630,18 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
             "{file} should point to expected source line"
         );
         assert!(
-            first.notes.iter().any(|n| n.starts_with("expr=")),
+            !readable_expr(first).is_empty(),
             "{file} should include readable expression context"
         );
         assert!(
-            first.notes.iter().any(|n| n.as_ref() == owner_note),
+            first
+                .facts
+                .iter()
+                .any(|(key, _)| key.as_str() == "owner_definition"),
+            "{file} should expose owner definition fact"
+        );
+        assert!(
+            owner_note.is_none_or(|note| first.notes.iter().any(|n| n.as_ref() == note)),
             "{file} should expose owner definition note"
         );
     }
@@ -255,23 +749,15 @@ fn eval_undefined_symbol_exposes_binding_trace() {
         first
             .notes
             .iter()
-            .any(|n| n.as_ref().starts_with("scope.local=")),
-        "undefined symbol diagnostics should include local scope context"
-    );
-    assert!(
-        first
-            .notes
-            .iter()
             .any(|n| n.as_ref().starts_with("scope.visible=")),
         "undefined symbol diagnostics should include visible scope context"
     );
-    assert!(
-        first
-            .notes
-            .iter()
-            .any(|n| n.as_ref().starts_with("scope.top_level=")),
-        "undefined symbol diagnostics should include top-level scope context"
-    );
+    for fact in ["scope_local", "scope_visible", "scope_top_level"] {
+        assert!(
+            first.facts.iter().any(|(key, _)| key.as_str() == fact),
+            "undefined symbol diagnostics should include {fact}"
+        );
+    }
 }
 
 #[test]
@@ -329,8 +815,8 @@ fn eval_undefined_symbol_alias_chain_exposes_rule_computed_and_template_help() {
         first
             .notes
             .iter()
-            .any(|n| n.as_ref().starts_with("computed: `z` is not present")),
-        "undefined-symbol diagnostics should expose computed note"
+            .any(|n| n.as_ref().starts_with("cause: `z` is not present")),
+        "undefined-symbol diagnostics should expose the cause in terms of the symbol"
     );
     assert!(
         first
@@ -647,13 +1133,8 @@ fn propagate_error_operator_span_points_to_composition_token() {
         primary.span.col > 1,
         "operator-level span should not point to definition column 1"
     );
-    let readable_expr = first
-        .notes
-        .iter()
-        .find(|note| note.as_ref().starts_with("expr="))
-        .expect("diagnostic should expose readable expression note");
     assert!(
-        readable_expr.contains("<:"),
+        readable_expr(first).contains("<:"),
         "readable expression note should preserve split operator context"
     );
 }
@@ -841,11 +1322,7 @@ fn propagate_error_ui_expr_note_is_pretty_printed() {
         .as_slice()
         .first()
         .expect("propagate error bundle should not be empty");
-    let expr_note = first
-        .notes
-        .iter()
-        .find(|note| note.starts_with("expr="))
-        .expect("diagnostic should expose readable expression note");
+    let expr_note = readable_expr(first);
     assert!(expr_note.contains("hslider("));
     assert!(expr_note.contains(" : +"));
     assert!(!expr_note.contains("float_bits("));
@@ -1012,6 +1489,75 @@ fn a_zero_divisor_that_is_no_literal_is_reported_by_whoever_needs_the_constant()
             "{program}: {}",
             first.message
         );
+    }
+}
+
+/// The checks of the `isBoxRoute` branch of C++ `eval.cpp`. Each program below
+/// has the same fate with Faust 2.84.3 and 2.91.0.
+#[test]
+fn route_parameters_are_refused_as_in_cpp() {
+    const SHAPE: &str = "invalid route expression, first two parameters should be blocks";
+    const NUMBERS: &str = "invalid route expression, parameters should be numbers";
+    for (source, expected) in [
+        ("process = route(2,2,1,3,2,1,5);", SHAPE),
+        ("process = route(2,2,1);", SHAPE),
+        ("process = route(2,2,par(i,3,i+1));", SHAPE),
+        ("process = route((1,2),2,1,1);", SHAPE),
+        ("process = route(2,(1,2),1,1);", SHAPE),
+        ("process = route(2,2,+,1);", SHAPE),
+        ("f(a) = route(2,2,a); process = f(1);", SHAPE),
+        ("process = route(hslider(\"x\",2,1,4,1),2,1,1);", NUMBERS),
+        ("process = route(2,2,1,hslider(\"x\",2,1,4,1));", NUMBERS),
+        (
+            "process = route(2,2,1,fvariable(int count, <math.h>));",
+            NUMBERS,
+        ),
+    ] {
+        let error = Compiler::new()
+            .compile_source_to_signals("route.dsp", source)
+            .expect_err(source);
+        let message = error.diagnostic_bundle().as_slice()[0].message.clone();
+        assert!(message.starts_with(expected), "{source}: {message}");
+    }
+}
+
+#[test]
+fn a_route_is_refused_at_its_definition() {
+    let source = "swap = route(2,2,1,3,2,1,5);\nprocess = _, _ : swap;\n";
+    let error = Compiler::new()
+        .compile_source_to_signals("route.dsp", source)
+        .expect_err("five values are no list of pairs");
+    let diagnostic = &error.diagnostic_bundle().as_slice()[0];
+    assert!(
+        diagnostic
+            .notes
+            .iter()
+            .any(|note| note.contains("`pairs` is 0→5")),
+        "{:?}",
+        diagnostic.notes
+    );
+    assert_eq!(diagnostic.labels[0].span.line, 1);
+}
+
+#[test]
+fn the_routes_cpp_accepts_still_compile() {
+    for source in [
+        "process = route(2,2,1,2,2,1);",
+        "process = route(2.5,2,1,1);",
+        "process = route(2,2,1.5,1);",
+        "process = route(2,2,0,0);",
+        "process = route(2,2,par(i,2,(i+1,i+1)));",
+        "process = route(1,1,sqrt(1),1);",
+        "process = route(2,2,(1,1:+,2));",
+        "f(n) = route(n,n,1,1); process = f(2);",
+        "f(a,b) = route(2,2,a,b); process = f(1,2);",
+        "f = route(2,2); process = f(1,2);",
+        "f(route(a,b,c)) = a+b; process = f(route(1,1,1,1));",
+        "g = case{ (route(a,b,c)) => a; }; process = g(route(3,1,1,1));",
+    ] {
+        Compiler::new()
+            .compile_source_to_signals("route.dsp", source)
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
     }
 }
 
@@ -1366,7 +1912,7 @@ fn a_failure_in_a_library_is_not_labelled_on_a_shared_identifier() {
         .compile_file_to_signals(&program, &[])
         .expect_err("no rule of k matches 5");
     let first = &err.diagnostic_bundle().as_slice()[0];
-    assert_eq!(first.message.as_ref(), "no case rule matches arguments");
+    assert_eq!(first.message.as_ref(), "no case rule matches `m.k(5)`");
     let labels: Vec<_> = first
         .labels
         .iter()
@@ -1374,12 +1920,7 @@ fn a_failure_in_a_library_is_not_labelled_on_a_shared_identifier() {
         .collect();
     assert_eq!(
         labels,
-        [(
-            "the call that leads here".to_owned(),
-            LabelRole::CallSite,
-            3,
-            1
-        )]
+        [("failing call".to_owned(), LabelRole::CallSite, 3, 1)]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -73,6 +73,260 @@ pub(crate) fn add_paired_propagate_context(
 
 // ─── Source label helpers ─────────────────────────────────────────────────────
 
+/// How deep the search for a section of `-` goes into a composition.
+const SECTION_DEPTH: usize = 32;
+
+/// Says what a composition mismatch may have meant.
+///
+/// A section of `-` in an argument comes first: `*(-(x))` or `max(-(x))` reads
+/// as a negation, keeps an input, and writing the negation would connect the
+/// widths. Otherwise, a mismatch of `:` whose widths divide is often a `<:` or
+/// a `:>` written `:`.
+pub(crate) fn add_composition_guidance(
+    diagnostic: Diagnostic,
+    error: &PropagateError,
+    arena: &tlib::TreeArena,
+) -> Diagnostic {
+    let (node, left_outputs, right_inputs) = match error {
+        PropagateError::SeqArityMismatch {
+            node,
+            left_outputs,
+            right_inputs,
+        }
+        | PropagateError::SplitArityMismatch {
+            node,
+            left_outputs,
+            right_inputs,
+        }
+        | PropagateError::MergeArityMismatch {
+            node,
+            left_outputs,
+            right_inputs,
+        } => (*node, *left_outputs, *right_inputs),
+        _ => return diagnostic,
+    };
+    let sections = match match_box(arena, node) {
+        BoxMatch::Seq(_, right) | BoxMatch::Split(_, right) | BoxMatch::Merge(_, right) => {
+            minus_sections_at_inputs(arena, right, 0)
+        }
+        _ => 0,
+    };
+    let connects = |inputs: usize| match error {
+        PropagateError::SeqArityMismatch { .. } => left_outputs == inputs,
+        PropagateError::SplitArityMismatch { .. } => inputs.is_multiple_of(left_outputs),
+        _ => left_outputs.is_multiple_of(inputs),
+    };
+    if (1..=sections.min(right_inputs)).any(|negated| connects(right_inputs - negated)) {
+        return diagnostic
+            .with_note("`-(x)` as an argument is the section `_ - x`, not a negation: it keeps an input of its own")
+            .with_help("write the negation as `0 - x`");
+    }
+    if !matches!(error, PropagateError::SeqArityMismatch { .. }) {
+        return diagnostic;
+    }
+    match composition_operator_hint(left_outputs, right_inputs) {
+        Some(hint) => diagnostic.with_help(hint),
+        None => diagnostic,
+    }
+}
+
+/// The operator that would connect these widths, if `:` was not meant.
+fn composition_operator_hint(left_outputs: usize, right_inputs: usize) -> Option<String> {
+    if left_outputs > 0 && right_inputs > left_outputs && right_inputs.is_multiple_of(left_outputs)
+    {
+        Some(format!(
+            "`A <: B` would split the {left_outputs} output(s) of A over the {right_inputs} inputs of B"
+        ))
+    } else if right_inputs > 0
+        && left_outputs > right_inputs
+        && left_outputs.is_multiple_of(right_inputs)
+    {
+        Some(format!(
+            "`A :> B` would merge the {left_outputs} outputs of A into the {right_inputs} input(s) of B"
+        ))
+    } else {
+        None
+    }
+}
+
+/// How many inputs of this expression come from a section of `-` given to a
+/// primitive: `*(-(x))` is evaluated to `_, (_, x : -) : *`, `max(-(x))` to
+/// `_, (_, x : -) : max`, and `select2(-(x))` to `(_, x : -), (_, _) : select2`.
+///
+/// Only what reaches the inputs counts: a section further down a composition is
+/// fed by what precedes it, and is often a `_ - x` written on purpose.
+fn minus_sections_at_inputs(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> usize {
+    if depth == SECTION_DEPTH {
+        return 0;
+    }
+    match match_box(arena, node) {
+        BoxMatch::Seq(left, right) => {
+            if is_primitive(arena, right) && matches!(match_box(arena, left), BoxMatch::Par(..)) {
+                minus_sections_in_arguments(arena, left, depth + 1)
+            } else {
+                minus_sections_at_inputs(arena, left, depth + 1)
+            }
+        }
+        BoxMatch::Par(left, right) => {
+            minus_sections_at_inputs(arena, left, depth + 1)
+                + minus_sections_at_inputs(arena, right, depth + 1)
+        }
+        BoxMatch::Split(left, _) | BoxMatch::Merge(left, _) | BoxMatch::Rec(left, _) => {
+            minus_sections_at_inputs(arena, left, depth + 1)
+        }
+        _ => 0,
+    }
+}
+
+/// The same count over the arguments of a primitive, a tree of `Par`.
+fn minus_sections_in_arguments(arena: &tlib::TreeArena, args: BoxId, depth: usize) -> usize {
+    if depth == SECTION_DEPTH {
+        return 0;
+    }
+    if let BoxMatch::Par(left, right) = match_box(arena, args) {
+        return minus_sections_in_arguments(arena, left, depth + 1)
+            + minus_sections_in_arguments(arena, right, depth + 1);
+    }
+    if is_minus_section(arena, args) {
+        1
+    } else {
+        minus_sections_at_inputs(arena, args, depth + 1)
+    }
+}
+
+/// Whether this box is `_, x : -`, as `-(x)` is evaluated.
+fn is_minus_section(arena: &tlib::TreeArena, node: BoxId) -> bool {
+    let BoxMatch::Seq(pair, op) = match_box(arena, node) else {
+        return false;
+    };
+    let BoxMatch::Par(first, _) = match_box(arena, pair) else {
+        return false;
+    };
+    matches!(match_box(arena, op), BoxMatch::Sub)
+        && matches!(match_box(arena, first), BoxMatch::Wire)
+}
+
+/// Whether this box is a primitive, under its infix symbol or its name.
+fn is_primitive(arena: &tlib::TreeArena, node: BoxId) -> bool {
+    prim_infix_symbol(arena, node).is_some() || prim_readable_name(arena, node).is_some()
+}
+
+/// Labels the definitions of the operands of a failing composition.
+///
+/// A mismatch shows where two widths meet, and the width that is wrong is
+/// usually written in one of those definitions (`capture : *(level)` of a
+/// `capture` that gained an output). Only definitions the file of the composition
+/// has once are labelled, and at most four, the left operand first.
+fn add_operand_definition_labels(
+    mut diagnostic: Diagnostic,
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    source: BoxId,
+    composition: &SourceSpan,
+    parameters: &std::collections::HashSet<BoxId>,
+) -> Diagnostic {
+    const SHOWN: usize = 4;
+    let mut names = Vec::new();
+    collect_operand_names(arena, source, 0, &mut names);
+    names.retain(|name| !parameters.contains(name));
+    let mut shown = 0;
+    for name in names {
+        let provenance = ctx.box_provenance();
+        let mut sites = provenance
+            .origins_for(name)
+            .iter()
+            .filter_map(|id| provenance.get(*id))
+            .filter(|origin| origin.role == parser::BoxOriginRole::Definition)
+            .map(|origin| source_span_from_parser_location(&origin.location))
+            .filter(|span| span.file == composition.file);
+        let (Some(site), None) = (sites.next(), sites.next()) else {
+            continue;
+        };
+        let BoxMatch::Ident(text) = match_box(arena, name) else {
+            continue;
+        };
+        let message = format!("`{text}` is defined here");
+        diagnostic = diagnostic.with_label(
+            Label::new(LabelStyle::Secondary, site, message).with_role(LabelRole::DefinitionSite),
+        );
+        shown += 1;
+        if shown == SHOWN {
+            break;
+        }
+    }
+    diagnostic
+}
+
+/// The names an operand is made of: those it composes and the functions it
+/// calls, not their arguments, whose width is not the operand's.
+fn collect_operand_names(
+    arena: &tlib::TreeArena,
+    node: BoxId,
+    depth: usize,
+    names: &mut Vec<BoxId>,
+) {
+    const DEPTH: usize = 32;
+    if depth == DEPTH {
+        return;
+    }
+    match match_box(arena, node) {
+        BoxMatch::Ident(_) => {
+            if !names.contains(&node) {
+                names.push(node);
+            }
+        }
+        BoxMatch::Par(left, right)
+        | BoxMatch::Seq(left, right)
+        | BoxMatch::Split(left, right)
+        | BoxMatch::Merge(left, right)
+        | BoxMatch::Rec(left, right) => {
+            collect_operand_names(arena, left, depth + 1, names);
+            collect_operand_names(arena, right, depth + 1, names);
+        }
+        BoxMatch::Appl(fun, _) => collect_operand_names(arena, fun, depth + 1, names),
+        BoxMatch::VGroup(_, body)
+        | BoxMatch::HGroup(_, body)
+        | BoxMatch::TGroup(_, body)
+        | BoxMatch::WithLocalDef(body, _)
+        | BoxMatch::WithRecDef(body, _, _) => {
+            collect_operand_names(arena, body, depth + 1, names);
+        }
+        _ => {}
+    }
+}
+
+/// The names bound as parameters in the top-level definition that holds
+/// `node`, its local functions included. An operand of one of these names is no
+/// definition, whatever else the file defines under it. Walking the whole
+/// definition rather than the path to `node` may leave out a label, never add a
+/// false one.
+fn parameters_around(
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    node: BoxId,
+) -> std::collections::HashSet<BoxId> {
+    let mut parameters = std::collections::HashSet::new();
+    let found = owner_definition_name_for_node(arena, defs_root, node)
+        .and_then(|owner| find_definition_name_and_expr(arena, defs_root, &owner));
+    let Some((_, expr)) = found else {
+        return parameters;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![expr];
+    while let Some(cur) = stack.pop() {
+        if seen.len() > 1 << 16 || !seen.insert(cur) {
+            continue;
+        }
+        if let BoxMatch::Abstr(parameter, _) = match_box(arena, cur) {
+            parameters.insert(parameter);
+        }
+        if let Some(children) = arena.children(cur) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    parameters
+}
+
 /// Attaches source labels for propagate/arity diagnostics.
 ///
 /// When the owning definition is known, this prefers that origin as primary and
@@ -98,10 +352,21 @@ pub(crate) fn maybe_add_source_label(
     // faulty `m(1) : …`). A box built from two compositions, or from one the
     // sources write at several places, gets no composition label.
     if let Some(origin) = composition_origins.and_then(|origins| origins.get(&node)) {
-        if let Some(span) = origin.and_then(|source| unique_source_span(ctx, source)) {
-            return diagnostic.with_label(
-                Label::new(LabelStyle::Primary, span, "failing composition")
+        if let Some((source, span)) =
+            origin.and_then(|source| Some((source, unique_source_span(ctx, source)?)))
+        {
+            let parameters = parameters_around(arena, defs_root, source);
+            diagnostic = diagnostic.with_label(
+                Label::new(LabelStyle::Primary, span.clone(), "failing composition")
                     .with_role(LabelRole::Operator),
+            );
+            return add_operand_definition_labels(
+                diagnostic,
+                ctx,
+                arena,
+                source,
+                &span,
+                &parameters,
             );
         }
         let fallback =
@@ -226,15 +491,27 @@ pub(crate) fn maybe_add_eval_source_labels(
     entrypoint_name: &str,
 ) -> Diagnostic {
     if let Some(owner) = owner_definition {
-        let use_span = source_span_for_node_in_definition(ctx, arena, defs_root, node, owner);
+        // An application has no place of its own: the name it calls does
+        let used = match match_box(arena, node) {
+            BoxMatch::Appl(fun, _) => fun,
+            _ => node,
+        };
+        let use_span = source_span_for_node_in_definition(ctx, arena, defs_root, used, owner);
+        let definition_primary = if used == node {
+            "definition site"
+        } else {
+            "failing call"
+        };
         let origin_span = source_span_for_definition_name(ctx, arena, defs_root, owner);
         let call_span =
             source_span_for_entrypoint_definition(ctx, arena, defs_root, entrypoint_name);
         if let Some(primary_span) = use_span.clone().or_else(|| origin_span.clone()) {
             let primary_role = if use_span.is_some() {
                 LabelRole::UseSite
-            } else {
+            } else if used == node {
                 LabelRole::DefinitionSite
+            } else {
+                LabelRole::CallSite
             };
             diagnostic = diagnostic.with_label(
                 Label::new(
@@ -243,7 +520,7 @@ pub(crate) fn maybe_add_eval_source_labels(
                     if use_span.is_some() {
                         "failing use"
                     } else {
-                        "definition site"
+                        definition_primary
                     },
                 )
                 .with_role(primary_role),
@@ -316,6 +593,32 @@ pub(crate) fn maybe_add_eval_source_labels(
         );
     }
     diagnostic
+}
+
+/// Labels the rules of a `case` that refused a call, which stays the failure.
+pub(crate) fn add_case_rules_label(
+    diagnostic: Diagnostic,
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    rules: BoxId,
+) -> Diagnostic {
+    let primary = primary_span_of(&diagnostic);
+    match source_span_for_definition_of_expr(ctx, arena, defs_root, rules) {
+        Some(span) if Some(&span) != primary.as_ref() => diagnostic.with_label(
+            Label::new(LabelStyle::Secondary, span, "the rules that do not match")
+                .with_role(LabelRole::DefinitionSite),
+        ),
+        _ => diagnostic,
+    }
+}
+
+fn primary_span_of(diagnostic: &Diagnostic) -> Option<SourceSpan> {
+    diagnostic
+        .labels
+        .iter()
+        .find(|label| label.style == LabelStyle::Primary)
+        .map(|label| label.span.clone())
 }
 
 /// The span of `node` when the sources mention it at a single place.
@@ -426,7 +729,8 @@ pub(crate) fn source_span_for_node_in_definition(
     node: BoxId,
     owner: &str,
 ) -> Option<SourceSpan> {
-    let (owner_name, _) = find_definition_name_and_expr(arena, defs_root, owner)?;
+    let (owner_name, owner_expr) = find_definition_name_and_expr(arena, defs_root, owner)?;
+    let local_names = local_definition_names(arena, owner_expr);
     let owner_start = ctx
         .box_provenance()
         .origins_for(owner_name)
@@ -441,6 +745,12 @@ pub(crate) fn source_span_for_node_in_definition(
     while !arena.is_nil(defs) {
         let def = arena.hd(defs)?;
         let name = arena.hd(def)?;
+        defs = arena.tl(defs)?;
+        // A `with` of the owner may define a name that is also a top-level one,
+        // often in a library: its site is inside the owner and ends nothing.
+        if local_names.contains(&name) {
+            continue;
+        }
         for id in ctx.box_provenance().origins_for(name) {
             let Some(origin) = ctx.box_provenance().get(*id) else {
                 continue;
@@ -458,7 +768,6 @@ pub(crate) fn source_span_for_node_in_definition(
                 next_start = Some(origin.location.clone());
             }
         }
-        defs = arena.tl(defs)?;
     }
 
     let candidates = ctx
@@ -560,7 +869,7 @@ pub(crate) fn source_span_for_definition_node(
     Some(source_span_from_parser_location(loc))
 }
 
-fn source_span_from_parser_location(loc: &parser::SourceLocation) -> SourceSpan {
+pub(crate) fn source_span_from_parser_location(loc: &parser::SourceLocation) -> SourceSpan {
     SourceSpan::new(
         loc.file(),
         loc.line(),
@@ -699,6 +1008,40 @@ pub(crate) fn source_span_for_definition_name(
 /// infinite loops on DAG-shared or aliased subtrees.  The conservative bound
 /// means very large subtrees may produce a false negative; callers that use
 /// this for ownership detection already tolerate that with a `None` fallback.
+/// The names defined by the `with` and `letrec` blocks under `root`, at any
+/// depth. Bounded like the other walks of this file: it serves diagnostics only.
+fn local_definition_names(
+    arena: &tlib::TreeArena,
+    root: BoxId,
+) -> std::collections::HashSet<BoxId> {
+    let mut names = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(cur) = stack.pop() {
+        if seen.len() > 1 << 16 || !seen.insert(cur) {
+            continue;
+        }
+        let blocks = match match_box(arena, cur) {
+            BoxMatch::WithLocalDef(_, definitions) => [Some(definitions), None],
+            BoxMatch::WithRecDef(_, definitions, others) => [Some(definitions), Some(others)],
+            _ => [None, None],
+        };
+        for mut list in blocks.into_iter().flatten() {
+            while !arena.is_nil(list) {
+                let Some(next) = arena.tl(list) else { break };
+                if let Some(name) = arena.hd(list).and_then(|def| arena.hd(def)) {
+                    names.insert(name);
+                }
+                list = next;
+            }
+        }
+        if let Some(children) = arena.children(cur) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    names
+}
+
 pub(crate) fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) -> bool {
     if root == needle {
         return true;

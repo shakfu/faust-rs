@@ -99,11 +99,16 @@ pub(crate) fn apply_value_list_value(
                 let forced = eval_value(arena, closure.expr, &closure.env, loop_detector)?;
                 apply_value_list_value(arena, forced, larg, env, loop_detector, call_site)
             }
-            BoxMatch::Environment => Err(EvalError::TooManyArguments {
-                node: call_site.unwrap_or(closure.expr),
-                expected: 0,
-                got: list_to_vec(arena, larg)?.len(),
-            }),
+            BoxMatch::Environment => {
+                let got = list_to_vec(arena, larg)?.len();
+                Err(EvalError::TooManyArguments {
+                    node: call_site.unwrap_or(closure.expr),
+                    expected: 0,
+                    got,
+                    function: None,
+                    remaining: got,
+                })
+            }
             BoxMatch::Abstr(id, body) => {
                 let arg = arena
                     .hd(larg)
@@ -305,6 +310,8 @@ pub(crate) fn apply_pattern_matcher_value(
             return Err(EvalError::PatternMatchFailed {
                 node: pm.original_rules,
                 arguments,
+                application: None,
+                call: None,
             });
         };
         pm.state = new_state;
@@ -335,6 +342,8 @@ pub(crate) fn apply_pattern_matcher_value(
         Err(EvalError::PatternMatchFailed {
             node: pm.original_rules,
             arguments: pm.rev_param_list.clone(),
+            application: None,
+            call: None,
         })
     });
     if dispatched {
@@ -454,6 +463,8 @@ pub(crate) fn apply_list(
                         node: call_site.unwrap_or(fun),
                         expected: ins,
                         got: larg_outs,
+                        function: None,
+                        remaining: list_to_vec(arena, larg)?.len(),
                     });
                 }
                 let missing = ins - larg_outs;

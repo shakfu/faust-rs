@@ -64,6 +64,13 @@ not a second parity target for this plan. Endpoint order and sample-order
 behavior are taken from `8eebea429...` unless a later, explicit baseline update
 is approved.
 
+Two such updates were approved on 2026-10-29, to follow C++ Faust `master-dev`
+(see `porting/journal/2026-10-29.md`): the streams are declared in channel order
+(`input0..`, then `output0..`; the pinned reference's `sortIO` declared them in
+reverse, and a Cmajor host numbers channels in declaration order), and a
+slider's `step` annotation is written only when the host's snapping,
+`round(init / step) * step` computed in float, gives the default back exactly.
+
 ### 2.2 Core backend sources
 
 | C++ source | Size | Contract owned |

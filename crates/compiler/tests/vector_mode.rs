@@ -58,6 +58,16 @@ const ATTACH_CROSS_LOOP_SOURCE: &str = concat!(
     "aOut = gA : _,!;\n",
     "process = attach(_, aOut);"
 );
+// `phaser_flanger.dsp` reduced, without the standard libraries: a feedback
+// comb puts the program in a fused serial group, and the outer `attach`
+// discards the value the inner one passes through, so the fused scalar
+// transport of `2*x` has its store in the body and no load left once dead
+// pure roots are removed.
+const FUSED_TRANSPORT_DEAD_LOAD_SOURCE: &str = concat!(
+    "comb(d) = _ <: _, ((+ : @(d)) ~ *(0.5)) : +;\n",
+    "meter(v) = abs(v) : + ~ *(0.9) : vbargraph(\"l\", 0, 1);\n",
+    "process = comb(5) : \\(x).(attach(x, attach(2*x, meter(2*x))));"
+);
 // Zero-stuffed upsampling input driving an in-domain accumulator. The vector
 // lowerer used to pass `ZeroPad` through unguarded, feeding the outer-rate
 // input on every fire: an impulse was accumulated `factor` times. Scalar
@@ -69,13 +79,72 @@ const UPSAMPLING_ZEROPAD_SOURCE: &str = "process = (2, _) : upsampling(+ ~ _);";
 // its inputs alone and the plan keeps its state advancing once per fire.
 const DOMAIN_ADOPTED_STATEFUL_SOURCE: &str =
     "process = (3, (_ : !)) : upsampling(1 : (+ ~ *(0.5)));";
-// `pm.ks` contains a pass-through symbolic recursion projection whose
-// cross-loop back-edge denotes the previous sample even though the selected
-// body has no explicit delay occurrence. Before X2b the vector lowerer tried
-// to route the body's current value and correctly fell back rather than
-// miscompile it. `pm.ks` itself consumes the deterministic oracle input.
-const KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE: &str =
-    concat!("import(\"stdfaust.lib\");\n", "process = pm.ks(200, 0.5);");
+// `pm.ks` written without the standard libraries: the `physmodels.lib`
+// `chain`/`terminations` waveguide structure it is built from, with
+// `ro.crossnn(1)` as a swap and an integer delay of 100 samples per direction
+// in place of `de.fdelay4`. `chain` and `terminations` create pass-through
+// recursion slots: a slot whose body is a bare projection of another recursion
+// group, two levels deep. Its feedback read is the explicit
+// `SIGDELAY1(SIGPROJ(i, SYMREF))`, so the alias carries exactly one sample of
+// delay. The 200-sample round trip hides a wrong feedback delay from any
+// render shorter than that: before `77568133` (issue #24) `-vec` differed
+// from scalar from frame 102 on. The input is the excitation.
+const KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE: &str = concat!(
+    "cross = \\(a,b).(b,a);\n",
+    "chain(A:As) = ((cross,_',_ : _,A : cross,_,_ : _,chain(As) : cross,_,_)) ~ _ : !,_,_,_;\n",
+    "chain(A) = A;\n",
+    "terminations(a,b,c) = (_,cross,_,_ : +,+,_ : b) ~ (a,c : cross);\n",
+    "endChain(b) = (0,0,0) : b : (!,!,_);\n",
+    "in(x) = +(x),+(x),_;\n",
+    "out(x,y,s) = x,y,x+y+s;\n",
+    "segment = par(i,2,@(100)),_;\n",
+    "refFilter = (_ <: (_+_')/2)*0.9;\n",
+    "process(excitation) = endChain(terminations(_, chain(in(excitation) : segment : out), refFilter));"
+);
+// Issue #24 reduced: the outer recursion's slot is a bare projection of the
+// inner recursion, which reads the outer one back. Scalar is
+// `y[n] = x[n] + 0.6 y[n-1]`; `-vec` used to read the alias two samples late.
+const NESTED_ALIAS_RECURSION_SOURCE: &str =
+    "process = (f ~ _) with { f(prev, x) = (+(prev*0.1 + x) ~ *(0.5)); };";
+// An alias slot with no dependency back into its body's group: the second
+// output reads the first slot's previous value.
+const INDEPENDENT_ALIAS_RECURSION_SOURCE: &str =
+    "process = (f ~ (_,_)) with { f(a, b, x) = (+(x) ~ *(0.5)), a*0.5; };";
+// Two alias levels, as in `pm.ks`: the outer slot aliases the middle one,
+// which aliases the inner recursion; the inner body reads both back.
+const ALIAS_CHAIN_RECURSION_SOURCE: &str = concat!(
+    "chain(x) = (outer ~ _) with {\n",
+    "  outer(prev) = (middle ~ _) with {\n",
+    "    middle(q) = x + 0.1*prev + 0.2*q : (+ ~ *(0.5));\n",
+    "  };\n",
+    "};\n",
+    "process = chain;"
+);
+// A dry/wet output: the input `y` is returned as is and also read by a
+// recursion that another output consumes. Both outputs are inline roots, so
+// they shared one root loop, which read the recursion while the recursion read
+// `y` from it: the plan had a cycle and `-vec` fell back to scalar.
+const SHARED_ROOT_LOOP_CYCLE_SOURCES: [(&str, &str); 3] = [
+    (
+        "shared_root_dry_after",
+        "process = _,_ : \\(x,y).(x + (y : +~*(0.9)), y);",
+    ),
+    (
+        "shared_root_dry_before",
+        "process = _,_ : \\(x,y).(y, x + (y : +~*(0.9)));",
+    ),
+    (
+        "shared_root_attach_meter",
+        "process = _,_ : \\(x,y).(attach(x, y : +~*(0.9) : vbargraph(\"l\",0,2)), y);",
+    ),
+];
+// The root loop owns more than its roots: `s@5`, first read by the first
+// output, is materialized there, and the recursion fed by `x+y` reads it back.
+// The cycle closes through that delay read, not through an output root.
+const SHARED_ROOT_LOOP_DELAY_READ_CYCLE_SOURCE: &str = concat!(
+    "fl(d) = _ <: _, @(d) : +;\n",
+    "process = _ <: fl(5), fl(7) : \\(x,y).(x + ((x+y) : +~*(0.9)), y);"
+);
 const PULSE_COUNTUP_LOOP_SOURCE: &str = r#"
     pulse_countup_loop(n, trig) = + ~ cond(n) * trig with { cond(n, x) = x * (x <= n); };
     process = pulse_countup_loop(4, 1) + 0.001;
@@ -511,33 +580,63 @@ fn stateful_recursion_under_upsampling_is_adopted_by_its_domain() {
 
 #[test]
 fn karplus_pass_through_backedge_is_certified_and_bit_exact() {
-    // Expanding `stdfaust.lib` needs more stack than libtest gives each test
-    // thread on some hosts; production compilation already runs on the main
-    // process stack. Keep the real library-level regression instead of
-    // weakening it to a hand-reduced signal graph.
-    std::thread::Builder::new()
-        .name("karplus-vector-regression".to_owned())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            assert_vector_pipeline_certified(
-                "karplus_pass_through_backedge",
-                KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
-                32,
-            );
-            assert_scalar_vector_bit_exact(
-                "karplus_pass_through_backedge",
-                KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
-                32,
-            );
-            assert_scalar_vector_bit_exact(
-                "karplus_pass_through_backedge_tail",
-                KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
-                24,
-            );
-        })
-        .expect("spawn Karplus regression thread")
-        .join()
-        .expect("Karplus regression thread");
+    assert_vector_pipeline_certified(
+        "karplus_pass_through_backedge",
+        KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
+        32,
+    );
+    // Five round trips of the 200-sample delay line, so the feedback is
+    // observed.
+    let input = [ramp(1024)];
+    assert_channels_bit_exact(
+        "karplus_pass_through_backedge",
+        KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
+        &input,
+        32,
+    );
+    assert_channels_bit_exact(
+        "karplus_pass_through_backedge_tail",
+        KARPLUS_PASS_THROUGH_BACKEDGE_SOURCE,
+        &input,
+        24,
+    );
+}
+
+/// A recursion slot that is a bare projection of another group is an alias:
+/// it is fed back with the explicit `SIGDELAY1` and nothing more. The edge
+/// from `SIGPROJ(i, SYMREF)` to the selected body is immediate, as in C++
+/// `getSignalDependencies`; counting it as a delay as well read the alias two
+/// samples late under `-vec` (issue #24).
+#[test]
+fn alias_recursion_slots_are_fed_back_with_one_sample_of_delay() {
+    let input = [ramp(256)];
+    for (name, source) in [
+        ("nested_alias_recursion", NESTED_ALIAS_RECURSION_SOURCE),
+        (
+            "independent_alias_recursion",
+            INDEPENDENT_ALIAS_RECURSION_SOURCE,
+        ),
+        ("alias_chain_recursion", ALIAS_CHAIN_RECURSION_SOURCE),
+    ] {
+        assert_vector_pipeline_certified(name, source, 32);
+        assert_channels_bit_exact(name, source, &input, 32);
+        assert_channels_bit_exact(name, source, &input, 24);
+    }
+}
+
+#[test]
+fn a_shared_root_loop_never_closes_a_cycle_through_a_recursion() {
+    let inputs = [ramp(256), ramp(256).into_iter().rev().collect()];
+    for (name, source) in SHARED_ROOT_LOOP_CYCLE_SOURCES {
+        assert_vector_pipeline_certified(name, source, 32);
+        assert_channels_bit_exact(name, source, &inputs, 32);
+        assert_channels_bit_exact(name, source, &inputs, 24);
+    }
+    let name = "shared_root_delay_read";
+    let source = SHARED_ROOT_LOOP_DELAY_READ_CYCLE_SOURCE;
+    assert_vector_pipeline_certified(name, source, 32);
+    assert_channels_bit_exact(name, source, &inputs[..1], 32);
+    assert_channels_bit_exact(name, source, &inputs[..1], 24);
 }
 
 #[test]
@@ -904,7 +1003,7 @@ fn phase3_state_plan_accepts_temporal_slow_values_and_special_state_cells() {
 
 /// Dead pure roots are removed before FIR assembly, so a fused serial group's
 /// delayed reads and scalar transport loads can disappear when nothing consumes
-/// them. Both corpus shapes below hit that case: they must stay fully certified
+/// them. Both shapes below hit that case: they must stay fully certified
 /// rather than falling back once the reads are gone.
 #[test]
 fn fused_serial_groups_survive_dead_pure_root_removal() {
@@ -916,14 +1015,24 @@ fn fused_serial_groups_survive_dead_pure_root_removal() {
                 vec_size: 32,
                 loop_variant: 0,
             });
-            let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/impulse-tests/dsp");
-            // echo_bug loses a delayed read of its own delay line; phaser_flanger
-            // loses the load side of a fused scalar transport.
-            for name in ["echo_bug.dsp", "phaser_flanger.dsp"] {
-                let path = corpus.join(name);
+            // echo_bug loses a delayed read of its own delay line; the reduced
+            // phaser_flanger loses the load side of a fused scalar transport.
+            // The corpus phaser_flanger.dsp is not compiled here: it imports
+            // the installed libraries, whose versions change its signal (since
+            // faustlibraries `69071402` its phaser calls `ma.expm1`, a foreign
+            // `sinh`, which the vector pipeline lowers as scalar).
+            for (name, source) in [
+                (
+                    "echo_bug.dsp",
+                    include_str!("../../../tests/impulse-tests/dsp/echo_bug.dsp"),
+                ),
+                (
+                    "fused_transport_dead_load.dsp",
+                    FUSED_TRANSPORT_DEAD_LOAD_SOURCE,
+                ),
+            ] {
                 let output = compiler
-                    .compile_file_default_to_fir_with_lane(&path, SignalFirLane::TransformFastLane)
+                    .compile_source_to_fir_with_lane(name, source, SignalFirLane::TransformFastLane)
                     .unwrap_or_else(|error| panic!("{name} vector FIR: {error}"));
                 assert_eq!(
                     output.vector_pipeline_status,
@@ -937,12 +1046,17 @@ fn fused_serial_groups_survive_dead_pure_root_removal() {
                     "{name} must keep the certified vector structure"
                 );
             }
-            // echo_bug is self-contained, so the restored vector structure can
-            // also be held to the bit-exactness oracle. phaser_flanger needs the
-            // installed libraries and stays a certification-only case here.
+            // Both are self-contained, so the restored vector structure is also
+            // held to the bit-exactness oracle.
             assert_channels_bit_exact(
                 "echo_bug.dsp",
                 include_str!("../../../tests/impulse-tests/dsp/echo_bug.dsp"),
+                std::slice::from_ref(&ramp(67)),
+                32,
+            );
+            assert_channels_bit_exact(
+                "fused_transport_dead_load.dsp",
+                FUSED_TRANSPORT_DEAD_LOAD_SOURCE,
                 std::slice::from_ref(&ramp(67)),
                 32,
             );

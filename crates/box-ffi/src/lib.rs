@@ -57,7 +57,7 @@ use tree_ffi::{
 pub use tree_ffi::{SOperator, SType};
 use ui::{
     ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiProgramBuilder, UiRootOrigin,
-    ordering_key_from_label, split_label_metadata,
+    split_label_metadata,
 };
 
 /// FIR package exported from box/signal handles for backend FFI constructors.
@@ -100,14 +100,6 @@ fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize
         }
     }
     max_input.map_or(0, |idx| idx.saturating_add(1))
-}
-
-fn control_label_and_metadata(
-    ctx: &BoxContext,
-    control: &FfiSignalControl,
-) -> (String, ui::UiMetadata) {
-    let raw = tree_to_str(&ctx.arena, control.label).unwrap_or_default();
-    split_label_metadata(raw)
 }
 
 fn control_range(ctx: &BoxContext, control: &FfiSignalControl) -> Option<ControlRange> {
@@ -172,8 +164,9 @@ pub fn signal_only_root_ui(ctx: &BoxContext, module_name: &str) -> UiProgram {
     let mut controls = Vec::with_capacity(ctx.signal_controls().len());
     let mut builder = UiProgramBuilder::new();
     for control in ctx.signal_controls() {
-        let (label, metadata) = control_label_and_metadata(ctx, control);
-        let order_key = ordering_key_from_label(&label, &metadata);
+        let raw_label = tree_to_str(&ctx.arena, control.label).unwrap_or_default();
+        let (label, metadata) = split_label_metadata(raw_label);
+        let order_key = raw_label.to_owned();
         controls.push(ControlSpec {
             id: control.id,
             kind: control_kind(control.kind),
@@ -2827,21 +2820,15 @@ mod tests {
     #[test]
     fn complete_error_keeps_a_text_longer_than_the_buffer_whole() {
         let _guard = fresh_test_context();
-        let mut source = String::new();
-        for index in 0..200 {
-            source.push_str(&format!(
-                "a_rather_long_definition_name_{index:03} = {index};\n"
-            ));
-        }
-        source.push_str("process = _ : missing_symbol;\n");
+        let symbol = "missing_symbol_".repeat(400);
+        let source = format!("process = _ : {symbol};\n");
 
         let (ok, summary) = dsp_to_boxes(&source);
         assert!(!ok);
         assert!(summary.len() < 4096);
         let complete = complete_error().unwrap();
         assert!(complete.len() > 4096, "only {} bytes", complete.len());
-        assert!(complete.contains("undefined symbol `missing_symbol`"));
-        assert!(complete.contains("a_rather_long_definition_name_199"));
+        assert!(complete.contains(&format!("undefined symbol `{symbol}`")));
     }
 
     #[test]

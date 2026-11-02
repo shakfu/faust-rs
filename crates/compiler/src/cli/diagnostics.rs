@@ -12,10 +12,10 @@
 //! Under `--error-format json`, [`print_bundle`] is the sole
 //! writer of stdout content: it prints exactly one well-formed JSON document,
 //! with no leading or trailing non-JSON bytes, and nothing else on stdout
-//! precedes or follows it for that invocation. Human-readable prefix lines
-//! (e.g. `"C++ pipeline failed: ..."`) belong to `--error-format human` only
-//! and are the caller's responsibility (see
-//! `runner::report_pipeline_failure`), never printed here in JSON mode.
+//! precedes or follows it for that invocation. The `"C++ pipeline failed: ..."`
+//! line of an error with no diagnostics belongs to `--error-format human` only
+//! and is the caller's responsibility (see `runner::report_pipeline_failure`),
+//! never printed here in JSON mode.
 //! Diagnostics always go to stdout in JSON mode and to stderr in human mode
 //! -- this asymmetry is intentional: JSON mode targets automated consumers
 //! (CI, IDE tooling, a future MCP server) that read one stream, while human
@@ -28,10 +28,14 @@
 //! human and JSON rendering on the stable diagnostic model without a
 //! text-only fallback path.
 //!
+//! Color is a property of the human channel alone: `--color` never reaches the
+//! JSON renderer, so a machine consumer cannot receive an escape.
+//!
 //! See `docs/diagnostics-codes-reference-en.md` for the frozen `FRS-*` code table.
 
 use super::args::{DiagnosticPathStyle, ErrorFormat, ErrorVerbosity};
-use super::human::{self, HumanRenderOptions};
+use super::human::{self, HumanRenderOptions, StderrColor};
+use clap::ColorChoice;
 use compiler::diagnostics_json::{
     DiagnosticFieldSet, DiagnosticsV2RenderOptions, SourceTextPolicy, render_diagnostics_v2_json,
 };
@@ -43,23 +47,33 @@ pub fn print_bundle(
     format: ErrorFormat,
     verbosity: ErrorVerbosity,
     path_style: DiagnosticPathStyle,
+    color: ColorChoice,
 ) {
     match format {
-        ErrorFormat::Human => eprint!(
-            "{}",
-            human::format_bundle(
-                bundle,
-                HumanRenderOptions {
-                    verbosity,
-                    path_style,
-                },
-            )
-        ),
+        ErrorFormat::Human => print_human_bundle(bundle, verbosity, path_style, color),
         ErrorFormat::Json => println!(
             "{}",
             format_diagnostics_json_with_verbosity(bundle, verbosity)
         ),
     }
+}
+
+/// Writes one bundle to stderr in the human format.
+pub(crate) fn print_human_bundle(
+    bundle: &DiagnosticBundle,
+    verbosity: ErrorVerbosity,
+    path_style: DiagnosticPathStyle,
+    color: ColorChoice,
+) {
+    let stderr = StderrColor::resolve(color);
+    stderr.write(&human::format_bundle(
+        bundle,
+        HumanRenderOptions {
+            verbosity,
+            path_style,
+            color: stderr.enabled(),
+        },
+    ));
 }
 
 /// Formats diagnostics in a human-oriented form at the default verbosity.

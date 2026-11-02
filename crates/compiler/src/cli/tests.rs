@@ -4,6 +4,7 @@
 //! they can exercise parser normalization, diagnostic rendering helpers, and
 //! output utilities without expanding the launcher in `main.rs`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,8 +13,8 @@ use clap::{CommandFactory, Parser, ValueEnum};
 use compiler::{Compiler, FaustInstallPaths};
 use diagnostics::{
     Applicability, DebugContext, Diagnostic, DiagnosticBundle, DiagnosticCategory, DiagnosticCode,
-    LabelRole, Severity, SourceKind, SourceMapBuilder, SourceRange, SourceSpan, Stage,
-    SuggestedFix, TextEdit,
+    DiagnosticTrace, LabelRole, RelatedDiagnostic, Severity, SourceKind, SourceMapBuilder,
+    SourceRange, SourceSpan, Stage, SuggestedFix, TextEdit, TraceFrame, TraceKind,
 };
 use serde_json::Value;
 use signals::{SigMatch, match_sig};
@@ -772,7 +773,6 @@ fn diagnostics_human_renderer_snapshot_with_snippet_and_caret() {
 $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
   1 | process = _,_ <: _,_,_;
     |             ^^ related source
-  = note: rule: split(A, B) requires inputs(B) % outputs(A) == 0
   = note: computed: 3 % 2 = 1
   = help: make B input count a multiple of A output count
 ";
@@ -1107,7 +1107,6 @@ fn diagnostics_human_renderer_snapshots_cover_complex_phase4_failures() {
             "err_08_propagate_seq_ui_mismatch.dsp",
             vec![
                 "error [FRS-PROP-0002] sequential composition mismatch",
-                "cause: sequential composition bus widths do not match",
                 "error originates from definition 'foo'",
                 "binding_trace=process -> foo",
                 "Here  A = hslider(\"gain\", 0.5, 0, 1, 0.01)",
@@ -1119,12 +1118,10 @@ fn diagnostics_human_renderer_snapshots_cover_complex_phase4_failures() {
             "err_16_propagate_compound_with_letrec_split.dsp",
             vec![
                 "error [FRS-PROP-0002] split composition mismatch",
-                "cause: split composition divisibility rule is violated",
                 "error originates from definition 'foo'",
                 "binding_trace=process -> baz -> bar -> foo",
                 "Here  A = (_, _)",
                 "while B = (_, (_, _))",
-                "template: process = A <: B; // inputs(B) % outputs(A) == 0",
             ],
         ),
     ];
@@ -1249,8 +1246,11 @@ fn diagnostics_human_renderer_snapshot_for_eval_undefined_symbol() {
     assert!(normalized.contains("error [FRS-EVAL-0002] undefined symbol `bar`"));
     assert!(normalized.contains("error originates from definition 'foo'"));
     assert!(normalized.contains("binding_trace=process -> foo"));
-    assert!(normalized.contains("expr=bar"));
-    assert!(normalized.contains("define the symbol in scope or fix the identifier name"));
+    assert!(!normalized.contains("expr="));
+    // what holds for every undefined symbol is for who asks
+    assert!(!normalized.contains("define the symbol in scope or fix the identifier name"));
+    let debug = format_diagnostics_human_with_verbosity(diagnostics, ErrorVerbosity::Debug);
+    assert!(debug.contains("general: define the symbol in scope or fix the identifier name"));
 }
 
 #[test]
@@ -1266,13 +1266,21 @@ fn diagnostics_human_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
     let normalized = rendered.replace(&path_text, "$FIXTURE");
 
     assert!(normalized.contains("error [FRS-EVAL-0002] undefined symbol `z`"));
-    assert!(normalized.contains("cause: unresolved identifier in current lexical scope"));
     assert!(normalized.contains("error originates from definition 'foo'"));
     assert!(normalized.contains("binding_trace=process -> baz -> bar -> foo"));
-    assert!(
-        normalized.contains("rule: referenced identifier must be present in visible lexical scope")
-    );
-    assert!(normalized.contains("template: z = ...; // define before use"));
+    // words for the header and what holds for every undefined symbol: at
+    // `debug`, each level a superset of the one below
+    for text in [
+        "cause: unresolved identifier in current lexical scope",
+        "rule: referenced identifier must be present in visible lexical scope",
+        "template: z = ...; // define before use",
+    ] {
+        assert!(!normalized.contains(text), "{normalized}");
+        let debug = format_diagnostics_human_with_verbosity(diagnostics, ErrorVerbosity::Debug);
+        assert!(debug.contains(text), "{debug}");
+    }
+    let concise = format_diagnostics_human_with_verbosity(diagnostics, ErrorVerbosity::Concise);
+    assert!(!concise.contains("help:"), "{concise}");
 }
 
 #[test]
@@ -1294,7 +1302,7 @@ fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert_eq!(diag["code"], "FRS-EVAL-0002");
-    assert!(notes.iter().any(|n| n.starts_with("expr=")));
+    assert!(!notes.iter().any(|n| n.starts_with("expr=")));
     assert!(notes.contains(&"error originates from definition 'foo'"));
     assert!(notes.contains(&"binding_trace=process -> foo"));
 }
@@ -1334,11 +1342,10 @@ fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
 
     let cause_i = note_index(&notes, "cause:");
     let rule_i = note_index(&notes, "rule:");
-    let computed_i = note_index(&notes, "computed:");
-    let context_i = note_index(&notes, "scope.local=");
+    let context_i = note_index(&notes, "scope.visible=");
     assert!(
-        cause_i < rule_i && rule_i < computed_i && computed_i < context_i,
-        "eval JSON note ordering should be cause -> rule -> computed -> context"
+        cause_i < rule_i && rule_i < context_i,
+        "eval JSON note ordering should be cause -> rule -> context"
     );
 }
 
@@ -1900,9 +1907,229 @@ fn human_renderer_respects_the_selected_path_style() {
         super::human::HumanRenderOptions {
             verbosity: ErrorVerbosity::Standard,
             path_style: super::args::DiagnosticPathStyle::Basename,
+            color: false,
         },
     );
     assert!(rendered.starts_with("mem.dsp:1:11:"), "{rendered}");
+}
+
+/// One diagnostic of the given severity using every section the renderer has.
+fn fully_populated_bundle(severity: Severity) -> DiagnosticBundle {
+    let mut builder = SourceMapBuilder::new();
+    let source = "process =\tfoo : \u{97f3} : bar;\nnext\nlast;\n";
+    builder.add(
+        PathBuf::from("mem.dsp"),
+        SourceKind::Memory,
+        source.to_owned(),
+    );
+    builder.add(
+        PathBuf::from("other.dsp"),
+        SourceKind::Memory,
+        "other = 1;\n".to_owned(),
+    );
+    let label = |style, span, message| diagnostics::Label::new(style, span, message);
+    let diagnostic = Diagnostic::new(
+        severity,
+        Stage::Propagate,
+        DiagnosticCode("FRS-PROP-0002"),
+        "two\nlines",
+    )
+    .with_label(label(
+        diagnostics::LabelStyle::Primary,
+        SourceSpan::new("mem.dsp", 1, 11, 1, 14),
+        "blamed",
+    ))
+    .with_label(label(
+        diagnostics::LabelStyle::Secondary,
+        SourceSpan::new("mem.dsp", 1, 1, 1, 8),
+        "context",
+    ))
+    .with_label(label(
+        diagnostics::LabelStyle::Secondary,
+        SourceSpan::new("mem.dsp", 2, 1, 3, 5),
+        "multi-line",
+    ))
+    .with_label(label(
+        diagnostics::LabelStyle::Secondary,
+        SourceSpan::new("other.dsp", 1, 1, 1, 6),
+        "elsewhere",
+    ))
+    .with_note("A = foo")
+    .with_note("A arity: inputs=0 outputs=1")
+    .with_note("B = bar")
+    .with_note("B arity: inputs=2 outputs=1")
+    .with_note("plain note")
+    .with_help("do this")
+    .with_trace(DiagnosticTrace {
+        kind: TraceKind::Binding,
+        frames: vec![TraceFrame {
+            name: Some("process".into()),
+            description: "frame".into(),
+            span: None,
+            ir: None,
+        }],
+    })
+    .with_fix(SuggestedFix {
+        title: "insert it".into(),
+        explanation: Some("because".into()),
+        applicability: Applicability::Manual,
+        edits: Vec::new(),
+    })
+    .with_related(RelatedDiagnostic {
+        code: DiagnosticCode("FRS-PROP-0001"),
+        message: "linked".into(),
+        labels: Vec::new(),
+    })
+    .with_debug_fact("node_id", "42");
+    let mut bundle = DiagnosticBundle::new();
+    bundle.push(diagnostic);
+    bundle.set_source_map(builder.finish());
+    bundle
+}
+
+/// Renders `bundle` at the given color setting and [`ErrorVerbosity::Full`].
+fn render_full(bundle: &DiagnosticBundle, color: bool) -> String {
+    super::human::format_bundle(
+        bundle,
+        super::human::HumanRenderOptions {
+            verbosity: ErrorVerbosity::Full,
+            color,
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn colored_diagnostics_are_the_plain_text_plus_escapes_only() {
+    for severity in [Severity::Error, Severity::Warning, Severity::Remark] {
+        let bundle = fully_populated_bundle(severity);
+        let plain = render_full(&bundle, false);
+        let colored = render_full(&bundle, true);
+        assert!(!plain.contains('\u{1b}'), "{plain}");
+        assert!(colored.contains('\u{1b}'), "{colored}");
+        assert_eq!(anstream::adapter::strip_str(&colored).to_string(), plain);
+    }
+}
+
+/// Renders `process = foo;` on line `line`, labeled, with a second label on
+/// line `other` to set the gutter width.
+fn render_with_foo_on_line(line: u32, other: u32) -> String {
+    let source = (1..=line.max(other))
+        .map(|n| {
+            if n == line {
+                "process = foo;\n"
+            } else {
+                "// x\n"
+            }
+        })
+        .collect::<String>();
+    let label = |style, at: u32, col, end_col, message| {
+        diagnostics::Label::new(
+            style,
+            SourceSpan::new("mem.dsp", at, col, at, end_col),
+            message,
+        )
+    };
+    let bundle = bundle_over_source(
+        &source,
+        vec![
+            label(diagnostics::LabelStyle::Primary, line, 11, 14, "blamed"),
+            label(diagnostics::LabelStyle::Secondary, other, 1, 3, "context"),
+        ],
+    );
+    format_diagnostics_human(&bundle)
+}
+
+#[test]
+fn carets_sit_under_their_code_whatever_the_line_number_width() {
+    for (line, other) in [(1, 2), (9, 10), (12, 13), (99, 100), (1000, 3), (3, 1000)] {
+        let rendered = render_with_foo_on_line(line, other);
+        let source_row = rendered
+            .lines()
+            .find(|row| row.contains("process = foo;"))
+            .unwrap();
+        let caret_row = rendered.lines().find(|row| row.contains("blamed")).unwrap();
+        assert_eq!(
+            caret_row.find('^'),
+            source_row.find("foo"),
+            "line {line}:\n{rendered}"
+        );
+        let bars = rendered
+            .lines()
+            .filter(|row| row.contains(" | ") || row.ends_with(" |"))
+            .map(|row| row.find('|'));
+        assert_eq!(
+            bars.collect::<BTreeSet<_>>().len(),
+            1,
+            "every gutter must have one width:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn one_digit_line_numbers_keep_the_four_column_gutter() {
+    let rendered = render_with_foo_on_line(1, 2);
+    assert!(rendered.contains("\n  1 | process = foo;\n"), "{rendered}");
+    assert!(
+        rendered.contains("\n    |           ^^^ blamed\n"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn multi_line_span_counts_its_last_line_in_the_gutter_width() {
+    let source = "a\n".repeat(10);
+    let bundle = bundle_over_source(
+        &source,
+        vec![diagnostics::Label::new(
+            diagnostics::LabelStyle::Primary,
+            SourceSpan::new("mem.dsp", 9, 1, 10, 2),
+            "span",
+        )],
+    );
+    let rendered = format_diagnostics_human(&bundle);
+    assert!(rendered.contains("\n   9 | a\n"), "{rendered}");
+    assert!(rendered.contains("\n     | ...\n"), "{rendered}");
+    assert!(rendered.contains("\n  10 | a\n"), "{rendered}");
+}
+
+#[test]
+fn library_rendering_stays_plain_for_ffi_hosts() {
+    let bundle = fully_populated_bundle(Severity::Error);
+    let rendered = super::human::format_bundle(&bundle, Default::default());
+    assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+}
+
+#[test]
+fn color_tells_severities_and_label_styles_apart() {
+    const RED: &str = "\u{1b}[31m";
+    const YELLOW: &str = "\u{1b}[33m";
+    const CYAN: &str = "\u{1b}[36m";
+    let header = |severity| {
+        let rendered = render_full(&fully_populated_bundle(severity), true);
+        rendered.lines().next().unwrap().to_owned()
+    };
+    assert!(header(Severity::Error).contains(RED));
+    assert!(header(Severity::Warning).contains(YELLOW));
+    assert!(header(Severity::Remark).contains(CYAN));
+
+    let rendered = render_full(&fully_populated_bundle(Severity::Error), true);
+    let line_with = |needle: &str| rendered.lines().find(|l| l.contains(needle)).unwrap();
+    assert!(line_with("blamed").contains(RED), "{rendered}");
+    assert!(!line_with("context").contains(RED), "{rendered}");
+}
+
+#[test]
+fn color_option_defaults_to_auto_and_rejects_unknown_values() {
+    assert_eq!(
+        CliArgs::parse_from(["faust-rs", "foo.dsp"]).color,
+        clap::ColorChoice::Auto
+    );
+    assert_eq!(
+        CliArgs::parse_from(["faust-rs", "--color", "never", "foo.dsp"]).color,
+        clap::ColorChoice::Never
+    );
+    assert!(CliArgs::try_parse_from(["faust-rs", "--color", "sometimes", "foo.dsp"]).is_err());
 }
 
 #[test]
@@ -1921,4 +2148,39 @@ fn dash_uim_enables_user_interface_macros_and_is_echoed() {
     assert!(long.user_interface_macros);
     let off = CliArgs::parse_from(["faust-rs", "foo.dsp"]);
     assert!(!off.user_interface_macros);
+}
+
+/// One place gets one caret, and a definition on the line of the error gets
+/// none. The labels stay in the bundle, and the debug level prints them.
+#[test]
+fn a_label_that_adds_nothing_is_not_printed() {
+    let err = Compiler::new()
+        .compile_source_to_signals("f.dsp", "process = nope;\n")
+        .expect_err("the undefined symbol should fail");
+    let diagnostics = err.diagnostic_bundle();
+    let messages: Vec<&str> = diagnostics.as_slice()[0]
+        .labels
+        .iter()
+        .map(|label| label.message.as_ref())
+        .collect();
+    assert_eq!(
+        messages,
+        ["failing use", "enclosing definition", "call site"]
+    );
+    let rendered = format_diagnostics_human(diagnostics);
+    assert!(!rendered.contains("enclosing definition"), "{rendered}");
+    assert!(!rendered.contains("call site"), "{rendered}");
+    let debug = format_diagnostics_human_with_verbosity(diagnostics, ErrorVerbosity::Debug);
+    assert!(debug.contains("enclosing definition"), "{debug}");
+    assert!(debug.contains("call site"), "{debug}");
+    // a definition elsewhere is worth its line, once
+    let err = Compiler::new()
+        .compile_source_to_signals("f.dsp", "foo =\n  nope;\nprocess = foo;\n")
+        .expect_err("the undefined symbol should fail");
+    let rendered = format_diagnostics_human(err.diagnostic_bundle());
+    assert_eq!(
+        rendered.matches("enclosing definition").count(),
+        1,
+        "{rendered}"
+    );
 }

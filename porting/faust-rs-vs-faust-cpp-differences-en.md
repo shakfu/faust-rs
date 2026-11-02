@@ -2,7 +2,7 @@
 
 Status: living compatibility registry
 
-Last reviewed: 2026-10-26 (C/C++ helpers guarded as in C++, `faust_wrap_*` under `FAUST_INT_WRAP` with the C++ ones as upstream's, C `faustmaxi`/`faustmini` under `FAUSTMAXI`: DIFF-BEH-028 recorded; one bargraph per bargraph signal: DIFF-BEH-027 recorded, the merged meters of `vumeter.dsp` an unrecorded difference closed; control characters of string literals: C++ `Symbol::get` turns every newline, tab and carriage return of a label, tooltip, `declare` value or foreign-function string into a space, and the parser now does the same, an unrecorded difference closed, test `crates/compiler/tests/string_literal_control_chars.rs`; `-uim` user-interface macros ported for C and C++: DIFF-CLI-014 recorded); 2026-10-18 (codegen factorization, [analysis §9](codegen-factorization-analysis-2026-10-18-en.md#9-outcome-2026-10-18): JSON widget `address` built as C++ `PathBuilder::buildPath` builds it, an unrecorded difference closed; codebox `min`/`max` and cmajor/codebox `>>>` now as upstream; DIFF-BACK-006 extended to rust, julia and asc; DIFF-BEH-005 backend module-shape diagnostics unified; the c, cpp, rust and cmajor banners copy upstream's `author`/`copyright`/`license`/`name`/`version` keys and the rust `metadata()` replays the compilation metadata, unrecorded differences closed); 2026-10-18 (reference spelling of the applied Box constructors: DIFF-API-009 narrowed; RAD through bargraphs: DIFF-SRC-002 gap closed; partial C++ Box/Signal headers: DIFF-API-009 recorded; `freeCMemory` missing from `libfaust-c.h`: DIFF-API-010 recorded, then closed (the header now declares it); `-mdoc` not ported: DIFF-GAP-020 recorded); 2026-10-17 (block-rate work in a boolean `ondemand`: DIFF-BEH-024 recorded; `pow(x, 1)` of an init-local constant: DIFF-BEH-022 updated); 2026-10-16 (shared pattern matchers: DIFF-GAP-018 recorded, then closed; isomorphic recursion merging: DIFF-BEH-021 recorded; small real powers: DIFF-BEH-022 recorded; late state join in sums: DIFF-BEH-023 recorded; reserved-word, unary-minus and arity-location diagnostics added to DIFF-SRC-001/002 and DIFF-BEH-005); full review 2026-08-13
+Last reviewed: 2026-11-01 (guidance for a section of `-`, a name of an imported file and a size beside a `waveform`: added to DIFF-BEH-005); 2026-10-31 (syntax errors in the tokens of the language: DIFF-CLI-016 recorded); 2026-10-30 (`--color` for human diagnostics, `faust-rs` and `faustprobe`: DIFF-CLI-015 recorded); 2026-10-26 (C/C++ helpers guarded as in C++, `faust_wrap_*` under `FAUST_INT_WRAP` with the C++ ones as upstream's, C `faustmaxi`/`faustmini` under `FAUSTMAXI`: DIFF-BEH-028 recorded; one bargraph per bargraph signal: DIFF-BEH-027 recorded, the merged meters of `vumeter.dsp` an unrecorded difference closed; control characters of string literals: C++ `Symbol::get` turns every newline, tab and carriage return of a label, tooltip, `declare` value or foreign-function string into a space, and the parser now does the same, an unrecorded difference closed, test `crates/compiler/tests/string_literal_control_chars.rs`; `-uim` user-interface macros ported for C and C++: DIFF-CLI-014 recorded); 2026-10-18 (codegen factorization, [analysis §9](codegen-factorization-analysis-2026-10-18-en.md#9-outcome-2026-10-18): JSON widget `address` built as C++ `PathBuilder::buildPath` builds it, an unrecorded difference closed; codebox `min`/`max` and cmajor/codebox `>>>` now as upstream; DIFF-BACK-006 extended to rust, julia and asc; DIFF-BEH-005 backend module-shape diagnostics unified; the c, cpp, rust and cmajor banners copy upstream's `author`/`copyright`/`license`/`name`/`version` keys and the rust `metadata()` replays the compilation metadata, unrecorded differences closed); 2026-10-18 (reference spelling of the applied Box constructors: DIFF-API-009 narrowed; RAD through bargraphs: DIFF-SRC-002 gap closed; partial C++ Box/Signal headers: DIFF-API-009 recorded; `freeCMemory` missing from `libfaust-c.h`: DIFF-API-010 recorded, then closed (the header now declares it); `-mdoc` not ported: DIFF-GAP-020 recorded); 2026-10-17 (block-rate work in a boolean `ondemand`: DIFF-BEH-024 recorded; `pow(x, 1)` of an init-local constant: DIFF-BEH-022 updated); 2026-10-16 (shared pattern matchers: DIFF-GAP-018 recorded, then closed; isomorphic recursion merging: DIFF-BEH-021 recorded; small real powers: DIFF-BEH-022 recorded; late state join in sums: DIFF-BEH-023 recorded; reserved-word, unary-minus and arity-location diagnostics added to DIFF-SRC-001/002 and DIFF-BEH-005); full review 2026-08-13
 
 C++ reference: `master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`
 
@@ -115,6 +115,29 @@ verified Rust extension must not be presented as a proof of C++ parity.
 - Implemented correction (2026-10-24): the `abs` rule is the sign, 0 at 0, as
   under `fad` (DIFF-SRC-001), in the symbolic sweep and in `BlockReverseAD`
   (one shared formula, `signals::ad_rules`).
+- Implemented correction (2026-11-01): `fad` differentiates a `BlockReverseAD`
+  carrier. `fad(rad(x', x), x)` reached signals and failed in signal preparation
+  (`FRS-SFIR-0004`, `projection 12 does not target symbolic recursion`), since
+  `fad` had no rule for the carrier. A primal slot now takes the tangent of its
+  body, and a gradient slot the gradient of a second carrier over that tangent,
+  one per `fad` seed, with the original's truncation at the block. Pinned sample
+  by sample against finite differences, over several blocks and at both
+  interpreter optimization levels, by the `fad_of_block_rad_*` tests in
+  `crates/compiler/tests/rad_runtime.rs`, on
+  [`tests/corpus/fad_rad_delay1_block.dsp`](../tests/corpus/fad_rad_delay1_block.dsp).
+- Known limit (2026-11-01): the exchange of the two derivatives reads the `rad`
+  seed as an independent variable, so a `rad` seed whose tangent under the `fad`
+  is neither a literal zero nor a seed of that `fad` is refused in propagation
+  (`FRS-PROP-0005`,
+  [`tests/corpus/err_fad_rad_dependent_seed.dsp`](../tests/corpus/err_fad_rad_dependent_seed.dsp)).
+  This covers a `fad` around an adaptive loop whose gradient is a block sweep
+  (the parameter is a recursion slot) and a seed read through a delay of the `fad`
+  seed. A feed-forward `rad`, which needs no block sweep, has no such limit.
+- Implemented correction (2026-11-01): two `BlockReverseAD` carriers reading one
+  delay kept separate adjoints. The carry of a delay was keyed by the node, and
+  hash-consing shares the node between carriers, so `rad(s * s, a), rad(s * b, a)`
+  over `s = a'` gave the first `rad` the gradient of the second, silently. Pinned by
+  `block_rad_sweeps_do_not_share_the_carry_of_a_delay`.
 - Compatibility impact: the source form and `BlockReverseAD` semantics have no
   pinned C++ source/backend oracle. Validation uses symbolic identities,
   FAD/RAD agreement, finite differences, and optimized/unoptimized runtime
@@ -214,11 +237,56 @@ for a pinned C++ command-line contract:
 - lowering selection/verification: `--signal-fir-lane`, `--no-fir-verify`,
   and `--fir-verify-strict`;
 - structured presentation: `--error-format human|json`,
-  `--error-verbosity concise|standard|debug|full`, `--diagnostic-paths`, and
-  `--help-error-format`.
+  `--error-verbosity concise|standard|debug|full`, `--diagnostic-paths`,
+  `--color`, and `--help-error-format`.
 
 These modes may be used by tests, CI, IDEs, and integrations, but scripts that
 must run unchanged with Faust C++ should not pass them.
+
+- **DIFF-CLI-015 — `--color auto|always|never`.** Status: `extension`. Human
+  diagnostics carry ANSI color when stderr is a terminal (`auto`, the default),
+  following `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE`; the pinned C++ compiler
+  prints plain text and has no such option. Scripts reading stderr are
+  unaffected: redirected output stays plain unless `CLICOLOR_FORCE` is set or
+  `--color always` is passed, and color only adds escapes, so removing them
+  gives the plain text byte for byte. The JSON channel and the text the FFI
+  layers return (`rendered_diagnostics`, `getCCompleteCraneliftDSPFactoryError`)
+  are plain for every C host. The `... pipeline failed:` line of an error with
+  no diagnostics and the
+  option-validation messages are outside the diagnostic renderer and stay plain.
+  `faustprobe` takes the same option with the same rules, also for the summary
+  line and for any error other than a compile failure, which stay plain; the
+  notes `--eval` adds are plain too. Its text crosses the C API, so it asks for
+  color through `cranelift_ffi::factory::set_complete_error_color`, a per-thread
+  Rust switch, off by default and out of reach of C. New public items, both
+  Rust-only and both `extension`: that function and
+  `compiler::diagnostics_human::StderrColor`, the decision the two tools share.
+  Evidence: `colored_diagnostics_are_the_plain_text_plus_escapes_only` and
+  `library_rendering_stays_plain_for_ffi_hosts` in
+  `crates/compiler/src/cli/tests.rs`, and the color tests of
+  `crates/compiler/tests/cli_diagnostics_channel.rs` and
+  `crates/cranelift-ffi/tests/compile_error_probe.rs`.
+
+- **DIFF-CLI-016 — wording of syntax errors.** Status: `extension`. A syntax
+  error says `syntax error: unexpected <token>, expected <tokens>`, with the
+  tokens of the language; the pinned C++ compiler says `syntax error, unexpected
+  IDENT` with those of the grammar. A missing `;` gets a `maybe-incorrect` fix,
+  and the errors its recovery produces are dropped when a parse of the repaired
+  text does not have them, so faust-rs can report fewer errors than its recovery
+  found. The line of the first error is unchanged. Scope lists past twelve names
+  are summed up in the text and whole in the JSON facts. Human output starts on
+  the diagnostic, with no `... pipeline failed:` line, and at `standard` carries
+  neither box node numbers, nor a label on a place another one marks, nor notes
+  and help that restate the header or hold for every failure of a kind: the JSON
+  report keeps all of it. An arity mismatch
+  also labels the definitions of its operands, and `too many arguments` and a
+  failed `case` are reported on the call and cite it; the C++ compiler has no
+  location for them. After an undefined symbol, a further evaluation reports the
+  others the evaluator reaches, where the C++ compiler stops at the first; which
+  programs are accepted and the first error are unchanged. Tests:
+  `crates/parser/tests/parse_error_order.rs`,
+  `a_long_scope_is_summed_up_in_the_text_and_whole_in_the_facts` in
+  `crates/compiler/tests/diagnostic_errors.rs`.
 
 ### 4.3 Adapted option behavior
 
@@ -354,6 +422,10 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
 - Diagnostic wording, code, and stage are not generally byte-compatible with
   C++ stderr. Exit success/failure and the underlying semantic rejection remain
   the parity objective for portable cases.
+- A section of `-` in an argument (`*(-(x))`), a name of an imported file
+  redefined by the program, and a size given to a table beside a `waveform`
+  have their own guidance (2026-11-01,
+  `crates/compiler/tests/diagnostic_errors.rs`). The rejection is the C++ one.
 - Duplicate UI paths, FIR verification, backend limitations, and const-table SR
   freezing have dedicated Rust diagnostics. A malformed FIR module (root not
   a module, a section not a block, a `sub_modules` entry not a sub-module)
@@ -673,6 +745,12 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
   hbargraph("", …)) + (3 : vbargraph("", …))`, fixed C++ declares
   `vbargraph0`, `hbargraph0`, `hbargraph1`, `0x00` and Rust `0x00`,
   `hbargraph0`, `hbargraph1`, `vbargraph0`, each name on the same widget.
+- That concerns labels that compare equal only. Rust compared the others on a
+  key rebuilt from the parsed `[n]`, not on the raw label as C++ does: the
+  spaces of `%2i` were lost, `[10]` came before `[ 2]`, and with 11 or more
+  bands (`an.spectral_level`) widgets were listed, and unlabelled bargraphs
+  numbered, otherwise than in C++. Fixed on 2026-10-31: the key is now the raw
+  label.
 - The names match: an unlabelled group or input widget is `0x00` and an
   unlabelled bargraph `hbargraph<n>` / `vbargraph<n>`, and two unlabelled
   input widgets in one group are refused as in C++ (`FRS-UI-0001`,
@@ -683,6 +761,7 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
   Faust 2.89.3.
 - Evidence: `crates/compiler/tests/anonymous_ui_labels.rs`,
   `unlabelled_controls_are_named_as_in_cpp_and_can_conflict` and
+  `widgets_are_sorted_on_their_raw_labels_as_in_cpp`;
   `anonymous_widget_names_count_per_prefix_like_get_fresh_id` in
   `crates/ui/tests/core_api.rs`.
 
@@ -1730,7 +1809,7 @@ remain visible until closed or explicitly reclassified.
 | DIFF-GAP-001 | `narrower` | Full non-trivial stream-wrapper lowering remains less complete than the mature C++ route; the shared-runtime differential confirms different outputs for `rep_18_stream_wrappers` under impulse, ramp, and sine inputs. |
 | DIFF-GAP-004 | `narrower` | `getInfos` and some embedded-compiler/filesystem helper semantics remain partial or adapted. |
 | DIFF-GAP-005 | `narrower` | WASM and Julia are functional on validated paths but do not claim the complete semantic, layout, packaging, or upstream impulse-suite maturity of the C++ implementations. The two backends were audited on 2026-08-14 and this blanket entry is now backed by an enumerated inventory (`G5-W1`…`G5-W6`, `G5-J1`…`G5-J7`) in [`wasm-julia-maturity-diff-gap-005-analysis-and-plan-2026-08-14-en.md`](wasm-julia-maturity-diff-gap-005-analysis-and-plan-2026-08-14-en.md). Closed so far: Julia's host-visible description surfaces — `metadata!` and `getJSON` now carry the same content as the reference (`G5-J1`, `G5-J2`, `G5-J3`) — the WASM companion JSON identity entries, `compile_options`/`filename`/`name` now appear in `meta` in C++ key order (`G5-W2`) — `sr_index` (`G5-W4`), which needed no code change, only its own registry entry: `DIFF-BACK-005` — and the impulse status table (`G5-J7`), re-derived on the full 133-DSP corpus (`tests/impulse-tests/README.md` §Status now has a Julia row; see the plan doc's P6 for the `FAUST_CPP` PATH-resolution trap that re-deriving it surfaced). Still open: `G5-W1`, `G5-W3`, `G5-W5`, `G5-W6`, `G5-J4`. This entry may only be removed when the inventory is empty; until then it must point at it. |
-| DIFF-GAP-006 | `narrower` | The specialized reverse-time recursive RAD path is disabled; Rust uses `BlockReverseAD` for temporal/recursive AD and still rejects mutable-table, soundfile, and unsupported foreign-function derivatives. |
+| DIFF-GAP-006 | `narrower` | The specialized reverse-time recursive RAD path is disabled; Rust uses `BlockReverseAD` for temporal/recursive AD and still rejects mutable-table, soundfile, and unsupported foreign-function derivatives, and, under an enclosing `fad`, a `rad` seed computed from a `fad` seed (DIFF-SRC-002). |
 | DIFF-GAP-007 | `narrower` | The Rust CLI/backend set is smaller than the complete Faust C++ backend catalog; unsupported `-lang` values are rejected. |
 | DIFF-GAP-008 | `excluded` | `backend-java` is outside the Rust port target scope. |
 | DIFF-GAP-009 | `excluded` | Legacy `-lang ocpp` is outside the Rust port target scope. |

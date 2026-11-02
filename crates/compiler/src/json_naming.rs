@@ -560,7 +560,16 @@ pub(crate) fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
     match error {
         // A missing entry point has no offending node: the definition list
         // it carries is not a site (see `maybe_add_missing_entrypoint_label`).
-        eval::EvalError::UndefinedSymbol { node, .. }
+        eval::EvalError::PatternMatchFailed {
+            application: Some(node),
+            ..
+        }
+        | eval::EvalError::PatternMatchFailed {
+            node,
+            application: None,
+            ..
+        }
+        | eval::EvalError::UndefinedSymbol { node, .. }
         | eval::EvalError::MalformedDefinitionNode { node }
         | eval::EvalError::MalformedListNode { node }
         | eval::EvalError::MalformedCaseNode { node }
@@ -569,10 +578,11 @@ pub(crate) fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
         | eval::EvalError::NonIdentifierIterationVariable { node }
         | eval::EvalError::IterationCountNotInt { node }
         | eval::EvalError::PatternArityMismatch { node, .. }
-        | eval::EvalError::PatternMatchFailed { node, .. }
         | eval::EvalError::CaseArgumentNotConstant { node, .. }
         | eval::EvalError::TooManyArguments { node, .. }
         | eval::EvalError::DivisionByZero { node, .. }
+        | eval::EvalError::InvalidRouteShape { node, .. }
+        | eval::EvalError::InvalidRouteParameters { node }
         | eval::EvalError::InvalidControlListOperand { node, .. }
         | eval::EvalError::ControlIndexOutOfRange { node, .. }
         | eval::EvalError::ControlIndexNotConstant { node, .. }
@@ -595,6 +605,7 @@ pub(crate) fn propagate_error_node(error: &PropagateError) -> Option<BoxId> {
         | PropagateError::SplitArityMismatch { node, .. }
         | PropagateError::MergeArityMismatch { node, .. }
         | PropagateError::RecArityMismatch { node, .. } => Some(*node),
+        PropagateError::FadOfRadWithDependentSeed { node, .. } => *node,
         _ => None,
     }
 }

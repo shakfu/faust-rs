@@ -196,7 +196,7 @@ pub use error::{
     DepthContext, DepthGuard, DepthLimit, DepthLimitSource, EvalError, EvalStats, EvalWarning,
 };
 pub use loop_detector::LoopDetector;
-use loop_detector::on_deep_stack;
+use loop_detector::{UndefinedCollection, on_deep_stack};
 pub use source_context::{EvalSourceContext, SamplePrecision};
 pub use suggestions::{SymbolSuggestion, rank_similar_names, unambiguous_suggestion};
 
@@ -427,8 +427,17 @@ fn eval_entrypoint_full(
         None => LoopDetector::new(),
     };
     let entry = BoxBuilder::new(arena).ident(entrypoint);
-    let result = eval_value(arena, entry, &env, &mut loop_detector)?;
-    let result = a2sb_value(arena, result, &mut loop_detector)?;
+    let started = std::time::Instant::now();
+    let result = match eval_and_lower(arena, entry, &env, &mut loop_detector) {
+        Ok(result) => result,
+        Err(error) => {
+            let budget = started.elapsed().saturating_mul(2).max(FURTHER_RUN_MINIMUM);
+            let flag = Arc::clone(&loop_detector.cancel);
+            return Err(with_further_undefined_symbols(
+                arena, error, entry, &env, flag, budget,
+            ));
+        }
+    };
     loop_detector.report_apply_memo();
     // Remap def_names keys through a2sb's symbolic_box_cache: pre-a2sb IDs that were
     // rebuilt by a2sb (because their subtree contained residual Abstr nodes) get new IDs.
@@ -454,6 +463,86 @@ fn eval_entrypoint_full(
 
 /// Lowers an [`EvalValue`] to box IR, guarded by the structural-depth budget.
 ///
+fn eval_and_lower(
+    arena: &mut TreeArena,
+    entry: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let value = eval_value(arena, entry, env, loop_detector)?;
+    a2sb_value(arena, value, loop_detector)
+}
+
+/// The shortest budget of a further run, for what fails at once.
+const FURTHER_RUN_MINIMUM: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `error`, if it is an undefined symbol, with the others of the program.
+///
+/// The run that failed is an ordinary one and stands: this cannot change which
+/// programs are accepted, or their first error. Only then is the program
+/// evaluated again, each undefined symbol recorded and read as `_`, for the
+/// budget at most. Going on in the first run would not do: evaluation tries some
+/// things and drops their error (`a2sb(...).ok()` of an argument), and a symbol
+/// met there does not fail the program.
+///
+/// A `_` can take a path the repaired program would not, so a symbol found this
+/// way may be in code that stays out of reach. It is undefined all the same.
+/// Whatever else fails in this run is dropped: the `_` may have caused it.
+fn with_further_undefined_symbols(
+    arena: &mut TreeArena,
+    error: EvalError,
+    entry: TreeId,
+    env: &Environment,
+    cancel: Arc<AtomicBool>,
+    budget: std::time::Duration,
+) -> EvalError {
+    let EvalError::UndefinedSymbol {
+        symbol,
+        node,
+        local_scope,
+        visible_scope,
+        top_level_scope,
+        ..
+    } = error
+    else {
+        return error;
+    };
+    let further =
+        further_undefined_symbols(arena, &symbol, entry, env, cancel, budget).into_boxed_slice();
+    EvalError::UndefinedSymbol {
+        symbol,
+        node,
+        local_scope,
+        visible_scope,
+        top_level_scope,
+        further,
+    }
+}
+
+/// The undefined symbols of a further run, but for `first`, see
+/// [`with_further_undefined_symbols`].
+fn further_undefined_symbols(
+    arena: &mut TreeArena,
+    first: &str,
+    entry: TreeId,
+    env: &Environment,
+    cancel: Arc<AtomicBool>,
+    budget: std::time::Duration,
+) -> Vec<EvalError> {
+    let mut detector = LoopDetector::with_cancel(cancel);
+    detector.collection = Some(UndefinedCollection {
+        deadline: std::time::Instant::now() + budget,
+        found: Vec::new(),
+    });
+    // What this run fails on is not an error of the program
+    let _ = eval_and_lower(arena, entry, env, &mut detector);
+    let mut found = detector.collection.map_or_else(Vec::new, |c| c.found);
+    found.retain(
+        |error| !matches!(error, EvalError::UndefinedSymbol { symbol, .. } if symbol == first),
+    );
+    found
+}
+
 /// Thin wrapper that brackets [`a2sb_value_inner`] with
 /// [`enter_structural`](LoopDetector::enter_structural) /
 /// [`leave_structural`](LoopDetector::leave_structural), so deep closure chains
@@ -680,6 +769,8 @@ fn lower_pattern_matcher_to_symbolic(
         return Err(EvalError::PatternMatchFailed {
             node: pm.original_rules,
             arguments: pm.rev_param_list.clone(),
+            application: None,
+            call: None,
         });
     }
     let total = case_expected_arity(arena, pm.original_rules)?;
@@ -841,7 +932,11 @@ fn eval_value_uncached(
             let efun = eval_value(arena, fun, env, loop_detector)?;
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
             let result =
-                apply_value_list_value(arena, efun, rev_args, env, loop_detector, Some(fun))?;
+                apply_value_list_value(arena, efun, rev_args, env, loop_detector, Some(fun));
+            let result = match result {
+                Err(error) => return Err(name_refused_application(arena, error, expr, rev_args)),
+                Ok(result) => result,
+            };
             // Tag result box with the applied function's name (mirrors C++ setDefNameProperty
             // after beta reduction). Extract name from: Ident("voice") or Access(os, "osc").
             // or_insert preserves the outermost/first name when results are shared.
@@ -1096,7 +1191,7 @@ fn eval_value_uncached(
             loop_detector,
         )?)),
         BoxMatch::Route(ins, outs, routes) => {
-            eval_route_value(arena, ins, outs, routes, env, loop_detector)
+            eval_route_value(arena, expr, ins, outs, routes, env, loop_detector)
         }
         BoxMatch::Seq(e1, e2) => eval_seq_value(arena, expr, e1, e2, env, loop_detector),
         // ── outputs(expr) / inputs(expr) ────────────────────────────────────
@@ -1108,7 +1203,7 @@ fn eval_value_uncached(
         // Without this arm, `outputs(…)` reaches the `_` catch-all and is
         // kept as a `BOXOUTPUTS(…)` node.  When that node is later used as
         // the iteration count of an `ipar`/`par`, `eval_non_negative_count`
-        // fails with "iteration count is not an int node".
+        // fails with "iteration count is not an integer constant".
         //
         // Example failure (softclipQuadratic1 in aanl.lib):
         //   pickN(N,O) = route(N,outputs(O), par(o,outputs(O), …))
@@ -1198,19 +1293,25 @@ fn eval_ident_value(
     loop_detector: &mut LoopDetector,
 ) -> Result<EvalValue, EvalError> {
     // get_symbol takes &self — safe while `name` no longer borrows `arena` mutably.
-    let ((binding_env_id, binding_sym), value) = arena
-        .get_symbol(name)
-        .and_then(|sym| {
-            env.lookup_value(sym)
-                .map(|(env_id, value)| ((env_id, sym), value))
-        })
-        .ok_or_else(|| EvalError::UndefinedSymbol {
+    let found = arena.get_symbol(name).and_then(|sym| {
+        env.lookup_value(sym)
+            .map(|(env_id, value)| ((env_id, sym), value))
+    });
+    let Some(((binding_env_id, binding_sym), value)) = found else {
+        let error = EvalError::UndefinedSymbol {
             symbol: name.to_owned(),
             node: expr,
             local_scope: env.local_names(arena),
             visible_scope: env.visible_names(arena),
             top_level_scope: env.top_level_names(arena),
-        })?;
+            further: Box::default(),
+        };
+        return if loop_detector.record_undefined(&error) {
+            Ok(EvalValue::Box(BoxBuilder::new(arena).wire()))
+        } else {
+            Err(error)
+        };
+    };
     match value {
         EvalValue::Box(value) => {
             if value == expr {
@@ -1259,8 +1360,15 @@ fn eval_ident_value(
 /// route spec (`normalizeRouteList`). Rust mirrors this with
 /// `eval_box_to_int_node` (propagate + simplify → `i32` → `boxInt`) and
 /// `normalize_route_spec`.
+///
+/// C++ refuses a route whose sizes are not two 0→1 boxes, or whose routes are
+/// not an even number of values, and one whose parameters do not fold to
+/// numbers, unless a parameter is a pattern variable, a wire or a slot: such a
+/// route is a pattern of a `case`. A parameter of unknown arity is left to
+/// propagation.
 fn eval_route_value(
     arena: &mut TreeArena,
+    expr: TreeId,
     ins: TreeId,
     outs: TreeId,
     routes: TreeId,
@@ -1279,6 +1387,7 @@ fn eval_route_value(
     };
     let ins_node = size_node(eval_ins)?;
     let outs_node = size_node(eval_outs)?;
+    check_route_parameters(arena, expr, eval_ins, eval_outs, eval_routes, loop_detector)?;
     let routes_node = a2sb(arena, eval_routes, loop_detector).unwrap_or(eval_routes);
     let spec_node = eval_box_to_int_list_node(arena, routes_node).unwrap_or_else(|| {
         let simplified_routes = box_simplification(arena, routes_node);
@@ -1287,6 +1396,57 @@ fn eval_route_value(
 
     let mut bld = BoxBuilder::new(arena);
     Ok(EvalValue::Box(bld.route(ins_node, outs_node, spec_node)))
+}
+
+/// The checks of the C++ `isBoxRoute` branch, on evaluated parameters.
+fn check_route_parameters(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    ins: TreeId,
+    outs: TreeId,
+    routes: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Result<(), EvalError> {
+    let mut parameters = [ins, outs, routes];
+    for parameter in &mut parameters {
+        *parameter = a2sb(arena, *parameter, loop_detector).unwrap_or(*parameter);
+    }
+    let is_pattern = parameters.iter().any(|&parameter| {
+        matches!(
+            match_box(arena, parameter),
+            BoxMatch::PatternVar(_) | BoxMatch::Wire | BoxMatch::Slot(_)
+        )
+    });
+    if is_pattern {
+        return Ok(());
+    }
+    let cache = &mut loop_detector.box_arity_cache;
+    let [Some(ins_arity), Some(outs_arity), Some(routes_arity)] =
+        parameters.map(|parameter| infer_box_arity_cached(arena, parameter, cache))
+    else {
+        return Ok(());
+    };
+    let (route_inputs, route_values) = routes_arity;
+    let well_formed = ins_arity == (0, 1)
+        && outs_arity == (0, 1)
+        && route_inputs == 0
+        && route_values > 1
+        && route_values.is_multiple_of(2);
+    if !well_formed {
+        return Err(EvalError::InvalidRouteShape {
+            node: expr,
+            ins: ins_arity,
+            outs: outs_arity,
+            routes: routes_arity,
+        });
+    }
+    if parameters
+        .iter()
+        .any(|&parameter| constant_list_signals(arena, parameter).is_none())
+    {
+        return Err(EvalError::InvalidRouteParameters { node: expr });
+    }
+    Ok(())
 }
 
 /// Evaluates a `seq(e1, e2)` box, folding numeric tuples where possible.
@@ -1824,6 +1984,72 @@ enum NumericLit {
 /// Converts a parser-style list into a vector in traversal order.
 fn list_to_vec(arena: &TreeArena, list: TreeId) -> Result<Vec<TreeId>, EvalError> {
     tlib::list_to_vec(arena, list).ok_or(EvalError::MalformedListNode { node: list })
+}
+
+/// Gives an error that refuses an application that application, the node with
+/// one place in the sources where the function is shared by all its uses, and
+/// how the source writes it. The innermost application is the one refused, and
+/// the ones around it leave the error alone.
+///
+/// The counts of [`EvalError::TooManyArguments`] become those of the whole call:
+/// `g(1, 2, 3, 4)` of a `g(x, y)` is refused with no argument left for the two
+/// inputs of a result that has none, and that is 4 arguments for 2.
+///
+/// [`EvalError::PatternMatchFailed`] gets the arguments the rules saw, simplified.
+/// The rules stop at the first one none of them matches, which `...` says.
+fn name_refused_application(
+    arena: &TreeArena,
+    error: EvalError,
+    application: TreeId,
+    rev_args: TreeId,
+) -> EvalError {
+    let BoxMatch::Appl(fun, _) = match_box(arena, application) else {
+        return error;
+    };
+    let text = |node, size| boxes::box_pp_bounded(arena, node, 0, boxes::FloatSize::Double, size);
+    let total = tlib::list_to_vec(arena, rev_args).map(|list| list.len());
+    match error {
+        EvalError::TooManyArguments {
+            expected,
+            got,
+            function: None,
+            remaining,
+            ..
+        } => {
+            let taken = total.unwrap_or(remaining).saturating_sub(remaining);
+            EvalError::TooManyArguments {
+                node: application,
+                expected: expected + taken,
+                got: got + taken,
+                function: text(fun, 60).ok(),
+                remaining,
+            }
+        }
+        EvalError::PatternMatchFailed {
+            node,
+            arguments,
+            application: None,
+            ..
+        } => {
+            let shown = arguments
+                .iter()
+                .map(|argument| text(*argument, 40))
+                .collect::<Result<Vec<_>, _>>();
+            let call = shown.ok().zip(text(fun, 60).ok()).map(|(mut shown, fun)| {
+                if total.is_some_and(|total| total > shown.len()) {
+                    shown.push("...".to_owned());
+                }
+                format!("{fun}({})", shown.join(", "))
+            });
+            EvalError::PatternMatchFailed {
+                node,
+                arguments,
+                application: Some(application),
+                call,
+            }
+        }
+        other => other,
+    }
 }
 
 /// Converts a vector into a parser-style list preserving order.
@@ -2563,5 +2789,51 @@ process = case {
             cached_len,
             "repeated apply-time arity probing should reuse cached a2sb lowering"
         );
+    }
+}
+
+#[cfg(test)]
+mod further_undefined_symbols_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn names(found: &[EvalError]) -> Vec<&str> {
+        found
+            .iter()
+            .filter_map(|error| match error {
+                EvalError::UndefinedSymbol { symbol, .. } => Some(symbol.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn search(budget: Duration) -> Vec<String> {
+        let mut arena = TreeArena::new();
+        let mut b = BoxBuilder::new(&mut arena);
+        let (first, second, third) = (b.ident("first"), b.ident("second"), b.ident("third"));
+        let tail = b.par(second, third);
+        let expr = b.par(first, tail);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let found = further_undefined_symbols(
+            &mut arena,
+            "first",
+            expr,
+            &Environment::empty(),
+            cancel,
+            budget,
+        );
+        names(&found).iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn the_first_symbol_is_not_found_again() {
+        assert_eq!(search(Duration::from_secs(60)), ["second", "third"]);
+    }
+
+    /// The budget is what keeps an error fast when the rest of the program is
+    /// not: a run past it ends with what it has.
+    #[test]
+    fn a_run_past_its_budget_stops() {
+        assert!(search(Duration::ZERO).is_empty());
     }
 }

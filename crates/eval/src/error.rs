@@ -260,6 +260,10 @@ pub enum EvalError {
         visible_scope: Vec<String>,
         /// Names bound at top-level.
         top_level_scope: Vec<String>,
+        /// The other undefined symbols a further run reached. They do not
+        /// decide anything: this error is the failure, and a symbol here may
+        /// be in code the repaired program would not reach.
+        further: Box<[EvalError]>,
     },
     MalformedDefinitionNode {
         node: TreeId,
@@ -304,13 +308,23 @@ pub enum EvalError {
         /// dispatched on. They let the compiler facade render a rule/attempt
         /// trace without exposing evaluator environments or automaton state.
         arguments: Vec<TreeId>,
+        /// The application refused, once the evaluation of its node knows it.
+        application: Option<TreeId>,
+        /// That application with the arguments the rules saw, as Faust.
+        call: Option<String>,
     },
     /// Non-closure application received more arguments than the function input arity.
     TooManyArguments {
-        /// Function-like node receiving too many arguments.
+        /// The application, once the evaluation of its node has named it, and
+        /// until then the function-like node receiving too many arguments.
         node: TreeId,
         expected: usize,
         got: usize,
+        /// How the source names the function; `None` until that same point.
+        function: Option<String>,
+        /// Arguments left when the function refused them: those before were
+        /// taken by its parameters.
+        remaining: usize,
     },
     InvalidModulationLabel {
         node: TreeId,
@@ -397,6 +411,9 @@ pub enum EvalError {
     RedefinedSymbol {
         /// The symbol name that was defined more than once.
         symbol: String,
+        /// The name as the definition holds it, which carries the provenance of
+        /// every definition of the symbol.
+        name_node: TreeId,
         /// The `TreeId` of the first (original) definition.
         first_def: TreeId,
         /// The `TreeId` of the conflicting second definition.
@@ -461,6 +478,25 @@ pub enum EvalError {
     NotAConstantExpression {
         node: TreeId,
     },
+    /// The sizes of a `route` are not two 0→1 boxes, or its routes are not an
+    /// even number of values. Each arity is `(inputs, outputs)`.
+    ///
+    /// C++ equivalent: `evalerror("invalid route expression, first two parameters
+    /// should be blocks producing a value, third parameter a list of input/output
+    /// pairs", …)` in `eval.cpp`.
+    InvalidRouteShape {
+        node: TreeId,
+        ins: (usize, usize),
+        outs: (usize, usize),
+        routes: (usize, usize),
+    },
+    /// The parameters of a `route` have the right shape but do not fold to numbers.
+    ///
+    /// C++ equivalent: `evalerror("invalid route expression, parameters should be
+    /// numbers", …)` in `eval.cpp`.
+    InvalidRouteParameters {
+        node: TreeId,
+    },
     /// Slider or numentry init value is outside the declared [min, max] range.
     ///
     /// C++ equivalent (upstream Faust; absent from the pinned reference
@@ -511,6 +547,37 @@ pub enum EvalError {
     },
     /// Cooperative cancellation: the external cancel flag was set (e.g., timeout).
     Cancelled,
+}
+
+/// A list of names as the text of a diagnostic shows it. A library brings
+/// hundreds of them into scope, which buried the message: past `SHOWN` names the
+/// text keeps the count and the ones close to `symbol`. The facts of the
+/// diagnostic keep them all.
+fn scope_summary(symbol: &str, names: &[String]) -> String {
+    const SHOWN: usize = 12;
+    if names.is_empty() {
+        return "<none>".to_owned();
+    }
+    if names.len() <= SHOWN {
+        return names.join(", ");
+    }
+    let near: Vec<String> = rank_similar_names(symbol, names.iter().map(String::as_str))
+        .into_iter()
+        .take(SHOWN)
+        .map(|suggestion| suggestion.name)
+        .collect();
+    if near.is_empty() {
+        format!(
+            "{} names, none close; all in --error-format json",
+            names.len()
+        )
+    } else {
+        format!(
+            "{} names, the closest: {}; all in --error-format json",
+            names.len(),
+            near.join(", ")
+        )
+    }
 }
 
 impl EvalError {
@@ -620,8 +687,8 @@ impl Display for EvalError {
                     node.as_u32()
                 )
             }
-            Self::IterationCountNotInt { node } => {
-                write!(f, "iteration count is not an int node: {}", node.as_u32())
+            Self::IterationCountNotInt { .. } => {
+                write!(f, "iteration count is not an integer constant")
             }
             Self::IterationCountTooLarge { value } => {
                 write!(f, "iteration count too large for this target: {value}")
@@ -632,16 +699,26 @@ impl Display for EvalError {
             Self::PatternArityMismatch { expected, got, .. } => {
                 write!(f, "pattern arity mismatch: expected {expected}, got {got}")
             }
+            Self::PatternMatchFailed {
+                call: Some(call), ..
+            } => write!(f, "no case rule matches `{call}`"),
             Self::PatternMatchFailed { .. } => write!(f, "no case rule matches arguments"),
+            Self::TooManyArguments {
+                expected,
+                got,
+                function: Some(function),
+                ..
+            } => write!(
+                f,
+                "too many arguments for `{function}`: expected at most {expected}, got {got}"
+            ),
             Self::TooManyArguments { expected, got, .. } => {
                 write!(
                     f,
                     "too many arguments: expected at most {expected}, got {got}"
                 )
             }
-            Self::InvalidModulationLabel { node } => {
-                write!(f, "invalid modulation label at node {}", node.as_u32())
-            }
+            Self::InvalidModulationLabel { .. } => write!(f, "invalid modulation label"),
             Self::InvalidLabelInterpolation { ident, reason, .. } => {
                 write!(
                     f,
@@ -745,6 +822,15 @@ impl Display for EvalError {
                     "expression is not a compile-time numeric constant (type 0→1)"
                 )
             }
+            Self::InvalidRouteShape { .. } => {
+                write!(
+                    f,
+                    "invalid route expression, first two parameters should be blocks producing a value, third parameter a list of input/output pairs"
+                )
+            }
+            Self::InvalidRouteParameters { .. } => {
+                write!(f, "invalid route expression, parameters should be numbers")
+            }
             Self::WidgetParameterNotConstant {
                 widget,
                 label,
@@ -821,11 +907,7 @@ impl ToDiagnostic for EvalError {
             ))
             .with_note(format!(
                 "available top-level definitions: {}",
-                if available_defs.is_empty() {
-                    "<none>".to_owned()
-                } else {
-                    available_defs.join(", ")
-                }
+                scope_summary(entrypoint, available_defs)
             ))
             .with_detail_code("missing-entrypoint")
             .with_fact("entrypoint", entrypoint.clone())
@@ -863,40 +945,17 @@ impl ToDiagnostic for EvalError {
             .with_note("cause: unresolved identifier in current lexical scope")
             .with_note("rule: referenced identifier must be present in visible lexical scope")
             .with_note(format!(
-                "computed: `{symbol}` is not present in current visible scope"
+                "cause: `{symbol}` is not present in current visible scope"
             ))
-            .with_note(format!(
-                "scope.local={}",
-                if local_scope.is_empty() {
-                    "<none>".to_owned()
-                } else {
-                    local_scope.join(", ")
-                }
-            ))
-            .with_note(format!(
-                "scope.visible={}",
-                if visible_scope.is_empty() {
-                    "<none>".to_owned()
-                } else {
-                    visible_scope.join(", ")
-                }
-            ))
-            .with_note(format!(
-                "scope.top_level={}",
-                if top_level_scope.is_empty() {
-                    "<none>".to_owned()
-                } else {
-                    top_level_scope.join(", ")
-                }
-            ))
+            .with_note(format!("scope.visible={}", scope_summary(symbol, visible_scope)))
             .with_detail_code("undefined-binding")
             .with_fact("symbol", symbol.clone())
             .with_fact("scope_local", local_scope.clone())
             .with_fact("scope_visible", visible_scope.clone())
             .with_fact("scope_top_level", top_level_scope.clone())
-            .with_help("define the symbol in scope or fix the identifier name")
+            .with_help("general: define the symbol in scope or fix the identifier name")
             .with_help(format!("template: {symbol} = ...; // define before use"))
-            .with_help("for top-level aliases: define target before first use"),
+            .with_help("general: for top-level aliases, define the target before its first use"),
             Self::PatternArityMismatch { expected, got, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -925,14 +984,14 @@ impl ToDiagnostic for EvalError {
                 "rule: non-closure application requires provided arguments <= function input arity",
             )
             .with_note(format!(
-                "computed: provided={got}, expected_max={expected}, overflow={}",
+                "cause: provided={got}, expected_max={expected}, overflow={}",
                 got.saturating_sub(*expected)
             ))
             .with_note(format!(
                 "suggested target: remove {} extra argument(s)",
                 got.saturating_sub(*expected)
             ))
-            .with_help("remove extra arguments or expand the function input arity")
+            .with_help("general: remove extra arguments or expand the function input arity")
             .with_help("template: f(a, b); // keep provided args <= function input arity"),
             Self::InvalidModulationLabel { .. } => Diagnostic::new(
                 Severity::Error,
@@ -963,7 +1022,7 @@ impl ToDiagnostic for EvalError {
                 message,
             )
             .with_note("cause: modulation circuit violates Faust box-arity constraints")
-            .with_note(format!("computed: {reason}"))
+            .with_note(format!("cause: {reason}"))
             .with_help("use a modulation circuit with at most 2 inputs and exactly 1 output"),
             Self::InvalidControlListOperand { primitive, .. } => Diagnostic::new(
                 Severity::Error,
@@ -1128,6 +1187,7 @@ impl ToDiagnostic for EvalError {
                 symbol,
                 first_def,
                 second_def,
+                ..
             } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -1141,7 +1201,7 @@ impl ToDiagnostic for EvalError {
                 "rule: each symbol may appear at most once per `with {}` block or definition list",
             )
             .with_note(format!(
-                "computed: `{symbol}` first bound to node {}, then to node {} (different values)",
+                "cause: `{symbol}` first bound to node {}, then to node {} (different values)",
                 first_def.as_u32(),
                 second_def.as_u32()
             ))
@@ -1162,8 +1222,8 @@ impl ToDiagnostic for EvalError {
             )
             .with_note("cause: no case rule matched the provided argument tuple")
             .with_note("rule: at least one case pattern must match the provided argument tuple")
-            .with_note("computed: provided tuple did not match any declared case pattern")
-            .with_help("add a matching case rule or add a catch-all pattern"),
+            .with_note("cause: provided tuple did not match any declared case pattern")
+            .with_help("general: add a matching case rule or add a catch-all pattern"),
             Self::IterationCountNotInt { .. }
             | Self::IterationCountTooLarge { .. }
             | Self::NegativeIterationCount { .. } => Diagnostic::new(
@@ -1310,6 +1370,28 @@ impl ToDiagnostic for EvalError {
             .with_note("cause: an expression the compiler evaluates at compile time does not fold to a number")
             .with_note("rule: it must reduce to a single number: a literal, a constant expression, or a constant definition")
             .with_help("pass a constant; a UI control, an input, or the argument of a function applied with `:` is a signal known only at run time"),
+            Self::InvalidRouteShape {
+                ins, outs, routes, ..
+            } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("rule: `route(ins, outs, pairs)` takes one value for `ins`, one for `outs`, and an even number of values for `pairs`")
+            .with_note(format!(
+                "computed: `ins` is {}→{}, `outs` is {}→{}, `pairs` is {}→{}",
+                ins.0, ins.1, outs.0, outs.1, routes.0, routes.1
+            ))
+            .with_help("list `pairs` as input, output, input, output: `route(2, 2, 1, 2, 2, 1)` swaps two signals"),
+            Self::InvalidRouteParameters { .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("rule: the parameters of `route` are compile-time numbers")
+            .with_help("pass constants; a UI control or an input is a signal known only at run time"),
             Self::Cancelled => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
