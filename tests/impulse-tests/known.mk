@@ -113,6 +113,25 @@ KNOWN_FAIL_rust :=
 # --- Julia backend (scalar prefix through the local Julia harness) ----------
 KNOWN_FAIL_julia :=
 
+# --- Mojo backend (scalar prefix through the local Mojo harness) ------------
+# Soundfiles are not supported by the Mojo backend (FRS-CGEN-MOJO-0003), as in
+# the C++ Mojo backend of grame-cncm/faust#1293.
+KNOWN_FAIL_mojo := sound
+# The GPU lane is its own base backend (no -vec suffix to strip). `math`
+# computes an integer power through f64 even in -single (as C++ does), and the
+# Apple GPU has no f64.
+KNOWN_FAIL_mojo-gpu := sound math
+# The batch lane refuses the same two (the layout refuses soundfiles too).
+KNOWN_FAIL_mojo-gpu-batch := sound math
+# Blocks outlined, code cut into runs (`make mojo-outline`): the scalar lane's exclusion.
+KNOWN_FAIL_mojo-outline := sound
+# Programs whose GPU and CPU f32 runs drift apart from a rounding-level start
+# amplified by feedback (largest GPU/CPU gap over the 15,000 frames, Mojo
+# 1.3.0.dev2026110705, Apple M5): the GPU lane runs them with every check but
+# the GPU/CPU tolerance. See porting/mojo-gpu-batch-of-voices-plan-2026-11-07-en.md.
+MOJO_GPU_DRIFT := bells cubic_distortion modulations parametric_eq \
+  phaser_flanger spectral_tilt thru_zero_flanger vcf_wah_pedals
+
 # --- Cmajor backend (full upstream Cmajor impulse adapter) -------------------
 # `control` is excluded by Make.cmajor for parity with the pinned C++ lane; it
 # is not a semantic failure of a supported Cmajor construct.
@@ -146,6 +165,8 @@ KNOWN_FAIL_rust-vec0 :=
 KNOWN_FAIL_rust-vec1 :=
 KNOWN_FAIL_julia-vec0 :=
 KNOWN_FAIL_julia-vec1 :=
+KNOWN_FAIL_mojo-vec0 :=
+KNOWN_FAIL_mojo-vec1 :=
 
 # Execution-option variants (`-ec`, `-os`, both). They inherit their base
 # backend's list through `base_backend`; entries here are divergences specific to

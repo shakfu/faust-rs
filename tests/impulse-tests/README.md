@@ -45,6 +45,129 @@ See the design write-up in
    - `make julia` — the faust-rs Julia backend is appended to a self-contained
      Julia impulse runtime, run by `julia`, and compared on the scalar prefix
      with `filesCompare -part` in 64-bit (`-double`) mode.
+   - `make mojo` — the faust-rs Mojo backend is placed between a
+     self-contained Mojo impulse runtime (`archs/impulsemojo.mojo`,
+     `archs/runimpulsemojo.mojo`), built with `mojo build -O3`, and compared on
+     the scalar prefix with `filesCompare -part` in 64-bit (`-double`) mode.
+     Opt-in, outside `make all`: `MOJO=` names the Mojo command, for instance
+     the locked environment of grame-cncm/faust#1293 (`pixi run --manifest-path
+     <faust>/architecture/mojo/pixi.toml -q mojo`). `mojo-vec0`/`mojo-vec1`
+     run it with `-vec -lv 0/1`.
+   - `make mojo-gpu` — the same programs on the GPU, 64 voices per program,
+     one GPU thread per voice running the unchanged scalar `compute`
+     (`archs/runimpulsemojogpu.mojo`, `-single`). The device is checked against
+     the same program run on the CPU in the same process (voices bit-identical
+     by class, voice 0 and 1 within 1e-4 of the CPU, no silent output), not
+     against the f64 C++ reference; `MOJO_GPU_DRIFT` lists the programs whose
+     GPU and CPU runs drift apart through feedback. Needs a Mojo with its
+     device package, tested with Mojo 1.3.0.dev2026110705 and `modular`
+     26.8.0.dev2026110705 on Apple silicon (plan:
+     `porting/mojo-gpu-batch-of-voices-plan-2026-11-07-en.md`).
+   - `make mojo-gpu-bench` — the cost model of that lane: five programs over
+     64 to 65,536 voices and 64 to 512-frame blocks, GPU (full block, launch,
+     copies, empty kernel) against the same voices on 1, 4 and 10 CPU threads,
+     to `build/mojo-gpu-bench/results.csv` (`archs/benchmojogpu.mojo`,
+     `Make.mojogpubench`; `BENCH_PROGRAMS`, `BENCH_VOICES`, `BENCH_BLOCKS`
+     narrow it, `BENCH_DSPDIR` reads the programs elsewhere, for instance the
+     GPU voices of `../corpus` (`gpu_partial_sine`, `gpu_mode_resonator`),
+     `BENCH_NAME` names the results file). Runs serially; about 10 minutes.
+   - `make mojo-gpu-poly` — a polyphonic instrument played in real time:
+     `POLY_VOICES` (256) voices of `POLY_DSP` (`../corpus/gpu_voice_saw.dsp`)
+     on the GPU with the batch
+     contract, mixed on the device and written through PortAudio's blocking
+     API, muted unless `POLY_AUDIBLE=audible`; fails on an underrun and prints
+     the latency PortAudio grants (`archs/polymojogpubatch.mojo`;
+     `PORTAUDIO_LIB` names the directory of `libportaudio`).
+   - `make mojo-gpu-bells` — a carillon: `BELLS` (256) bells, each a strike
+     and the 50 `pm.modeFilter` modes of `pm.standardBellModel`, one GPU
+     instance per mode with its own frequency, decay and gain (the mode table
+     read from the installed `physmodels.lib` by `tools/bell_modes.py`). It
+     checks one bell against the original `pm.standardBell`
+     (`../corpus/gpu_bell_reference.dsp`), times the carillon on the GPU
+     against two CPU baselines (ordinary `pm.standardBell` instances on 1, 4
+     and 10 threads, the one to beat, and the GPU's batch code on the CPU),
+     and plays it for `BELLS_SECONDS`, muted unless
+     `POLY_AUDIBLE=audible`, with the score `BELLS_SCORE`: `cloud` (every bell,
+     staggered; the default), `melody` (Beethoven's "Ode to Joy") or `chime`
+     (the Westminster Quarters), the two tunes with `BELLS=37`, one bell per
+     semitone (`archs/bellsmojogpubatch.mojo`; PortAudio).
+   - `make mojo-gpu-choir` — an additive choir: `CHOIR` (448) singers in four
+     parts, every harmonic up to 20 kHz one GPU instance of
+     `../corpus/gpu_choir_partial.dsp` (a sine with vibrato, a breath swell
+     and a resonant noise band that follows the vibrato), 48,048 partials at
+     448 singers, a four-chord progression with the vowel "a". It checks 8
+     singers against the same choir of scalar instances on the CPU, times the
+     choir on the GPU against the generated code on 1, 4 and 10 CPU threads,
+     and plays it dry for `CHOIR_SECONDS`, muted unless `POLY_AUDIBLE=audible`
+     (`archs/choirmojogpubatch.mojo`; PortAudio).
+   - `make mojo-gpu-choir-reverb` — the choir in a hall: the stereo mix that
+     comes back from the GPU goes through `../corpus/gpu_choir_reverb.dsp`
+     (`re.zita_rev1_stereo` mixed with the dry signal) on the CPU before the
+     sound card. This version sings a wider choir (registers from C2 to G5,
+     per-part vibrato, breathiness and stage placement, harmonics up to
+     16 kHz: 46,592 partials at 448 singers) and eight chords (D minor, B flat,
+     F, C, G minor 7, E flat, A7, D major), each followed by a rest so that the
+     hall's tail is heard. The built binary takes `reverb dry=<x> wet=<x>
+     t60=<s> gap=<s>` after `play <singers> <seconds> [audible]` (defaults
+     0.4, 2, 5 s and 3 s).
+   - The three real-time players (`mojo-gpu-poly`, `mojo-gpu-bells`,
+     `mojo-gpu-choir`, `mojo-gpu-choir-reverb`) share
+     `archs/realtimemojo.mojo` and take its options through `POLY_RT`:
+     `rt=tc` (the loop's thread takes the Mach time-constraint policy),
+     `rt=wg` (it joins the output device's IO workgroup), `rt=tc+wg`,
+     `pipeline` (the GPU computes block n + 1 while block n is written) and
+     `latency=<ms>` (the suggested output latency; PortAudio's ring holds
+     twice that), and `audio=cpal` (play through the cpal crate instead of
+     PortAudio's blocking API, with `ring=<frames>` and `buffer=<frames>`).
+     Each run prints a `timing` line: every block split into enqueue, GPU
+     wait, host work and the write, the gaps between writes, the lowest fill
+     of the output ring, and with cpal the callback's own counters. They
+     link `-framework CoreAudio` and `tools/cpal-bridge` (a C ABI over cpal,
+     a standalone Cargo project built by `make cpal-bridge` into
+     `build/cpal-bridge`).
+   - `make mojo-gpu-choir-render` — both versions rendered offline, as fast as
+     the GPU goes, to `build/mojo-gpu-choir/choir-dry.wav` (one cycle, 20 s)
+     and `choir-reverb.wav` (one cycle and the hall's tail, 69 s): 24-bit,
+     48 kHz, peak at -1 dBFS (`render <singers> <seconds> <out.f32> [reverb
+     ...]`, then `tools/f32_to_wav.py`).
+   - `make mojo-gpu-modal-fad` — modal sound matching by `fad`: a bank of
+     `MODAL` (4,096) modes, one GPU instance of
+     `../corpus/gpu_modal_fad_voice.dsp` per mode (y and its three tangents),
+     fitted to a synthetic target from a start `MODAL_SIGMA` (0.5)
+     bandwidths away, for `MODAL_EPOCHS` (300) epochs of `MODAL_UPDATE` (`gn`,
+     a damped Gauss-Newton per mode, or `adam`). It validates the GPU outputs
+     and gradients against the scalar CPU program and the closed form, then
+     times one epoch three ways: on the GPU with the batch code as emitted
+     (its `compute` state in locals), on the GPU with every state access left
+     in the voice arenas (`mojo_batch --no-registers`), and on the CPU (`archs/modalfadcpu.cpp`: the same fit,
+     four modes per program from `../corpus/gpu_modal_fad_group.dsp`,
+     compiled by clang, on `MODAL_THREADS` threads). Then it runs one fit
+     (`archs/modalfadmojogpubatch.mojo`; no PortAudio).
+   - `make mojo-gpu-modal-fad-bell BELL_WAV=<recording>` — the same fit
+     against a recording of a struck object that the user provides (not in
+     the repository), from `BELL_START` seconds for `BELL_SECONDS` after the
+     strike. Each mode is an instance of
+     `../corpus/gpu_modal_fad_voice_phase.dsp` (a free phase per mode;
+     harness built with `-D NPARAM=4`). The starting modes come from the
+     spectrum (`tools/modal_init.py`, needs numpy and sox): `BELL_MODES`
+     peaks, decays from their envelopes, amplitudes by joint least squares.
+     Then `BELL_EPOCHS` epochs of `BELL_UPDATE` on the GPU (`fit-file`). It
+     writes the fitted modes and `target.wav`, `model.wav` and `residual.wav`
+     to `build/mojo-gpu-modal-fad-bell/`, then times the same fit on the CPU
+     (`archs/modalfadcpufile.cpp`, four modes per program from
+     `../corpus/gpu_modal_fad_group_phase.dsp`, on `MODAL_THREADS` threads).
+   - `make mojo-outline` — the `make mojo` check with the blocks of every
+     program outlined and its straight-line code cut into runs of at most 8
+     statements, escapes through spill arrays (`fir::outline` with budget and
+     split budget 8; by default only methods over 2,000 and 8,000 statements
+     are touched), through the compiler's `mojo_batch --scalar` (plan
+     `porting/mojo-large-program-outlining-plan-2026-11-09-en.md`).
+   - `make mojo-gpu-batch` / `make mojo-gpu-bench-batch` — the same lane and
+     sweep with the batch contract (`MojoOptions::batch`: one struct for N
+     voices, state as a structure of arrays across voices), emitted by the
+     compiler's `mojo_batch` example since the mode has no `faust-rs` switch
+     (`archs/runimpulsemojogpubatch.mojo`, `archs/benchmojogpubatch.mojo`;
+     design `porting/mojo-gpu-batch-g3-voice-layout-design-2026-11-07-en.md`).
    - `make cmajor` — faust-rs emits scalar-double Cmajor, `cmaj generate
      --target=cpp` produces a native class, and the pinned C++ Faust
      `cmajor_cpp_dsp` adapter runs the upstream impulse protocol. Each DSP uses
@@ -132,6 +255,9 @@ See the design write-up in
 - Node.js for the WASM and AssemblyScript impulse runners.
 - `rustc` (already required to build the workspace) for the Rust backend gate.
 - Julia with the `StaticArrays` package for the Julia backend gate.
+- Mojo (`mojo`, tested with `1.1.0.dev2026090705` and
+  `1.3.0.dev2026110705`) for the optional Mojo backend gate; `MOJO=`
+  overrides the command.
 - Cmajor's `cmaj` command for the optional Cmajor backend gate; override its
   path with `CMAJ_BIN=/path/to/cmaj` and its C++ compiler with `CMAJ_CXX`.
 - `asc` (AssemblyScript compiler) on `PATH`, or `ASC=/path/to/asc`.
@@ -157,6 +283,7 @@ make assemblyscript # check the AssemblyScript backend (scalar prefix)
 make rust          # check the Rust backend (scalar prefix, rustc)
 make julia         # check the Julia backend (scalar prefix, Julia)
 make cmajor        # check scalar Cmajor via cmaj-generated C++
+make mojo MOJO=... # check the Mojo backend (scalar prefix, opt-in)
 make all-mem0      # full dsp/ corpus on C, C++, Cranelift, then focused audit
 make mem0-smoke    # focused allocation/JSON/O0-O3 audit on dsp-mem0/
 make mem0-opt      # rerun the focused C/C++/Cranelift -mem0 O0/O3 matrix

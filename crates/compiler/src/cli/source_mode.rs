@@ -12,6 +12,7 @@ use codegen::backends::cpp::CppOptions;
 use codegen::backends::cranelift::CraneliftOptions;
 use codegen::backends::interp::{FbcCppOptions, InterpOptions, generate_cpp_from_fbc, read_fbc};
 use codegen::backends::julia::JuliaOptions;
+use codegen::backends::mojo::MojoOptions;
 use codegen::backends::rust::RustOptions;
 use codegen::backends::wasm::WasmOptions;
 use compiler::{Compiler, FirVerifyOptions, golden_snapshot_from_file};
@@ -430,34 +431,6 @@ pub(crate) fn run_source_mode(
         return;
     }
 
-    if cli.dump_json && cli.lang.is_none() {
-        let mut timer = CompilationTimer::new(
-            cli.timeout,
-            cli.compilation_time,
-            cli.error_format,
-            cli.error_verbosity,
-        );
-        let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
-        let result = compiler.compile_file_to_json_with_compile_options_memory_and_class_name(
-            input_path,
-            &cli.import_dir,
-            selected_codegen_lane(cli).into_compiler_lane(),
-            compile_options_full_string(cli, None),
-            selected_memory_manager_mode(cli)
-                .is_mem0()
-                .then_some(codegen::memory_layout::MemoryLayoutFlavor::Cpp),
-            selected_class_name(cli),
-        );
-        timer.phase("json");
-
-        match result {
-            Ok(json) => emit_output(&json, cli.output.as_ref()),
-            Err(err) => report_pipeline_failure("JSON pipeline failed", &err, cli),
-        }
-        timer.total();
-        return;
-    }
-
     if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
         let mut timer = CompilationTimer::new(
             cli.timeout,
@@ -714,6 +687,47 @@ pub(crate) fn run_source_mode(
         return;
     }
 
+    if matches!(cli.lang, Some(CliLang::Mojo)) {
+        let mut timer = CompilationTimer::new(
+            cli.timeout,
+            cli.compilation_time,
+            cli.error_format,
+            cli.error_verbosity,
+        );
+        let compiler = compiler_from_cli(cli, Some(std::sync::Arc::clone(cancel)));
+        let options = MojoOptions {
+            class_name: selected_class_name(cli),
+            real_type: selected_mojo_real_type(cli),
+            compile_options: Some(compile_options_full_string(
+                cli,
+                Some(cli_lang_name(CliLang::Mojo)),
+            )),
+            // Metadata transport and the embedded JSON description are filled
+            // by the lowering, which is where the compilation snapshot lives.
+            ..MojoOptions::default()
+        };
+        let result = compiler.compile_file_to_mojo_with_lane(
+            input_path,
+            &cli.import_dir,
+            &options,
+            selected_codegen_lane(cli).into_compiler_lane(),
+        );
+        timer.phase("mojo-codegen");
+
+        match result {
+            Ok(mojo) => {
+                let rendered = wrap_backend_with_architecture(&mojo, cli);
+                emit_output(&rendered, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(&compiler, cli, input_path, CliLang::Mojo);
+                }
+            }
+            Err(err) => report_pipeline_failure("Mojo pipeline failed", &err, cli),
+        }
+        timer.total();
+        return;
+    }
+
     if matches!(cli.lang, Some(CliLang::Rust)) {
         let mut timer = CompilationTimer::new(
             cli.timeout,
@@ -777,11 +791,12 @@ pub(crate) fn run_source_mode(
 
         match result {
             Ok(wasm) => {
+                // `-o x.wasm` always gets its `x.json` helper (C++
+                // `createHelperFile`); `--json` adds the `<input>.json`
+                // companion every backend writes (C++ `generateJSONFile`).
+                emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, cli.output.as_ref());
                 if cli.dump_json {
-                    let output = require_companion_output_path(cli);
-                    emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, Some(output));
-                } else {
-                    emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, cli.output.as_ref());
+                    emit_output(&wasm.dsp_json, Some(&json_companion_path(cli, input_path)));
                 }
             }
             Err(err) => report_pipeline_failure("WASM pipeline failed", &err, cli),
@@ -841,6 +856,11 @@ pub(crate) fn run_source_mode(
                 Some(cli_lang_name(CliLang::Cpp)),
             )),
             ui_macros: cli.user_interface_macros,
+            outline: cli.outline.then_some(fir::outline::OutlinePolicy {
+                pointer_params: true,
+                promote_references: true,
+                ..fir::outline::OutlinePolicy::default()
+            }),
             ..CppOptions::default()
         };
         let result = compiler.compile_file_to_cpp_with_lane(

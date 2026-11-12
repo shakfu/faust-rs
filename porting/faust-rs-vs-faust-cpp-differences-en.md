@@ -2,7 +2,7 @@
 
 Status: living compatibility registry
 
-Last reviewed: 2026-11-02 (guidance for an evaluation cycle through a delay, an unresolved import and the operator a composition mismatch may have wanted: added to DIFF-BEH-005 and DIFF-BEH-018); 2026-11-01 (guidance for a section of `-`, a name of an imported file and a size beside a `waveform`: added to DIFF-BEH-005); 2026-10-31 (syntax errors in the tokens of the language: DIFF-CLI-016 recorded); 2026-10-30 (`--color` for human diagnostics, `faust-rs` and `faustprobe`: DIFF-CLI-015 recorded); 2026-10-26 (C/C++ helpers guarded as in C++, `faust_wrap_*` under `FAUST_INT_WRAP` with the C++ ones as upstream's, C `faustmaxi`/`faustmini` under `FAUSTMAXI`: DIFF-BEH-028 recorded; one bargraph per bargraph signal: DIFF-BEH-027 recorded, the merged meters of `vumeter.dsp` an unrecorded difference closed; control characters of string literals: C++ `Symbol::get` turns every newline, tab and carriage return of a label, tooltip, `declare` value or foreign-function string into a space, and the parser now does the same, an unrecorded difference closed, test `crates/compiler/tests/string_literal_control_chars.rs`; `-uim` user-interface macros ported for C and C++: DIFF-CLI-014 recorded); 2026-10-18 (codegen factorization, [analysis §9](codegen-factorization-analysis-2026-10-18-en.md#9-outcome-2026-10-18): JSON widget `address` built as C++ `PathBuilder::buildPath` builds it, an unrecorded difference closed; codebox `min`/`max` and cmajor/codebox `>>>` now as upstream; DIFF-BACK-006 extended to rust, julia and asc; DIFF-BEH-005 backend module-shape diagnostics unified; the c, cpp, rust and cmajor banners copy upstream's `author`/`copyright`/`license`/`name`/`version` keys and the rust `metadata()` replays the compilation metadata, unrecorded differences closed); 2026-10-18 (reference spelling of the applied Box constructors: DIFF-API-009 narrowed; RAD through bargraphs: DIFF-SRC-002 gap closed; partial C++ Box/Signal headers: DIFF-API-009 recorded; `freeCMemory` missing from `libfaust-c.h`: DIFF-API-010 recorded, then closed (the header now declares it); `-mdoc` not ported: DIFF-GAP-020 recorded); 2026-10-17 (block-rate work in a boolean `ondemand`: DIFF-BEH-024 recorded; `pow(x, 1)` of an init-local constant: DIFF-BEH-022 updated); 2026-10-16 (shared pattern matchers: DIFF-GAP-018 recorded, then closed; isomorphic recursion merging: DIFF-BEH-021 recorded; small real powers: DIFF-BEH-022 recorded; late state join in sums: DIFF-BEH-023 recorded; reserved-word, unary-minus and arity-location diagnostics added to DIFF-SRC-001/002 and DIFF-BEH-005); full review 2026-08-13
+Last reviewed: 2026-11-10 (`--outline` turns locals only passed to outlined methods into members: DIFF-CLI-018 updated); 2026-11-10 (`--outline` for C++, large methods split into methods of their own: DIFF-CLI-018 recorded); 2026-11-10 (`-json` made a C++-style companion and `-O` ported: DIFF-CLI-017 recorded); 2026-11-10 (generated tables shared across clock domains also when their generator has state: DIFF-BEH-029 corrected); 2026-11-09 (Mojo large methods outlined, long straight-line blocks cut into runs, large tables packed: DIFF-BACK-010 extended); 2026-11-08 (Mojo batch `compute` state promoted to locals: DIFF-BACK-010 extension updated); 2026-11-07 (`-lang mojo` from grame-cncm/faust#1293: DIFF-BACK-010 recorded, then extended with the Rust-only batch contract `MojoOptions::batch`); 2026-11-02 (guidance for an evaluation cycle through a delay, an unresolved import and the operator a composition mismatch may have wanted: added to DIFF-BEH-005 and DIFF-BEH-018); 2026-11-01 (guidance for a section of `-`, a name of an imported file and a size beside a `waveform`: added to DIFF-BEH-005); 2026-10-31 (syntax errors in the tokens of the language: DIFF-CLI-016 recorded); 2026-10-30 (`--color` for human diagnostics, `faust-rs` and `faustprobe`: DIFF-CLI-015 recorded); 2026-10-26 (C/C++ helpers guarded as in C++, `faust_wrap_*` under `FAUST_INT_WRAP` with the C++ ones as upstream's, C `faustmaxi`/`faustmini` under `FAUSTMAXI`: DIFF-BEH-028 recorded; one bargraph per bargraph signal: DIFF-BEH-027 recorded, the merged meters of `vumeter.dsp` an unrecorded difference closed; control characters of string literals: C++ `Symbol::get` turns every newline, tab and carriage return of a label, tooltip, `declare` value or foreign-function string into a space, and the parser now does the same, an unrecorded difference closed, test `crates/compiler/tests/string_literal_control_chars.rs`; `-uim` user-interface macros ported for C and C++: DIFF-CLI-014 recorded); 2026-10-18 (codegen factorization, [analysis §9](codegen-factorization-analysis-2026-10-18-en.md#9-outcome-2026-10-18): JSON widget `address` built as C++ `PathBuilder::buildPath` builds it, an unrecorded difference closed; codebox `min`/`max` and cmajor/codebox `>>>` now as upstream; DIFF-BACK-006 extended to rust, julia and asc; DIFF-BEH-005 backend module-shape diagnostics unified; the c, cpp, rust and cmajor banners copy upstream's `author`/`copyright`/`license`/`name`/`version` keys and the rust `metadata()` replays the compilation metadata, unrecorded differences closed); 2026-10-18 (reference spelling of the applied Box constructors: DIFF-API-009 narrowed; RAD through bargraphs: DIFF-SRC-002 gap closed; partial C++ Box/Signal headers: DIFF-API-009 recorded; `freeCMemory` missing from `libfaust-c.h`: DIFF-API-010 recorded, then closed (the header now declares it); `-mdoc` not ported: DIFF-GAP-020 recorded); 2026-10-17 (block-rate work in a boolean `ondemand`: DIFF-BEH-024 recorded; `pow(x, 1)` of an init-local constant: DIFF-BEH-022 updated); 2026-10-16 (shared pattern matchers: DIFF-GAP-018 recorded, then closed; isomorphic recursion merging: DIFF-BEH-021 recorded; small real powers: DIFF-BEH-022 recorded; late state join in sums: DIFF-BEH-023 recorded; reserved-word, unary-minus and arity-location diagnostics added to DIFF-SRC-001/002 and DIFF-BEH-005); full review 2026-08-13
 
 C++ reference: `master-dev-ocpp-od-fir-2-FIR19` at `8eebea429`
 
@@ -215,6 +215,7 @@ verified Rust extension must not be presented as a proof of C++ parity.
 | DIFF-CLI-001 | `--table-init runtime|const` | `extension` | C++ behavior corresponds to `runtime`: every generated table is filled by a sub-container during initialization. Rust additionally keeps `const`, which evaluates the generator during compilation and emits literal table contents. The default is `runtime`. |
 | DIFF-CLI-002 | `--table-init-sample-rate HZ` | `extension` | Required when `--table-init const` folds a generator that reads `ma.SR`. The positive integer is embedded permanently in the table. There is no implicit default. Under `--warn`, `FRS-COMP-0006` reports the frozen value and suggests `runtime` when the host SR must remain authoritative. |
 | DIFF-CLI-009 | `-e` / `--export-dsp` | `1:1` | Expands a DSP into a self-contained program, as C++ `-e`. `-lang` is accepted and recorded in `compile_options`, matching C++, since it selects a backend the expansion does not use; two emitters (`-e --dump-cpp`) still conflict. With no `-o` faust-rs prints to standard output, where C++ produces nothing; see `DIFF-BEH-006` for the full list of deviations. |
+| DIFF-CLI-018 | `--outline` | `extension` | C++ output only, off by default. Runs `fir::outline` (the pass of the Mojo backend, DIFF-BACK-010) before emission: while a DSP method has more than 2,000 FIR statements, its largest `then`/`else` block (in practice an `ondemand` block of the sample loop) becomes a method `<method>Outline<k>` of the class, called where the block was, under the same `if`; a long straight-line block above 8,000 statements is cut into runs. The C++ compiler's optimization time grows much faster than linearly with a function's size: a 36 × 36 matrix of gated delay lines took clang 28 minutes on one 190,000-line `compute`, 34 s once outlined. A local the block stores into is passed as `T* RESTRICT` by address, or, when its method only declares it and passes it to outlined methods (the block-rate values of an `ondemand`), becomes a class member reset where it was declared; one it only reads is passed by value, a channel pointer (`input0`) by value without `RESTRICT`. Without the option, and for a program whose methods are all under the budget, the output is byte for byte the usual one. The generated class has extra public methods; the `dsp` contract is unchanged, so architectures are unaffected. C++ Faust has no counterpart. The C backend is not covered. Evidence: [plan](cpp-outlining-plan-2026-11-10-en.md), [promotion plan](fir-outline-reference-promotion-plan-2026-11-10-en.md), `crates/compiler/tests/cpp_outline.rs` (bit-identical outputs of plain and outlined builds), `crates/fir/src/outline/tests.rs`. |
 | DIFF-CLI-003 | `--dlt N` | `extension` | Selects the delay-line threshold at which Rust changes from power-of-two circular storage to exact-size if-wrapped storage. The compiler records it in `compile_options`; the pinned C++ CLI has no direct counterpart. |
 | DIFF-CLI-010 | `-mem` / `-mem0` / long aliases | `adapted` | The four C++ mode-zero spellings normalize to one typed per-request `MemoryManagerMode::Mem0` and canonical `-mem0` metadata. The option is intentionally limited to scalar C, C++, and native Cranelift; C and Cranelift are Rust extensions, while `mem1`–`mem3`, vector mode, `-it`, and other backends fail closed. M1 implements parsing/propagation; M2 implements the shared version-2 layout/cost analysis. M3 implements generated C++ allocation with the legacy `dsp_memory_manager` surface plus additive checked methods. It intentionally fixes the reference's empty `init`, shallow clone, wrong-manager destruction, unchecked failure/alignment, static-table sentinel, and non-transactional cleanup defects; the emitted `Int64`/`Bool` enum extension requires the faust-rs-compatible manager header when those types occur. M4 implements the Rust-only C surface through the versioned, context-carrying `faust_memory_manager` ABI in `ffi-common`, with self-contained header emission, checked class operations, captured per-instance managers, explicit alignment, and transactional instance allocation. M5 implements Cranelift pointer-slot lowering, managed object/instance/class storage, deep clone, unbound-factory failure, copied callback binding, and functional C/C++ factory set/get. The Rust wrapper remains cache-allocated outside the manager-visible logical JIT state, and the legacy C++ adapter maps the appended `Int64`/`Bool` categories to its generic object categories because upstream `dsp_memory_manager::MemType` has no such values. M6 emits the additive version-2 `memory_manager`, `memory_layout`, and corrected `compute_cost` blocks only under `mem0`, selects the backend-specific manager/target ABI, and replaces Cranelift's former minimal hand-written JSON with the shared strict serializer while retaining its status keys. Ordinary non-`mem0` strict JSON remains byte-stable. M7 adds the focused self-contained C/C++/Cranelift impulse audit; the completed gate also runs each public backend target over the full oracle-supported `dsp/` corpus, with semantic JSON and cross-backend cost equality. The expanded corpus additionally guards corrected helper-object layout, embedded helper arrays, helper lifetime, and strict-C soundfile behavior. M8 adds a live pinned-C++ structural/JSON differential, exact common-subset cost parity, focused D6 allowlist tests, C/C++/Cranelift O0/O3 parity, sanitizer coverage, and Cranelift serialization/rebinding coverage. See the authoritative [mem0 plan](custom-memory-manager-mem0-analysis-and-porting-plan-2026-08-13-en.md). |
 
@@ -299,7 +300,8 @@ must run unchanged with Faust C++ should not pass them.
 | DIFF-CLI-008 | unknown or invalid combinations | `adapted` | The Rust CLI generally fails early through typed option validation rather than relying on permissive legacy parsing or a later backend failure. Scripts depending on C++ option coercion must be corrected. |
 | DIFF-CLI-012 | `--timeout` / `-timeout` deadline machinery | `adapted` | Rust combines a cooperative cancellation flag, a CLI watchdog, and phase-boundary checks. Both read one deadline rule (`cli/timer.rs`: `deadline`, `expired`), and `0` disables the limit for both; until 2026-10-10 the phase timer rejected every compilation under `--timeout 0`. A compilation that exceeds the limit fails with `FRS-COMP-0008`, also as a diagnostics-v2 document on stdout under `--error-format json` (it printed nothing on stdout before). C++ `-t` stops the process with a text message. Evidence: the tests of `cli/timer.rs` and `zero_timeout_disables_the_deadline_in_source_and_fixture_modes` in `crates/compiler/tests/cli_diagnostics_channel.rs`. |
 | DIFF-CLI-013 | `-v` / `--version` text and the build commit | `adapted` | Rust prints `faust-rs <version>` where C++ prints `FAUST Version <version>`. Both name the build's commit, since the version is the same for every commit between two releases ([grame-cncm/faust-rs#20](https://github.com/grame-cncm/faust-rs/issues/20)), but differently: C++ adds a second line, `Source commit: <9 digits>` (`-modified` for an uncommitted tree, `unknown` without git); Rust appends `(<8 digits> <commit date>)` to the first line, as `rustc` and `cargo` do, and prints the version alone without git. Uncommitted changes are not reflected. The diagnostics JSON `compiler` block carries the full hash and date in optional `commit`/`commit_date` fields. Generated code names the package version only, in both. Scripts parsing the C++ lines must be adapted. Evidence: `crates/compiler/build.rs`, `version_text_reports_this_build_commit`, `json_compiler_block_names_the_commit_of_the_build`. |
-| DIFF-CLI-014 | `-uim` / `--user-interface-macros` | `adapted` | Same `#ifdef FAUST_UIMACROS` block as C++ `CodeContainer::printMacros` for `-lang c` and `-lang cpp`: same macro names (the reference's `FAUST_COMPILATION_OPIONS` spelling kept), same entries and interface order, raw group labels with their metadata in the paths, the synthesized root and unnamed groups adding no segment, dead widgets left out, `FAUST_ACTIVES` counting soundfiles that `FAUST_LIST_ACTIVES` omits, and the C++ class (sub-containers included) declared `struct` without access specifiers. What differs follows the rest of the generated file (DIFF-BACK-004, DIFF-BEH-009): zone names are faust-rs's (`fEntry1` where C++ has `fEntry0`), numbers use the backend's literal spelling (`440.0f`, not `4.4e+02f`), paths and labels are escaped as C strings (C++ prints them raw, so a label with `"` broke the build), and lines are indented with spaces. The paths come from faust-rs's UI tree, so its own UI differences show up in them as they do in `buildUserInterface`: a relative group navigation is resolved (DIFF-BEH-008: `"Bar/gain"` where C++ prints `"Foo/../Bar/gain"`). Newlines in a label, kept as `\n` when `-uim` was ported, are spaces as in C++ since the string-literal fix of 2026-10-26. Other backends, `rust` included, ignore the option apart from echoing it in the compilation options, as in C++; the FIR fixture mode (`--fir-fixture`) has no UI tree and ignores it too. Evidence: `crates/compiler/tests/ui_macros.rs`, `crates/codegen/src/backends/ui_macros.rs` tests, `crates/transform/src/signal_fir/ui_macros.rs` tests; checked by building `architecture/minimal-static.cpp` against the output in `-single`, `-double` and `-vec`; compared with faust 2.90.15 on the 315 `.dsp` of `tests/` and `examples/` both compile: 297 blocks equal up to zone numbers and number spelling, the rest due to the soundfile zone name (`fSound`, not `fSoundfile`) or to UI differences `buildUserInterface` already has. |
+| DIFF-CLI-014 | `-uim` / `--user-interface-macros` | `adapted` | Same `#ifdef FAUST_UIMACROS` block as C++ `CodeContainer::printMacros` for `-lang c` and `-lang cpp`: same macro names (the reference's `FAUST_COMPILATION_OPIONS` spelling kept), same entries and interface order, raw group labels with their metadata in the paths, the synthesized root and unnamed groups adding no segment, dead widgets left out, `FAUST_ACTIVES` counting soundfiles that `FAUST_LIST_ACTIVES` omits, and the C++ class (sub-containers included) declared `struct` without access specifiers. What differs follows the rest of the generated file (DIFF-BACK-004, DIFF-BEH-009): zone names are faust-rs's (`fEntry1` where C++ has `fEntry0`), numbers use the backend's literal spelling (`440.0f`, not `4.4e+02f`), paths and labels are escaped as C strings (C++ prints them raw, so a label with `"` broke the build), and lines are indented with spaces. The paths come from faust-rs's UI tree, so its own UI differences show up in them as they do in `buildUserInterface`: a relative group navigation is resolved (DIFF-BEH-008: `"Bar/gain"` where C++ prints `"Foo/../Bar/gain"`). Newlines in a label, kept as `\n` when `-uim` was ported, are spaces as in C++ since the string-literal fix of 2026-10-26. Other backends, `rust` included, ignore the option apart from echoing it in the compilation options, as in C++; the FIR fixture mode (`--fir-fixture`) has no UI tree and ignores it too. Evidence: `crates/compiler/tests/ui_macros.rs`, `crates/codegen/src/backends/ui_macros.rs` tests, `crates/transform/src/signal_fir/ui_macros.rs` tests; checked by building `architecture/minimal-static.cpp` against the output in `-single`, `-double` and `-vec`; compared with faust 2.90.15 on the 315 `.dsp` of `tests/` and `examples/` both compile: 297 blocks equal up to zone numbers and number spelling, the rest due to the soundfile zone name (then `fSound`, `fSoundfile` as in C++ since 2026-11-06) or to UI differences `buildUserInterface` already has. |
+| DIFF-CLI-017 | `-json` companion and `-O <dir>` | `narrower` | Since 2026-11-10 `-json` is a companion as in C++ (`CodeContainer::generateJSONFile`): the backend output (C++ by default, wrapped under `-a`) goes to `-o` or stdout as usual and the JSON to `subst("$0.json", makeDrawPath())`, i.e. `<input>.json` (`foo.dsp.json`) or `<-O dir>/<name>.dsp.json`, whatever `-lang` and without needing `-o`; WASM keeps its `-o` `.json` helper besides. Before, `-json` without `-lang` printed only the JSON and refused `-a` (`faust2max6` failed with "--architecture is currently supported only for …"), and `-json -lang X` wrote `<-o stem>.json`: an unrecorded difference, closed. `-O` (`realpath`, `ERROR : invalid directory path` on failure) is ported for the `-o` file and the `-json` companion only; `-svg` still writes `<name>-svg/` in the working directory, and `-svg -json` still produces only the diagrams. Rust-only remainders: `-json` is rejected with `--golden`, `--parse`, `--dump-box`, `--dump-sig*`, `--dump-cpp-from-fbc`, `--dump-fir-verify` and `--check`, which emit no code (it was rejected there as a second mode before), and `--fir-fixture` keeps its standalone JSON emission and `-o`-named companion, having no DSP input. Callers that read the JSON from stdout must read `<input>.json` instead (`tests/impulse-tests/tools/impulseasc.js` now passes `-O`). Evidence: `crates/compiler/tests/cli_json_companion.rs`, `json_companion_path_follows_cpp_make_draw_path`. |
 
 Architecture wrapping now uses `FaustInstallPaths` defaults (including
 `FAUST_ARCH_PATH`, executable-relative `share/faust` and `include`, and the
@@ -790,7 +792,7 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
   backend (C, C++, Rust, Julia, WASM, AssemblyScript, Cranelift, interpreter),
   from one lowering rule shared by the scalar and vector lowerers
   (`emit_soundfile_buffer`, `crates/transform/src/signal_fir/leaf_emit.rs`)
-  over a new FIR load `LoadSoundfileChannels` (`fSoundN->fChannels`).
+  over a new FIR load `LoadSoundfileChannels` (`fSoundfileN->fChannels`).
   Constant channel 0 is not wrapped, as in C++.
 - The pinned C++ reference (`8eebea429`) instead indexes `fBuffers[chan]`
   directly and relies on the architecture duplicating channel pointers up to
@@ -802,7 +804,12 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
   (no guard, as in C++).
 - Rust-only host contracts that change with it: the Rust backend's host
   `Soundfile` type must expose `fChannels: i32`, the Julia one
-  `fChannels::Int32`, and an AssemblyScript host must provide the import
+  `fChannels::Int32` (since 2026-11-06 the Julia zone follows the C++ Julia
+  backend's interface instead, `fSoundfileN::Soundfile{T}` set to
+  `defaultsound(T)`, so `architecture/julia/dsp/dsp.jl` and `gui/SoundUI.jl`
+  serve both compilers; the zone is read without the C++ block-local copy,
+  which no architecture sees),
+  and an AssemblyScript host must provide the import
   `env._soundfileChannels(slot): i32`. The interpreter encodes the field as
   `kLoadSoundFieldInt` with selector 2, which pops no part, and its
   `Soundfile::read_sample` no longer wraps (faust-rs `.fbc` was already not
@@ -1245,6 +1252,67 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
   backends; two C++ classes with a C++ Faust copy of the helpers, and two C
   DSPs, built at `-O0` and run in one translation unit).
 
+### DIFF-BEH-029 — one generated table read from several clock domains is generated once
+
+- Status: `adapted` (generated code; outputs unchanged), implemented
+  2026-11-09, extended to generators with state on 2026-11-10.
+- Propagation annotates the first element of a `waveform` written in a clock
+  domain with that domain (C++ `boxWaveform`), and the stateful primitives of
+  any table generator written there. The same `rdtable` read from two
+  `ondemand` bodies is therefore two table nodes. The pinned C++ (2.84.3) emits
+  one generator sub-container, one waveform literal and one static table per
+  domain: `mydspSIG0` and `mydspSIG1` for `rd(i) = waveform{…}, int(i) :
+  rdtable;` read in two `ondemand` bodies.
+- faust-rs declares a read-only table once per content: a table node whose
+  size, element type and generator equal an earlier node's once the
+  `Clocked(env, x)` annotations of the generator are dropped reads the earlier
+  node's table (`crates/transform/src/signal_fir/table_content.rs`, used by
+  `ensure_readonly_table` in the scalar lowerer and in the checked vector
+  lowerer). Both fill paths drop those annotations anyway (the sub-module is
+  prepared with `drop_clock_annotations`, the `const` interpreter likewise),
+  so the content is the same. The generators are also compared modulo the
+  names of the recursion variables they bind: a generator with state (the
+  `ba.time` of the table of `os.osc`) is one recursion group per domain, each
+  with its own variable, and a generator is compiled from its payload alone.
+  As first implemented (2026-11-09) the comparison kept those names, so only
+  waveforms and stateless generators were shared: `os.osc` read in two
+  `ondemand` bodies still gave two tables. The table is filled once in `classInit` and read
+  by every domain, each in its own fire time. The signal forest is not
+  rewritten, so nothing else changes, and a writable table (`rwtable`), being
+  per-instance state with its own write port, is never shared. The rule holds
+  on every backend and under `--table-init const`. The checked vector lowerer
+  applies it too, but today no program reading one table from two domains is
+  admitted by the vector pipeline (they fall back to scalar on "loop belongs to
+  more than one clock island" or `FIR-SC01`, before and after this change).
+- Compatibility impact:
+  - The samples are those of C++: the shared table has the same content.
+  - Fewer sub-containers and tables than C++, and the later ones renumbered: a
+    program whose domains read one table twice names it `mydspSIG0` where C++
+    also emits `mydspSIG1`. Generated names are not a contract
+    (`DIFF-BACK-004`).
+  - The faust-coopiano voice (`cp.voice(60, v, gate)`) went from 73 table
+    sub-modules to its 4 distinct tables: 18.5 MB of C++ to 4.35 MB, 16.9 MB of
+    Mojo batch code to 6.06 MB, compiler peak memory 2.8 GB to 2.0 GB, compile
+    time 9.9 s to 7.9 s.
+  - Programs without such a duplicated table are byte-identical (base-vs-new
+    codegen differential over `tests/` and `examples/`, scalar, `-vec`,
+    `-double`).
+  - With stateful generators shared (2026-11-10), eight impulse programs that
+    read one `os.osc` table from several `ondemand` bodies
+    (`ondemand_05`, `07`, `08`, `10`, `15`, `16`, `17`, `18`) emit 1
+    sub-container where C++ and the first implementation emit 2 or 3; their
+    impulse responses still match the C++ reference on every lane run
+    (`interp`, `cpp`, `c`, `cranelift`, `rust`, `wasm`, and `-vec -lv 0` for
+    `interp` and `cpp`).
+- Evidence: `crates/compiler/tests/ondemand_table_sharing.rs` (one sub-module
+  on the C++, C, Rust, Julia, Mojo and Cmajor backends, one wasm data segment,
+  `-vec` and const modes, different contents and writable tables kept apart,
+  per-domain reads checked sample by sample in the interpreter, scalar and
+  `-vec`, `opt_level` 0 and max; the same for a generator with state read from
+  three domains), the unit tests of `table_content.rs`, and the journal entries
+  of [2026-11-09](journal/2026-11-09.md) and
+  [2026-11-10](journal/2026-11-10.md).
+
 ## 6. Additional backends and delivery forms
 
 ### DIFF-BACK-006 — headers and libraries of foreign functions in C and C++
@@ -1508,6 +1576,119 @@ to `FaustInstallPaths`. Evidence: `crates/compiler/tests/cli_architecture_paths.
   tests in `crates/fir/src/schedule/tests.rs` and `tests_reuse.rs` (producers
   and the checkers' mutations) and `crates/compiler/tests/fir_schedule.rs` (interpreter outputs
   with and without the pass, FIR verification).
+
+### DIFF-BACK-010 — `-lang mojo`, ported from an open upstream pull request
+
+- Status: `adapted` (scalar), `narrower` (soundfiles, explicit SIMD),
+  `excluded` (`-gpu`).
+- The pinned C++ reference (`8eebea429`) has no Mojo backend. `-lang mojo`
+  follows the generated contract of the C++ Mojo backend of the open pull
+  request grame-cncm/faust#1293, pinned at `05ac86fb1`: the struct
+  `mydsp(FaustDsp)` with a `null_val` zone, snake-case lifecycle methods,
+  `Some[FaustGui]`/`Some[FaustMeta]` callbacks, no imports (the pull request's
+  `architecture/mojo` supplies the prelude and the traits). Names follow the
+  C++ `snakeCase`.
+- Implemented differences, all in the generated text:
+  - literals are typed (`F64(0.5)`, `F32(0.5)`, `S32(1)`), where upstream writes
+    double-precision literals bare;
+  - integer `/` and `%`, real `%`/`fmod` and C `round` call `faust_idiv`,
+    `faust_irem`, `faust_fmod` and `faust_round`, emitted at the top of the
+    file on use, and C `rint` is `std.math.round`: Mojo `//`, `%` and `mod`
+    floor and its `round` rounds half to even, so upstream's `//`/`%`, `mod`
+    and `round` differ from C on negative operands and on halves; the
+    generated file calls `std.math` only, where upstream also calls the
+    architecture's `mod`, `rint` and `pow_unrolled`;
+  - a snake-case rename that would merge two FIR names fails with
+    `FRS-CGEN-MOJO-0004`, a Mojo keyword gets a trailing `_`; upstream checks
+    neither;
+  - `-vec` emits the vector FIR as plain loops; upstream emits explicit SIMD,
+    requires `-double`, `-vs` equal to the `f32` SIMD width and buffers of a
+    whole number of vectors. Mojo does not autovectorize, so faust-rs `-vec`
+    Mojo code is correct but not SIMD;
+  - a method whose body has a loop takes its receiver as `self` and opens with
+    `ref dsp = self`, where upstream writes `mut dsp`: Mojo
+    `1.1.0.dev2026090705` never finishes compiling field accesses through the
+    receiver inside nested loops (clock domains, `-vec`), and compiles them
+    at once through a local reference (fixed in Mojo `1.3.0.dev2026110705`;
+    the alias goes when the pull request's pinned toolchain moves). Callers
+    do not see the receiver's name;
+  - field layout and numbering follow faust-rs FIR (DIFF-BEH-009): 59 of the
+    91 impulse programs differ from upstream in field types (a one-sample
+    recursion is a scalar where upstream keeps a two-cell array); the method
+    set is identical on all 91.
+- Narrower: soundfiles are refused with `FRS-CGEN-MOJO-0003`, as the C++
+  visitor refuses them; `-ec`/`-os` are refused (no C++ Mojo reference).
+  Excluded: `-gpu`, the C++ Mojo GPU path.
+- Extension (Rust-only, implemented 2026-11-07): `MojoOptions::batch` emits a
+  batch contract the C++ backend has no counterpart for, one
+  `struct mydsp(FaustDspBatch)` for N voices whose state is laid out as a
+  structure of arrays by `fir::batch::layout_voices` (checked by
+  `fir::batch::check`): `__init__(out dsp, voices, state: Ptr[UInt8])` over
+  one buffer of `state_bytes(voices)` bytes, `voice: S32` after `dsp` on the
+  instance lifecycle and `compute`, `class_init` once for all voices,
+  controls through `num_controls`/`set_control`/`get_control` (the user
+  interface describes them with `dsp.null_val` zones). An emitter option
+  only: no `faust-rs` switch (the test lanes reach it through the compiler's
+  `mojo_batch` example). Default output is unchanged (codegen-identity
+  differential over every `.dsp` of `tests/` and `examples/`). Plan:
+  [`mojo-gpu-batch-g3-voice-layout-design-2026-11-07-en.md`](mojo-gpu-batch-g3-voice-layout-design-2026-11-07-en.md);
+  lanes `make mojo-gpu-batch` (131/131) and `make mojo-gpu-bench-batch`.
+  Since 2026-11-08 the batch `compute` keeps its state in locals for the
+  sample loop (`MojoOptions::batch_registers`, default on, run by
+  `fir::batch::promote_state` and checked by `fir::batch::promote_check`):
+  every per-voice field `compute` reaches only as a scalar or at literal
+  indices is read from its arena at the head of `compute` and written back at
+  its end. Same contract, same results (bit-identical in the interpreter
+  differential), fewer memory accesses; `mojo_batch --no-registers` emits the
+  earlier form. Plan:
+  [`batch-state-register-promotion-plan-2026-11-08-en.md`](batch-state-register-promotion-plan-2026-11-08-en.md).
+- Extension (Rust-only, implemented 2026-11-09), batch and scalar, both on by
+  default, emitter options without a `faust-rs` switch:
+  - large methods are split (`MojoOptions::outline`, run last by
+    `fir::outline::outline_large_blocks` and checked by
+    `fir::outline::check`): a DSP method over 2,000 FIR statements has its
+    largest `then`/`else` blocks moved, largest first, into methods
+    `<method>_outline<k>(mut dsp, ...)` written after `compute`, without
+    `@always_inline`, and called where the block was; the `if` stays in the
+    caller, a local the block stores into is a `mut` argument, the others
+    are passed by value. A method still over 8,000 statements has its largest
+    straight-line block cut into runs of at most 2,000 statements, each a
+    method `<method>_outline<k>` called in its place; a single-assignment
+    local read after its run goes through a per-type local spill array
+    `<method>_spill<k>` (`mut` argument, literal slots) declared by the
+    caller. Upstream writes every method whole, which Mojo 1.3
+    does not compile in useful time for large programs (8,000 statements
+    19 s, 16,000 statements 491 s; the faust-coopiano voice, 56,000 lines in
+    `compute`, not in 3.5 h). A program under the budget is emitted
+    unchanged;
+  - large tables are packed (`MojoOptions::packed_tables`): a struct table
+    of at least 256 `Int32`, `Float32` or `Float64` entries is initialised in
+    `__init__` from a string of the entries' bit patterns by
+    `faust_unpack32`/`faust_unpack64`, written at the top of the unit when
+    used, instead of an array literal (12,001 entries: 57.5 s of Mojo
+    compilation as a literal, 1.2 s packed). Entries are bit-identical to the
+    literal's (negative zero written as zero, as the literal writes it).
+
+  The codegen-identity differential over `tests/` and `examples/` (`-lang
+  mojo`, single and double) leaves 1,199 outputs identical; 10 differ, the 4
+  programs over the budget (`ondemand_fft_framed_128`/`256`,
+  `ondemand_stft_denoiser_1024`, `ddsp_rad_harmonic_spectral_frame`; the last
+  two also split into runs) and the one with tables of 256 entries or more
+  (`gpu_bell_reference`). Their Mojo impulse output equals the base build's. Plan:
+  [`mojo-large-program-outlining-plan-2026-11-09-en.md`](mojo-large-program-outlining-plan-2026-11-09-en.md);
+  tests `crates/fir/src/outline/tests.rs`,
+  `crates/compiler/tests/fir_outline_corpus.rs`; lane `make mojo-outline`.
+- Compatibility impact: faust-rs output builds against the pull request's
+  `architecture/mojo` unchanged. Numeric results follow C, not upstream Mojo,
+  on the operators listed above. The contract may move until the pull request
+  is merged; it is re-checked then.
+- Evidence:
+  [`mojo-backend-port-analysis-and-plan-2026-11-06-en.md`](mojo-backend-port-analysis-and-plan-2026-11-06-en.md);
+  `crates/codegen/src/backends/mojo/tests.rs`; the opt-in impulse lane
+  `make mojo` (`tests/impulse-tests/Make.mojo`, `archs/impulsemojo.mojo`):
+  132/132 programs (`sound` excluded), scalar prefix, on Mojo
+  `1.1.0.dev2026090705` and `1.3.0.dev2026110705`; `-vec -lv 0` and
+  `-vec -lv 1` 132/132 on `1.1.0.dev2026090705`.
 
 ## 7. Public API and representation adaptations
 

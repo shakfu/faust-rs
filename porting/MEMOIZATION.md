@@ -79,7 +79,8 @@ updated or added with the W7 cost corrections of 2026-10-10 and 2026-10-11;
 and §2.4b updated the same day when pattern matchers became persistent, and
 §2.4b again for the size of its entries and the pinning of its stores; §2.24
 was added and §2.11 and §2.20 updated on 2026-10-16 too; §2.27 was added on
-2026-10-24.
+2026-10-24; §2.30 and §2.31 on 2026-11-09; §2.30 was re-keyed on 2026-11-10
+(bound recursion variables).
 
 ### 2.1 `parser`: imported-source expansion cache
 
@@ -1504,7 +1505,8 @@ Validation:
 
 Status: implemented 2026-07-10 (`e4181cc6`), extended 2026-09-05 (`adaca773`),
 rescoped 2026-09-05 (`93f00111`), extended 2026-09-19 (`9e5d9320`, recorded
-2026-10-18), extended 2026-10-18 (`zero_folder`)
+2026-10-18), extended 2026-10-18 (`zero_folder`), dual cache rescoped by binder
+frame 2026-11-08
 
 Location:
 
@@ -1512,11 +1514,17 @@ Location:
 
 Caches, all one `fad(expr, seeds)` lowering long:
 
-- `cache: AHashMap<SigId, Dual>`, the dual `{ primal, tangents }` of each
-  rewritten node. It does two jobs: it keeps the rewrite linear on shared
-  subgraphs, and it breaks cycles, since the recursion arm inserts a
-  self-referential placeholder before descending so back edges resolve while the
-  group is still being built,
+- `frames: Vec<AHashMap<(SigId, i64), Dual>>` (named `cache` until
+  2026-11-08), the dual `{ primal, tangents }` of each rewritten node, one map
+  per binder frame: `frames[0]` for the whole lowering, `frames[f]` for the body
+  of the `f`-th recursion on the descent path, pushed on entering it and popped
+  on leaving it. An entry goes to the frame of the innermost binder its term
+  references (`memo_slot`, from `min_free_level`), keyed by the node and the
+  depth it was met at (a closed term under `CLOSED_DEPTH`, since it means the
+  same thing at every depth). The recursion arm still inserts a placeholder for
+  the group being built, in the body's frame,
+- `min_free_memo: AHashMap<(TreeId, i64), i64>`: the smallest free reference
+  level of a node above a threshold, which places its entry,
 - `dependency_memo: AHashMap<(SigId, usize, usize), bool>`: can the subtree
   rooted here depend on a seed? The tuple is the node, the number of binders the
   **transform** has entered, and the number this dependency walk has itself
@@ -1525,7 +1533,8 @@ Caches, all one `fad(expr, seeds)` lowering long:
   answer to a transform already inside the recursion, which broke every
   recursive FAD test,
 - `aperture_memo: AHashMap<TreeId, i64>`: the de Bruijn aperture, same shape as
-  §2.8 and §2.14 but a distinct instance with a narrower life,
+  §2.8 and §2.14 but a distinct instance with a narrower life (removed
+  2026-11-08 with the closed-entry filter it served),
 - `od_aug_cache: AHashMap<SigId, SigId>`: the augmented twin of a clocked
   wrapper. This one is a sharing invariant rather than a speed memo: every
   consumer must route through the *same* augmented block, or a stateful body
@@ -1578,6 +1587,48 @@ The lifetime lesson (`93f00111`) — worth reading next to §2.5's:
   together,
 - a wider scope gives an inner recursion the seed's tangent; a narrower one
   (clearing at each binder) would be correct but lose the sharing.
+
+The binder-frame rescoping (2026-11-08) — the narrower scope above did lose the
+sharing, exponentially:
+
+- the 2026-09-05 scope kept closed outer entries on entering a body, but
+  dropped everything the body added on leaving it, closed terms and terms that
+  only read outer binders included. Two recursions reading the same input `x`
+  (each body reads `x` lifted, one node for both) differentiated `x` under each
+  of them; when `x` is itself the output of such a stage, the work doubles per
+  stage,
+- faustlibraries `37ac4eec` (2026-10-05) gave `fi.filterbank` exactly that
+  shape, a TPT section and a direct-form section behind every crossover, picked
+  by `select2` on a constant that folds only after propagation. `fdn_online` of
+  faust-diff-fdn, an `fad` through its band analysis inside the optimiser's
+  recursion, went from 3.6 s to beyond the 120 s compilation limit, as did
+  `fdn_online_gated`, `_gated_hoist`, `_hoist_learn`, `_p25`, `_p28` and
+  `_p40`. A three-line reproducer (`select2(1>0)` over two one-pole
+  recursions, cascaded) took 0.2 s at 16 stages and 14.4 s at 22,
+- an entry is valid exactly as long as the binders its term reads are those it
+  was computed under: the frame of its innermost free reference. Below that
+  frame the spelling and the meaning are those of any sibling body at the same
+  depth (the seeds are lifted by depth alone), so the entry is shared there;
+  popping that binder's frame drops it,
+- the value also depends on the clock-domain renames of `augment_block`, which
+  are not in the key: a subtree carrying a token of a domain being twinned is
+  rebuilt as the twin's (`needs_rebuild`). Keeping entries longer exposed this:
+  `fdn_online_hoist_learn` with the September libraries changed its error.
+  `invalidate_twinned_entries` now drops the entries `needs_rebuild` selects
+  when a rename is added; the old scope had the same latent dependency within
+  one body,
+- measured: the reproducer at 200 stages in 0.7 s (closed seed) and 0.1 s
+  (seed inside a loop); `fdn_online` 1.1 s, `_p40` 3 s (10 s before, with the
+  September libraries). Every `.dsp` under `tests/` and `examples/` and in the
+  faust-diff-* projects (1,063 programs) compiles to identical C++ or to the
+  identical error, except the seven `fdn_online*` programs that timed out
+  before; with the September libraries, where the base compiled them, their
+  C++ is identical byte for byte.
+
+Validation for the rescoping: `fad_sweep_is_linear_in_a_cascade_of_twin_recursions`
+counts `transform_uncached` calls for 10 and 20 stages, with a closed seed and
+with the seed of an enclosing loop; the per-body scope (mutation: every entry
+in the innermost frame) fails it with 21,484 → 22,020,076 visits.
 
 Validation:
 
@@ -2115,6 +2166,224 @@ Validation:
 - two mutations the checker rejects: a dropped term, and an ignored common
   factor;
 - the base-vs-new codegen differential over `tests/` and `examples/`.
+
+### 2.30 `transform`: read-only table declarations keyed by content modulo clock annotations and bound recursion variables
+
+Status: implemented 2026-11-09 (`DIFF-BEH-029`); re-keyed 2026-11-10, when the
+key also forgot the names of the recursion variables a generator binds (below).
+
+Location: `crates/transform/src/signal_fir/table_content.rs`,
+`TableContentKeys`, held by the scalar lowerer
+(`UiLoweringState::table_contents`, consulted by `ensure_readonly_table` in
+`module/tables.rs`) and by the checked vector lowerer (`table_contents` in
+`vector/lower/signal.rs`, consulted by its `ensure_readonly_table`).
+
+Cache:
+- `owners: HashMap<(size, element kind, canonical generator), SigId>`: the
+  first read-only table node declared with that content; the lowerers already
+  memoize declarations per table node (`ui.waveform_tables`,
+  `readonly_tables`), and a later node of the same content is registered under
+  the owner's declaration;
+- `copies: HashMap<SigId, SigId>` with a private `TreeArena`: each generator
+  node copied once, without its `Clocked(env, x)` wrappers. The private arena's
+  hash-consing decides equality exactly, with no fingerprint and no collision;
+- `binders: HashMap<SigId, bool>` (2026-11-10): whether a recursion binder
+  `SYMREC(var, body)` lies under a node of the private arena. A copy without
+  one is its own canonical form; one with binders is rebuilt with the
+  variables it binds renamed `rec#0`, `rec#1`, ... in order of first visit
+  (`canonical_recursions`, one memoized walk per generator).
+
+Key (rule 6): a table's content depends on its size, its element type and its
+generator without the clock annotations, which both fill paths drop before
+computing it (the sub-module is prepared with `drop_clock_annotations`, the
+`const` interpreter likewise). The table node itself also names the domains
+of those annotations, which the content does not depend on: that key was
+finer than its value and duplicated the table once per domain. Writable tables
+are not keyed: their write port is per-instance state.
+
+The key of 2026-11-09 was still finer than its value for a generator with
+state. The prepared forest is in symbolic form, where each recursion group has
+a variable of its own, and the domain copies of one generator are as many
+groups: `ba.time` in the table of `os.osc` is `SYMREC(W1, …)` in one `ondemand`
+body and `SYMREC(W2, …)` in the next, so the declocked copies differed by that
+name and the table of the most common generator was never shared (found on
+2026-11-10 by checking the commit against `os.osc` in two bodies: three
+`mydspSIG` classes). A generator is compiled from a clone of its payload alone,
+so the name of a variable bound inside it names nothing the content depends
+on, and the key now renames those variables. The renaming is injective and
+leaves alone a reference to a group bound outside the generator, whose name is
+the only thing that tells it from a reference to another group: two generators
+with one canonical form differ by the names of their own groups only.
+
+Lifetime: one compiled module (one lowerer); a nested generator sub-module has
+its own. Nothing to invalidate: the prepared arena is immutable during
+lowering.
+
+Cost of the key (rule 7): one copy of each read-only generator, shared nodes
+copied once across tables. The domain copies of a waveform share every element
+but the annotated first one, so the coopiano voice copies the elements of its
+admittance tables once and re-interns one 12001-child node per domain (one
+hash of its child list, against one compiled sub-module before); programs
+without tables pay nothing. The binder test is memoized across tables the same
+way (one lookup per child of that node); a generator with a recursion is
+walked twice more, once for its bound variables and once to rename them.
+
+Measured (rule 5): the faust-coopiano voice, `cp.voice(60, v, gate)`, has 4
+distinct tables behind 73 read-only table nodes (two 12001-point admittance
+tables from 24 domains each, a 264-point table from 24 domains, a 2200-point
+table once): 73 sub-modules became 4, the C++ 18.5 MB → 4.35 MB, the Mojo
+batch output 16.9 MB → 6.06 MB, compiler peak memory 2.8 GB → 2.0 GB,
+compile time 9.9 s → 7.9 s. The compile-budget baskets are unchanged within
+noise (±5 %, hand-timed: the gate cannot run on the development Mac).
+
+Measured for the re-keying of 2026-11-10: `os.osc` read in two `ondemand`
+bodies and at the top level went from 3 sub-modules and tables to 1. Eight
+programs of `tests/impulse-tests/dsp` read one oscillator table from several
+domains (`ondemand_05`, `07`, `08`, `10`, `15`, `16`, `17`, `18`): 2 or 3
+sub-modules each became 1, their C++ 4 to 18 % smaller. The ten compile-budget
+programs, scalar and `-vec`, best of nine against the build before: ratios
+0.98 to 1.04 (hand-timed, as above).
+
+Rejected first: dropping the annotations inside the generator payloads in
+`signal_prepare` (a step 2.1c), so hash-consing would merge the table nodes.
+It merged them, but it also detached each generator from the stateful nodes it
+shared with the body it is written in: `os.osc` in one `ondemand`
+(`ondemand_01_basic`, a single table) gained a dead delay line `iVec11_d0` in
+the domain and renamed its state. Keying the declaration leaves the forest, and
+every program without a duplicated table, unchanged.
+
+Validation:
+- `crates/compiler/tests/ondemand_table_sharing.rs`: one sub-module on six text
+  backends and one wasm data segment, `-vec` and const modes, two contents and
+  two writable tables kept apart, and the per-domain reads checked sample by
+  sample (interp, scalar and `-vec`, `opt_level` 0 and max), which passes with
+  and without the keying;
+- the unit tests of `table_content.rs` (domain-only differences share an
+  owner; content, size and element type keep tables apart);
+- the base-vs-new codegen differential over `tests/` and `examples/`
+  (scalar, `-vec`, `-double`).
+- Re-keying of 2026-11-10: unit tests of `table_content.rs` (groups differing
+  by their variable and domain share an owner; different contents, two groups
+  in another order and references to two outer groups stay apart; a group
+  inside a group; a generator without recursion untouched), four of which fail
+  with the renaming off; in `ondemand_table_sharing.rs`, a stateful generator
+  read from three domains is one sub-module on six text backends and one table
+  under `--table-init const`, two stateful generators of different content stay
+  two, and the three domains' reads are checked sample by sample in the
+  interpreter; base-vs-new differential over the 646 `.dsp` (C++ scalar,
+  `-double`, `-vec`): the eight programs above differ, every other output is
+  identical; those eight against the C++ reference on the `interp`,
+  `interp-vec0`, `cpp`, `cpp-vec0`, `c`, `cranelift`, `rust` and `wasm` impulse
+  lanes: 8/8 on each.
+
+### 2.31 `fir`: candidate block contents of the outlining pass, and its rewrite tables
+
+Status: implemented 2026-11-09 (plan
+`porting/mojo-large-program-outlining-plan-2026-11-09-en.md`).
+
+Location: `crates/fir/src/outline/mod.rs`, `Pass::contents` (filled by
+`Pass::content_of`); the rewrite tables `Rewriter::memo` (same file) and, in
+the checker `crates/fir/src/outline/check.rs`, `Checker::inlined` and
+`Substitute::memo`.
+
+Cache:
+- `contents: HashMap<FirId, Content>`: for a candidate `then`/`else` block,
+  its free local variables with the kinds of access the block makes to each
+  (load, store, index-0 table access, anything else), or the reason it can
+  never be outlined (a `Return`, a declaration shadowing a free name, a call
+  to an outlined function, ...). What depends on the position — the types and
+  kinds of the visible variables — is resolved against the scope at each use
+  (`resolve`), outside the memo;
+- `Rewriter::memo`: one block's rewrite into its function's body (free
+  variables turned into parameter accesses), per block;
+- `Checker::inlined`: every node of the output with the calls to outlined
+  functions inlined back, for the whole check; `Substitute::memo`: one
+  inlined body with its parameters turned back into the caller's variables,
+  per call;
+- phase 2 (added the same day, plan §3.4): `SlotRewriter::memo`
+  (`crates/fir/src/outline/split.rs`), one run's or caller statement's
+  reads of escaped locals turned into spill-slot reads, per rewrite; and in
+  the checker `SlotsBack::memo`, the slot reads of one block turned back into
+  the locals, per block. The items of a block being split are scanned once
+  per split, without a memo (their sizes, uses and barriers).
+
+Key (rule 6): a block's content depends on its subtree only, which its
+hash-consed id names, and on the names of the outlined functions. A name is
+fresh when created (never declared in the module), so a call to it exists only
+in blocks built after it, whose ids are new: an id cached earlier cannot hold
+one. The rewrite tables are keyed by the node being rewritten, under a fixed
+substitution for their lifetime.
+
+Lifetime: one pass invocation (`contents`), one block (`Rewriter::memo`), one
+check (`inlined`), one call (`Substitute::memo`). Nothing to invalidate.
+
+Cost of the key (rule 7): an id, and the clone of a small map at each hit
+(the free variables of a block: 15 to 110 on the coopiano voice).
+
+Measured (rule 5): on the coopiano voice (`fit/voice.dsp`, 51 blocks outlined
+from `compute`), 2,475 hits for 99 misses (96 %); the 99 misses cost 0.09 s
+together, so the walks the memo avoids would cost about 2.2 s, against a
+10 s compilation. The rewrite tables follow the rule of every FIR rewrite of
+the workspace (`promote_state`, `layout_voices`): a hash-consed DAG rewritten
+without them is walked as a tree.
+
+Rejected first: re-walking the method after each outlining (the pass as first
+written, largest candidate first, one at a time) cost 1 s on the voice; the
+candidates are now collected once per method with their sizes and selected in
+one pass, with the same selection (output identical on both coopiano voices).
+
+Validation:
+- `crates/fir/src/outline/tests.rs` (the pass, its refusals, its checker and
+  the seven rejecting mutations);
+- `crates/compiler/tests/fir_outline_corpus.rs` (every hermetic program of
+  `tests/corpus` and `tests/impulse-tests/dsp`, and inline `ondemand`
+  programs, with every block outlined; checker and FIR verifier);
+- the base-vs-new codegen differential over `tests/` and `examples/`.
+
+### 2.32 `fir`: the reference promotion after outlining — rewrite tables and declaration counts
+
+Status: implemented 2026-11-10 (plan
+`porting/fir-outline-reference-promotion-plan-2026-11-10-en.md`).
+
+Location: `crates/fir/src/outline/promote.rs`, `Rewrite::memo`, the
+`has_declaration` memo of `declaration_counts`; in the checker
+`crates/fir/src/outline/promote_check.rs`, `Demote::memo`.
+
+Cache:
+- `Rewrite::memo`: one function body's rewrite (promoted references turned
+  into field accesses, their address arguments dropped), per function;
+- `has_declaration`: whether a subtree declares anything, per node, for one
+  count of the module's declarations: a subtree reached a second time (shared
+  by hash-consing) is counted again only when it declares something;
+- `Demote::memo`: one output body turned back into its source (fields into
+  locals or reference parameters), per function, cleared each time a field
+  becomes a local of the body being demoted (the same node then demotes
+  differently).
+
+Key (rule 6): the node, under a substitution fixed for the table's lifetime
+(the promoted set and the function's removed references); `has_declaration`
+depends on the subtree only.
+
+Lifetime: one function (`Rewrite::memo`, `Demote::memo`), one count
+(`has_declaration`). Nothing to invalidate.
+
+Cost of the key (rule 7): an id.
+
+Measured (rule 5): the rewrite tables follow the rule of every FIR rewrite of
+the workspace (2.31). Rejected first, measured on the 36 × 36 gated-delay
+program (1,296 outlined `ondemand` blocks, 23,328 promoted locals): counting
+declarations with a map of names per node, memoized, took most of a
+120 s timeout — a FIR block is a list, so every cell held the declarations
+of the rest of `compute` (quadratic); and filtering the candidates with one
+walk of the method each was quadratic too. With one walk of the module for the
+counts and one walk of each method for the uses, the promotion and its check
+take 1.2 s on that program (0.27 s at 18 × 18, linear).
+
+Validation:
+- `crates/fir/src/outline/tests.rs` (promotion, refusal, the three rejecting
+  mutations);
+- `crates/compiler/tests/cpp_outline.rs` (C++ corpus with promotion on, the
+  48 changed impulse programs bit-identical to their plain build).
 
 ## 3. Planned Additions
 

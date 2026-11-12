@@ -484,6 +484,11 @@ faust-rs -lang fir foo.dsp
 # Generate Julia source
 faust-rs -lang julia foo.dsp -o foo.jl
 
+# Generate Mojo source (the contract of grame-cncm/faust#1293's
+# architecture/mojo; see porting/faust-rs-vs-faust-cpp-differences-en.md,
+# DIFF-BACK-010)
+faust-rs -lang mojo foo.dsp -o foo.mojo
+
 # Generate Rust source
 faust-rs -lang rust foo.dsp -o foo.rs
 
@@ -493,11 +498,14 @@ faust-rs -lang wasm foo.dsp -o foo.wasm
 # Generate textual WAT/WAST from the same WASM backend
 faust-rs -lang wast foo.dsp -o foo.wat
 
-# Emit strict Faust JSON description
-faust-rs --json foo.dsp
+# Emit C++ plus the strict Faust JSON description in foo.dsp.json (as C++ -json)
+faust-rs -json foo.dsp -o foo.cpp
 
-# Emit a backend artifact plus companion JSON next to the output path
-faust-rs -lang cpp --json foo.dsp -o foo.cpp
+# Any backend, with an architecture file, or under an output directory
+# (-O out writes out/foo.cpp and out/foo.dsp.json)
+faust-rs -lang c -json foo.dsp -o foo.c
+faust-rs -json -a max-msp/max-msp64.cpp foo.dsp -o foo.cpp
+faust-rs -json foo.dsp -O out -o foo.cpp
 
 # Generate block-diagram SVG files
 faust-rs -svg foo.dsp
@@ -751,7 +759,7 @@ the layers from a host's side.
 | `transform`    | Signal preparation and signal-to-FIR lowering                                                                    |
 | `fir`          | Faust Intermediate Representation                                                                                |
 | `foreign-call` | Raw C ABI foreign-function invocation bridge                                                                     |
-| `codegen`      | AssemblyScript, C, C++, Cmajor, Codebox (RNBO), Rust, interpreter, Cranelift, WASM, and Julia backend generation |
+| `codegen`      | AssemblyScript, C, C++, Cmajor, Codebox (RNBO), Rust, interpreter, Cranelift, WASM, Julia, and Mojo backend generation |
 | `draw`         | SVG block-diagram rendering                                                                                      |
 | `doc`          | Documentation/reporting scaffold                                                                                 |
 | `compiler`     | Top-level compiler facade and CLI                                                                                |
